@@ -1,0 +1,199 @@
+'use client';
+
+import React from 'react';
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
+import { cn } from '@/lib/utils';
+import { Kbd } from '@/components/ui/kbd';
+
+const navItems = [
+  {
+    label: 'Dashboard',
+    href: '/',
+    shortcut: 'D',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="3" width="7" height="7" rx="1" />
+        <rect x="14" y="3" width="7" height="7" rx="1" />
+        <rect x="14" y="14" width="7" height="7" rx="1" />
+        <rect x="3" y="14" width="7" height="7" rx="1" />
+      </svg>
+    ),
+  },
+  {
+    label: 'Projects',
+    href: '/projects',
+    shortcut: 'P',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+      </svg>
+    ),
+  },
+  {
+    label: 'Rubrics',
+    href: '/rubrics',
+    shortcut: 'R',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9 11l3 3L22 4" />
+        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+      </svg>
+    ),
+  },
+  {
+    label: 'Models',
+    href: '/models',
+    shortcut: 'M',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 2L2 7l10 5 10-5-10-5z" />
+        <path d="M2 17l10 5 10-5" />
+        <path d="M2 12l10 5 10-5" />
+      </svg>
+    ),
+  },
+];
+
+interface SidebarProps {
+  collapsed?: boolean;
+  onToggle?: () => void;
+}
+
+export function Sidebar({ collapsed = false, onToggle }: SidebarProps) {
+  const pathname = usePathname();
+
+  return (
+    <aside
+      className={cn(
+        'flex h-full flex-col border-r border-surface-200 bg-surface-50 transition-all duration-200',
+        collapsed ? 'w-16' : 'w-60'
+      )}
+      role="navigation"
+      aria-label="Main navigation"
+    >
+      {/* Logo */}
+      <div className="flex h-14 items-center border-b border-surface-200 px-4">
+        <Link
+          href="/"
+          className="flex items-center gap-2.5 overflow-hidden"
+          aria-label="Judge Arena Home"
+        >
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-600 text-white font-bold text-sm">
+            JA
+          </div>
+          {!collapsed && (
+            <div className="flex flex-col overflow-hidden">
+              <span className="text-sm font-bold text-surface-900 truncate">
+                Judge Arena
+              </span>
+              <span className="text-2xs text-surface-400">
+                LLM Evaluation Studio
+              </span>
+            </div>
+          )}
+        </Link>
+      </div>
+
+      {/* Navigation */}
+      <nav className="flex-1 space-y-0.5 p-2">
+        {navItems.map((item) => {
+          const isActive =
+            item.href === '/'
+              ? pathname === '/'
+              : pathname.startsWith(item.href);
+
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={cn(
+                'group flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500',
+                isActive
+                  ? 'bg-brand-50 text-brand-700'
+                  : 'text-surface-600 hover:bg-surface-100 hover:text-surface-900'
+              )}
+              aria-current={isActive ? 'page' : undefined}
+            >
+              <span
+                className={cn(
+                  'shrink-0',
+                  isActive ? 'text-brand-600' : 'text-surface-400 group-hover:text-surface-600'
+                )}
+              >
+                {item.icon}
+              </span>
+              {!collapsed && (
+                <>
+                  <span className="flex-1 truncate">{item.label}</span>
+                  <Kbd className="opacity-0 group-hover:opacity-100 transition-opacity">
+                    {item.shortcut}
+                  </Kbd>
+                </>
+              )}
+            </Link>
+          );
+        })}
+      </nav>
+
+      {/* Bottom section */}
+      <div className="border-t border-surface-200 p-2">
+        <button
+          onClick={onToggle}
+          className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-surface-500 hover:bg-surface-100 hover:text-surface-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          <svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={cn(
+              'shrink-0 transition-transform',
+              collapsed && 'rotate-180'
+            )}
+          >
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+            <line x1="9" y1="3" x2="9" y2="21" />
+          </svg>
+          {!collapsed && <span>Collapse</span>}
+        </button>
+
+        {!collapsed && (
+          <button
+            className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-surface-500 hover:bg-surface-100 hover:text-surface-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+            onClick={() => {
+              const event = new KeyboardEvent('keydown', {
+                key: '?',
+                shiftKey: true,
+              });
+              window.dispatchEvent(event);
+            }}
+            aria-label="Show keyboard shortcuts"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <rect x="2" y="4" width="20" height="16" rx="2" />
+              <path d="M6 8h.001M10 8h.001M14 8h.001M18 8h.001M8 12h.001M12 12h.001M16 12h.001M7 16h10" />
+            </svg>
+            <span>Shortcuts</span>
+            <Kbd>?</Kbd>
+          </button>
+        )}
+      </div>
+    </aside>
+  );
+}

@@ -1,0 +1,113 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Project {
+  id          String       @id @default(cuid())
+  name        String
+  description String?
+  rubricId    String?
+  rubric      Rubric?      @relation(fields: [rubricId], references: [id])
+  evaluations Evaluation[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([rubricId])
+}
+
+model Rubric {
+  id          String            @id @default(cuid())
+  name        String
+  description String?
+  criteria    RubricCriterion[]
+  projects    Project[]
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+}
+
+model RubricCriterion {
+  id          String @id @default(cuid())
+  rubricId    String
+  rubric      Rubric @relation(fields: [rubricId], references: [id], onDelete: Cascade)
+  name        String
+  description String
+  maxScore    Int    @default(10)
+  weight      Float  @default(1.0)
+  order       Int    @default(0)
+
+  @@index([rubricId])
+}
+
+model ModelConfig {
+  id        String          @id @default(cuid())
+  name      String
+  provider  String // 'anthropic' | 'openai' | 'local'
+  modelId   String // e.g. 'claude-sonnet-4-5-20250514'
+  endpoint  String? // custom endpoint for local/self-hosted models
+  apiKey    String? // stored per-model (optional, falls back to env)
+  isActive  Boolean         @default(true)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  judgments ModelJudgment[]
+}
+
+model Evaluation {
+  id             String          @id @default(cuid())
+  projectId      String
+  project        Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  inputText      String
+  title          String?
+  status         String          @default("pending") // pending | judging | completed | error
+  modelJudgments ModelJudgment[]
+  humanJudgment  HumanJudgment?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  @@index([projectId])
+  @@index([status])
+}
+
+model ModelJudgment {
+  id            String      @id @default(cuid())
+  evaluationId  String
+  evaluation    Evaluation  @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+  modelConfigId String
+  modelConfig   ModelConfig @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
+  overallScore  Float?
+  reasoning     String?
+  rawResponse   String?
+  criteriaScores String? // JSON string: Array<{ criterionId: string; score: number; comment?: string }>
+  latencyMs     Int?
+  tokenCount    Int?
+  status        String      @default("pending") // pending | running | completed | error
+  error         String?
+  createdAt     DateTime    @default(now())
+
+  @@index([evaluationId])
+  @@index([modelConfigId])
+}
+
+model HumanJudgment {
+  id             String     @id @default(cuid())
+  evaluationId   String     @unique
+  evaluation     Evaluation @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+  overallScore   Float
+  reasoning      String?
+  criteriaScores String? // JSON string: Array<{ criterionId: string; score: number; comment?: string }>
+  selectedBestModelId String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+}
+
+model ApiKeyStore {
+  id        String   @id @default(cuid())
+  provider  String   @unique // 'anthropic' | 'openai'
+  apiKey    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

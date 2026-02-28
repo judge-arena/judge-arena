@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    @apply border-surface-200;
+  }
+
+  body {
+    @apply bg-surface-50 text-surface-900 font-sans antialiased;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand-500 ring-offset-2;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-surface-300 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-surface-400;
+  }
+
+  /* Selection color */
+  ::selection {
+    @apply bg-brand-200 text-brand-900;
+  }
+}
+
+@layer components {
+  .prose-sm p {
+    @apply text-sm leading-relaxed;
+  }
+
+  .prose-sm h2 {
+    @apply text-lg font-bold mt-4 mb-2;
+  }
+
+  .prose-sm h3 {
+    @apply text-base font-semibold mt-3 mb-1;
+  }
+
+  .prose-sm h4 {
+    @apply text-sm font-semibold mt-2 mb-1;
+  }
+
+  .prose-sm code {
+    @apply rounded bg-surface-100 px-1 py-0.5 font-mono text-xs;
+  }
+
+  .prose-sm pre {
+    @apply rounded-lg bg-surface-900 p-4 overflow-x-auto;
+  }
+
+  .prose-sm pre code {
+    @apply bg-transparent text-surface-100 p-0;
+  }
+
+  .prose-sm ul {
+    @apply list-disc pl-5 space-y-1;
+  }
+
+  .prose-sm ol {
+    @apply list-decimal pl-5 space-y-1;
+  }
+
+  .prose-sm li {
+    @apply text-sm;
+  }
+}
+
+@layer utilities {
+  .line-clamp-4 {
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+}
