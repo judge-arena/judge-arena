@@ -22,6 +22,14 @@ export async function GET(
         },
         evaluations: {
           include: {
+            rubric: {
+              select: {
+                id: true,
+                name: true,
+                version: true,
+                parentId: true,
+              },
+            },
             modelJudgments: {
               include: { modelConfig: true },
             },

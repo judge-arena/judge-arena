@@ -5,12 +5,26 @@ import { useParams, useRouter } from 'next/navigation';
 import { Header } from '@/components/layout/header';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Select } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { ModelJudgmentCard } from '@/components/evaluation/model-judgment-card';
 import { HumanJudgmentForm } from '@/components/evaluation/human-judgment-form';
 import { SubmissionViewer } from '@/components/evaluation/submission-viewer';
-import { safeParseJSON, getScoreColor, cn } from '@/lib/utils';
+import {
+  safeParseJSON,
+  getScoreColor,
+  cn,
+  buildRubricVersionOptions,
+} from '@/lib/utils';
 import { toast } from 'sonner';
 import type { CriteriaScore } from '@/types';
 
@@ -26,6 +40,10 @@ export default function EvaluatePage() {
   const [selectedBestModelId, setSelectedBestModelId] = useState<string | null>(
     null
   );
+  const [allRubrics, setAllRubrics] = useState<any[]>([]);
+  const [changeRubricOpen, setChangeRubricOpen] = useState(false);
+  const [nextRubricId, setNextRubricId] = useState('');
+  const [savingRubric, setSavingRubric] = useState(false);
 
   const loadEvaluation = useCallback(async () => {
     try {
@@ -50,6 +68,13 @@ export default function EvaluatePage() {
   useEffect(() => {
     loadEvaluation();
   }, [loadEvaluation]);
+
+  useEffect(() => {
+    fetch('/api/rubrics')
+      .then((res) => res.json())
+      .then((data) => setAllRubrics(data))
+      .catch(() => {});
+  }, []);
 
   // Poll while judging
   useEffect(() => {
@@ -133,6 +158,56 @@ export default function EvaluatePage() {
     }
   };
 
+  const saveEvaluationRubric = async () => {
+    if (!nextRubricId) return;
+
+    const currentRubricId =
+      evaluation?.rubric?.id ?? evaluation?.project?.rubric?.id ?? '';
+    const isRubricChanging = !!nextRubricId && nextRubricId !== currentRubricId;
+
+    if (!isRubricChanging) {
+      setChangeRubricOpen(false);
+      return;
+    }
+
+    const hasModelJudgments = (evaluation?.modelJudgments?.length ?? 0) > 0;
+    const shouldClearModelJudgments = hasModelJudgments
+      ? window.confirm(
+          'Changing the rubric will clear existing model judgments for this evaluation. Continue?'
+        )
+      : false;
+
+    if (hasModelJudgments && !shouldClearModelJudgments) {
+      return;
+    }
+
+    setSavingRubric(true);
+    try {
+      const res = await fetch(`/api/evaluations/${evaluationId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rubricId: nextRubricId,
+          clearModelJudgments: shouldClearModelJudgments,
+        }),
+      });
+
+      if (res.ok) {
+        setLoading(true);
+        await loadEvaluation();
+        setChangeRubricOpen(false);
+        toast.success('Evaluation rubric updated');
+      } else {
+        const data = await res.json();
+        toast.error(data.error || 'Failed to update rubric');
+      }
+    } catch {
+      toast.error('Failed to update rubric');
+    } finally {
+      setSavingRubric(false);
+    }
+  };
+
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -174,10 +249,25 @@ export default function EvaluatePage() {
 
   if (!evaluation) return null;
 
-  const rubric = evaluation.project?.rubric;
+  const rubric = evaluation.rubric ?? evaluation.project?.rubric;
   const criteria = rubric?.criteria ?? [];
   const modelJudgments = evaluation.modelJudgments ?? [];
   const humanJudgment = evaluation.humanJudgment;
+
+  const latestVersionByFamily = new Map<string, number>();
+  for (const r of allRubrics) {
+    const familyId = r.parentId ?? r.id;
+    const version = r.version ?? 1;
+    const current = latestVersionByFamily.get(familyId) ?? 0;
+    if (version > current) latestVersionByFamily.set(familyId, version);
+  }
+
+  const currentRubricVersion = rubric?.version ?? 1;
+  const currentRubricFamilyId = rubric ? rubric.parentId ?? rubric.id : null;
+  const currentRubricIsLatest = currentRubricFamilyId
+    ? (latestVersionByFamily.get(currentRubricFamilyId) ?? currentRubricVersion) ===
+      currentRubricVersion
+    : false;
 
   // Compute average model score
   const completedJudgments = modelJudgments.filter(
@@ -247,6 +337,22 @@ export default function EvaluatePage() {
             >
               {evaluation.status}
             </Badge>
+            {rubric && (
+              <Badge variant="info" size="md">
+                📋 {rubric.name} v{currentRubricVersion}
+                {currentRubricIsLatest ? ' (latest)' : ''}
+              </Badge>
+            )}
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                setNextRubricId(rubric?.id || '');
+                setChangeRubricOpen(true);
+              }}
+            >
+              Change Rubric
+            </Button>
             <Button
               variant="primary"
               size="sm"
@@ -464,6 +570,39 @@ export default function EvaluatePage() {
           </div>
         </div>
       </div>
+
+      <Dialog open={changeRubricOpen} onOpenChange={setChangeRubricOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Change Evaluation Rubric</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
+            <Select
+              label="Rubric"
+              value={nextRubricId}
+              onChange={(e) => setNextRubricId(e.target.value)}
+              options={buildRubricVersionOptions(allRubrics)}
+              hint="This changes only this evaluation. The project rubric is unchanged."
+            />
+          </DialogBody>
+          <DialogFooter>
+            <Button
+              variant="secondary"
+              onClick={() => setChangeRubricOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              loading={savingRubric}
+              disabled={!nextRubricId}
+              onClick={saveEvaluationRubric}
+            >
+              Save Rubric
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

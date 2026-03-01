@@ -13,10 +13,13 @@ export async function POST(
   { params }: { params: { id: string } }
 ) {
   try {
-    // Load evaluation with project rubric
+    // Load evaluation with its own rubric (fallback to project rubric for legacy data)
     const evaluation = await prisma.evaluation.findUnique({
       where: { id: params.id },
       include: {
+        rubric: {
+          include: { criteria: { orderBy: { order: 'asc' } } },
+        },
         project: {
           include: {
             rubric: {
@@ -34,10 +37,13 @@ export async function POST(
       );
     }
 
-    const rubric = evaluation.project.rubric;
+    const rubric = evaluation.rubric ?? evaluation.project.rubric;
     if (!rubric) {
       return NextResponse.json(
-        { error: 'Project has no rubric assigned. Please assign a rubric first.' },
+        {
+          error:
+            'No rubric assigned to this evaluation. Please assign a rubric first.',
+        },
         { status: 400 }
       );
     }
@@ -67,7 +73,7 @@ export async function POST(
 
     // Create pending judgments for each model
     const pendingJudgments = await Promise.all(
-      models.map((model) =>
+      models.map((model: any) =>
         prisma.modelJudgment.create({
           data: {
             evaluationId: params.id,
@@ -79,7 +85,7 @@ export async function POST(
     );
 
     // Run all model evaluations in parallel
-    const judgmentPromises = models.map(async (model, index) => {
+    const judgmentPromises = models.map(async (model: any, index: number) => {
       const judgmentId = pendingJudgments[index].id;
 
       try {
@@ -155,6 +161,14 @@ export async function POST(
     const updated = await prisma.evaluation.findUnique({
       where: { id: params.id },
       include: {
+        rubric: {
+          select: {
+            id: true,
+            name: true,
+            version: true,
+            parentId: true,
+          },
+        },
         project: { select: { id: true, name: true, rubricId: true } },
         modelJudgments: {
           include: {

@@ -18,6 +18,14 @@ export async function GET(request: Request) {
     const evaluations = await prisma.evaluation.findMany({
       where: projectId ? { projectId } : undefined,
       include: {
+        rubric: {
+          select: {
+            id: true,
+            name: true,
+            version: true,
+            parentId: true,
+          },
+        },
         project: { select: { id: true, name: true, rubricId: true } },
         modelJudgments: {
           include: {
@@ -68,6 +76,14 @@ export async function POST(request: Request) {
         status: 'pending',
       },
       include: {
+        rubric: {
+          select: {
+            id: true,
+            name: true,
+            version: true,
+            parentId: true,
+          },
+        },
         project: { select: { id: true, name: true, rubricId: true } },
         modelJudgments: {
           include: { modelConfig: true },

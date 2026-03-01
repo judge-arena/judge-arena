@@ -39,15 +39,24 @@ export default function ProjectDetailPage() {
   const [latestRubricVersion, setLatestRubricVersion] = useState<number | null>(
     null
   );
+  const [allRubrics, setAllRubrics] = useState<any[]>([]);
 
   const loadProject = useCallback(async () => {
     try {
-      const res = await fetch(`/api/projects/${projectId}`);
-      if (res.ok) {
-        setProject(await res.json());
+      const [projectRes, rubricsRes] = await Promise.all([
+        fetch(`/api/projects/${projectId}`),
+        fetch('/api/rubrics'),
+      ]);
+
+      if (projectRes.ok) {
+        setProject(await projectRes.json());
       } else {
         toast.error('Project not found');
         router.push('/projects');
+      }
+
+      if (rubricsRes.ok) {
+        setAllRubrics(await rubricsRes.json());
       }
     } catch {
       toast.error('Failed to load project');
@@ -149,6 +158,14 @@ export default function ProjectDetailPage() {
   }
 
   if (!project) return null;
+
+  const latestVersionByFamily = new Map<string, number>();
+  for (const rubric of allRubrics) {
+    const familyId = rubric.parentId ?? rubric.id;
+    const version = rubric.version ?? 1;
+    const current = latestVersionByFamily.get(familyId) ?? 0;
+    if (version > current) latestVersionByFamily.set(familyId, version);
+  }
 
   return (
     <div>
@@ -283,6 +300,17 @@ export default function ProjectDetailPage() {
                     </p>
                   </div>
                   <div className="flex items-center gap-3 shrink-0">
+                    {evaluation.rubric && (
+                      <Badge variant="info" size="sm">
+                        {evaluation.rubric.name} v{evaluation.rubric.version ?? 1}
+                        {(latestVersionByFamily.get(
+                          evaluation.rubric.parentId ?? evaluation.rubric.id
+                        ) ?? (evaluation.rubric.version ?? 1)) ===
+                        (evaluation.rubric.version ?? 1)
+                          ? ' (latest)'
+                          : ''}
+                      </Badge>
+                    )}
                     {evaluation.modelJudgments?.length > 0 && (
                       <span className="text-xs text-surface-500">
                         {evaluation.modelJudgments.filter((j: any) => j.status === 'completed').length}/
