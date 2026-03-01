@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import { Select } from '@/components/ui/select';
 import { EmptyState } from '@/components/ui/empty-state';
 import {
   Dialog,
@@ -33,6 +34,8 @@ export default function ProjectDetailPage() {
   const [evalTitle, setEvalTitle] = useState('');
   const [evalText, setEvalText] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [rubricVersions, setRubricVersions] = useState<any[]>([]);
+  const [selectedRubricVersionId, setSelectedRubricVersionId] = useState('');
 
   const loadProject = useCallback(async () => {
     try {
@@ -54,6 +57,28 @@ export default function ProjectDetailPage() {
     loadProject();
   }, [loadProject]);
 
+  // When the dialog opens, fetch all versions of the project's rubric
+  useEffect(() => {
+    if (!createEvalOpen || !project?.rubricId) {
+      setRubricVersions([]);
+      setSelectedRubricVersionId('');
+      return;
+    }
+    fetch(`/api/rubrics/${project.rubricId}/versions`)
+      .then((r) => r.json())
+      .then((versions: any[]) => {
+        setRubricVersions(versions);
+        // Default to the highest (latest) version
+        if (versions.length > 0) {
+          const latest = versions.reduce((a, b) =>
+            a.version > b.version ? a : b
+          );
+          setSelectedRubricVersionId(latest.id);
+        }
+      })
+      .catch(() => {});
+  }, [createEvalOpen, project?.rubricId]);
+
   const handleCreateEvaluation = async () => {
     if (!evalText.trim()) return;
     setSubmitting(true);
@@ -65,6 +90,7 @@ export default function ProjectDetailPage() {
           projectId,
           title: evalTitle || undefined,
           inputText: evalText,
+          ...(selectedRubricVersionId && { rubricId: selectedRubricVersionId }),
         }),
       });
       if (res.ok) {
@@ -300,6 +326,25 @@ export default function ProjectDetailPage() {
                 placeholder="e.g., PR #42 Code Review"
                 autoFocus
               />
+              {rubricVersions.length > 1 && (
+                <Select
+                  label="Rubric Version"
+                  value={selectedRubricVersionId}
+                  onChange={(e) => setSelectedRubricVersionId(e.target.value)}
+                  options={rubricVersions
+                    .slice()
+                    .sort((a, b) => b.version - a.version)
+                    .map((v) => ({
+                      value: v.id,
+                      label: `v${v.version} — ${v.criteria?.length ?? 0} criteria${
+                        v.id === rubricVersions.reduce((a: any, b: any) => (a.version > b.version ? a : b)).id
+                          ? ' (latest)'
+                          : ''
+                      }`,
+                    }))}
+                  hint="Choose which version of this project's rubric to use for grading"
+                />
+              )}
               <Textarea
                 label="Text to Evaluate"
                 value={evalText}

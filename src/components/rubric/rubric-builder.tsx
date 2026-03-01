@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import { TooltipIcon } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 
 interface CriterionData {
@@ -24,6 +25,31 @@ interface RubricBuilderProps {
   }) => void;
   loading?: boolean;
   submitLabel?: string;
+}
+
+function FieldLabel({
+  htmlFor,
+  label,
+  tooltip,
+  required,
+}: {
+  htmlFor?: string;
+  label: string;
+  tooltip?: string;
+  required?: boolean;
+}) {
+  return (
+    <div className="flex items-center gap-1.5 mb-1.5">
+      <label
+        htmlFor={htmlFor}
+        className="text-sm font-medium text-surface-700 select-none"
+      >
+        {label}
+        {required && <span className="ml-0.5 text-red-500">*</span>}
+      </label>
+      {tooltip && <TooltipIcon content={tooltip} />}
+    </div>
+  );
 }
 
 export function RubricBuilder({
@@ -71,28 +97,52 @@ export function RubricBuilder({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
+      {/* ── Rubric header ── */}
       <div className="space-y-4">
-        <Input
-          label="Rubric Name"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="e.g., Code Quality Assessment"
-          required
-        />
-        <Textarea
-          label="Description"
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          placeholder="Describe the purpose and scope of this rubric..."
-          rows={2}
-        />
+        <div>
+          <FieldLabel
+            htmlFor="rubric-name"
+            label="Rubric Name"
+            required
+            tooltip="A short, descriptive title for this rubric. Appears as a label when selecting rubrics for a project — e.g. 'Code Quality Assessment'."
+          />
+          <Input
+            id="rubric-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g., Code Quality Assessment"
+            required
+          />
+        </div>
+
+        <div>
+          <FieldLabel
+            htmlFor="rubric-description"
+            label="Description"
+            tooltip="Provides evaluators context about this rubric's purpose. This text is also prepended to the LLM judge's system prompt, so describe the type of content being graded and what 'good' looks like at a high level."
+          />
+          <Textarea
+            id="rubric-description"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Describe the purpose and scope of this rubric, e.g. 'Assess the quality of prose writing for clarity, correctness, and reader engagement…'"
+            rows={2}
+          />
+        </div>
       </div>
 
+      {/* ── Criteria ── */}
       <div>
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold text-surface-700">
-            Criteria ({criteria.length})
-          </h3>
+          <div className="flex items-center gap-1.5">
+            <h3 className="text-sm font-semibold text-surface-700">
+              Criteria ({criteria.length})
+            </h3>
+            <TooltipIcon
+              content="Each criterion is an independent dimension of quality. The LLM judge scores submissions on every criterion individually; a weighted average produces the final score."
+              side="right"
+            />
+          </div>
           <Button
             type="button"
             variant="ghost"
@@ -123,8 +173,9 @@ export function RubricBuilder({
                 'transition-colors hover:border-surface-300'
               )}
             >
-              <div className="flex items-start justify-between gap-2">
-                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-100 text-brand-700 text-xs font-semibold mt-0.5">
+              {/* Badge + remove */}
+              <div className="flex items-center justify-between">
+                <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-brand-100 text-brand-700 text-xs font-semibold">
                   {index + 1}
                 </span>
                 {criteria.length > 1 && (
@@ -148,18 +199,54 @@ export function RubricBuilder({
                 )}
               </div>
 
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {/* Criterion name */}
+              <div>
+                <FieldLabel
+                  htmlFor={`criterion-name-${index}`}
+                  label="Name"
+                  required
+                  tooltip="A concise label for this dimension of quality — 1 to 3 words (e.g. 'Accuracy', 'Clarity', 'Depth'). Shown in score breakdowns and summary tables."
+                />
                 <Input
-                  placeholder="Criterion name"
+                  id={`criterion-name-${index}`}
+                  placeholder="e.g., Accuracy"
                   value={criterion.name}
-                  onChange={(e) =>
-                    updateCriterion(index, 'name', e.target.value)
-                  }
+                  onChange={(e) => updateCriterion(index, 'name', e.target.value)}
                   required
                 />
-                <div className="flex gap-2">
+              </div>
+
+              {/* Scoring guide (description) */}
+              <div>
+                <FieldLabel
+                  htmlFor={`criterion-desc-${index}`}
+                  label="Scoring Guide"
+                  required
+                  tooltip="Explain precisely what the judge should evaluate and how to assign scores. Describe what a low, medium, and high score looks like. This text is sent verbatim to the LLM judge — the more specific, the more consistent the results."
+                />
+                <Textarea
+                  id={`criterion-desc-${index}`}
+                  placeholder="Describe what constitutes a low, mid, and high score for this criterion…"
+                  value={criterion.description}
+                  onChange={(e) =>
+                    updateCriterion(index, 'description', e.target.value)
+                  }
+                  rows={3}
+                  required
+                  className="text-sm"
+                />
+              </div>
+
+              {/* Max score + Weight */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <FieldLabel
+                    htmlFor={`criterion-max-${index}`}
+                    label="Max Score"
+                    tooltip="The ceiling for raw scores on this criterion. Scores are normalized when computing the weighted average, so this just sets the scale — e.g. 0–10 or 0–100."
+                  />
                   <Input
-                    placeholder="Max"
+                    id={`criterion-max-${index}`}
                     type="number"
                     min={1}
                     max={100}
@@ -171,10 +258,16 @@ export function RubricBuilder({
                         parseInt(e.target.value) || 10
                       )
                     }
-                    className="w-20"
+                  />
+                </div>
+                <div>
+                  <FieldLabel
+                    htmlFor={`criterion-weight-${index}`}
+                    label="Weight"
+                    tooltip="Relative importance of this criterion. A weight of 2.0 counts twice as much as 1.0 in the final score. Leave all weights at 1.0 for equal weighting across criteria."
                   />
                   <Input
-                    placeholder="Weight"
+                    id={`criterion-weight-${index}`}
                     type="number"
                     min={0}
                     max={10}
@@ -187,21 +280,9 @@ export function RubricBuilder({
                         parseFloat(e.target.value) || 1
                       )
                     }
-                    className="w-20"
                   />
                 </div>
               </div>
-
-              <Textarea
-                placeholder="Describe what this criterion evaluates..."
-                value={criterion.description}
-                onChange={(e) =>
-                  updateCriterion(index, 'description', e.target.value)
-                }
-                rows={2}
-                required
-                className="text-sm"
-              />
             </div>
           ))}
         </div>

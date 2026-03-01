@@ -24,10 +24,17 @@ model Rubric {
   id          String            @id @default(cuid())
   name        String
   description String?
+  version     Int               @default(1)
+  parentId    String?           // null for v1; root rubric id for later versions
+  parent      Rubric?           @relation("RubricVersions", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  versions    Rubric[]          @relation("RubricVersions")
   criteria    RubricCriterion[]
   projects    Project[]
+  evaluations Evaluation[]
   createdAt   DateTime          @default(now())
   updatedAt   DateTime          @updatedAt
+
+  @@index([parentId])
 }
 
 model RubricCriterion {
@@ -60,6 +67,8 @@ model Evaluation {
   id             String          @id @default(cuid())
   projectId      String
   project        Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  rubricId       String?         // specific rubric version used (overrides project.rubricId)
+  rubric         Rubric?         @relation(fields: [rubricId], references: [id])
   inputText      String
   title          String?
   status         String          @default("pending") // pending | judging | completed | error
@@ -69,6 +78,7 @@ model Evaluation {
   updatedAt      DateTime        @updatedAt
 
   @@index([projectId])
+  @@index([rubricId])
   @@index([status])
 }
 

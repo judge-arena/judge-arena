@@ -6,6 +6,7 @@ const createEvaluationSchema = z.object({
   projectId: z.string().min(1),
   title: z.string().max(200).optional(),
   inputText: z.string().min(1, 'Input text is required'),
+  rubricId: z.string().optional(), // specific rubric version to pin for this evaluation
 });
 
 // GET /api/evaluations - List evaluations (optionally filtered by project)
@@ -63,6 +64,7 @@ export async function POST(request: Request) {
         projectId: data.projectId,
         title: data.title,
         inputText: data.inputText,
+        ...(data.rubricId && { rubricId: data.rubricId }),
         status: 'pending',
       },
       include: {
