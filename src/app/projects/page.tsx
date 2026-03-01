@@ -19,7 +19,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
-import { formatDate } from '@/lib/utils';
+import { buildRubricVersionOptions, formatDate } from '@/lib/utils';
 import { toast } from 'sonner';
 
 export default function ProjectsPage() {
@@ -252,10 +252,7 @@ export default function ProjectsPage() {
                 label="Rubric"
                 options={[
                   { value: '', label: 'No rubric (select later)' },
-                  ...rubrics.map((r: any) => ({
-                    value: r.id,
-                    label: `${r.name} (${r.criteria?.length ?? 0} criteria)`,
-                  })),
+                  ...buildRubricVersionOptions(rubrics),
                 ]}
                 value={newRubricId}
                 onChange={(e) => setNewRubricId(e.target.value)}

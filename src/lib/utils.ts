@@ -123,3 +123,42 @@ export function formatShortcut(shortcut: string): string {
     .replace(/alt/gi, isMac ? '⌥' : 'Alt')
     .replace(/shift/gi, isMac ? '⇧' : 'Shift');
 }
+
+/** Build consistent rubric version select options */
+export function buildRubricVersionOptions(
+  rubrics: Array<{
+    id: string;
+    name: string;
+    version?: number;
+    parentId?: string | null;
+  }>
+): Array<{ value: string; label: string }> {
+  const latestVersionByFamily = new Map<string, number>();
+
+  for (const rubric of rubrics) {
+    const familyId = rubric.parentId ?? rubric.id;
+    const version = rubric.version ?? 1;
+    const current = latestVersionByFamily.get(familyId) ?? 0;
+    if (version > current) {
+      latestVersionByFamily.set(familyId, version);
+    }
+  }
+
+  return [...rubrics]
+    .sort((a, b) => {
+      const nameCmp = a.name.localeCompare(b.name);
+      if (nameCmp !== 0) return nameCmp;
+      return (b.version ?? 1) - (a.version ?? 1);
+    })
+    .map((rubric) => {
+      const familyId = rubric.parentId ?? rubric.id;
+      const version = rubric.version ?? 1;
+      const latestVersion = latestVersionByFamily.get(familyId) ?? version;
+      const latestTag = version === latestVersion ? ' (latest)' : '';
+
+      return {
+        value: rubric.id,
+        label: `${rubric.name} v${version}${latestTag}`,
+      };
+    });
+}

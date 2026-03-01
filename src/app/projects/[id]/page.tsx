@@ -20,7 +20,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
-import { formatDate, formatDateTime } from '@/lib/utils';
+import { buildRubricVersionOptions, formatDate, formatDateTime } from '@/lib/utils';
 import { toast } from 'sonner';
 
 export default function ProjectDetailPage() {
@@ -36,6 +36,9 @@ export default function ProjectDetailPage() {
   const [submitting, setSubmitting] = useState(false);
   const [rubricVersions, setRubricVersions] = useState<any[]>([]);
   const [selectedRubricVersionId, setSelectedRubricVersionId] = useState('');
+  const [latestRubricVersion, setLatestRubricVersion] = useState<number | null>(
+    null
+  );
 
   const loadProject = useCallback(async () => {
     try {
@@ -57,27 +60,37 @@ export default function ProjectDetailPage() {
     loadProject();
   }, [loadProject]);
 
-  // When the dialog opens, fetch all versions of the project's rubric
+  // Fetch all versions of the project's rubric once project data is loaded
   useEffect(() => {
-    if (!createEvalOpen || !project?.rubricId) {
+    if (!project?.rubricId) {
       setRubricVersions([]);
       setSelectedRubricVersionId('');
+      setLatestRubricVersion(null);
       return;
     }
+
     fetch(`/api/rubrics/${project.rubricId}/versions`)
       .then((r) => r.json())
       .then((versions: any[]) => {
         setRubricVersions(versions);
-        // Default to the highest (latest) version
+
         if (versions.length > 0) {
-          const latest = versions.reduce((a, b) =>
-            a.version > b.version ? a : b
-          );
-          setSelectedRubricVersionId(latest.id);
+          const latest = versions.reduce((a, b) => (a.version > b.version ? a : b));
+          setLatestRubricVersion(latest.version);
+
+          // Keep selection stable unless it's empty
+          setSelectedRubricVersionId((prev) => prev || latest.id);
         }
       })
       .catch(() => {});
-  }, [createEvalOpen, project?.rubricId]);
+  }, [project?.rubricId]);
+
+  // When opening the create dialog, default rubric selection to latest version
+  useEffect(() => {
+    if (!createEvalOpen || rubricVersions.length === 0) return;
+    const latest = rubricVersions.reduce((a, b) => (a.version > b.version ? a : b));
+    setSelectedRubricVersionId((prev) => prev || latest.id);
+  }, [createEvalOpen, rubricVersions]);
 
   const handleCreateEvaluation = async () => {
     if (!evalText.trim()) return;
@@ -150,7 +163,10 @@ export default function ProjectDetailPage() {
           <div className="flex items-center gap-2">
             {project.rubric && (
               <Badge variant="info" size="md">
-                📋 {project.rubric.name}
+                📋 {project.rubric.name} v{project.rubric.version ?? 1}
+                {latestRubricVersion === (project.rubric.version ?? 1)
+                  ? ' (latest)'
+                  : ''}
               </Badge>
             )}
             <Button
@@ -326,22 +342,12 @@ export default function ProjectDetailPage() {
                 placeholder="e.g., PR #42 Code Review"
                 autoFocus
               />
-              {rubricVersions.length > 1 && (
+              {rubricVersions.length > 0 && (
                 <Select
                   label="Rubric Version"
                   value={selectedRubricVersionId}
                   onChange={(e) => setSelectedRubricVersionId(e.target.value)}
-                  options={rubricVersions
-                    .slice()
-                    .sort((a, b) => b.version - a.version)
-                    .map((v) => ({
-                      value: v.id,
-                      label: `v${v.version} — ${v.criteria?.length ?? 0} criteria${
-                        v.id === rubricVersions.reduce((a: any, b: any) => (a.version > b.version ? a : b)).id
-                          ? ' (latest)'
-                          : ''
-                      }`,
-                    }))}
+                  options={buildRubricVersionOptions(rubricVersions)}
                   hint="Choose which version of this project's rubric to use for grading"
                 />
               )}
