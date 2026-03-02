@@ -3,6 +3,12 @@ import { prisma } from '@/lib/db';
 import { verifyModelConnection } from '@/lib/llm/verify';
 import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
+const DEFAULT_CLAUDE_MODEL_IDS = new Set([
+  'claude-sonnet-4-5-20250514',
+  'claude-sonnet-4-6-20250627',
+  'claude-opus-4-5-20250630',
+]);
+
 // POST /api/models/[id]/verify
 export async function POST(
   _request: Request,
@@ -35,16 +41,26 @@ export async function POST(
       const message =
         error instanceof Error ? error.message : 'Connection test failed';
 
+      const shouldDeactivateDefaultClaude =
+        model.provider === 'anthropic' &&
+        DEFAULT_CLAUDE_MODEL_IDS.has(model.modelId) &&
+        message.toLowerCase().includes('missing anthropic api key');
+
       await prisma.modelConfig.update({
         where: { id: params.id },
         data: {
+          ...(shouldDeactivateDefaultClaude ? { isActive: false } : {}),
           isVerified: false,
           verificationError: message,
         },
       });
 
       return NextResponse.json(
-        { error: `Model connection test failed: ${message}` },
+        {
+          error: shouldDeactivateDefaultClaude
+            ? `Model connection test failed: ${message}. Default Claude model has been deactivated.`
+            : `Model connection test failed: ${message}`,
+        },
         { status: 400 }
       );
     }

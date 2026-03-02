@@ -172,7 +172,6 @@ export default function ModelsPage() {
       });
       if (res.ok) {
         toast.success('Model verified successfully');
-        loadModels();
       } else {
         const data = await res.json();
         toast.error(data.error || 'Model verification failed');
@@ -180,6 +179,7 @@ export default function ModelsPage() {
     } catch {
       toast.error('Model verification failed');
     } finally {
+      await loadModels();
       setVerifyingId(null);
     }
   };
