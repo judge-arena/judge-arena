@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
+import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
 const createProjectSchema = z.object({
   name: z.string().min(1, 'Name is required').max(200),
@@ -8,14 +9,21 @@ const createProjectSchema = z.object({
   rubricId: z.string().optional(),
 });
 
-// GET /api/projects - List all projects
+// GET /api/projects - List projects visible to the current user
 export async function GET() {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
+    const where = isAdmin(session) ? undefined : { userId: session.user.id };
+
     const projects = await prisma.project.findMany({
+      where,
       include: {
         rubric: {
           include: { criteria: { orderBy: { order: 'asc' } } },
         },
+        user: { select: { id: true, name: true, email: true } },
         _count: { select: { evaluations: true } },
       },
       orderBy: { updatedAt: 'desc' },
@@ -33,6 +41,9 @@ export async function GET() {
 
 // POST /api/projects - Create a new project
 export async function POST(request: Request) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
     const body = await request.json();
     const data = createProjectSchema.parse(body);
@@ -42,11 +53,13 @@ export async function POST(request: Request) {
         name: data.name,
         description: data.description,
         rubricId: data.rubricId || null,
+        userId: session.user.id,
       },
       include: {
         rubric: {
           include: { criteria: { orderBy: { order: 'asc' } } },
         },
+        user: { select: { id: true, name: true, email: true } },
         _count: { select: { evaluations: true } },
       },
     });

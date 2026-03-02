@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
+import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
 const criterionSchema = z.object({
   name: z.string().min(1),
@@ -16,12 +17,19 @@ const createRubricSchema = z.object({
   criteria: z.array(criterionSchema).min(1, 'At least one criterion is required'),
 });
 
-// GET /api/rubrics
+// GET /api/rubrics — only own rubrics (admin sees all)
 export async function GET() {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
+    const where = isAdmin(session) ? undefined : { userId: session.user.id };
+
     const rubrics = await prisma.rubric.findMany({
+      where,
       include: {
         criteria: { orderBy: { order: 'asc' } },
+        user: { select: { id: true, name: true, email: true } },
         _count: { select: { projects: true } },
       },
       orderBy: { updatedAt: 'desc' },
@@ -39,6 +47,9 @@ export async function GET() {
 
 // POST /api/rubrics
 export async function POST(request: Request) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
     const body = await request.json();
     const data = createRubricSchema.parse(body);
@@ -47,6 +58,7 @@ export async function POST(request: Request) {
       data: {
         name: data.name,
         description: data.description,
+        userId: session.user.id,
         criteria: {
           create: data.criteria.map((c, i) => ({
             ...c,

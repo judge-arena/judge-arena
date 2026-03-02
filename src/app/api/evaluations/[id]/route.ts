@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
+import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
 const updateEvaluationSchema = z.object({
   rubricId: z.string().nullable().optional(),
@@ -13,6 +14,9 @@ export async function GET(
   _request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
     const evaluation = await prisma.evaluation.findUnique({
       where: { id: params.id },
@@ -27,6 +31,7 @@ export async function GET(
             },
           },
         },
+        user: { select: { id: true, name: true, email: true } },
         modelSelections: {
           include: {
             modelConfig: {
@@ -61,6 +66,10 @@ export async function GET(
       );
     }
 
+    if (evaluation.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     return NextResponse.json(evaluation);
   } catch (error) {
     console.error('Failed to fetch evaluation:', error);
@@ -76,7 +85,16 @@ export async function PATCH(
   request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
+    const existing = await prisma.evaluation.findUnique({ where: { id: params.id }, select: { userId: true } });
+    if (!existing) return NextResponse.json({ error: 'Evaluation not found' }, { status: 404 });
+    if (existing.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     const body = await request.json();
     const data = updateEvaluationSchema.parse(body);
 
@@ -218,7 +236,16 @@ export async function DELETE(
   _request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
+    const existing = await prisma.evaluation.findUnique({ where: { id: params.id }, select: { userId: true } });
+    if (!existing) return NextResponse.json({ error: 'Evaluation not found' }, { status: 404 });
+    if (existing.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     await prisma.evaluation.delete({ where: { id: params.id } });
     return NextResponse.json({ success: true });
   } catch (error) {

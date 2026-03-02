@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { verifyModelConnection } from '@/lib/llm/verify';
+import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
 const createModelSchema = z.object({
   name: z.string().min(1, 'Name is required').max(100),
@@ -12,11 +13,18 @@ const createModelSchema = z.object({
   isActive: z.boolean().default(true),
 });
 
-// GET /api/models
+// GET /api/models — own models only (admin sees all)
 export async function GET() {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
+    const where = isAdmin(session) ? undefined : { userId: session.user.id };
+
     const models = await prisma.modelConfig.findMany({
+      where,
       orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
+      include: { user: { select: { id: true, name: true, email: true } } },
     });
 
     // Don't send API keys to the client
@@ -38,6 +46,9 @@ export async function GET() {
 
 // POST /api/models
 export async function POST(request: Request) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
     const body = await request.json();
     const data = createModelSchema.parse(body);
@@ -69,6 +80,7 @@ export async function POST(request: Request) {
         isVerified: true,
         verifiedAt: new Date(),
         verificationError: null,
+        userId: session.user.id,
       },
     });
 

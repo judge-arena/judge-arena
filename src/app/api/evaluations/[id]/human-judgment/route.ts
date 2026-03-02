@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
+import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
 const humanJudgmentSchema = z.object({
   overallScore: z.number().min(0).max(10),
@@ -29,6 +30,9 @@ export async function POST(
   request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
     const body = await request.json();
     const data = humanJudgmentSchema.parse(body);
@@ -45,6 +49,10 @@ export async function POST(
       );
     }
 
+    if (evaluation.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     // Upsert human judgment
     const judgment = await prisma.humanJudgment.upsert({
       where: { evaluationId: params.id },
@@ -58,6 +66,7 @@ export async function POST(
       },
       create: {
         evaluationId: params.id,
+        userId: session.user.id,
         overallScore: data.overallScore,
         reasoning: data.reasoning,
         criteriaScores: data.criteriaScores

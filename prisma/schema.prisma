@@ -7,17 +7,39 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ─── Auth ───────────────────────────────────────────────────────────────────
+
+model User {
+  id             String          @id @default(cuid())
+  email          String          @unique
+  name           String?
+  passwordHash   String
+  role           String          @default("user") // "user" | "admin"
+  projects       Project[]
+  rubrics        Rubric[]
+  modelConfigs   ModelConfig[]
+  evaluations    Evaluation[]
+  humanJudgments HumanJudgment[]
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+}
+
+// ─── Domain ─────────────────────────────────────────────────────────────────
+
 model Project {
   id          String       @id @default(cuid())
   name        String
   description String?
   rubricId    String?
   rubric      Rubric?      @relation(fields: [rubricId], references: [id])
+  userId      String
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   evaluations Evaluation[]
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
 
   @@index([rubricId])
+  @@index([userId])
 }
 
 model Rubric {
@@ -31,10 +53,13 @@ model Rubric {
   criteria    RubricCriterion[]
   projects    Project[]
   evaluations Evaluation[]
+  userId      String
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt   DateTime          @default(now())
   updatedAt   DateTime          @updatedAt
 
   @@index([parentId])
+  @@index([userId])
 }
 
 model RubricCriterion {
@@ -61,10 +86,14 @@ model ModelConfig {
   isVerified         Boolean                    @default(false)
   verifiedAt         DateTime?
   verificationError  String?
+  userId             String
+  user               User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt          DateTime                   @default(now())
   updatedAt          DateTime                   @updatedAt
   judgments          ModelJudgment[]
   evaluationSelections EvaluationModelSelection[]
+
+  @@index([userId])
 }
 
 model Evaluation {
@@ -76,6 +105,8 @@ model Evaluation {
   inputText      String
   title          String?
   status         String          @default("pending") // pending | judging | completed | error
+  userId         String
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   modelJudgments ModelJudgment[]
   modelSelections EvaluationModelSelection[]
   humanJudgment  HumanJudgment?
@@ -85,6 +116,7 @@ model Evaluation {
   @@index([projectId])
   @@index([rubricId])
   @@index([status])
+  @@index([userId])
 }
 
 model EvaluationModelSelection {
@@ -128,8 +160,12 @@ model HumanJudgment {
   reasoning      String?
   criteriaScores String? // JSON string: Array<{ criterionId: string; score: number; comment?: string }>
   selectedBestModelId String?
+  userId         String
+  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt      DateTime   @default(now())
   updatedAt      DateTime   @updatedAt
+
+  @@index([userId])
 }
 
 model ApiKeyStore {

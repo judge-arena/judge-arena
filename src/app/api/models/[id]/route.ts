@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { verifyModelConnection } from '@/lib/llm/verify';
+import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
 const updateModelSchema = z.object({
   name: z.string().min(1).max(100).optional(),
@@ -17,6 +18,9 @@ export async function GET(
   _request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
     const model = await prisma.modelConfig.findUnique({
       where: { id: params.id },
@@ -24,6 +28,10 @@ export async function GET(
 
     if (!model) {
       return NextResponse.json({ error: 'Model not found' }, { status: 404 });
+    }
+
+    if (model.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
     return NextResponse.json({
@@ -45,6 +53,9 @@ export async function PATCH(
   request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
     const body = await request.json();
     const data = updateModelSchema.parse(body);
@@ -55,6 +66,10 @@ export async function PATCH(
 
     if (!existing) {
       return NextResponse.json({ error: 'Model not found' }, { status: 404 });
+    }
+
+    if (existing.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
     const updateData: Record<string, unknown> = {};
@@ -134,7 +149,16 @@ export async function DELETE(
   _request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
+    const existing = await prisma.modelConfig.findUnique({ where: { id: params.id }, select: { userId: true } });
+    if (!existing) return NextResponse.json({ error: 'Model not found' }, { status: 404 });
+    if (existing.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     await prisma.modelConfig.delete({ where: { id: params.id } });
     return NextResponse.json({ success: true });
   } catch (error) {

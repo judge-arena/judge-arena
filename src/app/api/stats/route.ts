@@ -1,9 +1,15 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
 // GET /api/stats - Dashboard statistics
 export async function GET() {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
+    const userFilter = isAdmin(session) ? {} : { userId: session.user.id };
+
     const [
       totalProjects,
       totalEvaluations,
@@ -12,14 +18,14 @@ export async function GET() {
       activeModels,
       totalRubrics,
     ] = await Promise.all([
-      prisma.project.count(),
-      prisma.evaluation.count(),
-      prisma.evaluation.count({ where: { status: 'completed' } }),
+      prisma.project.count({ where: userFilter }),
+      prisma.evaluation.count({ where: userFilter }),
+      prisma.evaluation.count({ where: { ...userFilter, status: 'completed' } }),
       prisma.evaluation.count({
-        where: { status: { in: ['pending', 'judging'] } },
+        where: { ...userFilter, status: { in: ['pending', 'judging'] } },
       }),
-      prisma.modelConfig.count({ where: { isActive: true } }),
-      prisma.rubric.count(),
+      prisma.modelConfig.count({ where: { ...userFilter, isActive: true } }),
+      prisma.rubric.count({ where: userFilter }),
     ]);
 
     return NextResponse.json({

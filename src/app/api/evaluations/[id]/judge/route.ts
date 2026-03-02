@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { executeJudgment } from '@/lib/llm';
+import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
 /**
  * POST /api/evaluations/[id]/judge
@@ -12,6 +13,9 @@ export async function POST(
   _request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
     // Load evaluation with its own rubric (fallback to project rubric for legacy data)
     const evaluation = await prisma.evaluation.findUnique({
@@ -41,6 +45,10 @@ export async function POST(
         { error: 'Evaluation not found' },
         { status: 404 }
       );
+    }
+
+    if (evaluation.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
     const rubric = evaluation.rubric ?? evaluation.project.rubric;

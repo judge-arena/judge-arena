@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
+import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
 const updateRubricSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -24,17 +25,25 @@ export async function GET(
   _request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
     const rubric = await prisma.rubric.findUnique({
       where: { id: params.id },
       include: {
         criteria: { orderBy: { order: 'asc' } },
+        user: { select: { id: true, name: true, email: true } },
         _count: { select: { projects: true } },
       },
     });
 
     if (!rubric) {
       return NextResponse.json({ error: 'Rubric not found' }, { status: 404 });
+    }
+
+    if (rubric.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
     return NextResponse.json(rubric);
@@ -52,7 +61,16 @@ export async function PATCH(
   request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
+    const existing = await prisma.rubric.findUnique({ where: { id: params.id }, select: { userId: true } });
+    if (!existing) return NextResponse.json({ error: 'Rubric not found' }, { status: 404 });
+    if (existing.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     const body = await request.json();
     const data = updateRubricSchema.parse(body);
 
@@ -106,7 +124,16 @@ export async function DELETE(
   _request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
+    const existing = await prisma.rubric.findUnique({ where: { id: params.id }, select: { userId: true } });
+    if (!existing) return NextResponse.json({ error: 'Rubric not found' }, { status: 404 });
+    if (existing.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     await prisma.rubric.delete({ where: { id: params.id } });
     return NextResponse.json({ success: true });
   } catch (error) {

@@ -1,9 +1,38 @@
 import { PrismaClient } from '@prisma/client';
+import bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
 
 async function main() {
   console.log('🌱 Seeding database...');
+
+  // Create admin user
+  const adminPassword = await bcrypt.hash('admin123', 12);
+  const adminUser = await prisma.user.upsert({
+    where: { email: 'admin@judgearena.local' },
+    update: {},
+    create: {
+      email: 'admin@judgearena.local',
+      name: 'Admin',
+      passwordHash: adminPassword,
+      role: 'admin',
+    },
+  });
+  console.log(`  ✓ Created admin user: ${adminUser.email} (password: admin123)`);
+
+  // Create demo user
+  const demoPassword = await bcrypt.hash('demo1234', 12);
+  const demoUser = await prisma.user.upsert({
+    where: { email: 'demo@judgearena.local' },
+    update: {},
+    create: {
+      email: 'demo@judgearena.local',
+      name: 'Demo User',
+      passwordHash: demoPassword,
+      role: 'user',
+    },
+  });
+  console.log(`  ✓ Created demo user: ${demoUser.email} (password: demo1234)`);
 
   // Create default rubric
   const rubric = await prisma.rubric.create({
@@ -11,6 +40,7 @@ async function main() {
       name: 'General Quality Assessment',
       description:
         'A comprehensive rubric for evaluating text quality across multiple dimensions.',
+      userId: adminUser.id,
       criteria: {
         create: [
           {
@@ -70,6 +100,7 @@ async function main() {
         isActive: true,
         isVerified: true,
         verifiedAt: new Date(),
+        userId: adminUser.id,
       },
     }),
     prisma.modelConfig.create({
@@ -80,6 +111,7 @@ async function main() {
         isActive: true,
         isVerified: true,
         verifiedAt: new Date(),
+        userId: adminUser.id,
       },
     }),
     prisma.modelConfig.create({
@@ -90,6 +122,7 @@ async function main() {
         isActive: true,
         isVerified: true,
         verifiedAt: new Date(),
+        userId: adminUser.id,
       },
     }),
   ]);
@@ -103,6 +136,7 @@ async function main() {
       description:
         'A sample project to demonstrate the LLM-as-a-Judge evaluation workflow. Submit text artifacts, have multiple models grade them, and provide your own human judgment.',
       rubricId: rubric.id,
+      userId: adminUser.id,
     },
   });
 
@@ -141,6 +175,7 @@ export async function authenticate(req: Request): Promise<User> {
 - Refresh tokens are single-use with rotation
 `,
       status: 'pending',
+      userId: adminUser.id,
     },
   });
 
@@ -148,6 +183,7 @@ export async function authenticate(req: Request): Promise<User> {
 
   console.log('\n✅ Database seeded successfully!');
   console.log(`\n📋 Summary:`);
+  console.log(`   - 2 Users (admin + demo)`);
   console.log(`   - 1 Rubric with 5 criteria`);
   console.log(`   - ${models.length} Model configurations`);
   console.log(`   - 1 Project with 1 sample evaluation`);

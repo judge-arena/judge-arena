@@ -1,12 +1,16 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { verifyModelConnection } from '@/lib/llm/verify';
+import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
 // POST /api/models/[id]/verify
 export async function POST(
   _request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
     const model = await prisma.modelConfig.findUnique({
       where: { id: params.id },
@@ -14,6 +18,10 @@ export async function POST(
 
     if (!model) {
       return NextResponse.json({ error: 'Model not found' }, { status: 404 });
+    }
+
+    if (model.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
     try {

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
+import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
 const createEvaluationSchema = z.object({
   projectId: z.string().min(1),
@@ -12,12 +13,20 @@ const createEvaluationSchema = z.object({
 
 // GET /api/evaluations - List evaluations (optionally filtered by project)
 export async function GET(request: Request) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
     const { searchParams } = new URL(request.url);
     const projectId = searchParams.get('projectId');
 
+    const where: any = {};
+    if (projectId) where.projectId = projectId;
+    // Non-admins only see their own evaluations
+    if (!isAdmin(session)) where.userId = session.user.id;
+
     const evaluations = await prisma.evaluation.findMany({
-      where: projectId ? { projectId } : undefined,
+      where,
       include: {
         rubric: {
           select: {
@@ -28,6 +37,7 @@ export async function GET(request: Request) {
           },
         },
         project: { select: { id: true, name: true, rubricId: true } },
+        user: { select: { id: true, name: true, email: true } },
         modelSelections: {
           include: {
             modelConfig: {
@@ -68,19 +78,26 @@ export async function GET(request: Request) {
 
 // POST /api/evaluations - Create a new evaluation
 export async function POST(request: Request) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
     const body = await request.json();
     const data = createEvaluationSchema.parse(body);
 
-    // Verify project exists
+    // Verify project exists and user owns it (or is admin)
     const project = await prisma.project.findUnique({
       where: { id: data.projectId },
+      select: { id: true, userId: true },
     });
     if (!project) {
       return NextResponse.json(
         { error: 'Project not found' },
         { status: 404 }
       );
+    }
+    if (project.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
     const requestedModelIds = data.modelConfigIds ?? [];
@@ -129,6 +146,7 @@ export async function POST(request: Request) {
         projectId: data.projectId,
         title: data.title,
         inputText: data.inputText,
+        userId: session.user.id,
         ...(data.rubricId && { rubricId: data.rubricId }),
         modelSelections: {
           create: [...new Set(selectedModelIds)].map((modelConfigId) => ({

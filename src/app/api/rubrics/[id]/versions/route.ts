@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
+import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
 const criterionSchema = z.object({
   name: z.string().min(1),
@@ -17,15 +18,21 @@ const newVersionSchema = z.object({
 });
 
 // GET /api/rubrics/[id]/versions
-// Returns all versions in the same rubric family, sorted by version asc
 export async function GET(
   _request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
     const rubric = await prisma.rubric.findUnique({ where: { id: params.id } });
     if (!rubric) {
       return NextResponse.json({ error: 'Rubric not found' }, { status: 404 });
+    }
+
+    if (rubric.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
     const rootId = rubric.parentId ?? rubric.id;
@@ -47,24 +54,28 @@ export async function GET(
 }
 
 // POST /api/rubrics/[id]/versions
-// Creates a new version branching from the rubric family identified by [id]
 export async function POST(
   request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
     const rubric = await prisma.rubric.findUnique({ where: { id: params.id } });
     if (!rubric) {
       return NextResponse.json({ error: 'Rubric not found' }, { status: 404 });
     }
 
+    if (rubric.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     const body = await request.json();
     const data = newVersionSchema.parse(body);
 
-    // Always anchor to the family root (v1)
     const rootId = rubric.parentId ?? rubric.id;
 
-    // Find the highest version in this family
     const familyVersions = await prisma.rubric.findMany({
       where: { OR: [{ id: rootId }, { parentId: rootId }] },
       select: { version: true },
@@ -80,6 +91,7 @@ export async function POST(
           data.description !== undefined ? data.description : rubric.description,
         version: nextVersion,
         parentId: rootId,
+        userId: session.user.id,
         criteria: {
           create: data.criteria.map((c, i) => ({
             name: c.name,

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
+import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
 const updateProjectSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -13,6 +14,9 @@ export async function GET(
   _request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
     const project = await prisma.project.findUnique({
       where: { id: params.id },
@@ -20,6 +24,7 @@ export async function GET(
         rubric: {
           include: { criteria: { orderBy: { order: 'asc' } } },
         },
+        user: { select: { id: true, name: true, email: true } },
         evaluations: {
           include: {
             rubric: {
@@ -30,6 +35,7 @@ export async function GET(
                 parentId: true,
               },
             },
+            user: { select: { id: true, name: true, email: true } },
             modelSelections: {
               include: {
                 modelConfig: {
@@ -60,6 +66,11 @@ export async function GET(
       return NextResponse.json({ error: 'Project not found' }, { status: 404 });
     }
 
+    // Ownership check: only owner or admin can view
+    if (project.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     return NextResponse.json(project);
   } catch (error) {
     console.error('Failed to fetch project:', error);
@@ -75,7 +86,16 @@ export async function PATCH(
   request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
+    const existing = await prisma.project.findUnique({ where: { id: params.id }, select: { userId: true } });
+    if (!existing) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+    if (existing.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     const body = await request.json();
     const data = updateProjectSchema.parse(body);
 
@@ -111,7 +131,16 @@ export async function DELETE(
   _request: Request,
   { params }: { params: { id: string } }
 ) {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+
   try {
+    const existing = await prisma.project.findUnique({ where: { id: params.id }, select: { userId: true } });
+    if (!existing) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+    if (existing.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     await prisma.project.delete({ where: { id: params.id } });
     return NextResponse.json({ success: true });
   } catch (error) {
