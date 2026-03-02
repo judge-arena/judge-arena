@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { Header } from '@/components/layout/header';
 import {
@@ -95,6 +95,16 @@ export default function DatasetsPage() {
     Array<{ input: string; expected: string }>
   >([{ input: '', expected: '' }]);
   const [localMode, setLocalMode] = useState<'inline' | 'paste'>('inline');
+  const localNameInputRef = useRef<HTMLInputElement>(null);
+  const hasFocusedLocalNameRef = useRef(false);
+
+  useEffect(() => {
+    if (!createOpen || createStep !== 'local-form') return;
+    if (hasFocusedLocalNameRef.current) return;
+
+    localNameInputRef.current?.focus();
+    hasFocusedLocalNameRef.current = true;
+  }, [createOpen, createStep]);
 
   /* ─── Data loading ─────────────────────────────────────────────────────── */
 
@@ -133,6 +143,7 @@ export default function DatasetsPage() {
   /* ─── Create dialog helpers ────────────────────────────────────────────── */
 
   const resetCreate = () => {
+    hasFocusedLocalNameRef.current = false;
     setCreateStep('type');
     setRemoteUrl('');
     setHfPreview(null);
@@ -704,12 +715,12 @@ export default function DatasetsPage() {
             {createStep === 'local-form' && (
               <div className="space-y-4">
                 <Input
+                  ref={localNameInputRef}
                   label="Dataset Name"
                   value={localName}
                   onChange={(e) => setLocalName(e.target.value)}
                   placeholder="e.g., Customer Support Prompts"
                   required
-                  autoFocus
                 />
                 <Textarea
                   label="Description"
