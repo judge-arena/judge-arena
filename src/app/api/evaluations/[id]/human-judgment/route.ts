@@ -17,7 +17,7 @@ const humanJudgmentSchema = z.object({
       })
     )
     .optional(),
-  selectedBestModelId: z.string().optional(),
+  selectedBestModelId: z.string().nullable().optional(),
 });
 
 /**
