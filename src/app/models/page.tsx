@@ -22,7 +22,10 @@ export default function ModelsPage() {
   const [models, setModels] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editingModel, setEditingModel] = useState<any | null>(null);
   const [creating, setCreating] = useState(false);
+  const [savingEdit, setSavingEdit] = useState(false);
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
 
   const loadModels = async () => {
@@ -56,9 +59,16 @@ export default function ModelsPage() {
         body: JSON.stringify(data),
       });
       if (res.ok) {
-        toast.success('Model added');
+        const created = await res.json();
+        toast.success('Model added. Running connection test...');
         setCreateOpen(false);
         loadModels();
+
+        if (created?.id) {
+          setTimeout(() => {
+            handleVerify(created.id);
+          }, 0);
+        }
       } else {
         const responseData = await res.json();
         toast.error(responseData.error || 'Failed to add model');
@@ -67,6 +77,57 @@ export default function ModelsPage() {
       toast.error('Failed to add model');
     } finally {
       setCreating(false);
+    }
+  };
+
+  const handleOpenEdit = (model: any) => {
+    setEditingModel(model);
+    setEditOpen(true);
+  };
+
+  const handleUpdate = async (data: {
+    name: string;
+    provider: string;
+    modelId: string;
+    endpoint: string;
+    apiKey: string;
+    isActive: boolean;
+  }) => {
+    if (!editingModel) return;
+
+    setSavingEdit(true);
+    try {
+      const payload: any = {
+        name: data.name,
+        provider: data.provider,
+        modelId: data.modelId,
+        endpoint: data.endpoint,
+        isActive: data.isActive,
+      };
+
+      if (data.apiKey.trim().length > 0) {
+        payload.apiKey = data.apiKey;
+      }
+
+      const res = await fetch(`/api/models/${editingModel.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        toast.success('Model updated');
+        setEditOpen(false);
+        setEditingModel(null);
+        await loadModels();
+      } else {
+        const responseData = await res.json();
+        toast.error(responseData.error || 'Failed to update model');
+      }
+    } catch {
+      toast.error('Failed to update model');
+    } finally {
+      setSavingEdit(false);
     }
   };
 
@@ -190,7 +251,9 @@ export default function ModelsPage() {
               return (
                 <Card
                   key={model.id}
+                  interactive
                   className={!model.isActive ? 'opacity-60' : ''}
+                  onClick={() => handleOpenEdit(model)}
                 >
                   <CardHeader>
                     <div className="flex items-start justify-between">
@@ -236,27 +299,49 @@ export default function ModelsPage() {
                       </div>
 
                       <div className="flex items-center gap-2 pt-2 border-t border-surface-100">
-                        {!model.isVerified && (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => handleVerify(model.id)}
-                            loading={verifyingId === model.id}
-                            className="flex-1"
-                          >
-                            Verify Connection
-                          </Button>
-                        )}
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleVerify(model.id);
+                          }}
+                          loading={verifyingId === model.id}
+                          className="flex-1"
+                        >
+                          Test
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleOpenEdit(model);
+                          }}
+                          className="flex-1"
+                        >
+                          Edit
+                        </Button>
                         <Button
                           variant={model.isActive ? 'ghost' : 'outline'}
                           size="sm"
-                          onClick={() => handleToggle(model.id, model.isActive)}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleToggle(model.id, model.isActive);
+                          }}
                           className="flex-1"
                         >
                           {model.isActive ? 'Deactivate' : 'Activate'}
                         </Button>
                         <button
-                          onClick={() => handleDelete(model.id)}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleDelete(model.id);
+                          }}
                           className="rounded p-1.5 text-surface-400 hover:text-red-500 hover:bg-red-50 transition-colors"
                           aria-label="Delete model"
                         >
@@ -289,6 +374,37 @@ export default function ModelsPage() {
           </DialogHeader>
           <DialogBody>
             <ModelConfigForm onSubmit={handleCreate} loading={creating} />
+          </DialogBody>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={editOpen}
+        onOpenChange={(open) => {
+          setEditOpen(open);
+          if (!open) setEditingModel(null);
+        }}
+      >
+        <DialogContent size="lg">
+          <DialogHeader>
+            <DialogTitle>Edit Model</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
+            {editingModel && (
+              <ModelConfigForm
+                initialData={{
+                  name: editingModel.name,
+                  provider: editingModel.provider,
+                  modelId: editingModel.modelId,
+                  endpoint: editingModel.endpoint || '',
+                  apiKey: '',
+                  isActive: editingModel.isActive,
+                }}
+                onSubmit={handleUpdate}
+                loading={savingEdit}
+                submitLabel="Save Model"
+              />
+            )}
           </DialogBody>
         </DialogContent>
       </Dialog>

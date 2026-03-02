@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { Header } from '@/components/layout/header';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
@@ -48,6 +49,8 @@ export default function EvaluatePage() {
   const [changeModelsOpen, setChangeModelsOpen] = useState(false);
   const [nextModelIds, setNextModelIds] = useState<string[]>([]);
   const [savingModels, setSavingModels] = useState(false);
+  const [changeModelSearch, setChangeModelSearch] = useState('');
+  const [quickChangeModelId, setQuickChangeModelId] = useState('');
 
   const loadEvaluation = useCallback(async () => {
     try {
@@ -286,6 +289,17 @@ export default function EvaluatePage() {
     }
   };
 
+  const addNextModel = (modelId: string) => {
+    setNextModelIds((prev) => {
+      if (prev.includes(modelId)) return prev;
+      if (prev.length >= 10) {
+        toast.error('You can select up to 10 models');
+        return prev;
+      }
+      return [...prev, modelId];
+    });
+  };
+
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -333,6 +347,26 @@ export default function EvaluatePage() {
   const modelSelections = evaluation.modelSelections ?? [];
   const selectedModelCount = modelSelections.length;
   const humanJudgment = evaluation.humanJudgment;
+
+  const normalizedChangeSearch = changeModelSearch.trim().toLowerCase();
+  const filteredChangeModels = allModels.filter((model: any) => {
+    if (!normalizedChangeSearch) return true;
+    return (
+      model.name.toLowerCase().includes(normalizedChangeSearch) ||
+      model.provider.toLowerCase().includes(normalizedChangeSearch) ||
+      model.modelId.toLowerCase().includes(normalizedChangeSearch)
+    );
+  });
+
+  const quickChangeOptions = [
+    { value: '', label: 'Quick add model...' },
+    ...filteredChangeModels
+      .filter((model: any) => !nextModelIds.includes(model.id))
+      .map((model: any) => ({
+        value: model.id,
+        label: `${model.name} (${model.provider})`,
+      })),
+  ];
 
   const latestVersionByFamily = new Map<string, number>();
   for (const r of allRubrics) {
@@ -445,6 +479,8 @@ export default function EvaluatePage() {
                     (s: any) => s.modelConfigId
                   )
                 );
+                setChangeModelSearch('');
+                setQuickChangeModelId('');
                 setChangeModelsOpen(true);
               }}
             >
@@ -724,13 +760,33 @@ export default function EvaluatePage() {
                 </span>
               </div>
 
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                <Input
+                  label="Search models"
+                  value={changeModelSearch}
+                  onChange={(e) => setChangeModelSearch(e.target.value)}
+                  placeholder="Search by name, provider, or model ID"
+                />
+                <Select
+                  label="Quick add"
+                  value={quickChangeModelId}
+                  onChange={(e) => {
+                    const modelId = e.target.value;
+                    if (!modelId) return;
+                    addNextModel(modelId);
+                    setQuickChangeModelId('');
+                  }}
+                  options={quickChangeOptions}
+                />
+              </div>
+
               {allModels.length === 0 ? (
                 <div className="rounded-lg border border-surface-200 bg-surface-50 px-3 py-2 text-xs text-surface-500">
                   No verified active models available.
                 </div>
               ) : (
                 <div className="max-h-56 overflow-y-auto rounded-lg border border-surface-200 divide-y divide-surface-100">
-                  {allModels.map((model: any) => {
+                  {filteredChangeModels.map((model: any) => {
                     const selected = nextModelIds.includes(model.id);
                     return (
                       <label
@@ -754,6 +810,11 @@ export default function EvaluatePage() {
                       </label>
                     );
                   })}
+                  {filteredChangeModels.length === 0 && (
+                    <div className="px-3 py-2 text-xs text-surface-500">
+                      No models match your search.
+                    </div>
+                  )}
                 </div>
               )}
 

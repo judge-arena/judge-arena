@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { verifyModelConnection } from '@/lib/llm/verify';
 import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
 const updateModelSchema = z.object({
@@ -81,17 +80,6 @@ export async function PATCH(
     if (data.apiKey !== undefined) updateData.apiKey = data.apiKey || null;
     if (data.isActive !== undefined) updateData.isActive = data.isActive;
 
-    const provider = data.provider ?? existing.provider;
-    const modelId = data.modelId ?? existing.modelId;
-    const endpoint =
-      data.endpoint !== undefined
-        ? data.endpoint || undefined
-        : existing.endpoint || undefined;
-    const apiKey =
-      data.apiKey !== undefined
-        ? data.apiKey || undefined
-        : existing.apiKey || undefined;
-
     const connectionChanged =
       data.provider !== undefined ||
       data.modelId !== undefined ||
@@ -99,24 +87,10 @@ export async function PATCH(
       data.apiKey !== undefined;
 
     if (connectionChanged) {
-      try {
-        await verifyModelConnection({
-          provider: provider as 'anthropic' | 'openai' | 'local',
-          modelId,
-          endpoint,
-          apiKey,
-        });
-        updateData.isVerified = true;
-        updateData.verifiedAt = new Date();
-        updateData.verificationError = null;
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : 'Connection test failed';
-        return NextResponse.json(
-          { error: `Model connection test failed: ${message}` },
-          { status: 400 }
-        );
-      }
+      updateData.isVerified = false;
+      updateData.verifiedAt = null;
+      updateData.verificationError =
+        'Connection settings changed. Click Test to verify.';
     }
 
     const model = await prisma.modelConfig.update({

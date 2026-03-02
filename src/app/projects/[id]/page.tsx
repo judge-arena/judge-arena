@@ -38,6 +38,8 @@ export default function ProjectDetailPage() {
   const [allRubrics, setAllRubrics] = useState<any[]>([]);
   const [availableModels, setAvailableModels] = useState<any[]>([]);
   const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
+  const [modelSearch, setModelSearch] = useState('');
+  const [quickAddModelId, setQuickAddModelId] = useState('');
 
   const loadProject = useCallback(async () => {
     try {
@@ -124,6 +126,17 @@ export default function ProjectDetailPage() {
     });
   };
 
+  const addModelSelection = (modelId: string) => {
+    setSelectedModelIds((prev) => {
+      if (prev.includes(modelId)) return prev;
+      if (prev.length >= 10) {
+        toast.error('You can select up to 10 models');
+        return prev;
+      }
+      return [...prev, modelId];
+    });
+  };
+
   const handleCreateEvaluation = async () => {
     if (!evalText.trim()) return;
     setSubmitting(true);
@@ -183,6 +196,26 @@ export default function ProjectDetailPage() {
   }
 
   if (!project) return null;
+
+  const normalizedSearch = modelSearch.trim().toLowerCase();
+  const filteredAvailableModels = availableModels.filter((model: any) => {
+    if (!normalizedSearch) return true;
+    return (
+      model.name.toLowerCase().includes(normalizedSearch) ||
+      model.provider.toLowerCase().includes(normalizedSearch) ||
+      model.modelId.toLowerCase().includes(normalizedSearch)
+    );
+  });
+
+  const quickAddOptions = [
+    { value: '', label: 'Quick add model...' },
+    ...filteredAvailableModels
+      .filter((model: any) => !selectedModelIds.includes(model.id))
+      .map((model: any) => ({
+        value: model.id,
+        label: `${model.name} (${model.provider})`,
+      })),
+  ];
 
   const latestVersionByFamily = new Map<string, number>();
   for (const rubric of allRubrics) {
@@ -374,13 +407,33 @@ export default function ProjectDetailPage() {
                   </span>
                 </div>
 
+                <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                  <Input
+                    label="Search models"
+                    value={modelSearch}
+                    onChange={(e) => setModelSearch(e.target.value)}
+                    placeholder="Search by name, provider, or model ID"
+                  />
+                  <Select
+                    label="Quick add"
+                    value={quickAddModelId}
+                    onChange={(e) => {
+                      const modelId = e.target.value;
+                      if (!modelId) return;
+                      addModelSelection(modelId);
+                      setQuickAddModelId('');
+                    }}
+                    options={quickAddOptions}
+                  />
+                </div>
+
                 {availableModels.length === 0 ? (
                   <div className="rounded-lg border border-surface-200 bg-surface-50 px-3 py-2 text-xs text-surface-500">
                     No verified active models available. You can still create a human-only evaluation.
                   </div>
                 ) : (
                   <div className="max-h-44 overflow-y-auto rounded-lg border border-surface-200 divide-y divide-surface-100">
-                    {availableModels.map((model: any) => {
+                    {filteredAvailableModels.map((model: any) => {
                       const selected = selectedModelIds.includes(model.id);
                       return (
                         <label
@@ -404,6 +457,11 @@ export default function ProjectDetailPage() {
                         </label>
                       );
                     })}
+                    {filteredAvailableModels.length === 0 && (
+                      <div className="px-3 py-2 text-xs text-surface-500">
+                        No models match your search.
+                      </div>
+                    )}
                   </div>
                 )}
 
