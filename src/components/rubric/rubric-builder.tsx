@@ -22,9 +22,23 @@ interface RubricBuilderProps {
     name: string;
     description: string;
     criteria: CriterionData[];
-  }) => void;
+  }) => void | Promise<void>;
+  onSubmitIntent?: (
+    data: {
+      name: string;
+      description: string;
+      criteria: CriterionData[];
+    },
+    intent: string
+  ) => void | Promise<void>;
   loading?: boolean;
+  secondaryLoading?: boolean;
+  cancelLoading?: boolean;
   submitLabel?: string;
+  secondarySubmitLabel?: string;
+  secondarySubmitIntent?: string;
+  submitIntent?: string;
+  onCancel?: () => void;
 }
 
 function FieldLabel({
@@ -57,8 +71,15 @@ export function RubricBuilder({
   initialDescription = '',
   initialCriteria,
   onSubmit,
+  onSubmitIntent,
   loading,
+  secondaryLoading,
+  cancelLoading,
   submitLabel = 'Create Rubric',
+  secondarySubmitLabel,
+  secondarySubmitIntent = 'secondary',
+  submitIntent = 'primary',
+  onCancel,
 }: RubricBuilderProps) {
   const [name, setName] = useState(initialName);
   const [description, setDescription] = useState(initialDescription);
@@ -90,9 +111,21 @@ export function RubricBuilder({
     );
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    onSubmit({ name, description, criteria });
+
+    const payload = { name, description, criteria };
+    const submitter = (e.nativeEvent as SubmitEvent).submitter as
+      | HTMLButtonElement
+      | undefined;
+    const intent = submitter?.value || submitIntent;
+
+    if (onSubmitIntent) {
+      await onSubmitIntent(payload, intent);
+      return;
+    }
+
+    await onSubmit(payload);
   };
 
   return (
@@ -288,16 +321,42 @@ export function RubricBuilder({
         </div>
       </div>
 
-      <Button
-        type="submit"
-        variant="primary"
-        size="lg"
-        className="w-full"
-        loading={loading}
-        disabled={!name || criteria.some((c) => !c.name || !c.description)}
-      >
-        {submitLabel}
-      </Button>
+      <div className="flex items-center justify-end gap-2">
+        {onCancel && (
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={onCancel}
+            loading={cancelLoading}
+          >
+            Cancel
+          </Button>
+        )}
+
+        {secondarySubmitLabel && (
+          <Button
+            type="submit"
+            variant="outline"
+            value={secondarySubmitIntent}
+            loading={secondaryLoading}
+            disabled={!name || criteria.some((c) => !c.name || !c.description)}
+          >
+            {secondarySubmitLabel}
+          </Button>
+        )}
+
+        <Button
+          type="submit"
+          variant="primary"
+          size="lg"
+          className={secondarySubmitLabel || onCancel ? '' : 'w-full'}
+          value={submitIntent}
+          loading={loading}
+          disabled={!name || criteria.some((c) => !c.name || !c.description)}
+        >
+          {submitLabel}
+        </Button>
+      </div>
     </form>
   );
 }

@@ -15,7 +15,6 @@ import {
 } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { RubricBuilder } from '@/components/rubric/rubric-builder';
-import { formatDate } from '@/lib/utils';
 import { toast } from 'sonner';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -46,6 +45,25 @@ type RubricFamily = {
   latest: RubricShape;
 };
 
+type RubricSubmitData = {
+  name: string;
+  description: string;
+  criteria: CriterionShape[];
+};
+
+function normalizeRubricData(data: RubricSubmitData) {
+  return {
+    name: data.name.trim(),
+    description: (data.description ?? '').trim(),
+    criteria: data.criteria.map((criterion) => ({
+      name: criterion.name.trim(),
+      description: criterion.description.trim(),
+      maxScore: Number(criterion.maxScore),
+      weight: Number(criterion.weight),
+    })),
+  };
+}
+
 function groupRubricsByFamily(rubrics: RubricShape[]): RubricFamily[] {
   const familyMap = new Map<string, RubricShape[]>();
   for (const r of rubrics) {
@@ -72,9 +90,9 @@ export default function RubricsPage() {
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
-  // State for "new version" dialog — holds the latest rubric of the family being edited
-  const [newVersionTarget, setNewVersionTarget] = useState<RubricShape | null>(null);
-  const [newVersionCreating, setNewVersionCreating] = useState(false);
+  const [editTarget, setEditTarget] = useState<RubricShape | null>(null);
+  const [savingCurrent, setSavingCurrent] = useState(false);
+  const [savingAsVersion, setSavingAsVersion] = useState(false);
 
   const families = useMemo(() => groupRubricsByFamily(rubrics), [rubrics]);
 
@@ -118,33 +136,98 @@ export default function RubricsPage() {
     }
   };
 
-  const handleNewVersion = async (data: {
-    name: string;
-    description: string;
-    criteria: CriterionShape[];
-  }) => {
-    if (!newVersionTarget) return;
-    setNewVersionCreating(true);
+  const saveEditAsCurrent = async (targetId: string, payload: RubricSubmitData) => {
+    setSavingCurrent(true);
     try {
-      const res = await fetch(`/api/rubrics/${newVersionTarget.id}/versions`, {
-        method: 'POST',
+      const res = await fetch(`/api/rubrics/${targetId}`, {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
+        body: JSON.stringify({
+          name: payload.name,
+          description: payload.description,
+          criteria: payload.criteria.map((criterion, index) => ({
+            ...criterion,
+            order: index,
+          })),
+        }),
       });
+
       if (res.ok) {
-        const newRubric = await res.json();
-        toast.success(`Saved as v${newRubric.version}`);
-        setNewVersionTarget(null);
+        toast.success('Rubric updated');
+        setEditTarget(null);
         loadRubrics();
       } else {
-        const d = await res.json();
-        toast.error(d.error || 'Failed to create version');
+        const data = await res.json().catch(() => ({}));
+        toast.error((data as any).error || 'Failed to update rubric');
       }
     } catch {
-      toast.error('Failed to create version');
+      toast.error('Failed to update rubric');
     } finally {
-      setNewVersionCreating(false);
+      setSavingCurrent(false);
     }
+  };
+
+  const saveEditAsNewVersion = async (targetId: string, payload: RubricSubmitData) => {
+    setSavingAsVersion(true);
+    try {
+      const res = await fetch(`/api/rubrics/${targetId}/versions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: payload.name,
+          description: payload.description,
+          criteria: payload.criteria.map((criterion, index) => ({
+            ...criterion,
+            order: index,
+          })),
+        }),
+      });
+
+      if (res.ok) {
+        const created = await res.json();
+        toast.success(`Saved as v${created.version}`);
+        setEditTarget(null);
+        loadRubrics();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        toast.error((data as any).error || 'Failed to create new version');
+      }
+    } catch {
+      toast.error('Failed to create new version');
+    } finally {
+      setSavingAsVersion(false);
+    }
+  };
+
+  const handleEditSubmit = async (data: RubricSubmitData, intent: string) => {
+    if (!editTarget) return;
+
+    const baseline = normalizeRubricData({
+      name: editTarget.name,
+      description: editTarget.description ?? '',
+      criteria:
+        editTarget.criteria?.map((criterion) => ({
+          name: criterion.name,
+          description: criterion.description,
+          maxScore: criterion.maxScore,
+          weight: criterion.weight,
+        })) ?? [],
+    });
+
+    const next = normalizeRubricData(data);
+    const changed = JSON.stringify(baseline) !== JSON.stringify(next);
+
+    if (!changed) {
+      toast.info('No changes detected');
+      return;
+    }
+
+    if (intent === 'save-as-new-version') {
+      await saveEditAsNewVersion(editTarget.id, data);
+      return;
+    }
+
+    await saveEditAsCurrent(editTarget.id, data);
   };
 
   const handleDelete = async (id: string) => {
@@ -205,7 +288,7 @@ export default function RubricsPage() {
               <RubricFamilyCard
                 key={family.rootId}
                 family={family}
-                onNewVersion={(rubric) => setNewVersionTarget(rubric)}
+                onEdit={(rubric) => setEditTarget(rubric)}
                 onDelete={handleDelete}
               />
             ))}
@@ -225,35 +308,35 @@ export default function RubricsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* New Version Dialog */}
+      {/* Edit Rubric Dialog */}
       <Dialog
-        open={!!newVersionTarget}
-        onOpenChange={(open) => !open && setNewVersionTarget(null)}
+        open={!!editTarget}
+        onOpenChange={(open) => !open && setEditTarget(null)}
       >
         <DialogContent size="xl">
           <DialogHeader>
-            <DialogTitle>
-              New Version —{' '}
-              <span className="font-normal">{newVersionTarget?.name}</span>
-              <span className="ml-2 text-sm font-normal text-surface-400">
-                v{newVersionTarget?.version} → v{(newVersionTarget?.version ?? 0) + 1}
-              </span>
-            </DialogTitle>
+            <DialogTitle>Edit Rubric</DialogTitle>
           </DialogHeader>
           <DialogBody>
-            {newVersionTarget && (
+            {editTarget && (
               <RubricBuilder
-                initialName={newVersionTarget.name}
-                initialDescription={newVersionTarget.description ?? ''}
-                initialCriteria={newVersionTarget.criteria?.map((c) => ({
+                initialName={editTarget.name}
+                initialDescription={editTarget.description ?? ''}
+                initialCriteria={editTarget.criteria?.map((c) => ({
                   name: c.name,
                   description: c.description,
                   maxScore: c.maxScore,
                   weight: c.weight,
                 }))}
-                onSubmit={handleNewVersion}
-                loading={newVersionCreating}
-                submitLabel={`Save as v${(newVersionTarget?.version ?? 0) + 1}`}
+                onSubmit={() => {}}
+                onSubmitIntent={handleEditSubmit}
+                onCancel={() => setEditTarget(null)}
+                loading={savingCurrent}
+                secondaryLoading={savingAsVersion}
+                submitLabel="Save Current Version"
+                submitIntent="save-current-version"
+                secondarySubmitLabel="Save as New Version"
+                secondarySubmitIntent="save-as-new-version"
               />
             )}
           </DialogBody>
@@ -267,11 +350,11 @@ export default function RubricsPage() {
 
 function RubricFamilyCard({
   family,
-  onNewVersion,
+  onEdit,
   onDelete,
 }: {
   family: RubricFamily;
-  onNewVersion: (rubric: RubricShape) => void;
+  onEdit: (rubric: RubricShape) => void;
   onDelete: (id: string) => void;
 }) {
   const { latest, versions } = family;
@@ -327,7 +410,7 @@ function RubricFamilyCard({
                 {versions.map((v, i) => (
                   <React.Fragment key={v.id}>
                     <span
-                      title={`v${v.version} · saved ${formatDate(v.createdAt)}`}
+                      title={`v${v.version}`}
                       className={
                         v.id === latest.id
                           ? 'inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-semibold bg-brand-100 text-brand-700'
@@ -351,31 +434,32 @@ function RubricFamilyCard({
           )}
 
           {/* Footer */}
-          <div className="flex items-center gap-2 pt-2 border-t border-surface-100">
+          <div className="flex items-center justify-end gap-1 pt-2 border-t border-surface-100">
             <Button
-              variant="outline"
+              variant="ghost"
               size="sm"
-              onClick={() => onNewVersion(latest)}
-              className="flex-1"
+              onClick={() => onEdit(latest)}
+              className="text-surface-400 hover:text-brand-700 hover:bg-brand-50"
+              aria-label="Edit rubric"
+              title="Edit rubric"
             >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                <path d="M12 5v14M5 12h14" />
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <path d="M12 20h9" />
+                <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
               </svg>
-              New Version
             </Button>
-            <button
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => onDelete(latest.id)}
-              className="rounded p-1.5 text-surface-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+              className="text-surface-400 hover:text-red-600 hover:bg-red-50"
               aria-label="Delete latest version"
               title="Delete this version"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                 <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
               </svg>
-            </button>
-            <span className="text-2xs text-surface-400 ml-auto shrink-0">
-              {formatDate(latest.updatedAt)}
-            </span>
+            </Button>
           </div>
         </div>
       </CardContent>
