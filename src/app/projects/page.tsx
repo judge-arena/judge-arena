@@ -9,7 +9,6 @@ import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
-import { Select } from '@/components/ui/select';
 import {
   Dialog,
   DialogContent,
@@ -19,27 +18,21 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
-import { buildRubricVersionOptions, formatDate } from '@/lib/utils';
+import { formatDate } from '@/lib/utils';
 import { toast } from 'sonner';
 
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<any[]>([]);
-  const [rubrics, setRubrics] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [newDescription, setNewDescription] = useState('');
-  const [newRubricId, setNewRubricId] = useState('');
 
   const loadData = async () => {
     try {
-      const [projectsRes, rubricsRes] = await Promise.all([
-        fetch('/api/projects'),
-        fetch('/api/rubrics'),
-      ]);
+      const projectsRes = await fetch('/api/projects');
       if (projectsRes.ok) setProjects(await projectsRes.json());
-      if (rubricsRes.ok) setRubrics(await rubricsRes.json());
     } catch (err) {
       console.error('Failed to load data:', err);
     } finally {
@@ -61,7 +54,6 @@ export default function ProjectsPage() {
         body: JSON.stringify({
           name: newName,
           description: newDescription,
-          rubricId: newRubricId || undefined,
         }),
       });
       if (res.ok) {
@@ -69,7 +61,6 @@ export default function ProjectsPage() {
         setCreateOpen(false);
         setNewName('');
         setNewDescription('');
-        setNewRubricId('');
         loadData();
       } else {
         const data = await res.json();
@@ -242,16 +233,6 @@ export default function ProjectsPage() {
                 onChange={(e) => setNewDescription(e.target.value)}
                 placeholder="Describe the purpose of this project..."
                 rows={3}
-              />
-              <Select
-                label="Rubric"
-                options={[
-                  { value: '', label: 'No rubric (select later)' },
-                  ...buildRubricVersionOptions(rubrics),
-                ]}
-                value={newRubricId}
-                onChange={(e) => setNewRubricId(e.target.value)}
-                hint="Rubrics define how submissions will be scored"
               />
             </div>
           </DialogBody>

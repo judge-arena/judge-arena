@@ -34,7 +34,6 @@ export default function ProjectDetailPage() {
   const [evalTitle, setEvalTitle] = useState('');
   const [evalText, setEvalText] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [rubricVersions, setRubricVersions] = useState<any[]>([]);
   const [selectedRubricVersionId, setSelectedRubricVersionId] = useState('');
   const [allRubrics, setAllRubrics] = useState<any[]>([]);
   const [availableModels, setAvailableModels] = useState<any[]>([]);
@@ -75,34 +74,34 @@ export default function ProjectDetailPage() {
     loadProject();
   }, [loadProject]);
 
-  // Fetch all versions of the project's rubric once project data is loaded
+  // Default rubric selection to latest available version
   useEffect(() => {
-    if (!project?.rubricId) {
-      setRubricVersions([]);
+    if (allRubrics.length === 0) {
       setSelectedRubricVersionId('');
       return;
     }
 
-    fetch(`/api/rubrics/${project.rubricId}/versions`)
-      .then((r) => r.json())
-      .then((versions: any[]) => {
-        setRubricVersions(versions);
+    const latest = [...allRubrics].sort((a, b) => {
+      const av = a.version ?? 1;
+      const bv = b.version ?? 1;
+      if (av !== bv) return bv - av;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    })[0];
 
-        if (versions.length > 0) {
-          const latest = versions.reduce((a, b) => (a.version > b.version ? a : b));
-          // Keep selection stable unless it's empty
-          setSelectedRubricVersionId((prev) => prev || latest.id);
-        }
-      })
-      .catch(() => {});
-  }, [project?.rubricId]);
+    setSelectedRubricVersionId((prev) => prev || latest?.id || '');
+  }, [allRubrics]);
 
   // When opening the create dialog, default rubric selection to latest version
   useEffect(() => {
-    if (!createEvalOpen || rubricVersions.length === 0) return;
-    const latest = rubricVersions.reduce((a, b) => (a.version > b.version ? a : b));
-    setSelectedRubricVersionId((prev) => prev || latest.id);
-  }, [createEvalOpen, rubricVersions]);
+    if (!createEvalOpen || allRubrics.length === 0) return;
+    const latest = [...allRubrics].sort((a, b) => {
+      const av = a.version ?? 1;
+      const bv = b.version ?? 1;
+      if (av !== bv) return bv - av;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    })[0];
+    setSelectedRubricVersionId((prev) => prev || latest?.id || '');
+  }, [createEvalOpen, allRubrics]);
 
   useEffect(() => {
     if (!createEvalOpen) return;
@@ -227,43 +226,6 @@ export default function ProjectDetailPage() {
       />
 
       <div className="p-6">
-        {/* Rubric warning */}
-        {!project.rubric && (
-          <Card className="mb-6 border-amber-200 bg-amber-50">
-            <CardContent className="pt-4">
-              <div className="flex items-center gap-3">
-                <svg
-                  width="20"
-                  height="20"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  className="text-amber-600 shrink-0"
-                >
-                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-                  <line x1="12" y1="9" x2="12" y2="13" />
-                  <line x1="12" y1="17" x2="12.01" y2="17" />
-                </svg>
-                <div>
-                  <p className="text-sm font-medium text-amber-800">
-                    No rubric assigned
-                  </p>
-                  <p className="text-xs text-amber-600">
-                    Assign a rubric to enable model evaluations.{' '}
-                    <Link
-                      href="/rubrics"
-                      className="underline hover:text-amber-800"
-                    >
-                      Create a rubric →
-                    </Link>
-                  </p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
         {/* Evaluations List */}
         {project.evaluations?.length === 0 ? (
           <EmptyState
@@ -391,15 +353,16 @@ export default function ProjectDetailPage() {
                 placeholder="e.g., PR #42 Code Review"
                 autoFocus
               />
-              {rubricVersions.length > 0 && (
-                <Select
-                  label="Rubric Version"
-                  value={selectedRubricVersionId}
-                  onChange={(e) => setSelectedRubricVersionId(e.target.value)}
-                  options={buildRubricVersionOptions(rubricVersions)}
-                  hint="Choose which version of this project's rubric to use for grading"
-                />
-              )}
+              <Select
+                label="Rubric Version"
+                value={selectedRubricVersionId}
+                onChange={(e) => setSelectedRubricVersionId(e.target.value)}
+                options={[
+                  { value: '', label: 'No rubric (human-only evaluation)' },
+                  ...buildRubricVersionOptions(allRubrics),
+                ]}
+                hint="Choose which rubric version to use for this evaluation"
+              />
 
               <div className="space-y-2">
                 <div className="flex items-center justify-between">

@@ -36,7 +36,7 @@ export async function GET(request: Request) {
             parentId: true,
           },
         },
-        project: { select: { id: true, name: true, rubricId: true } },
+        project: { select: { id: true, name: true } },
         user: { select: { id: true, name: true, email: true } },
         modelSelections: {
           include: {
@@ -164,7 +164,7 @@ export async function POST(request: Request) {
             parentId: true,
           },
         },
-        project: { select: { id: true, name: true, rubricId: true } },
+        project: { select: { id: true, name: true } },
         modelSelections: {
           include: {
             modelConfig: {

@@ -6,7 +6,6 @@ import { requireAuth, isAdmin } from '@/lib/auth-guard';
 const updateProjectSchema = z.object({
   name: z.string().min(1).max(200).optional(),
   description: z.string().max(2000).optional(),
-  rubricId: z.string().nullable().optional(),
 });
 
 // GET /api/projects/[id]
@@ -21,9 +20,6 @@ export async function GET(
     const project = await prisma.project.findUnique({
       where: { id: params.id },
       include: {
-        rubric: {
-          include: { criteria: { orderBy: { order: 'asc' } } },
-        },
         user: { select: { id: true, name: true, email: true } },
         evaluations: {
           include: {
@@ -103,9 +99,6 @@ export async function PATCH(
       where: { id: params.id },
       data,
       include: {
-        rubric: {
-          include: { criteria: { orderBy: { order: 'asc' } } },
-        },
         _count: { select: { evaluations: true } },
       },
     });

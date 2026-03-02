@@ -173,8 +173,7 @@ export default function EvaluatePage() {
   const saveEvaluationRubric = async () => {
     if (!nextRubricId) return;
 
-    const currentRubricId =
-      evaluation?.rubric?.id ?? evaluation?.project?.rubric?.id ?? '';
+    const currentRubricId = evaluation?.rubric?.id ?? '';
     const isRubricChanging = !!nextRubricId && nextRubricId !== currentRubricId;
 
     if (!isRubricChanging) {
@@ -328,7 +327,7 @@ export default function EvaluatePage() {
 
   if (!evaluation) return null;
 
-  const rubric = evaluation.rubric ?? evaluation.project?.rubric;
+  const rubric = evaluation.rubric;
   const criteria = rubric?.criteria ?? [];
   const modelJudgments = evaluation.modelJudgments ?? [];
   const modelSelections = evaluation.modelSelections ?? [];

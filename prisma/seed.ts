@@ -135,7 +135,6 @@ async function main() {
       name: 'Sample Evaluation Project',
       description:
         'A sample project to demonstrate the LLM-as-a-Judge evaluation workflow. Submit text artifacts, have multiple models grade them, and provide your own human judgment.',
-      rubricId: rubric.id,
       userId: adminUser.id,
     },
   });

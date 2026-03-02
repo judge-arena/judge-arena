@@ -6,7 +6,6 @@ import { requireAuth, isAdmin } from '@/lib/auth-guard';
 const createProjectSchema = z.object({
   name: z.string().min(1, 'Name is required').max(200),
   description: z.string().max(2000).optional(),
-  rubricId: z.string().optional(),
 });
 
 // GET /api/projects - List projects visible to the current user
@@ -20,9 +19,6 @@ export async function GET() {
     const projects = await prisma.project.findMany({
       where,
       include: {
-        rubric: {
-          include: { criteria: { orderBy: { order: 'asc' } } },
-        },
         user: { select: { id: true, name: true, email: true } },
         _count: { select: { evaluations: true } },
       },
@@ -52,13 +48,9 @@ export async function POST(request: Request) {
       data: {
         name: data.name,
         description: data.description,
-        rubricId: data.rubricId || null,
         userId: session.user.id,
       },
       include: {
-        rubric: {
-          include: { criteria: { orderBy: { order: 'asc' } } },
-        },
         user: { select: { id: true, name: true, email: true } },
         _count: { select: { evaluations: true } },
       },

@@ -17,20 +17,14 @@ export async function POST(
   if (session instanceof NextResponse) return session;
 
   try {
-    // Load evaluation with its own rubric (fallback to project rubric for legacy data)
+    // Load evaluation with its own rubric
     const evaluation = await prisma.evaluation.findUnique({
       where: { id: params.id },
       include: {
         rubric: {
           include: { criteria: { orderBy: { order: 'asc' } } },
         },
-        project: {
-          include: {
-            rubric: {
-              include: { criteria: { orderBy: { order: 'asc' } } },
-            },
-          },
-        },
+        project: { select: { id: true, name: true } },
         modelSelections: {
           include: {
             modelConfig: true,
@@ -51,7 +45,7 @@ export async function POST(
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    const rubric = evaluation.rubric ?? evaluation.project.rubric;
+    const rubric = evaluation.rubric;
     if (!rubric) {
       return NextResponse.json(
         {

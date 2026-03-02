@@ -20,7 +20,6 @@ export interface EvaluationWithRelations {
   project: {
     id: string;
     name: string;
-    rubricId: string | null;
   };
   modelJudgments: ModelJudgmentView[];
   humanJudgment: HumanJudgmentView | null;
@@ -91,8 +90,6 @@ export interface ProjectWithDetails {
   id: string;
   name: string;
   description: string | null;
-  rubricId: string | null;
-  rubric: RubricWithCriteria | null;
   createdAt: string;
   updatedAt: string;
   _count: {

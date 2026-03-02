@@ -24,13 +24,7 @@ export async function GET(
         rubric: {
           include: { criteria: { orderBy: { order: 'asc' } } },
         },
-        project: {
-          include: {
-            rubric: {
-              include: { criteria: { orderBy: { order: 'asc' } } },
-            },
-          },
-        },
+        project: { select: { id: true, name: true } },
         user: { select: { id: true, name: true, email: true } },
         modelSelections: {
           include: {
@@ -167,13 +161,7 @@ export async function PATCH(
           rubric: {
             include: { criteria: { orderBy: { order: 'asc' } } },
           },
-          project: {
-            include: {
-              rubric: {
-                include: { criteria: { orderBy: { order: 'asc' } } },
-              },
-            },
-          },
+          project: { select: { id: true, name: true } },
           modelSelections: {
             include: {
               modelConfig: {
