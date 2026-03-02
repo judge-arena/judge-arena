@@ -36,16 +36,16 @@ export default function ProjectDetailPage() {
   const [submitting, setSubmitting] = useState(false);
   const [rubricVersions, setRubricVersions] = useState<any[]>([]);
   const [selectedRubricVersionId, setSelectedRubricVersionId] = useState('');
-  const [latestRubricVersion, setLatestRubricVersion] = useState<number | null>(
-    null
-  );
   const [allRubrics, setAllRubrics] = useState<any[]>([]);
+  const [availableModels, setAvailableModels] = useState<any[]>([]);
+  const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
 
   const loadProject = useCallback(async () => {
     try {
-      const [projectRes, rubricsRes] = await Promise.all([
+      const [projectRes, rubricsRes, modelsRes] = await Promise.all([
         fetch(`/api/projects/${projectId}`),
         fetch('/api/rubrics'),
+        fetch('/api/models'),
       ]);
 
       if (projectRes.ok) {
@@ -57,6 +57,12 @@ export default function ProjectDetailPage() {
 
       if (rubricsRes.ok) {
         setAllRubrics(await rubricsRes.json());
+      }
+
+      if (modelsRes.ok) {
+        const models = await modelsRes.json();
+        const usable = models.filter((m: any) => m.isActive && m.isVerified);
+        setAvailableModels(usable);
       }
     } catch {
       toast.error('Failed to load project');
@@ -74,7 +80,6 @@ export default function ProjectDetailPage() {
     if (!project?.rubricId) {
       setRubricVersions([]);
       setSelectedRubricVersionId('');
-      setLatestRubricVersion(null);
       return;
     }
 
@@ -85,8 +90,6 @@ export default function ProjectDetailPage() {
 
         if (versions.length > 0) {
           const latest = versions.reduce((a, b) => (a.version > b.version ? a : b));
-          setLatestRubricVersion(latest.version);
-
           // Keep selection stable unless it's empty
           setSelectedRubricVersionId((prev) => prev || latest.id);
         }
@@ -101,6 +104,27 @@ export default function ProjectDetailPage() {
     setSelectedRubricVersionId((prev) => prev || latest.id);
   }, [createEvalOpen, rubricVersions]);
 
+  useEffect(() => {
+    if (!createEvalOpen) return;
+    setSelectedModelIds((prev) => {
+      if (prev.length > 0) return prev;
+      return availableModels.slice(0, 10).map((m: any) => m.id);
+    });
+  }, [createEvalOpen, availableModels]);
+
+  const toggleModelSelection = (modelId: string) => {
+    setSelectedModelIds((prev) => {
+      if (prev.includes(modelId)) {
+        return prev.filter((id) => id !== modelId);
+      }
+      if (prev.length >= 10) {
+        toast.error('You can select up to 10 models');
+        return prev;
+      }
+      return [...prev, modelId];
+    });
+  };
+
   const handleCreateEvaluation = async () => {
     if (!evalText.trim()) return;
     setSubmitting(true);
@@ -113,6 +137,7 @@ export default function ProjectDetailPage() {
           title: evalTitle || undefined,
           inputText: evalText,
           ...(selectedRubricVersionId && { rubricId: selectedRubricVersionId }),
+          modelConfigIds: selectedModelIds,
         }),
       });
       if (res.ok) {
@@ -121,6 +146,7 @@ export default function ProjectDetailPage() {
         setCreateEvalOpen(false);
         setEvalTitle('');
         setEvalText('');
+        setSelectedModelIds([]);
         router.push(`/evaluate/${evaluation.id}`);
       } else {
         const data = await res.json();
@@ -178,14 +204,6 @@ export default function ProjectDetailPage() {
         ]}
         actions={
           <div className="flex items-center gap-2">
-            {project.rubric && (
-              <Badge variant="info" size="md">
-                📋 {project.rubric.name} v{project.rubric.version ?? 1}
-                {latestRubricVersion === (project.rubric.version ?? 1)
-                  ? ' (latest)'
-                  : ''}
-              </Badge>
-            )}
             <Button
               variant="primary"
               size="sm"
@@ -311,6 +329,9 @@ export default function ProjectDetailPage() {
                           : ''}
                       </Badge>
                     )}
+                    <Badge variant="default" size="sm">
+                      {evaluation.modelSelections?.length ?? 0} models
+                    </Badge>
                     {evaluation.modelJudgments?.length > 0 && (
                       <span className="text-xs text-surface-500">
                         {evaluation.modelJudgments.filter((j: any) => j.status === 'completed').length}/
@@ -379,6 +400,55 @@ export default function ProjectDetailPage() {
                   hint="Choose which version of this project's rubric to use for grading"
                 />
               )}
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-surface-700">
+                    Models for this Evaluation
+                  </label>
+                  <span className="text-xs text-surface-500">
+                    {selectedModelIds.length}/10 selected
+                  </span>
+                </div>
+
+                {availableModels.length === 0 ? (
+                  <div className="rounded-lg border border-surface-200 bg-surface-50 px-3 py-2 text-xs text-surface-500">
+                    No verified active models available. You can still create a human-only evaluation.
+                  </div>
+                ) : (
+                  <div className="max-h-44 overflow-y-auto rounded-lg border border-surface-200 divide-y divide-surface-100">
+                    {availableModels.map((model: any) => {
+                      const selected = selectedModelIds.includes(model.id);
+                      return (
+                        <label
+                          key={model.id}
+                          className="flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-surface-50 cursor-pointer"
+                        >
+                          <div className="min-w-0">
+                            <p className="font-medium text-surface-800 truncate">
+                              {model.name}
+                            </p>
+                            <p className="text-xs text-surface-500 truncate">
+                              {model.provider} · {model.modelId}
+                            </p>
+                          </div>
+                          <input
+                            type="checkbox"
+                            checked={selected}
+                            onChange={() => toggleModelSelection(model.id)}
+                            className="rounded border-surface-300 text-brand-600 focus:ring-brand-500"
+                          />
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <p className="text-xs text-surface-500">
+                  Select 0 models for human-only evaluation, or up to 10 models.
+                </p>
+              </div>
+
               <Textarea
                 label="Text to Evaluate"
                 value={evalText}

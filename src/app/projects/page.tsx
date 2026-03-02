@@ -208,11 +208,6 @@ export default function ProjectsPage() {
                       <Badge variant="default" size="sm">
                         {project._count?.evaluations ?? 0} evaluations
                       </Badge>
-                      {project.rubric && (
-                        <Badge variant="info" size="sm">
-                          {project.rubric.name}
-                        </Badge>
-                      )}
                     </div>
                     <p className="mt-2 text-2xs text-surface-400">
                       Updated {formatDate(project.updatedAt)}

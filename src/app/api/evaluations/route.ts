@@ -7,6 +7,7 @@ const createEvaluationSchema = z.object({
   title: z.string().max(200).optional(),
   inputText: z.string().min(1, 'Input text is required'),
   rubricId: z.string().optional(), // specific rubric version to pin for this evaluation
+  modelConfigIds: z.array(z.string()).max(10).optional(),
 });
 
 // GET /api/evaluations - List evaluations (optionally filtered by project)
@@ -27,6 +28,21 @@ export async function GET(request: Request) {
           },
         },
         project: { select: { id: true, name: true, rubricId: true } },
+        modelSelections: {
+          include: {
+            modelConfig: {
+              select: {
+                id: true,
+                name: true,
+                provider: true,
+                modelId: true,
+                isActive: true,
+                isVerified: true,
+              },
+            },
+          },
+          orderBy: { createdAt: 'asc' },
+        },
         modelJudgments: {
           include: {
             modelConfig: {
@@ -67,12 +83,58 @@ export async function POST(request: Request) {
       );
     }
 
+    const requestedModelIds = data.modelConfigIds ?? [];
+    let selectedModelIds = requestedModelIds;
+
+    // Backward-compatible default: if model list omitted, use active verified models (up to 10)
+    if (data.modelConfigIds === undefined) {
+      const defaults = await prisma.modelConfig.findMany({
+        where: { isActive: true, isVerified: true },
+        select: { id: true },
+        orderBy: { createdAt: 'asc' },
+        take: 10,
+      });
+      selectedModelIds = defaults.map((m: any) => m.id);
+    }
+
+    if (selectedModelIds.length > 10) {
+      return NextResponse.json(
+        { error: 'You can select up to 10 models per evaluation' },
+        { status: 400 }
+      );
+    }
+
+    if (selectedModelIds.length > 0) {
+      const validModels = await prisma.modelConfig.findMany({
+        where: {
+          id: { in: selectedModelIds },
+          isVerified: true,
+        },
+        select: { id: true },
+      });
+
+      if (validModels.length !== new Set(selectedModelIds).size) {
+        return NextResponse.json(
+          {
+            error:
+              'One or more selected models are missing or not verified. Re-open model settings and verify connection.',
+          },
+          { status: 400 }
+        );
+      }
+    }
+
     const evaluation = await prisma.evaluation.create({
       data: {
         projectId: data.projectId,
         title: data.title,
         inputText: data.inputText,
         ...(data.rubricId && { rubricId: data.rubricId }),
+        modelSelections: {
+          create: [...new Set(selectedModelIds)].map((modelConfigId) => ({
+            modelConfigId,
+          })),
+        },
         status: 'pending',
       },
       include: {
@@ -85,6 +147,21 @@ export async function POST(request: Request) {
           },
         },
         project: { select: { id: true, name: true, rubricId: true } },
+        modelSelections: {
+          include: {
+            modelConfig: {
+              select: {
+                id: true,
+                name: true,
+                provider: true,
+                modelId: true,
+                isActive: true,
+                isVerified: true,
+              },
+            },
+          },
+          orderBy: { createdAt: 'asc' },
+        },
         modelJudgments: {
           include: { modelConfig: true },
         },

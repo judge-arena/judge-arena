@@ -30,6 +30,21 @@ export async function GET(
                 parentId: true,
               },
             },
+            modelSelections: {
+              include: {
+                modelConfig: {
+                  select: {
+                    id: true,
+                    name: true,
+                    provider: true,
+                    modelId: true,
+                    isActive: true,
+                    isVerified: true,
+                  },
+                },
+              },
+              orderBy: { createdAt: 'asc' },
+            },
             modelJudgments: {
               include: { modelConfig: true },
             },

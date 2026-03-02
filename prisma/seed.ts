@@ -68,6 +68,8 @@ async function main() {
         provider: 'anthropic',
         modelId: 'claude-sonnet-4-5-20250514',
         isActive: true,
+        isVerified: true,
+        verifiedAt: new Date(),
       },
     }),
     prisma.modelConfig.create({
@@ -76,6 +78,8 @@ async function main() {
         provider: 'anthropic',
         modelId: 'claude-sonnet-4-6-20250627',
         isActive: true,
+        isVerified: true,
+        verifiedAt: new Date(),
       },
     }),
     prisma.modelConfig.create({
@@ -84,6 +88,8 @@ async function main() {
         provider: 'anthropic',
         modelId: 'claude-opus-4-5-20250630',
         isActive: true,
+        isVerified: true,
+        verifiedAt: new Date(),
       },
     }),
   ]);

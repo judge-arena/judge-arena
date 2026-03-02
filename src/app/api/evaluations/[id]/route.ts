@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 const updateEvaluationSchema = z.object({
   rubricId: z.string().nullable().optional(),
+  modelConfigIds: z.array(z.string()).max(10).optional(),
   clearModelJudgments: z.boolean().optional(),
 });
 
@@ -25,6 +26,21 @@ export async function GET(
               include: { criteria: { orderBy: { order: 'asc' } } },
             },
           },
+        },
+        modelSelections: {
+          include: {
+            modelConfig: {
+              select: {
+                id: true,
+                name: true,
+                provider: true,
+                modelId: true,
+                isActive: true,
+                isVerified: true,
+              },
+            },
+          },
+          orderBy: { createdAt: 'asc' },
         },
         modelJudgments: {
           include: {
@@ -74,7 +90,28 @@ export async function PATCH(
       }
     }
 
+    if (data.modelConfigIds !== undefined && data.modelConfigIds.length > 0) {
+      const validModels = await prisma.modelConfig.findMany({
+        where: {
+          id: { in: data.modelConfigIds },
+          isVerified: true,
+        },
+        select: { id: true },
+      });
+
+      if (validModels.length !== new Set(data.modelConfigIds).size) {
+        return NextResponse.json(
+          {
+            error:
+              'One or more selected models are missing or not verified. Re-open model settings and verify connection.',
+          },
+          { status: 400 }
+        );
+      }
+    }
+
     const shouldClearModelJudgments = !!data.clearModelJudgments;
+    const shouldUpdateModelSelections = data.modelConfigIds !== undefined;
 
     const evaluation = await prisma.$transaction(async (tx: any) => {
       await tx.evaluation.update({
@@ -91,6 +128,21 @@ export async function PATCH(
         });
       }
 
+      if (shouldUpdateModelSelections) {
+        await tx.evaluationModelSelection.deleteMany({
+          where: { evaluationId: params.id },
+        });
+
+        if (data.modelConfigIds && data.modelConfigIds.length > 0) {
+          await tx.evaluationModelSelection.createMany({
+            data: [...new Set(data.modelConfigIds)].map((modelConfigId) => ({
+              evaluationId: params.id,
+              modelConfigId,
+            })),
+          });
+        }
+      }
+
       return tx.evaluation.findUnique({
         where: { id: params.id },
         include: {
@@ -103,6 +155,21 @@ export async function PATCH(
                 include: { criteria: { orderBy: { order: 'asc' } } },
               },
             },
+          },
+          modelSelections: {
+            include: {
+              modelConfig: {
+                select: {
+                  id: true,
+                  name: true,
+                  provider: true,
+                  modelId: true,
+                  isActive: true,
+                  isVerified: true,
+                },
+              },
+            },
+            orderBy: { createdAt: 'asc' },
           },
           modelJudgments: {
             include: {

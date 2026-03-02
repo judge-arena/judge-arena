@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
+import { verifyModelConnection } from '@/lib/llm/verify';
 
 const createModelSchema = z.object({
   name: z.string().min(1, 'Name is required').max(100),
@@ -19,7 +20,7 @@ export async function GET() {
     });
 
     // Don't send API keys to the client
-    const sanitized = models.map((m) => ({
+    const sanitized = models.map((m: any) => ({
       ...m,
       apiKey: undefined,
       hasApiKey: !!m.apiKey,
@@ -41,6 +42,22 @@ export async function POST(request: Request) {
     const body = await request.json();
     const data = createModelSchema.parse(body);
 
+    try {
+      await verifyModelConnection({
+        provider: data.provider,
+        modelId: data.modelId,
+        endpoint: data.endpoint || undefined,
+        apiKey: data.apiKey || undefined,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Connection test failed';
+      return NextResponse.json(
+        { error: `Model connection test failed: ${message}` },
+        { status: 400 }
+      );
+    }
+
     const model = await prisma.modelConfig.create({
       data: {
         name: data.name,
@@ -49,6 +66,9 @@ export async function POST(request: Request) {
         endpoint: data.endpoint || null,
         apiKey: data.apiKey || null,
         isActive: data.isActive,
+        isVerified: true,
+        verifiedAt: new Date(),
+        verificationError: null,
       },
     });
 

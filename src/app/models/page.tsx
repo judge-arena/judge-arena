@@ -23,6 +23,7 @@ export default function ModelsPage() {
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [verifyingId, setVerifyingId] = useState<string | null>(null);
 
   const loadModels = async () => {
     try {
@@ -99,6 +100,26 @@ export default function ModelsPage() {
       }
     } catch {
       toast.error('Failed to delete model');
+    }
+  };
+
+  const handleVerify = async (id: string) => {
+    setVerifyingId(id);
+    try {
+      const res = await fetch(`/api/models/${id}/verify`, {
+        method: 'POST',
+      });
+      if (res.ok) {
+        toast.success('Model verified successfully');
+        loadModels();
+      } else {
+        const data = await res.json();
+        toast.error(data.error || 'Model verification failed');
+      }
+    } catch {
+      toast.error('Model verification failed');
+    } finally {
+      setVerifyingId(null);
     }
   };
 
@@ -179,12 +200,20 @@ export default function ModelsPage() {
                           {providerInfo.label}
                         </CardDescription>
                       </div>
-                      <Badge
-                        variant={model.isActive ? 'success' : 'default'}
-                        size="sm"
-                      >
-                        {model.isActive ? 'Active' : 'Inactive'}
-                      </Badge>
+                      <div className="flex items-center gap-1.5">
+                        <Badge
+                          variant={model.isVerified ? 'success' : 'warning'}
+                          size="sm"
+                        >
+                          {model.isVerified ? 'Verified' : 'Unverified'}
+                        </Badge>
+                        <Badge
+                          variant={model.isActive ? 'success' : 'default'}
+                          size="sm"
+                        >
+                          {model.isActive ? 'Active' : 'Inactive'}
+                        </Badge>
+                      </div>
                     </div>
                   </CardHeader>
                   <CardContent>
@@ -207,6 +236,17 @@ export default function ModelsPage() {
                       </div>
 
                       <div className="flex items-center gap-2 pt-2 border-t border-surface-100">
+                        {!model.isVerified && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleVerify(model.id)}
+                            loading={verifyingId === model.id}
+                            className="flex-1"
+                          >
+                            Verify Connection
+                          </Button>
+                        )}
                         <Button
                           variant={model.isActive ? 'ghost' : 'outline'}
                           size="sm"

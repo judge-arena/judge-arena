@@ -27,6 +27,12 @@ export async function POST(
             },
           },
         },
+        modelSelections: {
+          include: {
+            modelConfig: true,
+          },
+          orderBy: { createdAt: 'asc' },
+        },
       },
     });
 
@@ -48,14 +54,17 @@ export async function POST(
       );
     }
 
-    // Get all active model configs
-    const models = await prisma.modelConfig.findMany({
-      where: { isActive: true },
-    });
+    // Use evaluation-selected models only
+    const models = evaluation.modelSelections
+      .map((s: any) => s.modelConfig)
+      .filter((m: any) => m.isVerified);
 
     if (models.length === 0) {
       return NextResponse.json(
-        { error: 'No active models configured. Add models in the Models page.' },
+        {
+          error:
+            'No verified models selected for this evaluation. Add/verify models via "Change Models" first.',
+        },
         { status: 400 }
       );
     }
@@ -170,6 +179,21 @@ export async function POST(
           },
         },
         project: { select: { id: true, name: true, rubricId: true } },
+        modelSelections: {
+          include: {
+            modelConfig: {
+              select: {
+                id: true,
+                name: true,
+                provider: true,
+                modelId: true,
+                isActive: true,
+                isVerified: true,
+              },
+            },
+          },
+          orderBy: { createdAt: 'asc' },
+        },
         modelJudgments: {
           include: {
             modelConfig: {

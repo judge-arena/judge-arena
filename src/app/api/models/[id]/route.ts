@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
+import { verifyModelConnection } from '@/lib/llm/verify';
 
 const updateModelSchema = z.object({
   name: z.string().min(1).max(100).optional(),
@@ -48,6 +49,14 @@ export async function PATCH(
     const body = await request.json();
     const data = updateModelSchema.parse(body);
 
+    const existing = await prisma.modelConfig.findUnique({
+      where: { id: params.id },
+    });
+
+    if (!existing) {
+      return NextResponse.json({ error: 'Model not found' }, { status: 404 });
+    }
+
     const updateData: Record<string, unknown> = {};
     if (data.name !== undefined) updateData.name = data.name;
     if (data.provider !== undefined) updateData.provider = data.provider;
@@ -56,6 +65,44 @@ export async function PATCH(
       updateData.endpoint = data.endpoint || null;
     if (data.apiKey !== undefined) updateData.apiKey = data.apiKey || null;
     if (data.isActive !== undefined) updateData.isActive = data.isActive;
+
+    const provider = data.provider ?? existing.provider;
+    const modelId = data.modelId ?? existing.modelId;
+    const endpoint =
+      data.endpoint !== undefined
+        ? data.endpoint || undefined
+        : existing.endpoint || undefined;
+    const apiKey =
+      data.apiKey !== undefined
+        ? data.apiKey || undefined
+        : existing.apiKey || undefined;
+
+    const connectionChanged =
+      data.provider !== undefined ||
+      data.modelId !== undefined ||
+      data.endpoint !== undefined ||
+      data.apiKey !== undefined;
+
+    if (connectionChanged) {
+      try {
+        await verifyModelConnection({
+          provider: provider as 'anthropic' | 'openai' | 'local',
+          modelId,
+          endpoint,
+          apiKey,
+        });
+        updateData.isVerified = true;
+        updateData.verifiedAt = new Date();
+        updateData.verificationError = null;
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Connection test failed';
+        return NextResponse.json(
+          { error: `Model connection test failed: ${message}` },
+          { status: 400 }
+        );
+      }
+    }
 
     const model = await prisma.modelConfig.update({
       where: { id: params.id },

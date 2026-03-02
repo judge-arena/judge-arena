@@ -41,9 +41,13 @@ export default function EvaluatePage() {
     null
   );
   const [allRubrics, setAllRubrics] = useState<any[]>([]);
+  const [allModels, setAllModels] = useState<any[]>([]);
   const [changeRubricOpen, setChangeRubricOpen] = useState(false);
   const [nextRubricId, setNextRubricId] = useState('');
   const [savingRubric, setSavingRubric] = useState(false);
+  const [changeModelsOpen, setChangeModelsOpen] = useState(false);
+  const [nextModelIds, setNextModelIds] = useState<string[]>([]);
+  const [savingModels, setSavingModels] = useState(false);
 
   const loadEvaluation = useCallback(async () => {
     try {
@@ -73,6 +77,14 @@ export default function EvaluatePage() {
     fetch('/api/rubrics')
       .then((res) => res.json())
       .then((data) => setAllRubrics(data))
+      .catch(() => {});
+
+    fetch('/api/models')
+      .then((res) => res.json())
+      .then((data) => {
+        const usable = (data || []).filter((m: any) => m.isActive && m.isVerified);
+        setAllModels(usable);
+      })
       .catch(() => {});
   }, []);
 
@@ -208,6 +220,73 @@ export default function EvaluatePage() {
     }
   };
 
+  const toggleNextModel = (modelId: string) => {
+    setNextModelIds((prev) => {
+      if (prev.includes(modelId)) {
+        return prev.filter((id) => id !== modelId);
+      }
+      if (prev.length >= 10) {
+        toast.error('You can select up to 10 models');
+        return prev;
+      }
+      return [...prev, modelId];
+    });
+  };
+
+  const saveEvaluationModels = async () => {
+    const currentModelIds: string[] = (evaluation?.modelSelections ?? []).map(
+      (s: any) => s.modelConfigId
+    );
+    const currentSet = new Set<string>(currentModelIds);
+    const nextSet = new Set<string>(nextModelIds);
+
+    const unchanged =
+      currentSet.size === nextSet.size &&
+      [...currentSet].every((id) => nextSet.has(id));
+
+    if (unchanged) {
+      setChangeModelsOpen(false);
+      return;
+    }
+
+    const hasModelJudgments = (evaluation?.modelJudgments?.length ?? 0) > 0;
+    const shouldClearModelJudgments = hasModelJudgments
+      ? window.confirm(
+          'Changing selected models will clear existing model judgments for this evaluation. Continue?'
+        )
+      : false;
+
+    if (hasModelJudgments && !shouldClearModelJudgments) {
+      return;
+    }
+
+    setSavingModels(true);
+    try {
+      const res = await fetch(`/api/evaluations/${evaluationId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          modelConfigIds: nextModelIds,
+          clearModelJudgments: shouldClearModelJudgments,
+        }),
+      });
+
+      if (res.ok) {
+        setLoading(true);
+        await loadEvaluation();
+        setChangeModelsOpen(false);
+        toast.success('Evaluation models updated');
+      } else {
+        const data = await res.json();
+        toast.error(data.error || 'Failed to update models');
+      }
+    } catch {
+      toast.error('Failed to update models');
+    } finally {
+      setSavingModels(false);
+    }
+  };
+
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -252,6 +331,8 @@ export default function EvaluatePage() {
   const rubric = evaluation.rubric ?? evaluation.project?.rubric;
   const criteria = rubric?.criteria ?? [];
   const modelJudgments = evaluation.modelJudgments ?? [];
+  const modelSelections = evaluation.modelSelections ?? [];
+  const selectedModelCount = modelSelections.length;
   const humanJudgment = evaluation.humanJudgment;
 
   const latestVersionByFamily = new Map<string, number>();
@@ -343,6 +424,9 @@ export default function EvaluatePage() {
                 {currentRubricIsLatest ? ' (latest)' : ''}
               </Badge>
             )}
+            <Badge variant="default" size="md">
+              🤖 {selectedModelCount} model{selectedModelCount === 1 ? '' : 's'}
+            </Badge>
             <Button
               variant="secondary"
               size="sm"
@@ -354,11 +438,25 @@ export default function EvaluatePage() {
               Change Rubric
             </Button>
             <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                setNextModelIds(
+                  (evaluation?.modelSelections ?? []).map(
+                    (s: any) => s.modelConfigId
+                  )
+                );
+                setChangeModelsOpen(true);
+              }}
+            >
+              Change Models
+            </Button>
+            <Button
               variant="primary"
               size="sm"
               onClick={runJudgment}
               loading={judging || evaluation.status === 'judging'}
-              disabled={!rubric}
+              disabled={!rubric || selectedModelCount === 0}
             >
               {modelJudgments.length > 0 ? 'Re-run Models' : 'Run Models'}
             </Button>
@@ -370,7 +468,7 @@ export default function EvaluatePage() {
         {/* Warning if no rubric */}
         {!rubric && (
           <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
-            No rubric assigned to this project. Please{' '}
+            No rubric assigned to this evaluation. Please{' '}
             <a
               href="/rubrics"
               className="underline font-medium hover:text-amber-900"
@@ -378,6 +476,13 @@ export default function EvaluatePage() {
               create and assign a rubric
             </a>{' '}
             to enable model evaluations.
+          </div>
+        )}
+
+        {rubric && selectedModelCount === 0 && (
+          <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+            No models selected for this evaluation. You can still complete human-only judgment, or use
+            {' '}"Change Models" to add up to 10 models.
           </div>
         )}
 
@@ -582,7 +687,7 @@ export default function EvaluatePage() {
               value={nextRubricId}
               onChange={(e) => setNextRubricId(e.target.value)}
               options={buildRubricVersionOptions(allRubrics)}
-              hint="This changes only this evaluation. The project rubric is unchanged."
+              hint="Change the rubric for this evaluation."
             />
           </DialogBody>
           <DialogFooter>
@@ -599,6 +704,78 @@ export default function EvaluatePage() {
               onClick={saveEvaluationRubric}
             >
               Save Rubric
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={changeModelsOpen} onOpenChange={setChangeModelsOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Change Evaluation Models</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-surface-700">
+                  Selected Models
+                </label>
+                <span className="text-xs text-surface-500">
+                  {nextModelIds.length}/10 selected
+                </span>
+              </div>
+
+              {allModels.length === 0 ? (
+                <div className="rounded-lg border border-surface-200 bg-surface-50 px-3 py-2 text-xs text-surface-500">
+                  No verified active models available.
+                </div>
+              ) : (
+                <div className="max-h-56 overflow-y-auto rounded-lg border border-surface-200 divide-y divide-surface-100">
+                  {allModels.map((model: any) => {
+                    const selected = nextModelIds.includes(model.id);
+                    return (
+                      <label
+                        key={model.id}
+                        className="flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-surface-50 cursor-pointer"
+                      >
+                        <div className="min-w-0">
+                          <p className="font-medium text-surface-800 truncate">
+                            {model.name}
+                          </p>
+                          <p className="text-xs text-surface-500 truncate">
+                            {model.provider} · {model.modelId}
+                          </p>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() => toggleNextModel(model.id)}
+                          className="rounded border-surface-300 text-brand-600 focus:ring-brand-500"
+                        />
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+
+              <p className="text-xs text-surface-500">
+                Select 0 models for human-only evaluation, or up to 10 models.
+              </p>
+            </div>
+          </DialogBody>
+          <DialogFooter>
+            <Button
+              variant="secondary"
+              onClick={() => setChangeModelsOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              loading={savingModels}
+              onClick={saveEvaluationModels}
+            >
+              Save Models
             </Button>
           </DialogFooter>
         </DialogContent>
