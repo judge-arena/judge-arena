@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useSession } from 'next-auth/react';
 import { Header } from '@/components/layout/header';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -10,21 +11,33 @@ import { Skeleton } from '@/components/ui/skeleton';
 import type { AppStats } from '@/types';
 
 export default function DashboardPage() {
+  const { data: session } = useSession();
   const [stats, setStats] = useState<AppStats | null>(null);
   const [recentEvaluations, setRecentEvaluations] = useState<any[]>([]);
+  const [recentProject, setRecentProject] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
+
+  const userName =
+    session?.user?.name ||
+    session?.user?.email?.split('@')[0] ||
+    'there';
 
   useEffect(() => {
     async function loadDashboard() {
       try {
-        const [statsRes, evalsRes] = await Promise.all([
+        const [statsRes, evalsRes, projectsRes] = await Promise.all([
           fetch('/api/stats'),
           fetch('/api/evaluations'),
+          fetch('/api/projects'),
         ]);
         if (statsRes.ok) setStats(await statsRes.json());
         if (evalsRes.ok) {
           const evals = await evalsRes.json();
           setRecentEvaluations(evals.slice(0, 5));
+        }
+        if (projectsRes.ok) {
+          const projects = await projectsRes.json();
+          setRecentProject(projects[0] ?? null);
         }
       } catch (err) {
         console.error('Failed to load dashboard:', err);
@@ -94,25 +107,37 @@ export default function DashboardPage() {
   return (
     <div>
       <Header
-        title="Dashboard"
+        title={`Welcome Back, ${userName}`}
         description="Overview of your LLM evaluation workspace"
         actions={
-          <Link href="/projects">
-            <Button variant="primary" size="sm">
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                aria-hidden="true"
-              >
-                <path d="M12 5v14M5 12h14" />
-              </svg>
-              New Project
-            </Button>
-          </Link>
+          <div className="flex items-center gap-2">
+            <Link href="/projects">
+              <Button variant="primary" size="sm">
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  aria-hidden="true"
+                >
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+                Create Project
+              </Button>
+            </Link>
+            <Link href="/rubrics">
+              <Button variant="outline" size="sm">
+                Build Rubric
+              </Button>
+            </Link>
+            <Link href="/models">
+              <Button variant="outline" size="sm">
+                Configure Models
+              </Button>
+            </Link>
+          </div>
         }
       />
 
@@ -154,104 +179,139 @@ export default function DashboardPage() {
           ))}
         </div>
 
-        {/* Quick Actions */}
-        <Card>
-          <CardContent className="pt-5">
-            <h2 className="text-sm font-semibold text-surface-700 mb-3">
-              Quick Actions
-            </h2>
-            <div className="flex flex-wrap gap-2">
-              <Link href="/projects">
-                <Button variant="outline" size="sm">
-                  Create Project
-                </Button>
-              </Link>
-              <Link href="/rubrics">
-                <Button variant="outline" size="sm">
-                  Build Rubric
-                </Button>
-              </Link>
-              <Link href="/models">
-                <Button variant="outline" size="sm">
-                  Configure Models
-                </Button>
-              </Link>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Recent Evaluations */}
-        <Card>
-          <CardContent className="pt-5">
-            <div className="flex items-center justify-between mb-3">
+        <div className="space-y-6">
+          <Card>
+            <CardContent className="pt-5">
+            <div className="flex items-center justify-between gap-3 mb-3">
               <h2 className="text-sm font-semibold text-surface-700">
-                Recent Evaluations
+                Jump back into a project
               </h2>
               <Link
                 href="/projects"
                 className="text-xs text-brand-600 hover:text-brand-700 font-medium"
               >
-                View all →
+                View all projects →
               </Link>
             </div>
 
             {loading ? (
-              <div className="space-y-3">
-                {[1, 2, 3].map((i) => (
-                  <Skeleton key={i} className="h-14 w-full" />
-                ))}
+              <Skeleton className="h-36 w-full rounded-xl" />
+            ) : !recentProject ? (
+              <div className="rounded-xl border border-dashed border-surface-300 p-6 text-center">
+                <p className="text-sm text-surface-500 mb-3">
+                  No projects yet. Create your first project to start evaluating.
+                </p>
+                <Link href="/projects">
+                  <Button variant="primary" size="sm">
+                    Create Project
+                  </Button>
+                </Link>
               </div>
-            ) : recentEvaluations.length === 0 ? (
-              <p className="text-sm text-surface-400 py-6 text-center">
-                No evaluations yet. Create a project and submit your first text
-                for evaluation.
-              </p>
             ) : (
-              <div className="divide-y divide-surface-100">
-                {recentEvaluations.map((evaluation: any) => (
-                  <Link
-                    key={evaluation.id}
-                    href={`/evaluate/${evaluation.id}`}
-                    className="flex items-center gap-3 py-3 hover:bg-surface-50 -mx-2 px-2 rounded-lg transition-colors"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-surface-900 truncate">
-                        {evaluation.title || 'Untitled Evaluation'}
+              <Link
+                href={`/projects/${recentProject.id}`}
+                className="block rounded-xl border border-surface-200 p-5 hover:border-brand-300 hover:bg-brand-50/30 transition-colors"
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <p className="text-base font-semibold text-surface-900 truncate">
+                      {recentProject.name}
+                    </p>
+                    {recentProject.description && (
+                      <p className="text-sm text-surface-500 mt-1 line-clamp-2">
+                        {recentProject.description}
                       </p>
-                      <p className="text-xs text-surface-400 truncate">
-                        {evaluation.project?.name} ·{' '}
-                        {new Date(evaluation.createdAt).toLocaleDateString()}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {(() => {
-                        const latestRun = (evaluation.runs ?? [])[0];
-                        const runCount = (evaluation.runs ?? []).length;
-                        const statusVariant =
-                          latestRun?.status === 'completed' ? 'success'
-                          : latestRun?.status === 'error' ? 'error'
-                          : latestRun?.status === 'judging' ? 'info'
-                          : 'default';
-                        return (
-                          <>
-                            <Badge variant="default" size="sm">
-                              {runCount} run{runCount === 1 ? '' : 's'}
-                            </Badge>
-                            {latestRun && (
-                              <Badge variant={statusVariant} size="sm">
-                                {latestRun.status}
-                              </Badge>
-                            )}
-                          </>
-                        );
-                      })()}
-                    </div>
-                  </Link>
-                ))}
-              </div>
+                    )}
+                    <p className="text-xs text-surface-400 mt-2">
+                      Last edited {new Date(recentProject.updatedAt).toLocaleDateString()}
+                    </p>
+                  </div>
+                  <Badge variant="default" size="sm">
+                    {recentProject._count?.evaluations ?? 0} evaluations
+                  </Badge>
+                </div>
+                <div className="mt-4">
+                  <Button variant="outline" size="sm">
+                    Jump back into project
+                  </Button>
+                </div>
+              </Link>
             )}
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardContent className="pt-5">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold text-surface-700">
+                  Recent Evaluations
+                </h2>
+                <Link
+                  href="/projects"
+                  className="text-xs text-brand-600 hover:text-brand-700 font-medium"
+                >
+                  View all →
+                </Link>
+              </div>
+
+              {loading ? (
+                <div className="space-y-3">
+                  {[1, 2, 3].map((i) => (
+                    <Skeleton key={i} className="h-14 w-full" />
+                  ))}
+                </div>
+              ) : recentEvaluations.length === 0 ? (
+                <p className="text-sm text-surface-400 py-6 text-center">
+                  No evaluations yet. Create a project and submit your first text
+                  for evaluation.
+                </p>
+              ) : (
+                <div className="divide-y divide-surface-100">
+                  {recentEvaluations.map((evaluation: any) => (
+                    <Link
+                      key={evaluation.id}
+                      href={`/evaluate/${evaluation.id}`}
+                      className="flex items-center gap-3 py-3 hover:bg-surface-50 -mx-2 px-2 rounded-lg transition-colors"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-surface-900 truncate">
+                          {evaluation.title || 'Untitled Evaluation'}
+                        </p>
+                        <p className="text-xs text-surface-400 truncate">
+                          {evaluation.project?.name} ·{' '}
+                          {new Date(evaluation.createdAt).toLocaleDateString()}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {(() => {
+                          const latestRun = (evaluation.runs ?? [])[0];
+                          const runCount = (evaluation.runs ?? []).length;
+                          const statusVariant =
+                            latestRun?.status === 'completed' ? 'success'
+                            : latestRun?.status === 'error' ? 'error'
+                            : latestRun?.status === 'judging' ? 'info'
+                            : 'default';
+                          return (
+                            <>
+                              <Badge variant="default" size="sm">
+                                {runCount} run{runCount === 1 ? '' : 's'}
+                              </Badge>
+                              {latestRun && (
+                                <Badge variant={statusVariant} size="sm">
+                                  {latestRun.status}
+                                </Badge>
+                              )}
+                            </>
+                          );
+                        })()}
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
 
         {/* Getting Started Guide */}
         {!loading && stats && stats.totalEvaluations === 0 && (
