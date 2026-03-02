@@ -59,11 +59,6 @@ export default function EvaluateTemplatePage() {
   const [changeRubricOpen, setChangeRubricOpen] = useState(false);
   const [nextRubricId, setNextRubricId] = useState('');
   const [savingRubric, setSavingRubric] = useState(false);
-  const [changeModelsOpen, setChangeModelsOpen] = useState(false);
-  const [nextModelIds, setNextModelIds] = useState<string[]>([]);
-  const [savingModels, setSavingModels] = useState(false);
-  const [changeModelSearch, setChangeModelSearch] = useState('');
-  const [quickChangeModel, setQuickChangeModel] = useState('');
 
   const loadEvaluation = useCallback(async () => {
     try {
@@ -97,11 +92,9 @@ export default function EvaluateTemplatePage() {
   }, []);
 
   const openNewRun = () => {
-    // Pre-fill from template defaults
+    // No default models at template level; run starts with explicit selection
     setRunRubricId(evaluation?.rubric?.id ?? '');
-    setRunModelIds(
-      (evaluation?.modelSelections ?? []).map((s: any) => s.modelConfigId)
-    );
+    setRunModelIds([]);
     setRunModelSearch('');
     setQuickAddModel('');
     setNewRunOpen(true);
@@ -179,46 +172,6 @@ export default function EvaluateTemplatePage() {
     }
   };
 
-  const toggleDefaultModel = (id: string) => {
-    setNextModelIds((prev) => {
-      if (prev.includes(id)) return prev.filter((x) => x !== id);
-      if (prev.length >= 10) { toast.error('Max 10 models'); return prev; }
-      return [...prev, id];
-    });
-  };
-  const addDefaultModel = (id: string) => {
-    if (!id) return;
-    setNextModelIds((prev) => {
-      if (prev.includes(id)) return prev;
-      if (prev.length >= 10) { toast.error('Max 10 models'); return prev; }
-      return [...prev, id];
-    });
-    setQuickChangeModel('');
-  };
-
-  const saveDefaultModels = async () => {
-    setSavingModels(true);
-    try {
-      const res = await fetch(`/api/evaluations/${evaluationId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ modelConfigIds: nextModelIds }),
-      });
-      if (res.ok) {
-        await loadEvaluation();
-        setChangeModelsOpen(false);
-        toast.success('Default models updated');
-      } else {
-        const data = await res.json();
-        toast.error(data.error || 'Failed to update models');
-      }
-    } catch {
-      toast.error('Failed to update models');
-    } finally {
-      setSavingModels(false);
-    }
-  };
-
   if (loading) {
     return (
       <div>
@@ -234,7 +187,6 @@ export default function EvaluateTemplatePage() {
   if (!evaluation) return null;
 
   const rubric = evaluation.rubric;
-  const modelSelections = evaluation.modelSelections ?? [];
   const runs: any[] = evaluation.runs ?? [];
 
   // Computed: latest run status for the header badge
@@ -254,23 +206,6 @@ export default function EvaluateTemplatePage() {
     { value: '', label: 'Quick add model...' },
     ...filteredRunModels
       .filter((m: any) => !runModelIds.includes(m.id))
-      .map((m: any) => ({ value: m.id, label: `${m.name} (${m.provider})` })),
-  ];
-
-  // ── Change Models dialog filters ─────────────────────────────────────────
-  const changeSearchNorm = changeModelSearch.trim().toLowerCase();
-  const filteredChangeModels = allModels.filter((m: any) => {
-    if (!changeSearchNorm) return true;
-    return (
-      m.name.toLowerCase().includes(changeSearchNorm) ||
-      m.provider.toLowerCase().includes(changeSearchNorm) ||
-      m.modelId.toLowerCase().includes(changeSearchNorm)
-    );
-  });
-  const quickChangeOptions = [
-    { value: '', label: 'Quick add model...' },
-    ...filteredChangeModels
-      .filter((m: any) => !nextModelIds.includes(m.id))
       .map((m: any) => ({ value: m.id, label: `${m.name} (${m.provider})` })),
   ];
 
@@ -322,22 +257,10 @@ export default function EvaluateTemplatePage() {
                 >
                   Change Rubric
                 </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => {
-                    setNextModelIds(modelSelections.map((s: any) => s.modelConfigId));
-                    setChangeModelSearch('');
-                    setQuickChangeModel('');
-                    setChangeModelsOpen(true);
-                  }}
-                >
-                  Change Models
-                </Button>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+            <div className="mb-4">
               <div className="space-y-1">
                 <p className="text-2xs font-semibold uppercase tracking-wider text-surface-400">
                   Default Rubric
@@ -350,25 +273,6 @@ export default function EvaluateTemplatePage() {
                 ) : (
                   <p className="text-sm text-surface-400 italic">No rubric assigned</p>
                 )}
-              </div>
-              <div className="space-y-1">
-                <p className="text-2xs font-semibold uppercase tracking-wider text-surface-400">
-                  Default Models ({modelSelections.length})
-                </p>
-                <div className="flex flex-wrap gap-1">
-                  {modelSelections.length === 0 ? (
-                    <p className="text-sm text-surface-400 italic">None</p>
-                  ) : (
-                    modelSelections.slice(0, 6).map((s: any) => (
-                      <Badge key={s.modelConfigId} variant="default" size="sm">
-                        {s.modelConfig.name}
-                      </Badge>
-                    ))
-                  )}
-                  {modelSelections.length > 6 && (
-                    <Badge variant="default" size="sm">+{modelSelections.length - 6} more</Badge>
-                  )}
-                </div>
               </div>
             </div>
 
@@ -385,11 +289,6 @@ export default function EvaluateTemplatePage() {
             <h2 className="text-sm font-semibold text-surface-700">
               Runs ({runs.length})
             </h2>
-            {runs.length > 0 && (
-              <Button variant="primary" size="sm" onClick={openNewRun}>
-                New Run
-              </Button>
-            )}
           </div>
 
           {runs.length === 0 ? (
@@ -496,7 +395,7 @@ export default function EvaluateTemplatePage() {
           <DialogBody>
             <div className="space-y-4">
               <p className="text-sm text-surface-500">
-                Configure this run. Defaults are loaded from the evaluation template; you can override them.
+                Configure this run by selecting a rubric and one or more models.
               </p>
 
               <Select
@@ -593,70 +492,6 @@ export default function EvaluateTemplatePage() {
           <DialogFooter>
             <Button variant="secondary" onClick={() => setChangeRubricOpen(false)}>Cancel</Button>
             <Button variant="primary" loading={savingRubric} onClick={saveDefaultRubric}>Save</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* ── Change Default Models Dialog ────────────────────────────────── */}
-      <Dialog open={changeModelsOpen} onOpenChange={setChangeModelsOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Change Default Models</DialogTitle>
-          </DialogHeader>
-          <DialogBody>
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="text-sm font-medium text-surface-700">Default Models</label>
-                <span className="text-xs text-surface-500">{nextModelIds.length}/10</span>
-              </div>
-              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-                <Input
-                  label="Search models"
-                  value={changeModelSearch}
-                  onChange={(e) => setChangeModelSearch(e.target.value)}
-                  placeholder="Name, provider, or model ID"
-                />
-                <Select
-                  label="Quick add"
-                  value={quickChangeModel}
-                  onChange={(e) => addDefaultModel(e.target.value)}
-                  options={quickChangeOptions}
-                />
-              </div>
-              {allModels.length === 0 ? (
-                <div className="rounded-lg border border-surface-200 bg-surface-50 px-3 py-2 text-xs text-surface-500">
-                  No verified active models available.
-                </div>
-              ) : (
-                <div className="max-h-52 overflow-y-auto rounded-lg border border-surface-200 divide-y divide-surface-100">
-                  {filteredChangeModels.map((model: any) => (
-                    <label
-                      key={model.id}
-                      className="flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-surface-50 cursor-pointer"
-                    >
-                      <div className="min-w-0">
-                        <p className="font-medium text-surface-800 truncate">{model.name}</p>
-                        <p className="text-xs text-surface-500 truncate">{model.provider} · {model.modelId}</p>
-                      </div>
-                      <input
-                        type="checkbox"
-                        checked={nextModelIds.includes(model.id)}
-                        onChange={() => toggleDefaultModel(model.id)}
-                        className="rounded border-surface-300 text-brand-600 focus:ring-brand-500"
-                      />
-                    </label>
-                  ))}
-                  {filteredChangeModels.length === 0 && (
-                    <div className="px-3 py-2 text-xs text-surface-500">No models match your search.</div>
-                  )}
-                </div>
-              )}
-              <p className="text-xs text-surface-500">These are defaults; you can override them per run.</p>
-            </div>
-          </DialogBody>
-          <DialogFooter>
-            <Button variant="secondary" onClick={() => setChangeModelsOpen(false)}>Cancel</Button>
-            <Button variant="primary" loading={savingModels} onClick={saveDefaultModels}>Save</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
