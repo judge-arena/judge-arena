@@ -359,16 +359,18 @@ function RubricFamilyCard({
 }) {
   const { latest, versions } = family;
   const hasHistory = versions.length > 1;
+  const [showVersions, setShowVersions] = useState(false);
+  const visibleCriteria = (latest.criteria ?? []).slice(0, 10);
 
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="relative">
+        <Badge variant="info" size="sm" className="absolute right-5 top-5">
+          v{latest.version}
+        </Badge>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <CardTitle className="truncate">{latest.name}</CardTitle>
-              <Badge variant="info" size="sm">v{latest.version}</Badge>
-            </div>
+            <CardTitle className="truncate pr-12">{latest.name}</CardTitle>
             {latest.description && (
               <CardDescription className="mt-1">{latest.description}</CardDescription>
             )}
@@ -380,61 +382,39 @@ function RubricFamilyCard({
         <div className="space-y-3">
           {/* Criteria list */}
           <div>
-            <h4 className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1.5">
-              Criteria ({latest.criteria?.length ?? 0})
-            </h4>
-            <div className="space-y-1">
-              {latest.criteria?.map((criterion, i) => (
-                <div
-                  key={criterion.id ?? i}
-                  className="flex items-center justify-between rounded-lg bg-surface-50 px-3 py-1.5"
-                >
-                  <span className="text-xs font-medium text-surface-700 truncate">
-                    {criterion.name}
-                  </span>
-                  <span className="text-2xs text-surface-400 font-mono shrink-0 ml-2">
-                    max {criterion.maxScore} · ×{criterion.weight}
-                  </span>
-                </div>
+            <div className="flex flex-wrap gap-1">
+              {visibleCriteria.map((criterion, i) => (
+                <Badge key={criterion.id ?? i} variant="default" size="sm">
+                  {criterion.name}
+                </Badge>
               ))}
+              {(latest.criteria?.length ?? 0) > 10 && (
+                <Badge variant="default" size="sm">+{(latest.criteria?.length ?? 0) - 10} more</Badge>
+              )}
+              {visibleCriteria.length === 0 && (
+                <p className="text-xs text-surface-400 italic">No criteria</p>
+              )}
             </div>
           </div>
 
-          {/* Version history timeline */}
-          {hasHistory && (
-            <div>
-              <h4 className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1.5">
-                Version History
-              </h4>
-              <div className="flex flex-wrap items-center gap-1">
-                {versions.map((v, i) => (
-                  <React.Fragment key={v.id}>
-                    <span
-                      title={`v${v.version}`}
-                      className={
-                        v.id === latest.id
-                          ? 'inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-semibold bg-brand-100 text-brand-700'
-                          : 'inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium bg-surface-100 text-surface-500'
-                      }
-                    >
-                      v{v.version}
-                      {v.id === latest.id && (
-                        <span className="text-brand-400 font-normal">current</span>
-                      )}
-                    </span>
-                    {i < versions.length - 1 && (
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-surface-300 shrink-0">
-                        <path d="M9 18l6-6-6-6" />
-                      </svg>
-                    )}
-                  </React.Fragment>
-                ))}
-              </div>
-            </div>
-          )}
-
           {/* Footer */}
           <div className="flex items-center justify-end gap-1 pt-2 border-t border-surface-100">
+            {hasHistory && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowVersions((prev) => !prev)}
+                className="text-surface-400 hover:text-surface-700 hover:bg-surface-100 mr-auto"
+                aria-label="Toggle version history"
+                title="Toggle version history"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                  <path d="M3 3v5h5" />
+                  <path d="M3.05 13a9 9 0 1 0 .5-4" />
+                  <path d="M12 7v5l3 3" />
+                </svg>
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="sm"
@@ -461,6 +441,35 @@ function RubricFamilyCard({
               </svg>
             </Button>
           </div>
+
+          {hasHistory && showVersions && (
+            <div className="pt-2 border-t border-surface-100">
+              <div className="flex flex-wrap items-center gap-1">
+                {versions.map((v, i) => (
+                  <React.Fragment key={v.id}>
+                    <span
+                      title={`v${v.version}`}
+                      className={
+                        v.id === latest.id
+                          ? 'inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-semibold bg-brand-100 text-brand-700'
+                          : 'inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium bg-surface-100 text-surface-500'
+                      }
+                    >
+                      v{v.version}
+                      {v.id === latest.id && (
+                        <span className="text-brand-400 font-normal">current</span>
+                      )}
+                    </span>
+                    {i < versions.length - 1 && (
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-surface-300 shrink-0">
+                        <path d="M9 18l6-6-6-6" />
+                      </svg>
+                    )}
+                  </React.Fragment>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </CardContent>
     </Card>
