@@ -409,92 +409,98 @@ export default function EvaluatePage() {
           { label: evaluation.title || 'Evaluation' },
         ]}
         actions={
-          <div className="flex items-center gap-2">
-            {/* Score summary */}
-            {avgModelScore !== null && (
-              <div className="text-right mr-2">
-                <p className="text-2xs text-surface-400">Avg Model Score</p>
-                <p
-                  className={cn(
-                    'text-lg font-bold font-mono',
-                    getScoreColor(avgModelScore)
-                  )}
-                >
-                  {avgModelScore.toFixed(1)}
-                </p>
-              </div>
-            )}
-            {humanJudgment && (
-              <div className="text-right mr-2">
-                <p className="text-2xs text-surface-400">Human Score</p>
-                <p
-                  className={cn(
-                    'text-lg font-bold font-mono',
-                    getScoreColor(humanJudgment.overallScore)
-                  )}
-                >
-                  {humanJudgment.overallScore.toFixed(1)}
-                </p>
-              </div>
-            )}
-            <Badge
-              variant={
-                evaluation.status === 'completed'
-                  ? 'success'
-                  : evaluation.status === 'error'
-                    ? 'error'
-                    : evaluation.status === 'judging'
-                      ? 'info'
-                      : 'warning'
-              }
-              size="md"
-            >
-              {evaluation.status}
-            </Badge>
-            {rubric && (
-              <Badge variant="info" size="md">
-                📋 {rubric.name} v{currentRubricVersion}
-                {currentRubricIsLatest ? ' (latest)' : ''}
+          <div className="flex flex-col items-end gap-2">
+            <div className="flex items-center gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  setNextRubricId(rubric?.id || '');
+                  setChangeRubricOpen(true);
+                }}
+              >
+                Change Rubric
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  setNextModelIds(
+                    (evaluation?.modelSelections ?? []).map(
+                      (s: any) => s.modelConfigId
+                    )
+                  );
+                  setChangeModelSearch('');
+                  setQuickChangeModelId('');
+                  setChangeModelsOpen(true);
+                }}
+              >
+                Change Models
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={runJudgment}
+                loading={judging || evaluation.status === 'judging'}
+                disabled={!rubric || selectedModelCount === 0}
+              >
+                {modelJudgments.length > 0 ? 'Re-run Models' : 'Run Models'}
+              </Button>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <Badge
+                variant={
+                  evaluation.status === 'completed'
+                    ? 'success'
+                    : evaluation.status === 'error'
+                      ? 'error'
+                      : evaluation.status === 'judging'
+                        ? 'info'
+                        : 'warning'
+                }
+                size="md"
+              >
+                {evaluation.status}
               </Badge>
-            )}
-            <Badge variant="default" size="md">
-              🤖 {selectedModelCount} model{selectedModelCount === 1 ? '' : 's'}
-            </Badge>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => {
-                setNextRubricId(rubric?.id || '');
-                setChangeRubricOpen(true);
-              }}
-            >
-              Change Rubric
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => {
-                setNextModelIds(
-                  (evaluation?.modelSelections ?? []).map(
-                    (s: any) => s.modelConfigId
-                  )
-                );
-                setChangeModelSearch('');
-                setQuickChangeModelId('');
-                setChangeModelsOpen(true);
-              }}
-            >
-              Change Models
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={runJudgment}
-              loading={judging || evaluation.status === 'judging'}
-              disabled={!rubric || selectedModelCount === 0}
-            >
-              {modelJudgments.length > 0 ? 'Re-run Models' : 'Run Models'}
-            </Button>
+              {rubric && (
+                <Badge variant="info" size="md">
+                  📋 {rubric.name} v{currentRubricVersion}
+                  {currentRubricIsLatest ? ' (latest)' : ''}
+                </Badge>
+              )}
+              <Badge variant="default" size="md">
+                🤖 {selectedModelCount} model{selectedModelCount === 1 ? '' : 's'}
+              </Badge>
+
+              {avgModelScore !== null && (
+                <div className="text-right px-2 py-1 rounded-md bg-surface-50 border border-surface-200">
+                  <p className="text-2xs text-surface-400">Avg</p>
+                  <p
+                    className={cn(
+                      'text-sm font-bold font-mono',
+                      getScoreColor(avgModelScore)
+                    )}
+                  >
+                    {avgModelScore.toFixed(1)}
+                  </p>
+                </div>
+              )}
+              {humanJudgment && (
+                <div className="text-right px-2 py-1 rounded-md bg-surface-50 border border-surface-200">
+                  <p className="text-2xs text-surface-400">Human</p>
+                  <p
+                    className={cn(
+                      'text-sm font-bold font-mono',
+                      getScoreColor(humanJudgment.overallScore)
+                    )}
+                  >
+                    {humanJudgment.overallScore.toFixed(1)}
+                  </p>
+                </div>
+              )}
+            </div>
+
           </div>
         }
       />
