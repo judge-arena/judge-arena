@@ -149,32 +149,41 @@ export default function ProjectsPage() {
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
             {projects.map((project) => (
               <Link key={project.id} href={`/projects/${project.id}`}>
-                <Card interactive className="h-full">
+                <Card interactive className={`h-full ${project.isDefault ? 'border-brand-200 bg-brand-50/30' : ''}`}>
                   <CardHeader>
                     <div className="flex items-start justify-between">
-                      <CardTitle className="truncate pr-2">
-                        {project.name}
-                      </CardTitle>
-                      <button
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          handleDelete(project.id);
-                        }}
-                        className="rounded p-1 text-surface-400 hover:text-red-500 hover:bg-red-50 transition-colors shrink-0"
-                        aria-label="Delete project"
-                      >
-                        <svg
-                          width="14"
-                          height="14"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
+                      <div className="flex items-center gap-2 min-w-0">
+                        <CardTitle className="truncate">
+                          {project.name}
+                        </CardTitle>
+                        {project.isDefault && (
+                          <Badge variant="info" size="sm" className="shrink-0">
+                            Public
+                          </Badge>
+                        )}
+                      </div>
+                      {!project.isDefault && (
+                        <button
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleDelete(project.id);
+                          }}
+                          className="rounded p-1 text-surface-400 hover:text-red-500 hover:bg-red-50 transition-colors shrink-0"
+                          aria-label="Delete project"
                         >
-                          <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                        </svg>
-                      </button>
+                          <svg
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                          >
+                            <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                          </svg>
+                        </button>
+                      )}
                     </div>
                     {project.description && (
                       <CardDescription className="line-clamp-2">

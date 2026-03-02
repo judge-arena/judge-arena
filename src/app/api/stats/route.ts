@@ -17,6 +17,7 @@ export async function GET() {
       pendingRuns,
       activeModels,
       totalRubrics,
+      totalDatasets,
     ] = await Promise.all([
       prisma.project.count({ where: userFilter }),
       prisma.evaluation.count({ where: userFilter }),
@@ -35,6 +36,11 @@ export async function GET() {
       }),
       prisma.modelConfig.count({ where: { ...userFilter, isActive: true } }),
       prisma.rubric.count({ where: userFilter }),
+      prisma.dataset.count({
+        where: isAdmin(session)
+          ? {}
+          : { OR: [{ userId: session.user.id }, { visibility: 'public' }] },
+      }),
     ]);
 
     return NextResponse.json({
@@ -44,6 +50,7 @@ export async function GET() {
       pendingEvaluations: pendingRuns,
       activeModels,
       totalRubrics,
+      totalDatasets,
     });
   } catch (error) {
     console.error('Failed to fetch stats:', error);

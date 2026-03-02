@@ -15,6 +15,7 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<AppStats | null>(null);
   const [recentEvaluations, setRecentEvaluations] = useState<any[]>([]);
   const [recentProject, setRecentProject] = useState<any | null>(null);
+  const [leaderboard, setLeaderboard] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
 
   const userName =
@@ -37,7 +38,12 @@ export default function DashboardPage() {
         }
         if (projectsRes.ok) {
           const projects = await projectsRes.json();
-          setRecentProject(projects[0] ?? null);
+          // Find the Leaderboard (default) project
+          const lb = projects.find((p: any) => p.isDefault);
+          setLeaderboard(lb ?? null);
+          // Most recent non-default project
+          const userProject = projects.find((p: any) => !p.isDefault);
+          setRecentProject(userProject ?? null);
         }
       } catch (err) {
         console.error('Failed to load dashboard:', err);
@@ -102,6 +108,19 @@ export default function DashboardPage() {
       ),
       color: 'text-amber-600 bg-amber-50',
     },
+    {
+      label: 'Datasets',
+      value: stats?.totalDatasets ?? 0,
+      href: '/datasets',
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <ellipse cx="12" cy="5" rx="9" ry="3" />
+          <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+          <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+        </svg>
+      ),
+      color: 'text-cyan-600 bg-cyan-50',
+    },
   ];
 
   return (
@@ -143,7 +162,7 @@ export default function DashboardPage() {
 
       <div className="p-6 space-y-6">
         {/* Stats Grid */}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
           {statCards.map((stat) => (
             <Link key={stat.label} href={stat.href}>
               <Card interactive className="h-full">
@@ -180,6 +199,60 @@ export default function DashboardPage() {
         </div>
 
         <div className="space-y-6">
+          {/* Leaderboard CTA */}
+          {!loading && leaderboard && (
+            <Link href={`/projects/${leaderboard.id}`}>
+              <Card interactive className="border-brand-200 bg-gradient-to-r from-brand-50 to-cyan-50">
+                <CardContent className="pt-5 pb-5">
+                  <div className="flex items-center gap-4">
+                    <div className="rounded-xl bg-brand-100 p-3">
+                      <svg
+                        width="24"
+                        height="24"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className="text-brand-600"
+                      >
+                        <path d="M8 21h8M12 17v4M7 4h10M4 8h16M5 4v4M19 4v4M9 8v3a3 3 0 0 0 6 0V8" />
+                      </svg>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <h2 className="text-base font-bold text-surface-900">
+                        Leaderboard
+                      </h2>
+                      <p className="text-sm text-surface-600 mt-0.5">
+                        Evaluate models against public datasets and benchmark performance
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Badge variant="success" size="sm">Public</Badge>
+                      <Badge variant="default" size="sm">
+                        {leaderboard._count?.evaluations ?? 0} evaluations
+                      </Badge>
+                      <svg
+                        width="20"
+                        height="20"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className="text-surface-400"
+                      >
+                        <polyline points="9 18 15 12 9 6" />
+                      </svg>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </Link>
+          )}
+
           <Card>
             <CardContent className="pt-5">
             <div className="flex items-center justify-between gap-3 mb-3">

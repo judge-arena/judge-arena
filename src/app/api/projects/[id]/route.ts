@@ -60,6 +60,17 @@ export async function GET(
           orderBy: { createdAt: 'desc' },
         },
         _count: { select: { evaluations: true } },
+        datasets: {
+          select: {
+            id: true,
+            name: true,
+            source: true,
+            visibility: true,
+            sampleCount: true,
+            huggingFaceId: true,
+          },
+          orderBy: { updatedAt: 'desc' },
+        },
       },
     });
 
@@ -67,8 +78,12 @@ export async function GET(
       return NextResponse.json({ error: 'Project not found' }, { status: 404 });
     }
 
-    // Ownership check: only owner or admin can view
-    if (project.userId !== session.user.id && !isAdmin(session)) {
+    // Ownership check: owner, admin, or default (Leaderboard) projects are visible to all
+    if (
+      project.userId !== session.user.id &&
+      !isAdmin(session) &&
+      !(project as any).isDefault
+    ) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 

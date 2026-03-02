@@ -206,11 +206,52 @@ export interface ProjectWithDetails {
   id: string;
   name: string;
   description: string | null;
+  isDefault?: boolean;
   createdAt: string;
   updatedAt: string;
   _count: {
     evaluations: number;
   };
+}
+
+// ─── Dataset ──────────────────────────────────────────────────────────────────
+
+export type DatasetSource = 'local' | 'remote';
+export type DatasetVisibility = 'private' | 'public';
+
+export interface DatasetListItem {
+  id: string;
+  name: string;
+  description: string | null;
+  source: DatasetSource;
+  visibility: DatasetVisibility;
+  sourceUrl: string | null;
+  huggingFaceId: string | null;
+  sampleCount: number | null;
+  tags: string | null;
+  splits: string | null;
+  createdAt: string;
+  updatedAt: string;
+  user: { id: string; name: string | null; email: string };
+  project: { id: string; name: string } | null;
+  _count: { samples: number };
+}
+
+export interface DatasetSampleView {
+  id: string;
+  index: number;
+  input: string;
+  expected: string | null;
+  metadata: string | null;
+  createdAt: string;
+}
+
+export interface DatasetDetail extends DatasetListItem {
+  remoteMetadata: string | null;
+  format: string | null;
+  localData: string | null;
+  features: string | null;
+  samples: DatasetSampleView[];
 }
 
 // ─── Misc ─────────────────────────────────────────────────────────────────────
@@ -236,4 +277,5 @@ export interface AppStats {
   pendingEvaluations: number;
   activeModels: number;
   totalRubrics: number;
+  totalDatasets: number;
 }

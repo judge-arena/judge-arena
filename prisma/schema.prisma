@@ -21,6 +21,7 @@ model User {
   evaluations    Evaluation[]
   evaluationRuns EvaluationRun[]
   humanJudgments HumanJudgment[]
+  datasets       Dataset[]
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
 }
@@ -31,9 +32,11 @@ model Project {
   id          String       @id @default(cuid())
   name        String
   description String?
+  isDefault   Boolean      @default(false) // true for system-wide projects like Leaderboard
   userId      String
   user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   evaluations Evaluation[]
+  datasets    Dataset[]
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
 
@@ -215,4 +218,64 @@ model ApiKeyStore {
   apiKey    String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// ─── Datasets ─────────────────────────────────────────────────────────────────
+// A dataset is a collection of evaluation samples.
+// Can be local (uploaded/inline) or remote (fetched from e.g. HuggingFace).
+// Can be private (user-only) or public (visible to all).
+
+model Dataset {
+  id          String          @id @default(cuid())
+  name        String
+  description String?
+  source      String          @default("local")  // 'local' | 'remote'
+  visibility  String          @default("private") // 'private' | 'public'
+
+  // ── Remote source fields ──
+  sourceUrl      String?      // e.g. https://huggingface.co/datasets/livecodebench/code_generation_lite
+  huggingFaceId  String?      // e.g. livecodebench/code_generation_lite
+  remoteMetadata String?      // JSON: { description, cardData, splits, features, downloadSize, ... }
+
+  // ── Local / inline data fields ──
+  format     String?          // 'json' | 'csv' | 'jsonl' | 'text'
+  localData  String?          // JSON string of inline sample data
+  filePath   String?          // path to uploaded file (if file upload)
+
+  // ── Dataset statistics (populated after fetch or upload) ──
+  sampleCount  Int?           // total number of samples
+  splits       String?        // JSON: e.g. ["train", "test"]
+  features     String?        // JSON: column/field schema from HF or inferred
+  tags         String?        // JSON: array of tag strings
+
+  // ── Relations ──
+  projectId String?
+  project   Project?         @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  samples   DatasetSample[]
+
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([visibility])
+  @@index([source])
+}
+
+model DatasetSample {
+  id        String  @id @default(cuid())
+  datasetId String
+  dataset   Dataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  index     Int     // ordering within dataset
+  input     String  // the prompt / question / code to evaluate
+  expected  String? // expected output / reference answer (optional)
+  metadata  String? // JSON: any extra fields from the source
+
+  createdAt DateTime @default(now())
+
+  @@index([datasetId])
+  @@unique([datasetId, index])
 }

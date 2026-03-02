@@ -106,6 +106,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           router.push('/rubrics');
           clearChord();
           return;
+        case 'g s':
+          router.push('/datasets');
+          clearChord();
+          return;
         case 'g m':
           router.push('/models');
           clearChord();

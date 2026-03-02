@@ -14,7 +14,10 @@ export async function GET() {
   if (session instanceof NextResponse) return session;
 
   try {
-    const where = isAdmin(session) ? undefined : { userId: session.user.id };
+    // Admins see all; regular users see their own plus default (Leaderboard) projects
+    const where = isAdmin(session)
+      ? undefined
+      : { OR: [{ userId: session.user.id }, { isDefault: true }] };
 
     const projects = await prisma.project.findMany({
       where,
@@ -22,7 +25,7 @@ export async function GET() {
         user: { select: { id: true, name: true, email: true } },
         _count: { select: { evaluations: true } },
       },
-      orderBy: { updatedAt: 'desc' },
+      orderBy: [{ isDefault: 'desc' }, { updatedAt: 'desc' }],
     });
 
     return NextResponse.json(projects);

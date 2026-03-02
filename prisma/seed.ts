@@ -129,6 +129,46 @@ async function main() {
 
   console.log(`  ✓ Created ${models.length} model configurations`);
 
+  // Create the Leaderboard project (default, visible to all)
+  const leaderboard = await prisma.project.upsert({
+    where: { id: 'leaderboard' },
+    update: {},
+    create: {
+      id: 'leaderboard',
+      name: 'Leaderboard',
+      description:
+        'Public leaderboard for evaluating models against standardized datasets. Compare model performance on well-known benchmarks.',
+      isDefault: true,
+      userId: adminUser.id,
+    },
+  });
+  console.log(`  ✓ Created Leaderboard project: ${leaderboard.name}`);
+
+  // Create a sample public remote dataset (LiveCodeBench)
+  const liveCodeBench = await prisma.dataset.upsert({
+    where: { id: 'livecodebench-codegen-lite' },
+    update: {},
+    create: {
+      id: 'livecodebench-codegen-lite',
+      name: 'LiveCodeBench Code Generation Lite',
+      description:
+        'A curated benchmark for evaluating code generation capabilities of LLMs. Contains programming problems with test cases from competitive programming platforms.',
+      source: 'remote',
+      visibility: 'public',
+      sourceUrl: 'https://huggingface.co/datasets/livecodebench/code_generation_lite',
+      huggingFaceId: 'livecodebench/code_generation_lite',
+      remoteMetadata: JSON.stringify({
+        author: 'livecodebench',
+        cardData: { license: 'mit', task_categories: ['text-generation'] },
+        lastModified: '2024-12-01',
+      }),
+      tags: JSON.stringify(['code-generation', 'benchmark', 'competitive-programming']),
+      projectId: leaderboard.id,
+      userId: adminUser.id,
+    },
+  });
+  console.log(`  ✓ Created dataset: ${liveCodeBench.name}`);
+
   // Create a sample project
   const project = await prisma.project.create({
     data: {
@@ -203,7 +243,9 @@ export async function authenticate(req: Request): Promise<User> {
   console.log(`   - 2 Users (admin + demo)`);
   console.log(`   - 1 Rubric with 5 criteria`);
   console.log(`   - ${models.length} Model configurations`);
-  console.log(`   - 1 Project with 1 evaluation template + 1 run`);
+  console.log(`   - 1 Leaderboard (default project) + 1 sample project`);
+  console.log(`   - 1 Public remote dataset (LiveCodeBench)`);
+  console.log(`   - 1 Evaluation template + 1 run`);
 }
 
 main()
