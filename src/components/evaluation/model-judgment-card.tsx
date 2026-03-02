@@ -17,6 +17,8 @@ interface ModelJudgmentCardProps {
   error: string | null;
   isSelected?: boolean;
   onSelect?: () => void;
+  /** When true, reasoning is displayed in full without line-clamping */
+  expandedReasoning?: boolean;
 }
 
 export function ModelJudgmentCard({
@@ -31,6 +33,7 @@ export function ModelJudgmentCard({
   error,
   isSelected,
   onSelect,
+  expandedReasoning = false,
 }: ModelJudgmentCardProps) {
   const criteriaScores = safeParseJSON<CriteriaScore[]>(criteriaScoresJson, []);
   const providerInfo = getProviderInfo(provider);
@@ -189,7 +192,10 @@ export function ModelJudgmentCard({
                 <h4 className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1">
                   Reasoning
                 </h4>
-                <p className="text-sm text-surface-700 leading-relaxed line-clamp-4">
+                <p className={cn(
+                  'text-sm text-surface-700 leading-relaxed whitespace-pre-wrap',
+                  !expandedReasoning && 'line-clamp-4'
+                )}>
                   {reasoning}
                 </p>
               </div>

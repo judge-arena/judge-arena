@@ -324,34 +324,33 @@ export default function ProjectDetailPage() {
                           : ''}
                       </Badge>
                     )}
-                    <Badge variant="default" size="sm">
-                      {evaluation.modelSelections?.length ?? 0} models
-                    </Badge>
-                    {evaluation.modelJudgments?.length > 0 && (
-                      <span className="text-xs text-surface-500">
-                        {evaluation.modelJudgments.filter((j: any) => j.status === 'completed').length}/
-                        {evaluation.modelJudgments.length} models
-                      </span>
-                    )}
-                    {evaluation.humanJudgment && (
-                      <Badge variant="success" size="sm">
-                        Human: {evaluation.humanJudgment.overallScore}/10
-                      </Badge>
-                    )}
-                    <Badge
-                      variant={
-                        evaluation.status === 'completed'
-                          ? 'success'
-                          : evaluation.status === 'error'
-                            ? 'error'
-                            : evaluation.status === 'judging'
-                              ? 'info'
-                              : 'warning'
-                      }
-                      size="sm"
-                    >
-                      {evaluation.status}
-                    </Badge>
+                    {(() => {
+                      const latestRun = (evaluation.runs ?? [])[0];
+                      const runCount = (evaluation.runs ?? []).length;
+                      return (
+                        <>
+                          <Badge variant="default" size="sm">
+                            {runCount} run{runCount === 1 ? '' : 's'}
+                          </Badge>
+                          {latestRun && (
+                            <Badge
+                              variant={
+                                latestRun.status === 'completed'
+                                  ? 'success'
+                                  : latestRun.status === 'error'
+                                    ? 'error'
+                                    : latestRun.status === 'judging'
+                                      ? 'info'
+                                      : 'warning'
+                              }
+                              size="sm"
+                            >
+                              {latestRun.status}
+                            </Badge>
+                          )}
+                        </>
+                      );
+                    })()}
                     <svg
                       width="16"
                       height="16"

@@ -19,6 +19,7 @@ model User {
   rubrics        Rubric[]
   modelConfigs   ModelConfig[]
   evaluations    Evaluation[]
+  evaluationRuns EvaluationRun[]
   humanJudgments HumanJudgment[]
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
@@ -40,19 +41,20 @@ model Project {
 }
 
 model Rubric {
-  id          String            @id @default(cuid())
-  name        String
-  description String?
-  version     Int               @default(1)
-  parentId    String?           // null for v1; root rubric id for later versions
-  parent      Rubric?           @relation("RubricVersions", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  versions    Rubric[]          @relation("RubricVersions")
-  criteria    RubricCriterion[]
-  evaluations Evaluation[]
-  userId      String
-  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt   DateTime          @default(now())
-  updatedAt   DateTime          @updatedAt
+  id             String            @id @default(cuid())
+  name           String
+  description    String?
+  version        Int               @default(1)
+  parentId       String?           // null for v1; root rubric id for later versions
+  parent         Rubric?           @relation("RubricVersions", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  versions       Rubric[]          @relation("RubricVersions")
+  criteria       RubricCriterion[]
+  evaluations    Evaluation[]
+  evaluationRuns EvaluationRun[]
+  userId         String
+  user           User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
 
   @@index([parentId])
   @@index([userId])
@@ -72,94 +74,137 @@ model RubricCriterion {
 }
 
 model ModelConfig {
-  id                 String                     @id @default(cuid())
-  name               String
-  provider           String // 'anthropic' | 'openai' | 'local'
-  modelId            String // e.g. 'claude-sonnet-4-5-20250514'
-  endpoint           String? // custom endpoint for local/self-hosted models
-  apiKey             String? // stored per-model (optional, falls back to env)
-  isActive           Boolean                    @default(true)
-  isVerified         Boolean                    @default(false)
-  verifiedAt         DateTime?
-  verificationError  String?
-  userId             String
-  user               User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt          DateTime                   @default(now())
-  updatedAt          DateTime                   @updatedAt
-  judgments          ModelJudgment[]
+  id                   String                     @id @default(cuid())
+  name                 String
+  provider             String                     // 'anthropic' | 'openai' | 'local'
+  modelId              String                     // e.g. 'claude-sonnet-4-5-20250514'
+  endpoint             String?                    // custom endpoint for local/self-hosted models
+  apiKey               String?                    // stored per-model (optional, falls back to env)
+  isActive             Boolean                    @default(true)
+  isVerified           Boolean                    @default(false)
+  verifiedAt           DateTime?
+  verificationError    String?
+  userId               String
+  user                 User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+  judgments            ModelJudgment[]
   evaluationSelections EvaluationModelSelection[]
+  runModelSelections   RunModelSelection[]
 
   @@index([userId])
 }
 
+// ─── Evaluation Template ─────────────────────────────────────────────────────
+// Stores the immutable input text, title, and default configuration.
+// Runs are executed against this template and are tracked separately.
+
 model Evaluation {
-  id             String          @id @default(cuid())
-  projectId      String
-  project        Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  rubricId       String?         // specific rubric version used for this evaluation
-  rubric         Rubric?         @relation(fields: [rubricId], references: [id])
-  inputText      String
-  title          String?
-  status         String          @default("pending") // pending | judging | completed | error
-  userId         String
-  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  modelJudgments ModelJudgment[]
-  modelSelections EvaluationModelSelection[]
-  humanJudgment  HumanJudgment?
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
+  id              String                     @id @default(cuid())
+  projectId       String
+  project         Project                    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  rubricId        String?                    // default rubric for new runs
+  rubric          Rubric?                    @relation(fields: [rubricId], references: [id])
+  inputText       String
+  title           String?
+  userId          String
+  user            User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  modelSelections EvaluationModelSelection[] // default model list for new runs
+  runs            EvaluationRun[]
+  createdAt       DateTime                   @default(now())
+  updatedAt       DateTime                   @updatedAt
 
   @@index([projectId])
   @@index([rubricId])
-  @@index([status])
   @@index([userId])
 }
 
 model EvaluationModelSelection {
-  id           String      @id @default(cuid())
-  evaluationId String
-  evaluation   Evaluation  @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+  id            String      @id @default(cuid())
+  evaluationId  String
+  evaluation    Evaluation  @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
   modelConfigId String
-  modelConfig  ModelConfig @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
-  createdAt    DateTime    @default(now())
+  modelConfig   ModelConfig @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
+  createdAt     DateTime    @default(now())
 
   @@unique([evaluationId, modelConfigId])
   @@index([evaluationId])
   @@index([modelConfigId])
 }
 
-model ModelJudgment {
-  id            String      @id @default(cuid())
-  evaluationId  String
-  evaluation    Evaluation  @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
-  modelConfigId String
-  modelConfig   ModelConfig @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
-  overallScore  Float?
-  reasoning     String?
-  rawResponse   String?
-  criteriaScores String? // JSON string: Array<{ criterionId: string; score: number; comment?: string }>
-  latencyMs     Int?
-  tokenCount    Int?
-  status        String      @default("pending") // pending | running | completed | error
-  error         String?
-  createdAt     DateTime    @default(now())
+// ─── Evaluation Run ───────────────────────────────────────────────────────────
+// One discrete execution of an Evaluation template.
+// Each press of "Run Models" (or a human-only session) creates one Run.
+
+model EvaluationRun {
+  id                 String              @id @default(uuid())
+  evaluationId       String
+  evaluation         Evaluation          @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+  rubricId           String?             // rubric version pinned at run time
+  rubric             Rubric?             @relation(fields: [rubricId], references: [id])
+  status             String              @default("pending") // pending | judging | completed | error
+  triggeredById      String
+  triggeredBy        User                @relation(fields: [triggeredById], references: [id], onDelete: Cascade)
+  runModelSelections RunModelSelection[]
+  modelJudgments     ModelJudgment[]
+  humanJudgment      HumanJudgment?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
 
   @@index([evaluationId])
+  @@index([rubricId])
+  @@index([triggeredById])
+  @@index([status])
+}
+
+// Models selected for a specific run (snapshot at run creation time)
+model RunModelSelection {
+  id            String        @id @default(cuid())
+  runId         String
+  run           EvaluationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  modelConfigId String
+  modelConfig   ModelConfig   @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
+  createdAt     DateTime      @default(now())
+
+  @@unique([runId, modelConfigId])
+  @@index([runId])
+  @@index([modelConfigId])
+}
+
+// ─── Judgments ───────────────────────────────────────────────────────────────
+
+model ModelJudgment {
+  id             String        @id @default(cuid())
+  runId          String
+  run            EvaluationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  modelConfigId  String
+  modelConfig    ModelConfig   @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
+  overallScore   Float?
+  reasoning      String?
+  rawResponse    String?       // full LLM response, never truncated
+  criteriaScores String?       // JSON: Array<{ criterionId, criterionName, score, maxScore, weight, comment? }>
+  latencyMs      Int?
+  tokenCount     Int?
+  status         String        @default("pending") // pending | running | completed | error
+  error          String?
+  createdAt      DateTime      @default(now())
+
+  @@index([runId])
   @@index([modelConfigId])
 }
 
 model HumanJudgment {
-  id             String     @id @default(cuid())
-  evaluationId   String     @unique
-  evaluation     Evaluation @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
-  overallScore   Float
-  reasoning      String?
-  criteriaScores String? // JSON string: Array<{ criterionId: string; score: number; comment?: string }>
+  id                  String        @id @default(cuid())
+  runId               String        @unique
+  run                 EvaluationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  overallScore        Float
+  reasoning           String?
+  criteriaScores      String?       // JSON: Array<{ criterionId, criterionName, score, maxScore, weight, comment? }>
   selectedBestModelId String?
-  userId         String
-  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  userId              String
+  user                User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
 
   @@index([userId])
 }

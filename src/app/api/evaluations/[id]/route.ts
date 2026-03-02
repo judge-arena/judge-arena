@@ -6,8 +6,25 @@ import { requireAuth, isAdmin } from '@/lib/auth-guard';
 const updateEvaluationSchema = z.object({
   rubricId: z.string().nullable().optional(),
   modelConfigIds: z.array(z.string()).max(10).optional(),
-  clearModelJudgments: z.boolean().optional(),
 });
+
+const runSummaryInclude = {
+  rubric: { select: { id: true, name: true, version: true } },
+  triggeredBy: { select: { id: true, name: true, email: true } },
+  runModelSelections: {
+    include: {
+      modelConfig: { select: { id: true, name: true, provider: true, modelId: true } },
+    },
+    orderBy: { createdAt: 'asc' as const },
+  },
+  modelJudgments: {
+    include: {
+      modelConfig: { select: { id: true, name: true, provider: true } },
+    },
+    orderBy: { createdAt: 'asc' as const },
+  },
+  humanJudgment: { select: { overallScore: true } },
+};
 
 // GET /api/evaluations/[id]
 export async function GET(
@@ -29,37 +46,21 @@ export async function GET(
         modelSelections: {
           include: {
             modelConfig: {
-              select: {
-                id: true,
-                name: true,
-                provider: true,
-                modelId: true,
-                isActive: true,
-                isVerified: true,
-              },
+              select: { id: true, name: true, provider: true, modelId: true, isActive: true, isVerified: true },
             },
           },
           orderBy: { createdAt: 'asc' },
         },
-        modelJudgments: {
-          include: {
-            modelConfig: {
-              select: { id: true, name: true, provider: true, modelId: true },
-            },
-          },
-          orderBy: { createdAt: 'asc' },
+        runs: {
+          include: runSummaryInclude,
+          orderBy: { createdAt: 'desc' },
         },
-        humanJudgment: true,
       },
     });
 
     if (!evaluation) {
-      return NextResponse.json(
-        { error: 'Evaluation not found' },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: 'Evaluation not found' }, { status: 404 });
     }
-
     if (evaluation.userId !== session.user.id && !isAdmin(session)) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
@@ -67,14 +68,11 @@ export async function GET(
     return NextResponse.json(evaluation);
   } catch (error) {
     console.error('Failed to fetch evaluation:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch evaluation' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch evaluation' }, { status: 500 });
   }
 }
 
-// PATCH /api/evaluations/[id]
+// PATCH /api/evaluations/[id] — update template defaults (rubric / model selections)
 export async function PATCH(
   request: Request,
   { params }: { params: { id: string } }
@@ -83,7 +81,10 @@ export async function PATCH(
   if (session instanceof NextResponse) return session;
 
   try {
-    const existing = await prisma.evaluation.findUnique({ where: { id: params.id }, select: { userId: true } });
+    const existing = await prisma.evaluation.findUnique({
+      where: { id: params.id },
+      select: { userId: true },
+    });
     if (!existing) return NextResponse.json({ error: 'Evaluation not found' }, { status: 404 });
     if (existing.userId !== session.user.id && !isAdmin(session)) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
@@ -93,59 +94,34 @@ export async function PATCH(
     const data = updateEvaluationSchema.parse(body);
 
     if (data.rubricId) {
-      const rubric = await prisma.rubric.findUnique({
-        where: { id: data.rubricId },
-        select: { id: true },
-      });
-      if (!rubric) {
-        return NextResponse.json({ error: 'Rubric not found' }, { status: 404 });
-      }
+      const rubric = await prisma.rubric.findUnique({ where: { id: data.rubricId }, select: { id: true } });
+      if (!rubric) return NextResponse.json({ error: 'Rubric not found' }, { status: 404 });
     }
 
     if (data.modelConfigIds !== undefined && data.modelConfigIds.length > 0) {
       const validModels = await prisma.modelConfig.findMany({
-        where: {
-          id: { in: data.modelConfigIds },
-          isVerified: true,
-        },
+        where: { id: { in: data.modelConfigIds }, isVerified: true },
         select: { id: true },
       });
-
       if (validModels.length !== new Set(data.modelConfigIds).size) {
         return NextResponse.json(
-          {
-            error:
-              'One or more selected models are missing or not verified. Re-open model settings and verify connection.',
-          },
+          { error: 'One or more selected models are missing or not verified.' },
           { status: 400 }
         );
       }
     }
-
-    const shouldClearModelJudgments = !!data.clearModelJudgments;
-    const shouldUpdateModelSelections = data.modelConfigIds !== undefined;
 
     const evaluation = await prisma.$transaction(async (tx: any) => {
       await tx.evaluation.update({
         where: { id: params.id },
         data: {
           ...(data.rubricId !== undefined ? { rubricId: data.rubricId } : {}),
-          ...(shouldClearModelJudgments ? { status: 'pending' } : {}),
         },
       });
 
-      if (shouldClearModelJudgments) {
-        await tx.modelJudgment.deleteMany({
-          where: { evaluationId: params.id },
-        });
-      }
-
-      if (shouldUpdateModelSelections) {
-        await tx.evaluationModelSelection.deleteMany({
-          where: { evaluationId: params.id },
-        });
-
-        if (data.modelConfigIds && data.modelConfigIds.length > 0) {
+      if (data.modelConfigIds !== undefined) {
+        await tx.evaluationModelSelection.deleteMany({ where: { evaluationId: params.id } });
+        if (data.modelConfigIds.length > 0) {
           await tx.evaluationModelSelection.createMany({
             data: [...new Set(data.modelConfigIds)].map((modelConfigId) => ({
               evaluationId: params.id,
@@ -158,64 +134,31 @@ export async function PATCH(
       return tx.evaluation.findUnique({
         where: { id: params.id },
         include: {
-          rubric: {
-            include: { criteria: { orderBy: { order: 'asc' } } },
-          },
+          rubric: { include: { criteria: { orderBy: { order: 'asc' } } } },
           project: { select: { id: true, name: true } },
           modelSelections: {
             include: {
               modelConfig: {
-                select: {
-                  id: true,
-                  name: true,
-                  provider: true,
-                  modelId: true,
-                  isActive: true,
-                  isVerified: true,
-                },
+                select: { id: true, name: true, provider: true, modelId: true, isActive: true, isVerified: true },
               },
             },
             orderBy: { createdAt: 'asc' },
           },
-          modelJudgments: {
-            include: {
-              modelConfig: {
-                select: {
-                  id: true,
-                  name: true,
-                  provider: true,
-                  modelId: true,
-                },
-              },
-            },
-            orderBy: { createdAt: 'asc' },
-          },
-          humanJudgment: true,
+          runs: { include: runSummaryInclude, orderBy: { createdAt: 'desc' } },
         },
       });
     });
 
     if (!evaluation) {
-      return NextResponse.json(
-        { error: 'Evaluation not found' },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: 'Evaluation not found' }, { status: 404 });
     }
-
     return NextResponse.json(evaluation);
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return NextResponse.json(
-        { error: 'Validation failed', details: error.errors },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Validation failed', details: error.errors }, { status: 400 });
     }
-
     console.error('Failed to update evaluation:', error);
-    return NextResponse.json(
-      { error: 'Failed to update evaluation' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to update evaluation' }, { status: 500 });
   }
 }
 
@@ -228,7 +171,10 @@ export async function DELETE(
   if (session instanceof NextResponse) return session;
 
   try {
-    const existing = await prisma.evaluation.findUnique({ where: { id: params.id }, select: { userId: true } });
+    const existing = await prisma.evaluation.findUnique({
+      where: { id: params.id },
+      select: { userId: true },
+    });
     if (!existing) return NextResponse.json({ error: 'Evaluation not found' }, { status: 404 });
     if (existing.userId !== session.user.id && !isAdmin(session)) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
@@ -238,9 +184,6 @@ export async function DELETE(
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Failed to delete evaluation:', error);
-    return NextResponse.json(
-      { error: 'Failed to delete evaluation' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to delete evaluation' }, { status: 500 });
   }
 }

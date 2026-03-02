@@ -7,47 +7,34 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Skeleton } from '@/components/ui/skeleton';
-import { formatDate } from '@/lib/utils';
+import { cn, formatDateTime, getScoreColor } from '@/lib/utils';
 
-interface Evaluation {
+// Evaluation run as returned nested inside templates from GET /api/evaluations
+interface RunSummary {
   id: string;
-  title: string;
+  evaluationId: string;
   status: string;
-  inputText: string;
   createdAt: string;
-  updatedAt: string;
-  project: {
-    id: string;
-    name: string;
-  };
-  rubric?: {
-    id: string;
-    name: string;
-    version: number;
-  } | null;
-  modelJudgments: {
-    id: string;
-    status: string;
-    overallScore: number | null;
-    modelConfig: {
-      name: string;
-      provider: string;
-    };
-  }[];
-  humanJudgment?: {
-    overallScore: number;
-  } | null;
+  triggeredBy: { id: string; name: string | null; email: string };
+  rubric?: { id: string; name: string; version: number } | null;
+  runModelSelections: { modelConfigId: string; modelConfig: { name: string; provider: string } }[];
+  modelJudgments: { id: string; status: string; overallScore: number | null; modelConfig: { name: string } }[];
+  humanJudgment?: { overallScore: number } | null;
+  // injected by the client after flattening
+  evaluationTitle: string | null;
+  projectId: string;
+  projectName: string;
 }
 
-const statusConfig: Record<string, { label: string; variant: 'default' | 'success' | 'warning' | 'error' }> = {
-  pending: { label: 'Pending', variant: 'default' },
-  judging: { label: 'Judging', variant: 'warning' },
+const statusConfig: Record<string, { label: string; variant: 'default' | 'success' | 'warning' | 'error' | 'info' }> = {
+  pending:   { label: 'Pending',   variant: 'warning' },
+  judging:   { label: 'Judging',   variant: 'info' },
   completed: { label: 'Completed', variant: 'success' },
-  error: { label: 'Error', variant: 'error' },
+  error:     { label: 'Error',     variant: 'error' },
 };
 
 export default function EvaluationsPage() {
-  const [evaluations, setEvaluations] = useState<Evaluation[]>([]);
+  const [runs, setRuns] = useState<RunSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'pending' | 'completed' | 'error'>('all');
   const [search, setSearch] = useState('');
@@ -57,10 +44,25 @@ export default function EvaluationsPage() {
       try {
         const res = await fetch('/api/evaluations');
         if (res.ok) {
-          setEvaluations(await res.json());
+          const templates: any[] = await res.json();
+          // Flatten all runs from all templates, injecting template/project context
+          const flat: RunSummary[] = [];
+          for (const template of templates) {
+            for (const run of template.runs ?? []) {
+              flat.push({
+                ...run,
+                evaluationTitle: template.title ?? null,
+                projectId: template.project?.id ?? '',
+                projectName: template.project?.name ?? '',
+              });
+            }
+          }
+          // Sort newest first
+          flat.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+          setRuns(flat);
         }
       } catch (err) {
-        console.error('Failed to load evaluations:', err);
+        console.error('Failed to load runs:', err);
       } finally {
         setLoading(false);
       }
@@ -68,39 +70,46 @@ export default function EvaluationsPage() {
     load();
   }, []);
 
-  const filtered = evaluations.filter((ev) => {
-    if (filter !== 'all' && ev.status !== filter) return false;
+  const filtered = runs.filter((run) => {
+    // Status filter
+    if (filter === 'pending' && run.status !== 'pending' && run.status !== 'judging') return false;
+    if (filter === 'completed' && run.status !== 'completed') return false;
+    if (filter === 'error' && run.status !== 'error') return false;
+
+    // Text search
     if (search) {
       const q = search.toLowerCase();
       return (
-        ev.title.toLowerCase().includes(q) ||
-        ev.project.name.toLowerCase().includes(q) ||
-        ev.inputText.toLowerCase().includes(q)
+        (run.evaluationTitle ?? '').toLowerCase().includes(q) ||
+        run.projectName.toLowerCase().includes(q) ||
+        run.id.toLowerCase().includes(q) ||
+        (run.rubric?.name ?? '').toLowerCase().includes(q) ||
+        (run.triggeredBy?.name ?? run.triggeredBy?.email ?? '').toLowerCase().includes(q)
       );
     }
     return true;
   });
 
   const counts = {
-    all: evaluations.length,
-    pending: evaluations.filter((e) => e.status === 'pending' || e.status === 'judging').length,
-    completed: evaluations.filter((e) => e.status === 'completed').length,
-    error: evaluations.filter((e) => e.status === 'error').length,
+    all: runs.length,
+    pending: runs.filter((r) => r.status === 'pending' || r.status === 'judging').length,
+    completed: runs.filter((r) => r.status === 'completed').length,
+    error: runs.filter((r) => r.status === 'error').length,
   };
 
   return (
     <div>
       <Header
         title="Evaluation History"
-        description="Browse all evaluations across your projects."
+        description="Browse all evaluation runs across your projects."
       />
 
       <div className="p-6 space-y-6">
-        {/* Filters */}
+        {/* ── Filters ── */}
         <div className="flex flex-col sm:flex-row gap-3">
           <input
             type="text"
-            placeholder="Search evaluations..."
+            placeholder="Search by title, project, rubric, or run ID…"
             className="flex-1 rounded-lg border border-surface-200 bg-white px-3 py-2 text-sm text-surface-900 placeholder:text-surface-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -122,98 +131,111 @@ export default function EvaluationsPage() {
           </div>
         </div>
 
-        {/* Content */}
+        {/* ── Content ── */}
         {loading ? (
           <div className="space-y-3">
             {Array.from({ length: 5 }).map((_, i) => (
-              <Skeleton key={i} className="h-24 rounded-xl" />
+              <Skeleton key={i} className="h-28 rounded-xl" />
             ))}
           </div>
         ) : filtered.length === 0 ? (
           <EmptyState
-            title={search || filter !== 'all' ? 'No matching evaluations' : 'No evaluations yet'}
+            title={search || filter !== 'all' ? 'No matching runs' : 'No runs yet'}
             description={
               search || filter !== 'all'
                 ? 'Try adjusting your search or filter.'
-                : 'Create a project and run your first evaluation to see it here.'
+                : 'Open an evaluation template and press "New Run" to get started.'
             }
           />
         ) : (
           <div className="space-y-3">
-            {filtered.map((ev) => {
-              const status = statusConfig[ev.status] || statusConfig.pending;
-              const completedJudgments = ev.modelJudgments.filter(
-                (j) => j.status === 'completed'
+            {filtered.map((run) => {
+              const sc = statusConfig[run.status] ?? statusConfig.pending;
+              const completedJudgments = run.modelJudgments.filter(
+                (j) => j.status === 'completed' && j.overallScore !== null
               );
               const avgScore =
                 completedJudgments.length > 0
-                  ? completedJudgments.reduce(
-                      (sum, j) => sum + (j.overallScore ?? 0),
-                      0
-                    ) / completedJudgments.length
+                  ? completedJudgments.reduce((s, j) => s + (j.overallScore ?? 0), 0) /
+                    completedJudgments.length
                   : null;
 
               return (
                 <Link
-                  key={ev.id}
-                  href={`/projects/${ev.project.id}/evaluate/${ev.id}`}
+                  key={run.id}
+                  href={`/evaluate/${run.evaluationId}/runs/${run.id}`}
                   className="block"
                 >
                   <Card className="hover:border-brand-300 hover:shadow-sm transition-all cursor-pointer">
                     <CardContent className="p-4">
-                      <div className="flex items-start justify-between gap-4">
+                      <div className="flex items-start gap-4">
+                        {/* ── Main info ── */}
                         <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 mb-1">
+                          {/* Title + status */}
+                          <div className="flex flex-wrap items-center gap-2 mb-1">
                             <h3 className="text-sm font-semibold text-surface-900 truncate">
-                              {ev.title}
+                              {run.evaluationTitle || 'Untitled Evaluation'}
                             </h3>
-                            <Badge variant={status.variant} className="shrink-0">
-                              {status.label}
-                            </Badge>
+                            <Badge variant={sc.variant} size="sm">{sc.label}</Badge>
                           </div>
-                          <div className="flex items-center gap-3 text-xs text-surface-500 mb-2">
+
+                          {/* Project / rubric / date */}
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-surface-500 mb-2">
                             <span className="flex items-center gap-1">
-                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                               </svg>
-                              {ev.project.name}
+                              {run.projectName}
                             </span>
-                            {ev.rubric && (
+                            {run.rubric && (
                               <span className="flex items-center gap-1">
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                                   <path d="M9 11l3 3L22 4" />
                                   <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
                                 </svg>
-                                {ev.rubric.name} v{ev.rubric.version}
+                                {run.rubric.name} v{run.rubric.version}
                               </span>
                             )}
-                            <span>{formatDate(ev.createdAt)}</span>
+                            <span>{formatDateTime(run.createdAt)}</span>
                           </div>
-                          <p className="text-xs text-surface-400 line-clamp-1">
-                            {ev.inputText.substring(0, 150)}
-                          </p>
+
+                          {/* Triggered by + model list */}
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-xs text-surface-500">
+                              By{' '}
+                              <span className="font-medium text-surface-700">
+                                {run.triggeredBy?.name || run.triggeredBy?.email}
+                              </span>
+                            </span>
+                            {run.runModelSelections.slice(0, 4).map((s) => (
+                              <Badge key={s.modelConfigId} variant="default" size="sm">
+                                {s.modelConfig.name}
+                              </Badge>
+                            ))}
+                            {run.runModelSelections.length > 4 && (
+                              <Badge variant="default" size="sm">
+                                +{run.runModelSelections.length - 4} more
+                              </Badge>
+                            )}
+                          </div>
                         </div>
 
-                        {/* Scores */}
-                        <div className="flex items-center gap-3 shrink-0">
+                        {/* ── Scores ── */}
+                        <div className="flex items-center gap-4 shrink-0">
                           {avgScore !== null && (
                             <div className="text-center">
-                              <div className="text-lg font-bold text-brand-600">
+                              <div className={cn('text-lg font-bold font-mono', getScoreColor(avgScore))}>
                                 {avgScore.toFixed(1)}
                               </div>
-                              <div className="text-2xs text-surface-400">
-                                Model Avg
-                              </div>
+                              <div className="text-2xs text-surface-400">Model Avg</div>
                             </div>
                           )}
-                          {ev.humanJudgment && (
+                          {run.humanJudgment && (
                             <div className="text-center">
-                              <div className="text-lg font-bold text-emerald-600">
-                                {ev.humanJudgment.overallScore.toFixed(1)}
+                              <div className={cn('text-lg font-bold font-mono', getScoreColor(run.humanJudgment.overallScore))}>
+                                {run.humanJudgment.overallScore.toFixed(1)}
                               </div>
-                              <div className="text-2xs text-surface-400">
-                                Human
-                              </div>
+                              <div className="text-2xs text-surface-400">Human</div>
                             </div>
                           )}
                           {completedJudgments.length > 0 && (
@@ -221,9 +243,7 @@ export default function EvaluationsPage() {
                               <div className="text-sm font-medium text-surface-600">
                                 {completedJudgments.length}
                               </div>
-                              <div className="text-2xs text-surface-400">
-                                Judges
-                              </div>
+                              <div className="text-2xs text-surface-400">Judges</div>
                             </div>
                           )}
                         </div>

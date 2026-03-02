@@ -7,11 +7,30 @@ const createEvaluationSchema = z.object({
   projectId: z.string().min(1),
   title: z.string().max(200).optional(),
   inputText: z.string().min(1, 'Input text is required'),
-  rubricId: z.string().optional(), // specific rubric version to pin for this evaluation
-  modelConfigIds: z.array(z.string()).max(10).optional(),
+  rubricId: z.string().optional(), // default rubric for new runs
+  modelConfigIds: z.array(z.string()).max(10).optional(), // default models for new runs
 });
 
-// GET /api/evaluations - List evaluations (optionally filtered by project)
+// Shared include for run summaries
+const runSummaryInclude = {
+  rubric: { select: { id: true, name: true, version: true } },
+  triggeredBy: { select: { id: true, name: true, email: true } },
+  runModelSelections: {
+    include: {
+      modelConfig: { select: { id: true, name: true, provider: true, modelId: true } },
+    },
+    orderBy: { createdAt: 'asc' as const },
+  },
+  modelJudgments: {
+    include: {
+      modelConfig: { select: { id: true, name: true, provider: true } },
+    },
+    orderBy: { createdAt: 'asc' as const },
+  },
+  humanJudgment: { select: { overallScore: true } },
+};
+
+// GET /api/evaluations - List evaluation templates (optionally filtered by project)
 export async function GET(request: Request) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
@@ -22,46 +41,26 @@ export async function GET(request: Request) {
 
     const where: any = {};
     if (projectId) where.projectId = projectId;
-    // Non-admins only see their own evaluations
     if (!isAdmin(session)) where.userId = session.user.id;
 
     const evaluations = await prisma.evaluation.findMany({
       where,
       include: {
-        rubric: {
-          select: {
-            id: true,
-            name: true,
-            version: true,
-            parentId: true,
-          },
-        },
+        rubric: { select: { id: true, name: true, version: true, parentId: true } },
         project: { select: { id: true, name: true } },
         user: { select: { id: true, name: true, email: true } },
         modelSelections: {
           include: {
             modelConfig: {
-              select: {
-                id: true,
-                name: true,
-                provider: true,
-                modelId: true,
-                isActive: true,
-                isVerified: true,
-              },
+              select: { id: true, name: true, provider: true, modelId: true, isActive: true, isVerified: true },
             },
           },
           orderBy: { createdAt: 'asc' },
         },
-        modelJudgments: {
-          include: {
-            modelConfig: {
-              select: { id: true, name: true, provider: true, modelId: true },
-            },
-          },
-          orderBy: { createdAt: 'asc' },
+        runs: {
+          include: runSummaryInclude,
+          orderBy: { createdAt: 'desc' },
         },
-        humanJudgment: true,
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -69,14 +68,11 @@ export async function GET(request: Request) {
     return NextResponse.json(evaluations);
   } catch (error) {
     console.error('Failed to fetch evaluations:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch evaluations' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch evaluations' }, { status: 500 });
   }
 }
 
-// POST /api/evaluations - Create a new evaluation
+// POST /api/evaluations - Create a new evaluation template
 export async function POST(request: Request) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
@@ -85,17 +81,12 @@ export async function POST(request: Request) {
     const body = await request.json();
     const data = createEvaluationSchema.parse(body);
 
-    // Verify project exists and user owns it (or is admin)
+    // Verify project ownership
     const project = await prisma.project.findUnique({
       where: { id: data.projectId },
       select: { id: true, userId: true },
     });
-    if (!project) {
-      return NextResponse.json(
-        { error: 'Project not found' },
-        { status: 404 }
-      );
-    }
+    if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
     if (project.userId !== session.user.id && !isAdmin(session)) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
@@ -115,27 +106,17 @@ export async function POST(request: Request) {
     }
 
     if (selectedModelIds.length > 10) {
-      return NextResponse.json(
-        { error: 'You can select up to 10 models per evaluation' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'You can select up to 10 models per evaluation' }, { status: 400 });
     }
 
     if (selectedModelIds.length > 0) {
       const validModels = await prisma.modelConfig.findMany({
-        where: {
-          id: { in: selectedModelIds },
-          isVerified: true,
-        },
+        where: { id: { in: selectedModelIds }, isVerified: true },
         select: { id: true },
       });
-
       if (validModels.length !== new Set(selectedModelIds).size) {
         return NextResponse.json(
-          {
-            error:
-              'One or more selected models are missing or not verified. Re-open model settings and verify connection.',
-          },
+          { error: 'One or more selected models are missing or not verified.' },
           { status: 400 }
         );
       }
@@ -149,56 +130,30 @@ export async function POST(request: Request) {
         userId: session.user.id,
         ...(data.rubricId && { rubricId: data.rubricId }),
         modelSelections: {
-          create: [...new Set(selectedModelIds)].map((modelConfigId) => ({
-            modelConfigId,
-          })),
+          create: [...new Set(selectedModelIds)].map((modelConfigId) => ({ modelConfigId })),
         },
-        status: 'pending',
       },
       include: {
-        rubric: {
-          select: {
-            id: true,
-            name: true,
-            version: true,
-            parentId: true,
-          },
-        },
+        rubric: { select: { id: true, name: true, version: true, parentId: true } },
         project: { select: { id: true, name: true } },
         modelSelections: {
           include: {
             modelConfig: {
-              select: {
-                id: true,
-                name: true,
-                provider: true,
-                modelId: true,
-                isActive: true,
-                isVerified: true,
-              },
+              select: { id: true, name: true, provider: true, modelId: true, isActive: true, isVerified: true },
             },
           },
           orderBy: { createdAt: 'asc' },
         },
-        modelJudgments: {
-          include: { modelConfig: true },
-        },
-        humanJudgment: true,
+        runs: { include: runSummaryInclude, orderBy: { createdAt: 'desc' } },
       },
     });
 
     return NextResponse.json(evaluation, { status: 201 });
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return NextResponse.json(
-        { error: 'Validation failed', details: error.errors },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Validation failed', details: error.errors }, { status: 400 });
     }
     console.error('Failed to create evaluation:', error);
-    return NextResponse.json(
-      { error: 'Failed to create evaluation' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to create evaluation' }, { status: 500 });
   }
 }

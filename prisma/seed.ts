@@ -141,10 +141,11 @@ async function main() {
 
   console.log(`  ✓ Created project: ${project.name}`);
 
-  // Create a sample evaluation
+  // Create a sample evaluation template
   const evaluation = await prisma.evaluation.create({
     data: {
       projectId: project.id,
+      rubricId: rubric.id,
       title: 'Sample Code Review',
       inputText: `## Pull Request: Add User Authentication
 
@@ -173,19 +174,36 @@ export async function authenticate(req: Request): Promise<User> {
 - Tokens expire after 15 minutes
 - Refresh tokens are single-use with rotation
 `,
-      status: 'pending',
       userId: adminUser.id,
+      modelSelections: {
+        create: models.map((m) => ({ modelConfigId: m.id })),
+      },
     },
   });
 
-  console.log(`  ✓ Created sample evaluation: ${evaluation.title}`);
+  console.log(`  ✓ Created sample evaluation template: ${evaluation.title}`);
+
+  // Create a sample run for the evaluation (status: pending — no judgments yet)
+  const sampleRun = await prisma.evaluationRun.create({
+    data: {
+      evaluationId: evaluation.id,
+      rubricId: rubric.id,
+      status: 'pending',
+      triggeredById: adminUser.id,
+      runModelSelections: {
+        create: models.map((m) => ({ modelConfigId: m.id })),
+      },
+    },
+  });
+
+  console.log(`  ✓ Created sample run: ${sampleRun.id}`);
 
   console.log('\n✅ Database seeded successfully!');
   console.log(`\n📋 Summary:`);
   console.log(`   - 2 Users (admin + demo)`);
   console.log(`   - 1 Rubric with 5 criteria`);
   console.log(`   - ${models.length} Model configurations`);
-  console.log(`   - 1 Project with 1 sample evaluation`);
+  console.log(`   - 1 Project with 1 evaluation template + 1 run`);
 }
 
 main()

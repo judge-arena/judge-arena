@@ -2,13 +2,15 @@
 
 import React, { useEffect, useState, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { Header } from '@/components/layout/header';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { Card, CardContent } from '@/components/ui/card';
+import { EmptyState } from '@/components/ui/empty-state';
 import {
   Dialog,
   DialogBody,
@@ -17,32 +19,43 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { ModelJudgmentCard } from '@/components/evaluation/model-judgment-card';
-import { HumanJudgmentForm } from '@/components/evaluation/human-judgment-form';
 import { SubmissionViewer } from '@/components/evaluation/submission-viewer';
 import {
-  safeParseJSON,
-  getScoreColor,
-  cn,
   buildRubricVersionOptions,
+  cn,
+  formatDate,
+  formatDateTime,
+  getScoreColor,
+  safeParseJSON,
 } from '@/lib/utils';
 import { toast } from 'sonner';
-import type { CriteriaScore } from '@/types';
 
-export default function EvaluatePage() {
+const statusConfig: Record<string, { label: string; variant: 'default' | 'success' | 'warning' | 'error' | 'info' }> = {
+  pending:  { label: 'Pending',  variant: 'warning' },
+  judging:  { label: 'Judging',  variant: 'info' },
+  completed:{ label: 'Completed',variant: 'success' },
+  error:    { label: 'Error',    variant: 'error' },
+};
+
+export default function EvaluateTemplatePage() {
   const params = useParams();
   const router = useRouter();
   const evaluationId = params.id as string;
 
   const [evaluation, setEvaluation] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [judging, setJudging] = useState(false);
-  const [submittingHuman, setSubmittingHuman] = useState(false);
-  const [selectedBestModelId, setSelectedBestModelId] = useState<string | null>(
-    null
-  );
+
+  // "New Run" dialog state
+  const [newRunOpen, setNewRunOpen] = useState(false);
   const [allRubrics, setAllRubrics] = useState<any[]>([]);
   const [allModels, setAllModels] = useState<any[]>([]);
+  const [runRubricId, setRunRubricId] = useState('');
+  const [runModelIds, setRunModelIds] = useState<string[]>([]);
+  const [runModelSearch, setRunModelSearch] = useState('');
+  const [quickAddModel, setQuickAddModel] = useState('');
+  const [launching, setLaunching] = useState(false);
+
+  // Edit template defaults
   const [changeRubricOpen, setChangeRubricOpen] = useState(false);
   const [nextRubricId, setNextRubricId] = useState('');
   const [savingRubric, setSavingRubric] = useState(false);
@@ -50,17 +63,13 @@ export default function EvaluatePage() {
   const [nextModelIds, setNextModelIds] = useState<string[]>([]);
   const [savingModels, setSavingModels] = useState(false);
   const [changeModelSearch, setChangeModelSearch] = useState('');
-  const [quickChangeModelId, setQuickChangeModelId] = useState('');
+  const [quickChangeModel, setQuickChangeModel] = useState('');
 
   const loadEvaluation = useCallback(async () => {
     try {
       const res = await fetch(`/api/evaluations/${evaluationId}`);
       if (res.ok) {
-        const data = await res.json();
-        setEvaluation(data);
-        if (data.humanJudgment?.selectedBestModelId) {
-          setSelectedBestModelId(data.humanJudgment.selectedBestModelId);
-        }
+        setEvaluation(await res.json());
       } else {
         toast.error('Evaluation not found');
         router.push('/projects');
@@ -77,140 +86,88 @@ export default function EvaluatePage() {
   }, [loadEvaluation]);
 
   useEffect(() => {
-    fetch('/api/rubrics')
-      .then((res) => res.json())
-      .then((data) => setAllRubrics(data))
-      .catch(() => {});
-
-    fetch('/api/models')
-      .then((res) => res.json())
-      .then((data) => {
-        const usable = (data || []).filter((m: any) => m.isActive && m.isVerified);
-        setAllModels(usable);
-      })
-      .catch(() => {});
+    Promise.all([
+      fetch('/api/rubrics').then((r) => r.json()).catch(() => []),
+      fetch('/api/models').then((r) => r.json()).catch(() => []),
+    ]).then(([rubrics, models]) => {
+      setAllRubrics(rubrics ?? []);
+      const usable = (models ?? []).filter((m: any) => m.isActive && m.isVerified);
+      setAllModels(usable);
+    });
   }, []);
 
-  // Poll while judging
-  useEffect(() => {
-    if (evaluation?.status !== 'judging') return;
+  const openNewRun = () => {
+    // Pre-fill from template defaults
+    setRunRubricId(evaluation?.rubric?.id ?? '');
+    setRunModelIds(
+      (evaluation?.modelSelections ?? []).map((s: any) => s.modelConfigId)
+    );
+    setRunModelSearch('');
+    setQuickAddModel('');
+    setNewRunOpen(true);
+  };
 
-    const interval = setInterval(async () => {
-      const res = await fetch(`/api/evaluations/${evaluationId}`);
-      if (res.ok) {
-        const data = await res.json();
-        setEvaluation(data);
-        if (data.status !== 'judging') {
-          clearInterval(interval);
-        }
-      }
-    }, 2000);
+  const toggleRunModel = (id: string) => {
+    setRunModelIds((prev) => {
+      if (prev.includes(id)) return prev.filter((x) => x !== id);
+      if (prev.length >= 10) { toast.error('Max 10 models per run'); return prev; }
+      return [...prev, id];
+    });
+  };
+  const addRunModel = (id: string) => {
+    if (!id) return;
+    setRunModelIds((prev) => {
+      if (prev.includes(id)) return prev;
+      if (prev.length >= 10) { toast.error('Max 10 models per run'); return prev; }
+      return [...prev, id];
+    });
+    setQuickAddModel('');
+  };
 
-    return () => clearInterval(interval);
-  }, [evaluation?.status, evaluationId]);
-
-  const runJudgment = async () => {
-    setJudging(true);
+  const launchRun = async () => {
+    if (!runRubricId) {
+      toast.error('Please select a rubric for this run');
+      return;
+    }
+    if (runModelIds.length === 0) {
+      toast.error('Please select at least one model');
+      return;
+    }
+    setLaunching(true);
     try {
-      const res = await fetch(`/api/evaluations/${evaluationId}/judge`, {
+      const res = await fetch(`/api/evaluations/${evaluationId}/runs`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rubricId: runRubricId, modelConfigIds: runModelIds }),
       });
-
       if (res.ok) {
-        const data = await res.json();
-        setEvaluation(data.evaluation);
-        if (data.summary.errors > 0) {
-          toast.warning(
-            `${data.summary.completed}/${data.summary.total} models completed. ${data.summary.errors} had errors.`
-          );
-        } else {
-          toast.success(
-            `All ${data.summary.total} models completed evaluation`
-          );
-        }
+        const run = await res.json();
+        setNewRunOpen(false);
+        router.push(`/evaluate/${evaluationId}/runs/${run.id}`);
       } else {
         const data = await res.json();
-        toast.error(data.error || 'Failed to run evaluation');
-        // Reload to get updated status
-        loadEvaluation();
+        toast.error(data.error || 'Failed to start run');
       }
     } catch {
-      toast.error('Failed to run evaluation');
-      loadEvaluation();
+      toast.error('Failed to start run');
     } finally {
-      setJudging(false);
+      setLaunching(false);
     }
   };
 
-  const submitHumanJudgment = async (data: {
-    overallScore: number;
-    reasoning: string;
-    criteriaScores: CriteriaScore[];
-    selectedBestModelId: string | null;
-  }) => {
-    setSubmittingHuman(true);
-    try {
-      const res = await fetch(
-        `/api/evaluations/${evaluationId}/human-judgment`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(data),
-        }
-      );
-
-      if (res.ok) {
-        toast.success('Human judgment saved');
-        loadEvaluation();
-      } else {
-        const responseData = await res.json();
-        toast.error(responseData.error || 'Failed to save judgment');
-      }
-    } catch {
-      toast.error('Failed to save judgment');
-    } finally {
-      setSubmittingHuman(false);
-    }
-  };
-
-  const saveEvaluationRubric = async () => {
+  const saveDefaultRubric = async () => {
     if (!nextRubricId) return;
-
-    const currentRubricId = evaluation?.rubric?.id ?? '';
-    const isRubricChanging = !!nextRubricId && nextRubricId !== currentRubricId;
-
-    if (!isRubricChanging) {
-      setChangeRubricOpen(false);
-      return;
-    }
-
-    const hasModelJudgments = (evaluation?.modelJudgments?.length ?? 0) > 0;
-    const shouldClearModelJudgments = hasModelJudgments
-      ? window.confirm(
-          'Changing the rubric will clear existing model judgments for this evaluation. Continue?'
-        )
-      : false;
-
-    if (hasModelJudgments && !shouldClearModelJudgments) {
-      return;
-    }
-
     setSavingRubric(true);
     try {
       const res = await fetch(`/api/evaluations/${evaluationId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          rubricId: nextRubricId,
-          clearModelJudgments: shouldClearModelJudgments,
-        }),
+        body: JSON.stringify({ rubricId: nextRubricId }),
       });
-
       if (res.ok) {
-        setLoading(true);
         await loadEvaluation();
         setChangeRubricOpen(false);
-        toast.success('Evaluation rubric updated');
+        toast.success('Default rubric updated');
       } else {
         const data = await res.json();
         toast.error(data.error || 'Failed to update rubric');
@@ -222,62 +179,35 @@ export default function EvaluatePage() {
     }
   };
 
-  const toggleNextModel = (modelId: string) => {
+  const toggleDefaultModel = (id: string) => {
     setNextModelIds((prev) => {
-      if (prev.includes(modelId)) {
-        return prev.filter((id) => id !== modelId);
-      }
-      if (prev.length >= 10) {
-        toast.error('You can select up to 10 models');
-        return prev;
-      }
-      return [...prev, modelId];
+      if (prev.includes(id)) return prev.filter((x) => x !== id);
+      if (prev.length >= 10) { toast.error('Max 10 models'); return prev; }
+      return [...prev, id];
     });
   };
+  const addDefaultModel = (id: string) => {
+    if (!id) return;
+    setNextModelIds((prev) => {
+      if (prev.includes(id)) return prev;
+      if (prev.length >= 10) { toast.error('Max 10 models'); return prev; }
+      return [...prev, id];
+    });
+    setQuickChangeModel('');
+  };
 
-  const saveEvaluationModels = async () => {
-    const currentModelIds: string[] = (evaluation?.modelSelections ?? []).map(
-      (s: any) => s.modelConfigId
-    );
-    const currentSet = new Set<string>(currentModelIds);
-    const nextSet = new Set<string>(nextModelIds);
-
-    const unchanged =
-      currentSet.size === nextSet.size &&
-      [...currentSet].every((id) => nextSet.has(id));
-
-    if (unchanged) {
-      setChangeModelsOpen(false);
-      return;
-    }
-
-    const hasModelJudgments = (evaluation?.modelJudgments?.length ?? 0) > 0;
-    const shouldClearModelJudgments = hasModelJudgments
-      ? window.confirm(
-          'Changing selected models will clear existing model judgments for this evaluation. Continue?'
-        )
-      : false;
-
-    if (hasModelJudgments && !shouldClearModelJudgments) {
-      return;
-    }
-
+  const saveDefaultModels = async () => {
     setSavingModels(true);
     try {
       const res = await fetch(`/api/evaluations/${evaluationId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          modelConfigIds: nextModelIds,
-          clearModelJudgments: shouldClearModelJudgments,
-        }),
+        body: JSON.stringify({ modelConfigIds: nextModelIds }),
       });
-
       if (res.ok) {
-        setLoading(true);
         await loadEvaluation();
         setChangeModelsOpen(false);
-        toast.success('Evaluation models updated');
+        toast.success('Default models updated');
       } else {
         const data = await res.json();
         toast.error(data.error || 'Failed to update models');
@@ -289,563 +219,456 @@ export default function EvaluatePage() {
     }
   };
 
-  const addNextModel = (modelId: string) => {
-    setNextModelIds((prev) => {
-      if (prev.includes(modelId)) return prev;
-      if (prev.length >= 10) {
-        toast.error('You can select up to 10 models');
-        return prev;
-      }
-      return [...prev, modelId];
-    });
-  };
-
-  // Keyboard shortcuts
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
-      const isInput =
-        target.tagName === 'INPUT' ||
-        target.tagName === 'TEXTAREA' ||
-        target.tagName === 'SELECT';
-
-      // Ctrl+E to run evaluation
-      if ((e.ctrlKey || e.metaKey) && e.key === 'e' && !isInput) {
-        e.preventDefault();
-        if (!judging) runJudgment();
-      }
-
-      // Ctrl+Enter to submit (handled in form)
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-        // Form submission handled by the HumanJudgmentForm
-      }
-    };
-
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [judging]);
-
   if (loading) {
     return (
       <div>
         <Skeleton className="h-20 w-full" />
         <div className="p-6 space-y-4">
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-            <Skeleton className="h-80 w-full rounded-xl" />
-            <Skeleton className="h-80 w-full rounded-xl" />
-          </div>
+          <Skeleton className="h-40 w-full rounded-xl" />
+          <Skeleton className="h-24 w-full rounded-xl" />
+          <Skeleton className="h-24 w-full rounded-xl" />
         </div>
       </div>
     );
   }
-
   if (!evaluation) return null;
 
   const rubric = evaluation.rubric;
-  const criteria = rubric?.criteria ?? [];
-  const modelJudgments = evaluation.modelJudgments ?? [];
   const modelSelections = evaluation.modelSelections ?? [];
-  const selectedModelCount = modelSelections.length;
-  const humanJudgment = evaluation.humanJudgment;
+  const runs: any[] = evaluation.runs ?? [];
 
-  const normalizedChangeSearch = changeModelSearch.trim().toLowerCase();
-  const filteredChangeModels = allModels.filter((model: any) => {
-    if (!normalizedChangeSearch) return true;
+  // Computed: latest run status for the header badge
+  const latestRun = runs[0] ?? null;
+
+  // ── New Run dialog filters ──────────────────────────────────────────────
+  const runSearchNorm = runModelSearch.trim().toLowerCase();
+  const filteredRunModels = allModels.filter((m: any) => {
+    if (!runSearchNorm) return true;
     return (
-      model.name.toLowerCase().includes(normalizedChangeSearch) ||
-      model.provider.toLowerCase().includes(normalizedChangeSearch) ||
-      model.modelId.toLowerCase().includes(normalizedChangeSearch)
+      m.name.toLowerCase().includes(runSearchNorm) ||
+      m.provider.toLowerCase().includes(runSearchNorm) ||
+      m.modelId.toLowerCase().includes(runSearchNorm)
     );
   });
+  const quickRunOptions = [
+    { value: '', label: 'Quick add model...' },
+    ...filteredRunModels
+      .filter((m: any) => !runModelIds.includes(m.id))
+      .map((m: any) => ({ value: m.id, label: `${m.name} (${m.provider})` })),
+  ];
 
+  // ── Change Models dialog filters ─────────────────────────────────────────
+  const changeSearchNorm = changeModelSearch.trim().toLowerCase();
+  const filteredChangeModels = allModels.filter((m: any) => {
+    if (!changeSearchNorm) return true;
+    return (
+      m.name.toLowerCase().includes(changeSearchNorm) ||
+      m.provider.toLowerCase().includes(changeSearchNorm) ||
+      m.modelId.toLowerCase().includes(changeSearchNorm)
+    );
+  });
   const quickChangeOptions = [
     { value: '', label: 'Quick add model...' },
     ...filteredChangeModels
-      .filter((model: any) => !nextModelIds.includes(model.id))
-      .map((model: any) => ({
-        value: model.id,
-        label: `${model.name} (${model.provider})`,
-      })),
+      .filter((m: any) => !nextModelIds.includes(m.id))
+      .map((m: any) => ({ value: m.id, label: `${m.name} (${m.provider})` })),
   ];
-
-  const latestVersionByFamily = new Map<string, number>();
-  for (const r of allRubrics) {
-    const familyId = r.parentId ?? r.id;
-    const version = r.version ?? 1;
-    const current = latestVersionByFamily.get(familyId) ?? 0;
-    if (version > current) latestVersionByFamily.set(familyId, version);
-  }
-
-  const currentRubricVersion = rubric?.version ?? 1;
-  const currentRubricFamilyId = rubric ? rubric.parentId ?? rubric.id : null;
-  const currentRubricIsLatest = currentRubricFamilyId
-    ? (latestVersionByFamily.get(currentRubricFamilyId) ?? currentRubricVersion) ===
-      currentRubricVersion
-    : false;
-
-  // Compute average model score
-  const completedJudgments = modelJudgments.filter(
-    (j: any) => j.status === 'completed' && j.overallScore !== null
-  );
-  const avgModelScore =
-    completedJudgments.length > 0
-      ? completedJudgments.reduce(
-          (sum: number, j: any) => sum + j.overallScore,
-          0
-        ) / completedJudgments.length
-      : null;
 
   return (
     <div>
       <Header
-        title={evaluation.title || 'Evaluation'}
+        title={evaluation.title || 'Untitled Evaluation'}
         description={evaluation.project?.name}
         breadcrumbs={[
           { label: 'Projects', href: '/projects' },
-          {
-            label: evaluation.project?.name || 'Project',
-            href: `/projects/${evaluation.project?.id}`,
-          },
+          { label: evaluation.project?.name || 'Project', href: `/projects/${evaluation.project?.id}` },
           { label: evaluation.title || 'Evaluation' },
         ]}
         actions={
-          <div className="flex flex-col items-end gap-2">
-            <div className="flex items-center gap-2">
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => {
-                  setNextRubricId(rubric?.id || '');
-                  setChangeRubricOpen(true);
-                }}
-              >
-                Change Rubric
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => {
-                  setNextModelIds(
-                    (evaluation?.modelSelections ?? []).map(
-                      (s: any) => s.modelConfigId
-                    )
-                  );
-                  setChangeModelSearch('');
-                  setQuickChangeModelId('');
-                  setChangeModelsOpen(true);
-                }}
-              >
-                Change Models
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={runJudgment}
-                loading={judging || evaluation.status === 'judging'}
-                disabled={!rubric || selectedModelCount === 0}
-              >
-                {modelJudgments.length > 0 ? 'Re-run Models' : 'Run Models'}
-              </Button>
-            </div>
-
-            <div className="flex flex-wrap items-center justify-end gap-2">
+          <div className="flex items-center gap-2">
+            {latestRun && (
               <Badge
-                variant={
-                  evaluation.status === 'completed'
-                    ? 'success'
-                    : evaluation.status === 'error'
-                      ? 'error'
-                      : evaluation.status === 'judging'
-                        ? 'info'
-                        : 'warning'
-                }
+                variant={statusConfig[latestRun.status]?.variant ?? 'default'}
                 size="md"
               >
-                {evaluation.status}
+                {statusConfig[latestRun.status]?.label ?? latestRun.status}
               </Badge>
-              {rubric && (
-                <Badge variant="info" size="md">
-                  📋 {rubric.name} v{currentRubricVersion}
-                  {currentRubricIsLatest ? ' (latest)' : ''}
-                </Badge>
-              )}
-              <Badge variant="default" size="md">
-                🤖 {selectedModelCount} model{selectedModelCount === 1 ? '' : 's'}
-              </Badge>
-
-              {avgModelScore !== null && (
-                <div className="text-right px-2 py-1 rounded-md bg-surface-50 border border-surface-200">
-                  <p className="text-2xs text-surface-400">Avg</p>
-                  <p
-                    className={cn(
-                      'text-sm font-bold font-mono',
-                      getScoreColor(avgModelScore)
-                    )}
-                  >
-                    {avgModelScore.toFixed(1)}
-                  </p>
-                </div>
-              )}
-              {humanJudgment && (
-                <div className="text-right px-2 py-1 rounded-md bg-surface-50 border border-surface-200">
-                  <p className="text-2xs text-surface-400">Human</p>
-                  <p
-                    className={cn(
-                      'text-sm font-bold font-mono',
-                      getScoreColor(humanJudgment.overallScore)
-                    )}
-                  >
-                    {humanJudgment.overallScore.toFixed(1)}
-                  </p>
-                </div>
-              )}
-            </div>
-
+            )}
+            <Button variant="primary" size="sm" onClick={openNewRun}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <polygon points="5 3 19 12 5 21 5 3" />
+              </svg>
+              New Run
+            </Button>
           </div>
         }
       />
 
-      <div className="p-6">
-        {/* Warning if no rubric */}
-        {!rubric && (
-          <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
-            No rubric assigned to this evaluation. Please{' '}
-            <a
-              href="/rubrics"
-              className="underline font-medium hover:text-amber-900"
-            >
-              create and assign a rubric
-            </a>{' '}
-            to enable model evaluations.
-          </div>
-        )}
+      <div className="p-6 space-y-6">
 
-        {rubric && selectedModelCount === 0 && (
-          <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
-            No models selected for this evaluation. You can still complete human-only judgment, or use
-            {' '}"Change Models" to add up to 10 models.
-          </div>
-        )}
+        {/* ── Template configuration card ───────────────────────────────── */}
+        <Card>
+          <CardContent className="p-5">
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <h2 className="text-sm font-semibold text-surface-700">Evaluation Template</h2>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setNextRubricId(rubric?.id ?? '');
+                    setChangeRubricOpen(true);
+                  }}
+                >
+                  Change Rubric
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setNextModelIds(modelSelections.map((s: any) => s.modelConfigId));
+                    setChangeModelSearch('');
+                    setQuickChangeModel('');
+                    setChangeModelsOpen(true);
+                  }}
+                >
+                  Change Models
+                </Button>
+              </div>
+            </div>
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
-          {/* Left Column: Submission + Model Judgments */}
-          <div className="lg:col-span-3 space-y-6">
-            {/* Submission */}
-            <SubmissionViewer
-              text={evaluation.inputText}
-              title={evaluation.title}
-            />
-
-            {/* Model Judgments */}
-            {modelJudgments.length > 0 && (
-              <div>
-                <div className="flex items-center justify-between mb-3">
-                  <h2 className="text-sm font-semibold text-surface-700">
-                    Model Judgments ({modelJudgments.length})
-                  </h2>
-                  {completedJudgments.length > 0 && (
-                    <span className="text-xs text-surface-400">
-                      Click to select as best
-                    </span>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+              <div className="space-y-1">
+                <p className="text-2xs font-semibold uppercase tracking-wider text-surface-400">
+                  Default Rubric
+                </p>
+                {rubric ? (
+                  <p className="text-sm text-surface-800 font-medium">
+                    {rubric.name}
+                    <span className="ml-1 text-xs text-surface-400">v{rubric.version}</span>
+                  </p>
+                ) : (
+                  <p className="text-sm text-surface-400 italic">No rubric assigned</p>
+                )}
+              </div>
+              <div className="space-y-1">
+                <p className="text-2xs font-semibold uppercase tracking-wider text-surface-400">
+                  Default Models ({modelSelections.length})
+                </p>
+                <div className="flex flex-wrap gap-1">
+                  {modelSelections.length === 0 ? (
+                    <p className="text-sm text-surface-400 italic">None</p>
+                  ) : (
+                    modelSelections.slice(0, 6).map((s: any) => (
+                      <Badge key={s.modelConfigId} variant="default" size="sm">
+                        {s.modelConfig.name}
+                      </Badge>
+                    ))
+                  )}
+                  {modelSelections.length > 6 && (
+                    <Badge variant="default" size="sm">+{modelSelections.length - 6} more</Badge>
                   )}
                 </div>
-
-                <Tabs defaultValue="grid">
-                  <TabsList>
-                    <TabsTrigger value="grid">Grid</TabsTrigger>
-                    <TabsTrigger value="comparison">Compare</TabsTrigger>
-                  </TabsList>
-
-                  <TabsContent value="grid">
-                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                      {modelJudgments.map((judgment: any) => (
-                        <ModelJudgmentCard
-                          key={judgment.id}
-                          modelName={judgment.modelConfig.name}
-                          provider={judgment.modelConfig.provider}
-                          overallScore={judgment.overallScore}
-                          reasoning={judgment.reasoning}
-                          criteriaScores={judgment.criteriaScores}
-                          latencyMs={judgment.latencyMs}
-                          tokenCount={judgment.tokenCount}
-                          status={judgment.status}
-                          error={judgment.error}
-                          isSelected={
-                            selectedBestModelId === judgment.modelConfig.id
-                          }
-                          onSelect={() =>
-                            setSelectedBestModelId(
-                              selectedBestModelId === judgment.modelConfig.id
-                                ? null
-                                : judgment.modelConfig.id
-                            )
-                          }
-                        />
-                      ))}
-                    </div>
-                  </TabsContent>
-
-                  <TabsContent value="comparison">
-                    <div className="rounded-xl border border-surface-200 bg-white overflow-x-auto">
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="border-b border-surface-100">
-                            <th className="px-4 py-3 text-left text-xs font-semibold text-surface-500">
-                              Criterion
-                            </th>
-                            {completedJudgments.map((j: any) => (
-                              <th
-                                key={j.id}
-                                className="px-4 py-3 text-center text-xs font-semibold text-surface-500"
-                              >
-                                {j.modelConfig.name}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {criteria.map((criterion: any) => (
-                            <tr
-                              key={criterion.id}
-                              className="border-b border-surface-50"
-                            >
-                              <td className="px-4 py-2 text-xs font-medium text-surface-700">
-                                {criterion.name}
-                              </td>
-                              {completedJudgments.map((j: any) => {
-                                const scores = safeParseJSON<CriteriaScore[]>(
-                                  j.criteriaScores,
-                                  []
-                                );
-                                const cs = scores.find(
-                                  (s) =>
-                                    s.criterionId === criterion.id ||
-                                    s.criterionName === criterion.name
-                                );
-                                return (
-                                  <td
-                                    key={j.id}
-                                    className="px-4 py-2 text-center"
-                                  >
-                                    <span
-                                      className={cn(
-                                        'font-mono text-sm font-semibold',
-                                        cs
-                                          ? getScoreColor(
-                                              cs.score,
-                                              cs.maxScore
-                                            )
-                                          : 'text-surface-300'
-                                      )}
-                                    >
-                                      {cs
-                                        ? `${cs.score}/${cs.maxScore}`
-                                        : '—'}
-                                    </span>
-                                  </td>
-                                );
-                              })}
-                            </tr>
-                          ))}
-                          <tr className="bg-surface-50 font-semibold">
-                            <td className="px-4 py-2 text-xs text-surface-700">
-                              Overall
-                            </td>
-                            {completedJudgments.map((j: any) => (
-                              <td
-                                key={j.id}
-                                className="px-4 py-2 text-center"
-                              >
-                                <span
-                                  className={cn(
-                                    'font-mono text-base',
-                                    getScoreColor(j.overallScore)
-                                  )}
-                                >
-                                  {j.overallScore?.toFixed(1)}
-                                </span>
-                              </td>
-                            ))}
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
-                  </TabsContent>
-                </Tabs>
               </div>
+            </div>
+
+            <SubmissionViewer
+              text={evaluation.inputText}
+              title="Input Text"
+            />
+          </CardContent>
+        </Card>
+
+        {/* ── Runs list ─────────────────────────────────────────────────── */}
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-surface-700">
+              Runs ({runs.length})
+            </h2>
+            {runs.length > 0 && (
+              <Button variant="primary" size="sm" onClick={openNewRun}>
+                New Run
+              </Button>
             )}
           </div>
 
-          {/* Right Column: Human Judgment */}
-          <div className="lg:col-span-2">
-            <div className="sticky top-6">
-              <div className="rounded-xl border border-surface-200 bg-white p-5">
-                {rubric ? (
-                  <HumanJudgmentForm
-                    criteria={criteria}
-                    modelJudgmentIds={completedJudgments.map((j: any) => ({
-                      id: j.modelConfig.id,
-                      name: j.modelConfig.name,
-                    }))}
-                    existingJudgment={
-                      humanJudgment
-                        ? {
-                            overallScore: humanJudgment.overallScore,
-                            reasoning: humanJudgment.reasoning,
-                            criteriaScores: safeParseJSON<CriteriaScore[]>(
-                              humanJudgment.criteriaScores,
-                              []
-                            ),
-                            selectedBestModelId:
-                              humanJudgment.selectedBestModelId,
-                          }
-                        : undefined
-                    }
-                    onSubmit={submitHumanJudgment}
-                    loading={submittingHuman}
-                  />
-                ) : (
-                  <div className="text-center py-8">
-                    <p className="text-sm text-surface-500">
-                      Assign a rubric to this project to enable scoring.
-                    </p>
-                  </div>
-                )}
-              </div>
+          {runs.length === 0 ? (
+            <EmptyState
+              title="No runs yet"
+              description='Click "New Run" to run models against this evaluation template.'
+              action={
+                <Button variant="primary" onClick={openNewRun}>
+                  Start First Run
+                </Button>
+              }
+            />
+          ) : (
+            <div className="space-y-2">
+              {runs.map((run: any, index: number) => {
+                const sc = statusConfig[run.status] ?? statusConfig.pending;
+                const completedJudgments = (run.modelJudgments ?? []).filter(
+                  (j: any) => j.status === 'completed' && j.overallScore !== null
+                );
+                const avgScore =
+                  completedJudgments.length > 0
+                    ? completedJudgments.reduce((s: number, j: any) => s + j.overallScore, 0) /
+                      completedJudgments.length
+                    : null;
+
+                return (
+                  <Link
+                    key={run.id}
+                    href={`/evaluate/${evaluationId}/runs/${run.id}`}
+                    className="block"
+                  >
+                    <Card className="hover:border-brand-300 hover:shadow-sm transition-all cursor-pointer">
+                      <CardContent className="p-4">
+                        <div className="flex items-center gap-4">
+                          {/* Run number + ID */}
+                          <div className="shrink-0 hidden sm:flex flex-col items-center w-10">
+                            <span className="text-xs font-bold text-surface-500">#{runs.length - index}</span>
+                          </div>
+
+                          {/* Meta */}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2 mb-1">
+                              <Badge variant={sc.variant} size="sm">{sc.label}</Badge>
+                              {run.rubric && (
+                                <Badge variant="info" size="sm">
+                                  📋 {run.rubric.name} v{run.rubric.version}
+                                </Badge>
+                              )}
+                              <Badge variant="default" size="sm">
+                                🤖 {(run.runModelSelections ?? []).length} model{(run.runModelSelections ?? []).length === 1 ? '' : 's'}
+                              </Badge>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-3 text-xs text-surface-500">
+                              <span>
+                                Triggered by{' '}
+                                <span className="font-medium text-surface-700">
+                                  {run.triggeredBy?.name || run.triggeredBy?.email}
+                                </span>
+                              </span>
+                              <span>{formatDateTime(run.createdAt)}</span>
+                              <span className="font-mono text-2xs text-surface-300 hidden sm:inline">{run.id}</span>
+                            </div>
+                          </div>
+
+                          {/* Scores */}
+                          <div className="flex items-center gap-3 shrink-0">
+                            {avgScore !== null && (
+                              <div className="text-center">
+                                <div className={cn('text-base font-bold font-mono', getScoreColor(avgScore))}>
+                                  {avgScore.toFixed(1)}
+                                </div>
+                                <div className="text-2xs text-surface-400">Avg</div>
+                              </div>
+                            )}
+                            {run.humanJudgment && (
+                              <div className="text-center">
+                                <div className={cn('text-base font-bold font-mono', getScoreColor(run.humanJudgment.overallScore))}>
+                                  {run.humanJudgment.overallScore.toFixed(1)}
+                                </div>
+                                <div className="text-2xs text-surface-400">Human</div>
+                              </div>
+                            )}
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-surface-300 shrink-0">
+                              <path d="M9 18l6-6-6-6" />
+                            </svg>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </Link>
+                );
+              })}
             </div>
-          </div>
+          )}
         </div>
       </div>
 
+      {/* ── New Run Dialog ──────────────────────────────────────────────── */}
+      <Dialog open={newRunOpen} onOpenChange={setNewRunOpen}>
+        <DialogContent size="lg">
+          <DialogHeader>
+            <DialogTitle>New Evaluation Run</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
+            <div className="space-y-4">
+              <p className="text-sm text-surface-500">
+                Configure this run. Defaults are loaded from the evaluation template; you can override them.
+              </p>
+
+              <Select
+                label="Rubric"
+                value={runRubricId}
+                onChange={(e) => setRunRubricId(e.target.value)}
+                options={buildRubricVersionOptions(allRubrics)}
+                hint="The rubric version will be pinned for this run."
+              />
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-surface-700">Models</label>
+                  <span className="text-xs text-surface-500">{runModelIds.length}/10</span>
+                </div>
+                <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                  <Input
+                    label="Search models"
+                    value={runModelSearch}
+                    onChange={(e) => setRunModelSearch(e.target.value)}
+                    placeholder="Name, provider, or model ID"
+                  />
+                  <Select
+                    label="Quick add"
+                    value={quickAddModel}
+                    onChange={(e) => addRunModel(e.target.value)}
+                    options={quickRunOptions}
+                  />
+                </div>
+                {allModels.length === 0 ? (
+                  <div className="rounded-lg border border-surface-200 bg-surface-50 px-3 py-2 text-xs text-surface-500">
+                    No verified active models available.
+                  </div>
+                ) : (
+                  <div className="max-h-52 overflow-y-auto rounded-lg border border-surface-200 divide-y divide-surface-100">
+                    {filteredRunModels.map((model: any) => (
+                      <label
+                        key={model.id}
+                        className="flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-surface-50 cursor-pointer"
+                      >
+                        <div className="min-w-0">
+                          <p className="font-medium text-surface-800 truncate">{model.name}</p>
+                          <p className="text-xs text-surface-500 truncate">{model.provider} · {model.modelId}</p>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={runModelIds.includes(model.id)}
+                          onChange={() => toggleRunModel(model.id)}
+                          className="rounded border-surface-300 text-brand-600 focus:ring-brand-500"
+                        />
+                      </label>
+                    ))}
+                    {filteredRunModels.length === 0 && (
+                      <div className="px-3 py-2 text-xs text-surface-500">No models match your search.</div>
+                    )}
+                  </div>
+                )}
+                <p className="text-xs text-surface-500">Select 1–10 models. Scores and feedback will be recorded per model per run.</p>
+              </div>
+            </div>
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setNewRunOpen(false)}>Cancel</Button>
+            <Button
+              variant="primary"
+              loading={launching}
+              disabled={!runRubricId || runModelIds.length === 0}
+              onClick={launchRun}
+            >
+              Launch Run
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Change Default Rubric Dialog ─────────────────────────────────── */}
       <Dialog open={changeRubricOpen} onOpenChange={setChangeRubricOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Change Evaluation Rubric</DialogTitle>
+            <DialogTitle>Change Default Rubric</DialogTitle>
           </DialogHeader>
           <DialogBody>
             <Select
               label="Rubric"
               value={nextRubricId}
               onChange={(e) => setNextRubricId(e.target.value)}
-              options={buildRubricVersionOptions(allRubrics)}
-              hint="Change the rubric for this evaluation."
+              options={[
+                { value: '', label: 'No default rubric' },
+                ...buildRubricVersionOptions(allRubrics),
+              ]}
+              hint="This sets the default rubric for new runs on this evaluation."
             />
           </DialogBody>
           <DialogFooter>
-            <Button
-              variant="secondary"
-              onClick={() => setChangeRubricOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="primary"
-              loading={savingRubric}
-              disabled={!nextRubricId}
-              onClick={saveEvaluationRubric}
-            >
-              Save Rubric
-            </Button>
+            <Button variant="secondary" onClick={() => setChangeRubricOpen(false)}>Cancel</Button>
+            <Button variant="primary" loading={savingRubric} onClick={saveDefaultRubric}>Save</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
+      {/* ── Change Default Models Dialog ────────────────────────────────── */}
       <Dialog open={changeModelsOpen} onOpenChange={setChangeModelsOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Change Evaluation Models</DialogTitle>
+            <DialogTitle>Change Default Models</DialogTitle>
           </DialogHeader>
           <DialogBody>
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <label className="text-sm font-medium text-surface-700">
-                  Selected Models
-                </label>
-                <span className="text-xs text-surface-500">
-                  {nextModelIds.length}/10 selected
-                </span>
+                <label className="text-sm font-medium text-surface-700">Default Models</label>
+                <span className="text-xs text-surface-500">{nextModelIds.length}/10</span>
               </div>
-
               <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
                 <Input
                   label="Search models"
                   value={changeModelSearch}
                   onChange={(e) => setChangeModelSearch(e.target.value)}
-                  placeholder="Search by name, provider, or model ID"
+                  placeholder="Name, provider, or model ID"
                 />
                 <Select
                   label="Quick add"
-                  value={quickChangeModelId}
-                  onChange={(e) => {
-                    const modelId = e.target.value;
-                    if (!modelId) return;
-                    addNextModel(modelId);
-                    setQuickChangeModelId('');
-                  }}
+                  value={quickChangeModel}
+                  onChange={(e) => addDefaultModel(e.target.value)}
                   options={quickChangeOptions}
                 />
               </div>
-
               {allModels.length === 0 ? (
                 <div className="rounded-lg border border-surface-200 bg-surface-50 px-3 py-2 text-xs text-surface-500">
                   No verified active models available.
                 </div>
               ) : (
-                <div className="max-h-56 overflow-y-auto rounded-lg border border-surface-200 divide-y divide-surface-100">
-                  {filteredChangeModels.map((model: any) => {
-                    const selected = nextModelIds.includes(model.id);
-                    return (
-                      <label
-                        key={model.id}
-                        className="flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-surface-50 cursor-pointer"
-                      >
-                        <div className="min-w-0">
-                          <p className="font-medium text-surface-800 truncate">
-                            {model.name}
-                          </p>
-                          <p className="text-xs text-surface-500 truncate">
-                            {model.provider} · {model.modelId}
-                          </p>
-                        </div>
-                        <input
-                          type="checkbox"
-                          checked={selected}
-                          onChange={() => toggleNextModel(model.id)}
-                          className="rounded border-surface-300 text-brand-600 focus:ring-brand-500"
-                        />
-                      </label>
-                    );
-                  })}
+                <div className="max-h-52 overflow-y-auto rounded-lg border border-surface-200 divide-y divide-surface-100">
+                  {filteredChangeModels.map((model: any) => (
+                    <label
+                      key={model.id}
+                      className="flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-surface-50 cursor-pointer"
+                    >
+                      <div className="min-w-0">
+                        <p className="font-medium text-surface-800 truncate">{model.name}</p>
+                        <p className="text-xs text-surface-500 truncate">{model.provider} · {model.modelId}</p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={nextModelIds.includes(model.id)}
+                        onChange={() => toggleDefaultModel(model.id)}
+                        className="rounded border-surface-300 text-brand-600 focus:ring-brand-500"
+                      />
+                    </label>
+                  ))}
                   {filteredChangeModels.length === 0 && (
-                    <div className="px-3 py-2 text-xs text-surface-500">
-                      No models match your search.
-                    </div>
+                    <div className="px-3 py-2 text-xs text-surface-500">No models match your search.</div>
                   )}
                 </div>
               )}
-
-              <p className="text-xs text-surface-500">
-                Select 0 models for human-only evaluation, or up to 10 models.
-              </p>
+              <p className="text-xs text-surface-500">These are defaults; you can override them per run.</p>
             </div>
           </DialogBody>
           <DialogFooter>
-            <Button
-              variant="secondary"
-              onClick={() => setChangeModelsOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="primary"
-              loading={savingModels}
-              onClick={saveEvaluationModels}
-            >
-              Save Models
-            </Button>
+            <Button variant="secondary" onClick={() => setChangeModelsOpen(false)}>Cancel</Button>
+            <Button variant="primary" loading={savingModels} onClick={saveDefaultModels}>Save</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
   );
 }
+
+
+
+
+
+
+
+
+

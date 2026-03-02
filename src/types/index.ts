@@ -9,28 +9,131 @@ export interface CriteriaScore {
   comment?: string;
 }
 
+// ─── Evaluation Template ─────────────────────────────────────────────────────
+
 export interface EvaluationWithRelations {
   id: string;
   projectId: string;
   inputText: string;
   title: string | null;
-  status: string;
   createdAt: string;
   updatedAt: string;
   project: {
     id: string;
     name: string;
   };
+  rubric?: {
+    id: string;
+    name: string;
+    version: number;
+    parentId: string | null;
+  } | null;
+  modelSelections: {
+    id: string;
+    modelConfigId: string;
+    modelConfig: {
+      id: string;
+      name: string;
+      provider: string;
+      modelId: string;
+    };
+  }[];
+  /** Summary of runs for this template (sorted newest-first) */
+  runs: EvaluationRunSummary[];
+}
+
+// ─── Evaluation Run ───────────────────────────────────────────────────────────
+
+export interface EvaluationRunSummary {
+  id: string;
+  evaluationId: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  rubric?: {
+    id: string;
+    name: string;
+    version: number;
+  } | null;
+  triggeredBy: {
+    id: string;
+    name: string | null;
+    email: string;
+  };
+  runModelSelections: {
+    id: string;
+    modelConfigId: string;
+    modelConfig: {
+      id: string;
+      name: string;
+      provider: string;
+    };
+  }[];
+  modelJudgments: {
+    id: string;
+    status: string;
+    overallScore: number | null;
+    modelConfig: {
+      id: string;
+      name: string;
+      provider: string;
+    };
+  }[];
+  humanJudgment?: {
+    overallScore: number;
+  } | null;
+}
+
+export interface EvaluationRunDetail {
+  id: string;
+  evaluationId: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  rubric?: {
+    id: string;
+    name: string;
+    version: number;
+    parentId: string | null;
+    criteria: RubricCriterionView[];
+  } | null;
+  triggeredBy: {
+    id: string;
+    name: string | null;
+    email: string;
+  };
+  evaluation: {
+    id: string;
+    title: string | null;
+    inputText: string;
+    project: {
+      id: string;
+      name: string;
+    };
+  };
+  runModelSelections: {
+    id: string;
+    modelConfigId: string;
+    modelConfig: {
+      id: string;
+      name: string;
+      provider: string;
+      modelId: string;
+    };
+  }[];
   modelJudgments: ModelJudgmentView[];
   humanJudgment: HumanJudgmentView | null;
 }
 
+// ─── Judgments ───────────────────────────────────────────────────────────────
+
 export interface ModelJudgmentView {
   id: string;
-  evaluationId: string;
+  runId: string;
   modelConfigId: string;
   overallScore: number | null;
   reasoning: string | null;
+  rawResponse: string | null;
   criteriaScores: CriteriaScore[];
   latencyMs: number | null;
   tokenCount: number | null;
@@ -47,18 +150,27 @@ export interface ModelJudgmentView {
 
 export interface HumanJudgmentView {
   id: string;
-  evaluationId: string;
+  runId: string;
   overallScore: number;
   reasoning: string | null;
   criteriaScores: CriteriaScore[];
   selectedBestModelId: string | null;
   createdAt: string;
+  user?: {
+    id: string;
+    name: string | null;
+    email: string;
+  };
 }
+
+// ─── Rubric ───────────────────────────────────────────────────────────────────
 
 export interface RubricWithCriteria {
   id: string;
   name: string;
   description: string | null;
+  version: number;
+  parentId: string | null;
   criteria: RubricCriterionView[];
   createdAt: string;
   updatedAt: string;
@@ -74,6 +186,8 @@ export interface RubricCriterionView {
   order: number;
 }
 
+// ─── Model Config ─────────────────────────────────────────────────────────────
+
 export interface ModelConfigView {
   id: string;
   name: string;
@@ -86,6 +200,8 @@ export interface ModelConfigView {
   hasApiKey: boolean;
 }
 
+// ─── Project ──────────────────────────────────────────────────────────────────
+
 export interface ProjectWithDetails {
   id: string;
   name: string;
@@ -96,6 +212,8 @@ export interface ProjectWithDetails {
     evaluations: number;
   };
 }
+
+// ─── Misc ─────────────────────────────────────────────────────────────────────
 
 export type EvaluationStatus = 'pending' | 'judging' | 'completed' | 'error';
 export type JudgmentStatus = 'pending' | 'running' | 'completed' | 'error';

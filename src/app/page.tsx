@@ -224,26 +224,27 @@ export default function DashboardPage() {
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
-                      <Badge
-                        variant={
-                          evaluation.status === 'completed'
-                            ? 'success'
-                            : evaluation.status === 'error'
-                              ? 'error'
-                              : evaluation.status === 'judging'
-                                ? 'info'
-                                : 'warning'
-                        }
-                        size="sm"
-                      >
-                        {evaluation.status}
-                      </Badge>
-                      {evaluation.modelJudgments?.length > 0 && (
-                        <span className="text-2xs text-surface-400">
-                          {evaluation.modelJudgments.length} model
-                          {evaluation.modelJudgments.length !== 1 ? 's' : ''}
-                        </span>
-                      )}
+                      {(() => {
+                        const latestRun = (evaluation.runs ?? [])[0];
+                        const runCount = (evaluation.runs ?? []).length;
+                        const statusVariant =
+                          latestRun?.status === 'completed' ? 'success'
+                          : latestRun?.status === 'error' ? 'error'
+                          : latestRun?.status === 'judging' ? 'info'
+                          : 'default';
+                        return (
+                          <>
+                            <Badge variant="default" size="sm">
+                              {runCount} run{runCount === 1 ? '' : 's'}
+                            </Badge>
+                            {latestRun && (
+                              <Badge variant={statusVariant} size="sm">
+                                {latestRun.status}
+                              </Badge>
+                            )}
+                          </>
+                        );
+                      })()}
                     </div>
                   </Link>
                 ))}

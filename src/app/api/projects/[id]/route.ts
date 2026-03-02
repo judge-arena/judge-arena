@@ -47,10 +47,15 @@ export async function GET(
               },
               orderBy: { createdAt: 'asc' },
             },
-            modelJudgments: {
-              include: { modelConfig: true },
+            // Include run summaries so the project page can show run count + latest status
+            runs: {
+              select: {
+                id: true,
+                status: true,
+                createdAt: true,
+              },
+              orderBy: { createdAt: 'desc' },
             },
-            humanJudgment: true,
           },
           orderBy: { createdAt: 'desc' },
         },

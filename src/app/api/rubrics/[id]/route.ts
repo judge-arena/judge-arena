@@ -34,7 +34,7 @@ export async function GET(
       include: {
         criteria: { orderBy: { order: 'asc' } },
         user: { select: { id: true, name: true, email: true } },
-        _count: { select: { projects: true } },
+        _count: { select: { evaluations: true, evaluationRuns: true } },
       },
     });
 

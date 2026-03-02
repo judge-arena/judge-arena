@@ -13,16 +13,25 @@ export async function GET() {
     const [
       totalProjects,
       totalEvaluations,
-      completedEvaluations,
-      pendingEvaluations,
+      completedRuns,
+      pendingRuns,
       activeModels,
       totalRubrics,
     ] = await Promise.all([
       prisma.project.count({ where: userFilter }),
       prisma.evaluation.count({ where: userFilter }),
-      prisma.evaluation.count({ where: { ...userFilter, status: 'completed' } }),
-      prisma.evaluation.count({
-        where: { ...userFilter, status: { in: ['pending', 'judging'] } },
+      // Runs (not templates) are what have a status
+      prisma.evaluationRun.count({
+        where: {
+          status: 'completed',
+          ...(isAdmin(session) ? {} : { triggeredById: session.user.id }),
+        },
+      }),
+      prisma.evaluationRun.count({
+        where: {
+          status: { in: ['pending', 'judging'] },
+          ...(isAdmin(session) ? {} : { triggeredById: session.user.id }),
+        },
       }),
       prisma.modelConfig.count({ where: { ...userFilter, isActive: true } }),
       prisma.rubric.count({ where: userFilter }),
@@ -31,8 +40,8 @@ export async function GET() {
     return NextResponse.json({
       totalProjects,
       totalEvaluations,
-      completedEvaluations,
-      pendingEvaluations,
+      completedEvaluations: completedRuns,
+      pendingEvaluations: pendingRuns,
       activeModels,
       totalRubrics,
     });
