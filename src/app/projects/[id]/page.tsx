@@ -171,18 +171,6 @@ export default function ProjectDetailPage() {
     }
   };
 
-  // Ctrl+N to create new evaluation
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
-        e.preventDefault();
-        setCreateEvalOpen(true);
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, []);
-
   if (loading) {
     return (
       <div>

@@ -93,7 +93,7 @@ export default function RunDetailPage() {
     }
   };
 
-  // Keyboard shortcut: Ctrl+Enter (handled by HumanJudgmentForm)
+  // Keyboard shortcuts for scoring are handled by HumanJudgmentForm
 
   if (loading) {
     return (

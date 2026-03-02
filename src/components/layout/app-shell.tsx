@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useSession } from 'next-auth/react';
 import { Sidebar } from '@/components/layout/sidebar';
@@ -12,6 +12,8 @@ const publicPaths = ['/login', '/register'];
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const chordRef = useRef<string[]>([]);
+  const chordTimeoutRef = useRef<number | null>(null);
   const router = useRouter();
   const pathname = usePathname();
   const { status } = useSession();
@@ -24,6 +26,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       router.push('/login');
     }
   }, [status, isPublicPage, router]);
+
+  const clearChord = useCallback(() => {
+    chordRef.current = [];
+    if (chordTimeoutRef.current !== null) {
+      window.clearTimeout(chordTimeoutRef.current);
+      chordTimeoutRef.current = null;
+    }
+  }, []);
+
+  const scheduleChordReset = useCallback(() => {
+    if (chordTimeoutRef.current !== null) {
+      window.clearTimeout(chordTimeoutRef.current);
+    }
+    chordTimeoutRef.current = window.setTimeout(() => {
+      chordRef.current = [];
+      chordTimeoutRef.current = null;
+    }, 1200);
+  }, []);
 
   // Global keyboard shortcuts
   const handleKeyDown = useCallback(
@@ -44,59 +64,71 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       if (e.key === 'Escape') {
         setShortcutsOpen(false);
+        clearChord();
         return;
       }
 
-      // Ctrl/Cmd shortcuts (work even in inputs)
-      const mod = e.ctrlKey || e.metaKey;
-
-      if (mod && e.key === 'k') {
-        e.preventDefault();
-        // Future: open command palette / quick search
+      if (isInput || e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1) {
         return;
       }
 
-      // Navigation shortcuts (only when not in input)
-      if (!isInput) {
-        // G + key navigation (vim-style)
-        if (e.key === 'g') {
-          const handleNavKey = (navEvent: KeyboardEvent) => {
-            switch (navEvent.key) {
-              case 'd':
-                router.push('/');
-                break;
-              case 'p':
-                router.push('/projects');
-                break;
-              case 'r':
-                router.push('/rubrics');
-                break;
-              case 'm':
-                router.push('/models');
-                break;
-              case 'e':
-                router.push('/evaluations');
-                break;
-            }
-            window.removeEventListener('keydown', handleNavKey);
-          };
+      const key = e.key.toLowerCase();
 
-          window.addEventListener('keydown', handleNavKey, { once: true });
-          // Auto-cleanup after timeout
-          setTimeout(() => {
-            window.removeEventListener('keydown', handleNavKey);
-          }, 1000);
+      if (chordRef.current.length === 0) {
+        if (key !== 'g') {
           return;
         }
+        e.preventDefault();
+        chordRef.current = ['g'];
+        scheduleChordReset();
+        return;
+      }
+
+      if (chordRef.current[0] !== 'g') {
+        clearChord();
+        return;
+      }
+
+      e.preventDefault();
+      const sequence = [...chordRef.current, key];
+      const sequenceKey = sequence.join(' ');
+
+      switch (sequenceKey) {
+        case 'g d':
+          router.push('/');
+          clearChord();
+          return;
+        case 'g p':
+          router.push('/projects');
+          clearChord();
+          return;
+        case 'g r':
+          router.push('/rubrics');
+          clearChord();
+          return;
+        case 'g m':
+          router.push('/models');
+          clearChord();
+          return;
+        case 'g e':
+          router.push('/evaluations');
+          clearChord();
+          return;
+        default:
+          clearChord();
+          return;
       }
     },
-    [router]
+    [router, clearChord, scheduleChordReset]
   );
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleKeyDown]);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      clearChord();
+    };
+  }, [handleKeyDown, clearChord]);
 
   // Show loading state while checking auth
   if (status === 'loading') {

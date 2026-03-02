@@ -92,11 +92,11 @@ export function HumanJudgmentForm({
         return;
       }
 
-      // Number keys 1-9 for quick scoring
       const num = parseInt(e.key);
       if (num >= 1 && num <= 9 && !e.ctrlKey && !e.metaKey && !e.altKey) {
         setOverallScore(num);
       }
+
       if (e.key === '0' && !e.ctrlKey && !e.metaKey && !e.altKey) {
         setOverallScore(10);
       }
@@ -229,7 +229,7 @@ export function HumanJudgmentForm({
         onChange={(e) => setReasoning(e.target.value)}
         placeholder="Explain your judgment... What stood out? Where did models agree or disagree?"
         rows={4}
-        hint="Ctrl+Enter to submit"
+        hint="Use 1-9 for quick score"
       />
 
       {/* Submit */}

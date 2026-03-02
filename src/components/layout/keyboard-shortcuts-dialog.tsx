@@ -10,7 +10,6 @@ import {
   DialogBody,
 } from '@/components/ui/dialog';
 import { Kbd } from '@/components/ui/kbd';
-import { formatShortcut } from '@/lib/utils';
 
 interface ShortcutGroup {
   title: string;
@@ -28,15 +27,7 @@ const shortcutGroups: ShortcutGroup[] = [
       { keys: ['G', 'P'], description: 'Go to Projects' },
       { keys: ['G', 'R'], description: 'Go to Rubrics' },
       { keys: ['G', 'M'], description: 'Go to Models' },
-    ],
-  },
-  {
-    title: 'Actions',
-    shortcuts: [
-      { keys: [formatShortcut('Mod'), 'N'], description: 'New evaluation' },
-      { keys: [formatShortcut('Mod'), 'Enter'], description: 'Submit judgment' },
-      { keys: [formatShortcut('Mod'), 'E'], description: 'Run model evaluation' },
-      { keys: [formatShortcut('Mod'), 'S'], description: 'Save current work' },
+      { keys: ['G', 'E'], description: 'Go to Evaluations' },
     ],
   },
   {
@@ -54,7 +45,6 @@ const shortcutGroups: ShortcutGroup[] = [
     shortcuts: [
       { keys: ['?'], description: 'Show keyboard shortcuts' },
       { keys: ['Esc'], description: 'Close dialog / Cancel' },
-      { keys: [formatShortcut('Mod'), 'K'], description: 'Quick search' },
     ],
   },
 ];

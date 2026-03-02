@@ -11,7 +11,7 @@ const navItems = [
   {
     label: 'Dashboard',
     href: '/',
-    shortcut: 'D',
+    shortcut: 'G D',
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <rect x="3" y="3" width="7" height="7" rx="1" />
@@ -24,7 +24,7 @@ const navItems = [
   {
     label: 'Projects',
     href: '/projects',
-    shortcut: 'P',
+    shortcut: 'G P',
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
@@ -34,7 +34,7 @@ const navItems = [
   {
     label: 'Rubrics',
     href: '/rubrics',
-    shortcut: 'R',
+    shortcut: 'G R',
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M9 11l3 3L22 4" />
@@ -45,7 +45,7 @@ const navItems = [
   {
     label: 'Models',
     href: '/models',
-    shortcut: 'M',
+    shortcut: 'G M',
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M12 2L2 7l10 5 10-5-10-5z" />
@@ -57,7 +57,7 @@ const navItems = [
   {
     label: 'Evaluations',
     href: '/evaluations',
-    shortcut: 'E',
+    shortcut: 'G E',
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />

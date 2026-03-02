@@ -86,18 +86,6 @@ export default function ProjectsPage() {
     }
   };
 
-  // Ctrl+N to create
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
-        e.preventDefault();
-        setCreateOpen(true);
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, []);
-
   return (
     <div>
       <Header
