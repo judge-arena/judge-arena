@@ -43,6 +43,8 @@ export async function GET(
         },
         project: { select: { id: true, name: true } },
         user: { select: { id: true, name: true, email: true } },
+        dataset: { select: { id: true, name: true, sampleCount: true } },
+        datasetSample: { select: { id: true, index: true, input: true, expected: true } },
         modelSelections: {
           include: {
             modelConfig: {
@@ -136,6 +138,8 @@ export async function PATCH(
         include: {
           rubric: { include: { criteria: { orderBy: { order: 'asc' } } } },
           project: { select: { id: true, name: true } },
+          dataset: { select: { id: true, name: true, sampleCount: true } },
+          datasetSample: { select: { id: true, index: true, input: true, expected: true } },
           modelSelections: {
             include: {
               modelConfig: {

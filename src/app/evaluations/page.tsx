@@ -27,16 +27,17 @@ interface RunSummary {
 }
 
 const statusConfig: Record<string, { label: string; variant: 'default' | 'success' | 'warning' | 'error' | 'info' }> = {
-  pending:   { label: 'Pending',   variant: 'warning' },
-  judging:   { label: 'Judging',   variant: 'info' },
-  completed: { label: 'Completed', variant: 'success' },
-  error:     { label: 'Error',     variant: 'error' },
+  pending:     { label: 'Pending',      variant: 'warning' },
+  judging:     { label: 'Judging',      variant: 'info' },
+  needs_human: { label: 'Needs Human',  variant: 'warning' },
+  completed:   { label: 'Completed',    variant: 'success' },
+  error:       { label: 'Error',        variant: 'error' },
 };
 
 export default function EvaluationsPage() {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<'all' | 'pending' | 'completed' | 'error'>('all');
+  const [filter, setFilter] = useState<'all' | 'pending' | 'needs_human' | 'completed' | 'error'>('all');
   const [search, setSearch] = useState('');
 
   useEffect(() => {
@@ -73,6 +74,7 @@ export default function EvaluationsPage() {
   const filtered = runs.filter((run) => {
     // Status filter
     if (filter === 'pending' && run.status !== 'pending' && run.status !== 'judging') return false;
+    if (filter === 'needs_human' && run.status !== 'needs_human') return false;
     if (filter === 'completed' && run.status !== 'completed') return false;
     if (filter === 'error' && run.status !== 'error') return false;
 
@@ -93,6 +95,7 @@ export default function EvaluationsPage() {
   const counts = {
     all: runs.length,
     pending: runs.filter((r) => r.status === 'pending' || r.status === 'judging').length,
+    needs_human: runs.filter((r) => r.status === 'needs_human').length,
     completed: runs.filter((r) => r.status === 'completed').length,
     error: runs.filter((r) => r.status === 'error').length,
   };
@@ -114,8 +117,8 @@ export default function EvaluationsPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
-          <div className="flex gap-1.5">
-            {(['all', 'pending', 'completed', 'error'] as const).map((f) => (
+          <div className="flex gap-1.5 flex-wrap">
+            {(['all', 'pending', 'needs_human', 'completed', 'error'] as const).map((f) => (
               <button
                 key={f}
                 onClick={() => setFilter(f)}
@@ -125,7 +128,7 @@ export default function EvaluationsPage() {
                     : 'bg-surface-100 text-surface-600 hover:bg-surface-200'
                 }`}
               >
-                {f === 'all' ? 'All' : f.charAt(0).toUpperCase() + f.slice(1)} ({counts[f]})
+                {f === 'all' ? 'All' : f === 'needs_human' ? 'Needs Human' : f.charAt(0).toUpperCase() + f.slice(1)} ({counts[f]})
               </button>
             ))}
           </div>

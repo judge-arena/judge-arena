@@ -1,6 +1,7 @@
 import { getServerSession } from 'next-auth';
 import { NextResponse } from 'next/server';
 import { authOptions } from '@/lib/auth';
+import { prisma } from '@/lib/db';
 
 export interface AuthSession {
   user: {
@@ -24,12 +25,38 @@ export async function requireAuth(): Promise<AuthSession | NextResponse> {
   if (!session?.user || !(session.user as any).id) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
+
+  const sessionUserId = (session.user as any).id as string;
+  const sessionEmail = session.user.email ?? null;
+
+  const dbUserById = await prisma.user.findUnique({
+    where: { id: sessionUserId },
+    select: { id: true, email: true, name: true, role: true },
+  });
+
+  let resolvedUser = dbUserById;
+
+  if (!resolvedUser && sessionEmail) {
+    const dbUserByEmail = await prisma.user.findUnique({
+      where: { email: sessionEmail },
+      select: { id: true, email: true, name: true, role: true },
+    });
+    resolvedUser = dbUserByEmail;
+  }
+
+  if (!resolvedUser) {
+    return NextResponse.json(
+      { error: 'User not found for current session. Please sign out and sign in again.' },
+      { status: 401 }
+    );
+  }
+
   return {
     user: {
-      id: (session.user as any).id,
-      email: session.user.email!,
-      name: session.user.name ?? null,
-      role: (session.user as any).role ?? 'user',
+      id: resolvedUser.id,
+      email: resolvedUser.email,
+      name: resolvedUser.name ?? null,
+      role: resolvedUser.role ?? (session.user as any).role ?? 'user',
     },
   };
 }

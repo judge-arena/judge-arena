@@ -114,12 +114,21 @@ model Evaluation {
   user            User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
   modelSelections EvaluationModelSelection[] // default model list for new runs
   runs            EvaluationRun[]
+
+  // ── Dataset link (populated when evaluation was created from a dataset) ──
+  datasetId       String?
+  dataset         Dataset?                   @relation(fields: [datasetId], references: [id], onDelete: SetNull)
+  datasetSampleId String?
+  datasetSample   DatasetSample?             @relation(fields: [datasetSampleId], references: [id], onDelete: SetNull)
+
   createdAt       DateTime                   @default(now())
   updatedAt       DateTime                   @updatedAt
 
   @@index([projectId])
   @@index([rubricId])
   @@index([userId])
+  @@index([datasetId])
+  @@index([datasetSampleId])
 }
 
 model EvaluationModelSelection {
@@ -145,7 +154,7 @@ model EvaluationRun {
   evaluation         Evaluation          @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
   rubricId           String?             // rubric version pinned at run time
   rubric             Rubric?             @relation(fields: [rubricId], references: [id])
-  status             String              @default("pending") // pending | judging | completed | error
+  status             String              @default("pending") // pending | judging | needs_human | completed | error
   triggeredById      String
   triggeredBy        User                @relation(fields: [triggeredById], references: [id], onDelete: Cascade)
   runModelSelections RunModelSelection[]
@@ -254,7 +263,8 @@ model Dataset {
   userId    String
   user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  samples   DatasetSample[]
+  samples     DatasetSample[]
+  evaluations Evaluation[]
 
   createdAt DateTime         @default(now())
   updatedAt DateTime         @updatedAt
@@ -274,7 +284,8 @@ model DatasetSample {
   expected  String? // expected output / reference answer (optional)
   metadata  String? // JSON: any extra fields from the source
 
-  createdAt DateTime @default(now())
+  evaluations Evaluation[]
+  createdAt   DateTime @default(now())
 
   @@index([datasetId])
   @@unique([datasetId, index])

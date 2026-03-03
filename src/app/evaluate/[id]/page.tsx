@@ -31,10 +31,11 @@ import {
 import { toast } from 'sonner';
 
 const statusConfig: Record<string, { label: string; variant: 'default' | 'success' | 'warning' | 'error' | 'info' }> = {
-  pending:  { label: 'Pending',  variant: 'warning' },
-  judging:  { label: 'Judging',  variant: 'info' },
-  completed:{ label: 'Completed',variant: 'success' },
-  error:    { label: 'Error',    variant: 'error' },
+  pending:     { label: 'Pending',      variant: 'warning' },
+  judging:     { label: 'Judging',      variant: 'info' },
+  needs_human: { label: 'Needs Human',  variant: 'warning' },
+  completed:   { label: 'Completed',    variant: 'success' },
+  error:       { label: 'Error',        variant: 'error' },
 };
 
 export default function EvaluateTemplatePage() {
@@ -275,6 +276,40 @@ export default function EvaluateTemplatePage() {
                 )}
               </div>
             </div>
+
+            {/* Dataset context */}
+            {evaluation.dataset && (
+              <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 flex items-center gap-2">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-blue-600 shrink-0" aria-hidden="true">
+                  <ellipse cx="12" cy="5" rx="9" ry="3" />
+                  <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+                  <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+                </svg>
+                <div className="text-xs text-blue-800">
+                  <span className="font-medium">From dataset:</span>{' '}
+                  <a href={`/datasets/${evaluation.dataset.id}`} className="underline hover:text-blue-900">
+                    {evaluation.dataset.name}
+                  </a>
+                  {evaluation.datasetSample && (
+                    <span className="ml-1 text-blue-600">
+                      (sample #{evaluation.datasetSample.index + 1})
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Expected output (from dataset sample) */}
+            {evaluation.datasetSample?.expected && (
+              <div className="mb-4">
+                <p className="text-2xs font-semibold uppercase tracking-wider text-surface-400 mb-1">
+                  Expected Output (Reference)
+                </p>
+                <div className="rounded-lg border border-surface-200 bg-surface-50 p-3 text-xs text-surface-700 whitespace-pre-wrap max-h-32 overflow-y-auto">
+                  {evaluation.datasetSample.expected}
+                </div>
+              </div>
+            )}
 
             <SubmissionViewer
               text={evaluation.inputText}

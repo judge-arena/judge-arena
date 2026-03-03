@@ -28,6 +28,17 @@ export interface EvaluationWithRelations {
     version: number;
     parentId: string | null;
   } | null;
+  dataset?: {
+    id: string;
+    name: string;
+    sampleCount: number | null;
+  } | null;
+  datasetSample?: {
+    id: string;
+    index: number;
+    input: string;
+    expected: string | null;
+  } | null;
   modelSelections: {
     id: string;
     modelConfigId: string;
@@ -256,7 +267,7 @@ export interface DatasetDetail extends DatasetListItem {
 
 // ─── Misc ─────────────────────────────────────────────────────────────────────
 
-export type EvaluationStatus = 'pending' | 'judging' | 'completed' | 'error';
+export type EvaluationStatus = 'pending' | 'judging' | 'needs_human' | 'completed' | 'error';
 export type JudgmentStatus = 'pending' | 'running' | 'completed' | 'error';
 export type ModelProvider = 'anthropic' | 'openai' | 'local';
 

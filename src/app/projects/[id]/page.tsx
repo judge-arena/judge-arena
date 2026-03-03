@@ -41,12 +41,18 @@ export default function ProjectDetailPage() {
   const [modelSearch, setModelSearch] = useState('');
   const [quickAddModelId, setQuickAddModelId] = useState('');
 
+  // ── Dataset mode state ──
+  const [evalMode, setEvalMode] = useState<'text' | 'dataset'>('text');
+  const [availableDatasets, setAvailableDatasets] = useState<any[]>([]);
+  const [selectedDatasetId, setSelectedDatasetId] = useState('');
+
   const loadProject = useCallback(async () => {
     try {
-      const [projectRes, rubricsRes, modelsRes] = await Promise.all([
+      const [projectRes, rubricsRes, modelsRes, datasetsRes] = await Promise.all([
         fetch(`/api/projects/${projectId}`),
         fetch('/api/rubrics'),
         fetch('/api/models'),
+        fetch('/api/datasets'),
       ]);
 
       if (projectRes.ok) {
@@ -64,6 +70,12 @@ export default function ProjectDetailPage() {
         const models = await modelsRes.json();
         const usable = models.filter((m: any) => m.isActive && m.isVerified);
         setAvailableModels(usable);
+      }
+
+      if (datasetsRes.ok) {
+        const datasets = await datasetsRes.json();
+        // Only show datasets that have samples
+        setAvailableDatasets(datasets.filter((d: any) => (d._count?.samples ?? d.sampleCount ?? 0) > 0));
       }
     } catch {
       toast.error('Failed to load project');
@@ -138,28 +150,51 @@ export default function ProjectDetailPage() {
   };
 
   const handleCreateEvaluation = async () => {
-    if (!evalText.trim()) return;
+    if (evalMode === 'text' && !evalText.trim()) return;
+    if (evalMode === 'dataset' && !selectedDatasetId) return;
+
     setSubmitting(true);
     try {
+      const payload =
+        evalMode === 'text'
+          ? {
+              mode: 'single',
+              projectId,
+              title: evalTitle || undefined,
+              inputText: evalText,
+              ...(selectedRubricVersionId && { rubricId: selectedRubricVersionId }),
+              modelConfigIds: selectedModelIds,
+            }
+          : {
+              mode: 'dataset',
+              projectId,
+              datasetId: selectedDatasetId,
+              ...(selectedRubricVersionId && { rubricId: selectedRubricVersionId }),
+              modelConfigIds: selectedModelIds,
+            };
+
       const res = await fetch('/api/evaluations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          projectId,
-          title: evalTitle || undefined,
-          inputText: evalText,
-          ...(selectedRubricVersionId && { rubricId: selectedRubricVersionId }),
-          modelConfigIds: selectedModelIds,
-        }),
+        body: JSON.stringify(payload),
       });
       if (res.ok) {
-        const evaluation = await res.json();
-        toast.success('Evaluation created');
+        const result = await res.json();
         setCreateEvalOpen(false);
         setEvalTitle('');
         setEvalText('');
         setSelectedModelIds([]);
-        router.push(`/evaluate/${evaluation.id}`);
+        setSelectedDatasetId('');
+        setEvalMode('text');
+
+        if (result.mode === 'dataset') {
+          toast.success(`Created ${result.evaluationsCreated} evaluations from dataset "${result.datasetName}"`);
+          // Reload project to show new evaluations
+          loadProject();
+        } else {
+          toast.success('Evaluation created');
+          router.push(`/evaluate/${result.id}`);
+        }
       } else {
         const data = await res.json();
         toast.error(data.error || 'Failed to create evaluation');
@@ -293,9 +328,21 @@ export default function ProjectDetailPage() {
                   className="flex items-center gap-4 px-4 py-3 hover:bg-surface-50 transition-colors first:rounded-t-xl last:rounded-b-xl"
                 >
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-surface-900 truncate">
-                      {evaluation.title || 'Untitled Evaluation'}
-                    </p>
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium text-surface-900 truncate">
+                        {evaluation.title || 'Untitled Evaluation'}
+                      </p>
+                      {evaluation.datasetId && (
+                        <Badge variant="info" size="sm">
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="mr-0.5" aria-hidden="true">
+                            <ellipse cx="12" cy="5" rx="9" ry="3" />
+                            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+                            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+                          </svg>
+                          Dataset
+                        </Badge>
+                      )}
+                    </div>
                     <p className="text-xs text-surface-400 truncate mt-0.5">
                       {formatDateTime(evaluation.createdAt)} · {evaluation.inputText?.length?.toLocaleString()} chars
                     </p>
@@ -329,11 +376,13 @@ export default function ProjectDetailPage() {
                                     ? 'error'
                                     : latestRun.status === 'judging'
                                       ? 'info'
-                                      : 'warning'
+                                      : latestRun.status === 'needs_human'
+                                        ? 'warning'
+                                        : 'warning'
                               }
                               size="sm"
                             >
-                              {latestRun.status}
+                              {latestRun.status === 'needs_human' ? 'Needs Human' : latestRun.status}
                             </Badge>
                           )}
                         </>
@@ -366,13 +415,105 @@ export default function ProjectDetailPage() {
           </DialogHeader>
           <DialogBody>
             <div className="space-y-4">
-              <Input
-                label="Title (optional)"
-                value={evalTitle}
-                onChange={(e) => setEvalTitle(e.target.value)}
-                placeholder="e.g., PR #42 Code Review"
-                autoFocus
-              />
+              {/* ── Source toggle: Text vs Dataset ── */}
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium text-surface-700">Evaluation Source</label>
+                <div className="flex rounded-lg border border-surface-200 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setEvalMode('text')}
+                    className={`flex-1 px-4 py-2.5 text-sm font-medium transition-colors ${
+                      evalMode === 'text'
+                        ? 'bg-brand-600 text-white'
+                        : 'bg-white text-surface-600 hover:bg-surface-50'
+                    }`}
+                  >
+                    <span className="flex items-center justify-center gap-2">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                        <polyline points="14 2 14 8 20 8" />
+                        <line x1="16" y1="13" x2="8" y2="13" />
+                        <line x1="16" y1="17" x2="8" y2="17" />
+                      </svg>
+                      Text to Evaluate
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEvalMode('dataset')}
+                    className={`flex-1 px-4 py-2.5 text-sm font-medium transition-colors border-l border-surface-200 ${
+                      evalMode === 'dataset'
+                        ? 'bg-brand-600 text-white'
+                        : 'bg-white text-surface-600 hover:bg-surface-50'
+                    }`}
+                  >
+                    <span className="flex items-center justify-center gap-2">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                        <ellipse cx="12" cy="5" rx="9" ry="3" />
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+                      </svg>
+                      Dataset to Evaluate
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              {/* ── Text-mode: title + textarea ── */}
+              {evalMode === 'text' && (
+                <>
+                  <Input
+                    label="Title (optional)"
+                    value={evalTitle}
+                    onChange={(e) => setEvalTitle(e.target.value)}
+                    placeholder="e.g., PR #42 Code Review"
+                    autoFocus
+                  />
+                </>
+              )}
+
+              {/* ── Dataset-mode: dataset picker ── */}
+              {evalMode === 'dataset' && (
+                <div className="space-y-2">
+                  <Select
+                    label="Dataset"
+                    value={selectedDatasetId}
+                    onChange={(e) => setSelectedDatasetId(e.target.value)}
+                    options={[
+                      { value: '', label: 'Select a dataset...' },
+                      ...availableDatasets.map((d: any) => ({
+                        value: d.id,
+                        label: `${d.name} (${d._count?.samples ?? d.sampleCount ?? '?'} samples)`,
+                      })),
+                    ]}
+                    hint="Each sample in the dataset will become a separate evaluation"
+                  />
+                  {selectedDatasetId && (() => {
+                    const ds = availableDatasets.find((d: any) => d.id === selectedDatasetId);
+                    if (!ds) return null;
+                    const count = ds._count?.samples ?? ds.sampleCount ?? 0;
+                    return (
+                      <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+                        <p className="font-medium mb-1">Dataset: {ds.name}</p>
+                        {ds.description && <p className="text-blue-700 mb-1">{ds.description}</p>}
+                        <p>
+                          This will create <span className="font-bold">{count} evaluation{count !== 1 ? 's' : ''}</span>
+                          {' '}— one per dataset sample. Each can be independently run through model + human evaluation.
+                        </p>
+                      </div>
+                    );
+                  })()}
+                  {availableDatasets.length === 0 && (
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
+                      No datasets with samples available.{' '}
+                      <a href="/datasets" className="underline font-medium hover:text-amber-900">
+                        Create a dataset first
+                      </a>.
+                    </div>
+                  )}
+                </div>
+              )}
+
               <Select
                 label="Rubric Version"
                 value={selectedRubricVersionId}
@@ -457,15 +598,18 @@ export default function ProjectDetailPage() {
                 </p>
               </div>
 
-              <Textarea
-                label="Text to Evaluate"
-                value={evalText}
-                onChange={(e) => setEvalText(e.target.value)}
-                placeholder="Paste the text, code, document, or artifact you want to evaluate..."
-                rows={12}
-                required
-                hint="This text will be sent to all active models for judgment"
-              />
+              {/* ── Text input (only in text mode) ── */}
+              {evalMode === 'text' && (
+                <Textarea
+                  label="Text to Evaluate"
+                  value={evalText}
+                  onChange={(e) => setEvalText(e.target.value)}
+                  placeholder="Paste the text, code, document, or artifact you want to evaluate..."
+                  rows={12}
+                  required
+                  hint="This text will be sent to all active models for judgment"
+                />
+              )}
             </div>
           </DialogBody>
           <DialogFooter>
@@ -479,9 +623,15 @@ export default function ProjectDetailPage() {
               variant="primary"
               onClick={handleCreateEvaluation}
               loading={submitting}
-              disabled={!evalText.trim()}
+              disabled={evalMode === 'text' ? !evalText.trim() : !selectedDatasetId}
             >
-              Create & Open
+              {evalMode === 'dataset'
+                ? `Create ${
+                    selectedDatasetId
+                      ? `${availableDatasets.find((d: any) => d.id === selectedDatasetId)?._count?.samples ?? availableDatasets.find((d: any) => d.id === selectedDatasetId)?.sampleCount ?? ''} `
+                      : ''
+                  }Evaluation${selectedDatasetId && (availableDatasets.find((d: any) => d.id === selectedDatasetId)?._count?.samples ?? 0) !== 1 ? 's' : ''}`
+                : 'Create & Open'}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -71,10 +71,13 @@ export async function POST(
     });
 
     // Mark run as completed once human judgment is submitted
-    await prisma.evaluationRun.update({
-      where: { id: params.runId },
-      data: { status: 'completed' },
-    });
+    // (transitions from needs_human -> completed, or judging -> completed)
+    if (run.status !== 'completed') {
+      await prisma.evaluationRun.update({
+        where: { id: params.runId },
+        data: { status: 'completed' },
+      });
+    }
 
     return NextResponse.json(judgment);
   } catch (error) {

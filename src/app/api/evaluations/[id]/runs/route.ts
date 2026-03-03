@@ -33,6 +33,8 @@ const runDetailInclude = {
       title: true,
       inputText: true,
       project: { select: { id: true, name: true } },
+      dataset: { select: { id: true, name: true } },
+      datasetSample: { select: { id: true, index: true } },
     },
   },
 };
@@ -218,7 +220,7 @@ export async function POST(
 
       await prisma.evaluationRun.update({
         where: { id: run.id },
-        data: { status: allErrored ? 'error' : 'completed' },
+        data: { status: allErrored ? 'error' : 'needs_human' },
       });
     })();
 

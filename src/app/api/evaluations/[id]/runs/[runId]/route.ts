@@ -29,6 +29,8 @@ const runDetailInclude = {
       inputText: true,
       userId: true,
       project: { select: { id: true, name: true } },
+      dataset: { select: { id: true, name: true, sampleCount: true } },
+      datasetSample: { select: { id: true, index: true, input: true, expected: true } },
     },
   },
 };
