@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { requireAuth, isAdmin } from '@/lib/auth-guard';
 import {
@@ -87,6 +88,55 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const data = createDatasetSchema.parse(body);
+    const sanitizedProjectId = data.projectId?.trim() || undefined;
+
+    const sessionUser = await prisma.user.findUnique({
+      where: { id: session.user.id },
+      select: { id: true, email: true },
+    });
+    const fallbackUser =
+      sessionUser ??
+      (await prisma.user.findUnique({
+        where: { email: session.user.email },
+        select: { id: true, email: true },
+      }));
+
+    if (!fallbackUser) {
+      return NextResponse.json(
+        {
+          error:
+            'User not found for current session. Please sign out and sign in again.',
+        },
+        { status: 401 }
+      );
+    }
+
+    const effectiveUserId = fallbackUser.id;
+
+    if (sanitizedProjectId) {
+      const project = await prisma.project.findUnique({
+        where: { id: sanitizedProjectId },
+        select: { id: true, userId: true, isDefault: true },
+      });
+
+      if (!project) {
+        return NextResponse.json(
+          { error: 'Invalid projectId: project does not exist' },
+          { status: 400 }
+        );
+      }
+
+      const canUseProject =
+        isAdmin(session) ||
+        project.userId === effectiveUserId ||
+        project.isDefault;
+      if (!canUseProject) {
+        return NextResponse.json(
+          { error: 'Forbidden: project is not accessible' },
+          { status: 403 }
+        );
+      }
+    }
 
     let remoteMetadata: string | undefined;
     let sampleCount: number | undefined;
@@ -137,8 +187,8 @@ export async function POST(request: Request) {
         splits,
         features,
         tags,
-        projectId: data.projectId,
-        userId: session.user.id,
+        projectId: sanitizedProjectId,
+        userId: effectiveUserId,
         ...(data.samples?.length
           ? {
               samples: {
@@ -169,6 +219,20 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
+
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2003'
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            'Foreign key constraint failed. Check project selection and session user.',
+        },
+        { status: 400 }
+      );
+    }
+
     console.error('Failed to create dataset:', error);
     return NextResponse.json(
       { error: 'Failed to create dataset' },

@@ -26,7 +26,22 @@ interface DialogProps {
 function Dialog({ open: controlledOpen, onOpenChange, children }: DialogProps) {
   const [internalOpen, setInternalOpen] = React.useState(false);
   const open = controlledOpen ?? internalOpen;
-  const setOpen = onOpenChange ?? setInternalOpen;
+  const onOpenChangeRef = React.useRef(onOpenChange);
+
+  React.useEffect(() => {
+    onOpenChangeRef.current = onOpenChange;
+  }, [onOpenChange]);
+
+  const setOpen = React.useCallback(
+    (nextOpen: boolean) => {
+      if (controlledOpen !== undefined) {
+        onOpenChangeRef.current?.(nextOpen);
+        return;
+      }
+      setInternalOpen(nextOpen);
+    },
+    [controlledOpen]
+  );
 
   return (
     <DialogContext.Provider value={{ open, setOpen }}>
@@ -91,7 +106,7 @@ const DialogContent = React.forwardRef<
       document.body.style.overflow = '';
       clearTimeout(timer);
     };
-  }, [open, setOpen]);
+  }, [open]);
 
   if (!open) return null;
 
