@@ -31,6 +31,7 @@ model User {
 model Project {
   id          String       @id @default(cuid())
   name        String
+  slug        String?      // portable identifier for config export/import
   description String?
   isDefault   Boolean      @default(false) // true for system-wide projects like Leaderboard
   userId      String
@@ -40,12 +41,14 @@ model Project {
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
 
+  @@unique([userId, slug])
   @@index([userId])
 }
 
 model Rubric {
   id             String            @id @default(cuid())
   name           String
+  slug           String?           // portable identifier for config export/import
   description    String?
   version        Int               @default(1)
   parentId       String?           // null for v1; root rubric id for later versions
@@ -59,6 +62,7 @@ model Rubric {
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
 
+  @@unique([userId, slug])
   @@index([parentId])
   @@index([userId])
 }
@@ -79,6 +83,7 @@ model RubricCriterion {
 model ModelConfig {
   id                   String                     @id @default(cuid())
   name                 String
+  slug                 String?                    // portable identifier for config export/import
   provider             String                     // 'anthropic' | 'openai' | 'local'
   modelId              String                     // e.g. 'claude-sonnet-4-5-20250514'
   endpoint             String?                    // custom endpoint for local/self-hosted models
@@ -95,6 +100,7 @@ model ModelConfig {
   evaluationSelections EvaluationModelSelection[]
   runModelSelections   RunModelSelection[]
 
+  @@unique([userId, slug])
   @@index([userId])
 }
 
@@ -239,6 +245,7 @@ model ApiKeyStore {
 model Dataset {
   id          String          @id @default(cuid())
   name        String
+  slug        String?         // portable identifier for config export/import
   description String?
   source      String          @default("local")  // 'local' | 'remote'
   visibility  String          @default("private") // 'private' | 'public'
@@ -271,6 +278,7 @@ model Dataset {
   createdAt DateTime         @default(now())
   updatedAt DateTime         @updatedAt
 
+  @@unique([userId, slug])
   @@index([userId])
   @@index([projectId])
   @@index([visibility])

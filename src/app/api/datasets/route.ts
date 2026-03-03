@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { generateSlug } from '@/lib/config';
 import {
   fetchDatasetMetadata,
   parseHuggingFaceUrl,
@@ -149,9 +150,20 @@ export async function POST(request: Request) {
       }
     }
 
+    // Auto-generate slug for config portability
+    const dsSlug = generateSlug(data.name);
+    const existingSlugs = (await prisma.dataset.findMany({
+      where: { userId: session.user.id },
+      select: { slug: true },
+    })).map((d) => d.slug).filter(Boolean) as string[];
+    const uniqueSlug = existingSlugs.includes(dsSlug)
+      ? `${dsSlug}-${Date.now().toString(36).slice(-4)}`
+      : dsSlug;
+
     const dataset = await prisma.dataset.create({
       data: {
         name: data.name,
+        slug: uniqueSlug,
         description: data.description,
         source: data.source,
         visibility: data.visibility,

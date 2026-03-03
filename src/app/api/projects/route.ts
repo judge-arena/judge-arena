@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { generateSlug } from '@/lib/config';
 
 const createProjectSchema = z.object({
   name: z.string().min(1, 'Name is required').max(200),
@@ -47,9 +48,20 @@ export async function POST(request: Request) {
     const body = await request.json();
     const data = createProjectSchema.parse(body);
 
+    // Auto-generate slug for config portability
+    const slug = generateSlug(data.name);
+    const existingSlugs = (await prisma.project.findMany({
+      where: { userId: session.user.id },
+      select: { slug: true },
+    })).map((p) => p.slug).filter(Boolean) as string[];
+    const uniqueSlug = existingSlugs.includes(slug)
+      ? `${slug}-${Date.now().toString(36).slice(-4)}`
+      : slug;
+
     const project = await prisma.project.create({
       data: {
         name: data.name,
+        slug: uniqueSlug,
         description: data.description,
         userId: session.user.id,
       },

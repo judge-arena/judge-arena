@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { generateSlug } from '@/lib/config';
 
 const createModelSchema = z.object({
   name: z.string().min(1, 'Name is required').max(100),
@@ -53,9 +54,20 @@ export async function POST(request: Request) {
     const body = await request.json();
     const data = createModelSchema.parse(body);
 
+    // Auto-generate slug for config portability
+    const slug = generateSlug(data.name);
+    const existingSlugs = (await prisma.modelConfig.findMany({
+      where: { userId: session.user.id },
+      select: { slug: true },
+    })).map((m) => m.slug).filter(Boolean) as string[];
+    const uniqueSlug = existingSlugs.includes(slug)
+      ? `${slug}-${Date.now().toString(36).slice(-4)}`
+      : slug;
+
     const model = await prisma.modelConfig.create({
       data: {
         name: data.name,
+        slug: uniqueSlug,
         provider: data.provider,
         modelId: data.modelId,
         endpoint: data.endpoint || null,

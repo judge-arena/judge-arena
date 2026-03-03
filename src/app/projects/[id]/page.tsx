@@ -79,6 +79,17 @@ export default function ProjectDetailPage() {
     toast.success(`Exporting ${scopeLabel} as ${format.toUpperCase()}…`);
   };
 
+  const handleConfigExport = (format: 'yaml' | 'json', includeSamples: boolean = false) => {
+    const url = `/api/config/export?format=${format}&includeSamples=${includeSamples}`;
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = '';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    toast.success(`Exporting configuration as ${format.toUpperCase()}…`);
+  };
+
   const loadProject = useCallback(async () => {
     try {
       const [projectRes, rubricsRes, modelsRes, datasetsRes] = await Promise.all([
@@ -374,6 +385,20 @@ export default function ProjectDetailPage() {
                       onClick={() => { handleProjectExport('jsonl', 'all'); setExportMenuOpen(false); }}
                     >
                       📋 All data as JSONL
+                    </button>
+                    <div className="my-1 border-t border-surface-100" />
+                    <p className="px-3 py-1.5 text-2xs font-semibold text-surface-400 uppercase tracking-wide">Configuration</p>
+                    <button
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
+                      onClick={() => { handleConfigExport('yaml'); setExportMenuOpen(false); }}
+                    >
+                      ⚙️ Config as YAML
+                    </button>
+                    <button
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
+                      onClick={() => { handleConfigExport('yaml', true); setExportMenuOpen(false); }}
+                    >
+                      ⚙️ Config + Data as YAML
                     </button>
                   </div>
                 )}

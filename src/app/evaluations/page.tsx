@@ -67,6 +67,17 @@ export default function EvaluationsPage() {
     toast.success(`Exporting all evaluations as ${format.toUpperCase()}…`);
   };
 
+  const handleConfigExport = (format: 'yaml' | 'json') => {
+    const url = `/api/config/export?format=${format}`;
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = '';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    toast.success(`Exporting configuration as ${format.toUpperCase()}…`);
+  };
+
   useEffect(() => {
     const load = async () => {
       try {
@@ -158,7 +169,8 @@ export default function EvaluationsPage() {
                 Export All
               </Button>
               {exportMenuOpen && (
-                <div className="absolute right-0 top-full mt-1 z-20 w-48 rounded-lg border border-surface-200 bg-white py-1 shadow-lg">
+                <div className="absolute right-0 top-full mt-1 z-20 w-56 rounded-lg border border-surface-200 bg-white py-1 shadow-lg">
+                  <p className="px-3 py-1.5 text-2xs font-semibold text-surface-400 uppercase tracking-wide">Evaluation Data</p>
                   <button
                     className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
                     onClick={() => { handleExportEvaluations('csv'); setExportMenuOpen(false); }}
@@ -170,6 +182,14 @@ export default function EvaluationsPage() {
                     onClick={() => { handleExportEvaluations('jsonl'); setExportMenuOpen(false); }}
                   >
                     📋 Export as JSONL
+                  </button>
+                  <div className="my-1 border-t border-surface-100" />
+                  <p className="px-3 py-1.5 text-2xs font-semibold text-surface-400 uppercase tracking-wide">Configuration</p>
+                  <button
+                    className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
+                    onClick={() => { handleConfigExport('yaml'); setExportMenuOpen(false); }}
+                  >
+                    ⚙️ Config as YAML
                   </button>
                 </div>
               )}
