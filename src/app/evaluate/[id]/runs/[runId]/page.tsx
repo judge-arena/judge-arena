@@ -217,43 +217,73 @@ export default function RunDetailPage() {
           <div className="lg:col-span-3 space-y-6">
 
             {/* Submission */}
-            <div className="rounded-xl border border-surface-200 bg-white overflow-hidden">
-              <div className="flex items-center justify-between border-b border-surface-100 px-4 py-3">
-                <div className="flex items-center gap-2">
-                  <h3 className="text-sm font-semibold text-surface-900">Input Text</h3>
-                  {evaluation?.dataset && (
-                    <Badge variant="info" size="sm">
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="mr-0.5" aria-hidden="true">
-                        <ellipse cx="12" cy="5" rx="9" ry="3" />
-                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
-                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
-                      </svg>
-                      {evaluation.dataset.name}
-                      {evaluation.datasetSample && ` #${evaluation.datasetSample.index + 1}`}
-                    </Badge>
-                  )}
+            {evaluation?.promptText ? (
+              <div className="space-y-4">
+                <div className="rounded-xl border border-surface-200 bg-white overflow-hidden">
+                  <div className="flex items-center justify-between border-b border-surface-100 px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm font-semibold text-surface-900">Prompt (Input)</h3>
+                      {evaluation?.dataset && (
+                        <Badge variant="info" size="sm">
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="mr-0.5" aria-hidden="true">
+                            <ellipse cx="12" cy="5" rx="9" ry="3" />
+                            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+                            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+                          </svg>
+                          {evaluation.dataset.name}
+                          {evaluation.datasetSample && ` #${evaluation.datasetSample.index + 1}`}
+                        </Badge>
+                      )}
+                    </div>
+                    <span className="text-2xs text-surface-400">
+                      {evaluation?.promptText?.length?.toLocaleString()} chars
+                    </span>
+                  </div>
+                  <div className="p-4 overflow-y-auto">
+                    <div className="prose prose-sm max-w-none text-surface-700 whitespace-pre-wrap break-words">
+                      {evaluation?.promptText}
+                    </div>
+                  </div>
                 </div>
-                <span className="text-2xs text-surface-400">
-                  {evaluation?.inputText?.length?.toLocaleString()} chars
-                </span>
-              </div>
-              {/* Full-height viewer — not capped */}
-              <div className="p-4 overflow-y-auto">
-                <div className="prose prose-sm max-w-none text-surface-700 whitespace-pre-wrap break-words">
-                  {evaluation?.inputText}
-                </div>
-              </div>
-            </div>
 
-            {/* Expected output from dataset */}
-            {evaluation?.datasetSample?.expected && (
-              <div className="rounded-xl border border-green-200 bg-green-50 overflow-hidden">
-                <div className="flex items-center justify-between border-b border-green-100 px-4 py-3">
-                  <h3 className="text-sm font-semibold text-green-800">Expected Output (Reference)</h3>
+                <div className="rounded-xl border border-surface-200 bg-white overflow-hidden">
+                  <div className="flex items-center justify-between border-b border-surface-100 px-4 py-3">
+                    <h3 className="text-sm font-semibold text-surface-900">Response (Output to Judge)</h3>
+                    <span className="text-2xs text-surface-400">
+                      {(evaluation?.responseText || evaluation?.inputText || '').length.toLocaleString()} chars
+                    </span>
+                  </div>
+                  <div className="p-4 overflow-y-auto">
+                    <div className="prose prose-sm max-w-none text-surface-700 whitespace-pre-wrap break-words">
+                      {evaluation?.responseText || evaluation?.inputText}
+                    </div>
+                  </div>
                 </div>
-                <div className="p-4 overflow-y-auto max-h-48">
-                  <div className="prose prose-sm max-w-none text-green-700 whitespace-pre-wrap break-words">
-                    {evaluation.datasetSample.expected}
+              </div>
+            ) : (
+              <div className="rounded-xl border border-surface-200 bg-white overflow-hidden">
+                <div className="flex items-center justify-between border-b border-surface-100 px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-semibold text-surface-900">Submission</h3>
+                    {evaluation?.dataset && (
+                      <Badge variant="info" size="sm">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="mr-0.5" aria-hidden="true">
+                          <ellipse cx="12" cy="5" rx="9" ry="3" />
+                          <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+                          <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+                        </svg>
+                        {evaluation.dataset.name}
+                        {evaluation.datasetSample && ` #${evaluation.datasetSample.index + 1}`}
+                      </Badge>
+                    )}
+                  </div>
+                  <span className="text-2xs text-surface-400">
+                    {evaluation?.inputText?.length?.toLocaleString()} chars
+                  </span>
+                </div>
+                <div className="p-4 overflow-y-auto">
+                  <div className="prose prose-sm max-w-none text-surface-700 whitespace-pre-wrap break-words">
+                    {evaluation?.inputText}
                   </div>
                 </div>
               </div>

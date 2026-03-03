@@ -15,6 +15,8 @@ export interface EvaluationWithRelations {
   id: string;
   projectId: string;
   inputText: string;
+  promptText?: string | null;
+  responseText?: string | null;
   title: string | null;
   createdAt: string;
   updatedAt: string;
@@ -117,6 +119,8 @@ export interface EvaluationRunDetail {
     id: string;
     title: string | null;
     inputText: string;
+    promptText?: string | null;
+    responseText?: string | null;
     project: {
       id: string;
       name: string;

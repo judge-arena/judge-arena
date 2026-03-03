@@ -108,7 +108,9 @@ model Evaluation {
   project         Project                    @relation(fields: [projectId], references: [id], onDelete: Cascade)
   rubricId        String?                    // default rubric for new runs
   rubric          Rubric?                    @relation(fields: [rubricId], references: [id])
-  inputText       String
+  inputText       String                     // legacy single-text artifact (or fallback display text)
+  promptText      String?                    // optional prompt (input) for prompt-response judging
+  responseText    String?                    // optional response/output to evaluate against rubric
   title           String?
   userId          String
   user            User                       @relation(fields: [userId], references: [id], onDelete: Cascade)

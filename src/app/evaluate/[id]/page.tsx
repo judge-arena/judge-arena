@@ -299,22 +299,23 @@ export default function EvaluateTemplatePage() {
               </div>
             )}
 
-            {/* Expected output (from dataset sample) */}
-            {evaluation.datasetSample?.expected && (
-              <div className="mb-4">
-                <p className="text-2xs font-semibold uppercase tracking-wider text-surface-400 mb-1">
-                  Expected Output (Reference)
-                </p>
-                <div className="rounded-lg border border-surface-200 bg-surface-50 p-3 text-xs text-surface-700 whitespace-pre-wrap max-h-32 overflow-y-auto">
-                  {evaluation.datasetSample.expected}
-                </div>
+            {evaluation.promptText ? (
+              <div className="space-y-4">
+                <SubmissionViewer
+                  text={evaluation.promptText}
+                  title="Prompt (Input)"
+                />
+                <SubmissionViewer
+                  text={evaluation.responseText || evaluation.inputText}
+                  title="Response (Output to Judge)"
+                />
               </div>
+            ) : (
+              <SubmissionViewer
+                text={evaluation.inputText}
+                title="Submission"
+              />
             )}
-
-            <SubmissionViewer
-              text={evaluation.inputText}
-              title="Input Text"
-            />
           </CardContent>
         </Card>
 

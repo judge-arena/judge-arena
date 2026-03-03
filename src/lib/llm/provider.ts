@@ -8,7 +8,9 @@
 import type { CriteriaScore, RubricCriterionView } from '@/types';
 
 export interface JudgmentRequest {
-  inputText: string;
+  inputText?: string;
+  promptText?: string;
+  responseText?: string;
   rubricCriteria: RubricCriterionView[];
   rubricName: string;
   rubricDescription?: string;
@@ -50,7 +52,7 @@ export function buildJudgmentSystemPrompt(
     )
     .join('\n');
 
-  return `You are an expert evaluator acting as an impartial judge. Your task is to evaluate a submitted text artifact according to a specific grading rubric.
+  return `You are an expert evaluator acting as an impartial judge. Your task is to evaluate a submission according to a specific grading rubric.
 
 ## Rubric: ${rubricName}
 ${rubricDescription ? `\n${rubricDescription}\n` : ''}
@@ -58,12 +60,14 @@ ${rubricDescription ? `\n${rubricDescription}\n` : ''}
 ${criteriaList}
 
 ## Instructions
-1. Read the submitted text carefully.
-2. Evaluate it against EACH criterion independently.
-3. Provide a score for each criterion (0 to its max score).
-4. Write a brief justification for each score.
-5. Calculate an overall weighted score.
-6. Provide overall reasoning for your judgment.
+1. Read the submission carefully.
+2. If a prompt and response are provided, evaluate the response in context of the prompt.
+3. If only one text artifact is provided, evaluate that artifact directly.
+4. Evaluate against EACH criterion independently.
+5. Provide a score for each criterion (0 to its max score).
+6. Write a brief justification for each score.
+7. Calculate an overall weighted score.
+8. Provide overall reasoning for your judgment.
 
 ## Response Format
 You MUST respond with valid JSON in exactly this format:
@@ -86,13 +90,43 @@ Be fair, thorough, and consistent in your evaluation. Do not be overly generous 
 }
 
 /**
- * Build the user prompt containing the text to evaluate
+ * Build the user prompt containing the submission to evaluate
  */
-export function buildJudgmentUserPrompt(inputText: string): string {
+export function buildJudgmentUserPrompt(request: {
+  inputText?: string;
+  promptText?: string;
+  responseText?: string;
+}): string {
+  const promptText = request.promptText?.trim();
+  const responseText = request.responseText?.trim();
+  const inputText = request.inputText?.trim();
+
+  if (promptText && responseText) {
+    return `Please evaluate the following response according to the rubric criteria provided.
+
+## Prompt (Input)
+${promptText}
+
+## Response (Output to evaluate)
+${responseText}
+
+Evaluate how well the response addresses the prompt.
+Respond with your evaluation in the specified JSON format.`;
+  }
+
+  if (responseText) {
+    return `Please evaluate the following response according to the rubric criteria provided.
+
+## Response (Output to evaluate)
+${responseText}
+
+Respond with your evaluation in the specified JSON format.`;
+  }
+
   return `Please evaluate the following submission according to the rubric criteria provided.
 
 ## Submission
-${inputText}
+${inputText ?? ''}
 
 Respond with your evaluation in the specified JSON format.`;
 }

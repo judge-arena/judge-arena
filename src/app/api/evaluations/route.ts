@@ -5,13 +5,29 @@ import { z } from 'zod';
 import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
 // ── Single-text evaluation ──
-const createSingleSchema = z.object({
+const createSingleBaseSchema = z.object({
   projectId: z.string().min(1),
   title: z.string().max(200).optional(),
-  inputText: z.string().min(1, 'Input text is required'),
+  inputText: z.string().optional(),
+  promptText: z.string().optional(),
+  responseText: z.string().optional(),
   rubricId: z.string().optional(),
   modelConfigIds: z.array(z.string()).max(10).optional(),
 });
+
+const createSingleSchema = createSingleBaseSchema.refine(
+  (data) => {
+    const hasSingle = !!data.inputText?.trim();
+    const hasPair = !!data.promptText?.trim() && !!data.responseText?.trim();
+    const hasResponseOnly = !!data.responseText?.trim();
+    return hasSingle || hasPair || hasResponseOnly;
+  },
+  {
+    message:
+      'Provide either inputText, or promptText+responseText, or responseText.',
+    path: ['inputText'],
+  }
+);
 
 // ── Dataset batch evaluation ──
 const createBatchSchema = z.object({
@@ -22,7 +38,7 @@ const createBatchSchema = z.object({
 });
 
 const createEvaluationSchema = z.discriminatedUnion('mode', [
-  createSingleSchema.extend({ mode: z.literal('single') }),
+  createSingleBaseSchema.extend({ mode: z.literal('single') }),
   createBatchSchema.extend({ mode: z.literal('dataset') }),
 ]);
 
@@ -30,10 +46,24 @@ const createEvaluationSchema = z.discriminatedUnion('mode', [
 const createEvaluationLegacySchema = z.object({
   projectId: z.string().min(1),
   title: z.string().max(200).optional(),
-  inputText: z.string().min(1, 'Input text is required'),
+  inputText: z.string().optional(),
+  promptText: z.string().optional(),
+  responseText: z.string().optional(),
   rubricId: z.string().optional(),
   modelConfigIds: z.array(z.string()).max(10).optional(),
-});
+}).refine(
+  (data) => {
+    const hasSingle = !!data.inputText?.trim();
+    const hasPair = !!data.promptText?.trim() && !!data.responseText?.trim();
+    const hasResponseOnly = !!data.responseText?.trim();
+    return hasSingle || hasPair || hasResponseOnly;
+  },
+  {
+    message:
+      'Provide either inputText, or promptText+responseText, or responseText.',
+    path: ['inputText'],
+  }
+);
 
 // Shared include for run summaries
 const runSummaryInclude = {
@@ -171,13 +201,19 @@ export async function POST(request: Request) {
         data: {
           projectId: data.projectId,
           title: data.title,
-          inputText: data.inputText,
+          inputText:
+            data.inputText?.trim() ||
+            data.responseText?.trim() ||
+            data.promptText?.trim() ||
+            '',
+          promptText: data.promptText?.trim() || undefined,
+          responseText: data.responseText?.trim() || undefined,
           userId: session.user.id,
           ...(data.rubricId && { rubricId: data.rubricId }),
           modelSelections: {
             create: [...new Set(selectedModelIds)].map((modelConfigId) => ({ modelConfigId })),
           },
-        },
+        } satisfies Prisma.EvaluationUncheckedCreateInput,
         include: evaluationInclude,
       });
 
@@ -208,7 +244,9 @@ export async function POST(request: Request) {
           data: {
             projectId: batchData.projectId,
             title: `${dataset.name} #${sample.index + 1}`,
-            inputText: sample.input,
+            inputText: sample.expected || sample.input,
+            promptText: sample.input,
+            responseText: sample.expected || undefined,
             userId: session.user.id,
             datasetId: dataset.id,
             datasetSampleId: sample.id,
@@ -216,7 +254,7 @@ export async function POST(request: Request) {
             modelSelections: {
               create: [...new Set(selectedModelIds)].map((modelConfigId) => ({ modelConfigId })),
             },
-          },
+          } satisfies Prisma.EvaluationUncheckedCreateInput,
         })
       )
     );

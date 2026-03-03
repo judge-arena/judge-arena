@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { requireAuth, isAdmin } from '@/lib/auth-guard';
 import { executeJudgment } from '@/lib/llm';
@@ -7,6 +8,14 @@ import { executeJudgment } from '@/lib/llm';
 const createRunSchema = z.object({
   rubricId: z.string().optional(),        // override; defaults to evaluation.rubricId
   modelConfigIds: z.array(z.string()).max(10).optional(), // override; defaults to evaluation.modelSelections
+});
+
+const evaluationForRunInclude = Prisma.validator<Prisma.EvaluationInclude>()({
+  rubric: { include: { criteria: { orderBy: { order: 'asc' } } } },
+  modelSelections: {
+    include: { modelConfig: true },
+    orderBy: { createdAt: 'asc' },
+  },
 });
 
 const runDetailInclude = {
@@ -32,6 +41,8 @@ const runDetailInclude = {
       id: true,
       title: true,
       inputText: true,
+      promptText: true,
+      responseText: true,
       project: { select: { id: true, name: true } },
       dataset: { select: { id: true, name: true } },
       datasetSample: { select: { id: true, index: true } },
@@ -85,13 +96,7 @@ export async function POST(
     // Load the template with its defaults
     const evaluation = await prisma.evaluation.findUnique({
       where: { id: params.id },
-      include: {
-        rubric: { include: { criteria: { orderBy: { order: 'asc' } } } },
-        modelSelections: {
-          include: { modelConfig: true },
-          orderBy: { createdAt: 'asc' },
-        },
-      },
+      include: evaluationForRunInclude,
     });
     if (!evaluation) return NextResponse.json({ error: 'Evaluation not found' }, { status: 404 });
     if (evaluation.userId !== session.user.id && !isAdmin(session)) {
@@ -178,6 +183,8 @@ export async function POST(
             model.provider,
             {
               inputText: evaluation.inputText,
+              promptText: evaluation.promptText ?? undefined,
+              responseText: evaluation.responseText ?? undefined,
               rubricCriteria: rubric.criteria,
               rubricName: rubric.name,
               rubricDescription: rubric.description || undefined,

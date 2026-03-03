@@ -53,7 +53,7 @@ export class OpenAICompatibleProvider implements JudgmentProvider {
       request.rubricDescription,
       request.rubricCriteria
     );
-    const userPrompt = buildJudgmentUserPrompt(request.inputText);
+    const userPrompt = buildJudgmentUserPrompt(request);
 
     const startTime = Date.now();
 
