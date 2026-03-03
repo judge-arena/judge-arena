@@ -1,13 +1,15 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import Link from 'next/link';
 import { Header } from '@/components/layout/header';
 import { Card, CardContent } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn, formatDateTime, getScoreColor } from '@/lib/utils';
+import { toast } from 'sonner';
 
 // Evaluation run as returned nested inside templates from GET /api/evaluations
 interface RunSummary {
@@ -39,6 +41,31 @@ export default function EvaluationsPage() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'pending' | 'needs_human' | 'completed' | 'error'>('all');
   const [search, setSearch] = useState('');
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+
+  // Close export menu on outside click
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
+        setExportMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [exportMenuOpen]);
+
+  const handleExportEvaluations = (format: 'csv' | 'jsonl') => {
+    const url = `/api/evaluations/export?format=${format}`;
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = '';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    toast.success(`Exporting all evaluations as ${format.toUpperCase()}…`);
+  };
 
   useEffect(() => {
     const load = async () => {
@@ -105,6 +132,50 @@ export default function EvaluationsPage() {
       <Header
         title="Evaluation History"
         description="Browse all evaluation runs across your projects."
+        actions={
+          runs.length > 0 ? (
+            <div className="relative" ref={exportMenuRef}>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setExportMenuOpen((prev) => !prev)}
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+                Export All
+              </Button>
+              {exportMenuOpen && (
+                <div className="absolute right-0 top-full mt-1 z-20 w-48 rounded-lg border border-surface-200 bg-white py-1 shadow-lg">
+                  <button
+                    className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
+                    onClick={() => { handleExportEvaluations('csv'); setExportMenuOpen(false); }}
+                  >
+                    📄 Export as CSV
+                  </button>
+                  <button
+                    className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
+                    onClick={() => { handleExportEvaluations('jsonl'); setExportMenuOpen(false); }}
+                  >
+                    📋 Export as JSONL
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : undefined
+        }
       />
 
       <div className="p-6 space-y-6">

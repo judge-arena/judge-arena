@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams } from 'next/navigation';
 import { Header } from '@/components/layout/header';
 import {
@@ -80,6 +80,32 @@ export default function DatasetDetailPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showAllSamples, setShowAllSamples] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+
+  // Close export menu on outside click
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
+        setExportMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [exportMenuOpen]);
+
+  const handleExport = (format: 'csv' | 'jsonl') => {
+    // Trigger download via hidden link
+    const url = `/api/datasets/${id}/export?format=${format}`;
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = '';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    toast.success(`Exporting dataset as ${format.toUpperCase()}…`);
+  };
 
   const loadDataset = useCallback(async () => {
     try {
@@ -248,6 +274,49 @@ export default function DatasetDetailPage() {
         ]}
         actions={
           <div className="flex items-center gap-2">
+            {/* Export buttons */}
+            {dataset.samples.length > 0 && (
+              <div className="relative" ref={exportMenuRef}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setExportMenuOpen((prev) => !prev)}
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" y1="15" x2="12" y2="3" />
+                  </svg>
+                  Export
+                </Button>
+                {exportMenuOpen && (
+                  <div className="absolute right-0 top-full mt-1 z-20 w-48 rounded-lg border border-surface-200 bg-white py-1 shadow-lg">
+                    <button
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
+                      onClick={() => { handleExport('csv'); setExportMenuOpen(false); }}
+                    >
+                      📄 Export as CSV
+                    </button>
+                    <button
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
+                      onClick={() => { handleExport('jsonl'); setExportMenuOpen(false); }}
+                    >
+                      📋 Export as JSONL
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
             {dataset.source === 'remote' && dataset.huggingFaceId && (
               <>
                 <Button
