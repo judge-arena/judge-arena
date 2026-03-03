@@ -7,6 +7,7 @@ const updateDatasetSchema = z.object({
   name: z.string().min(1).max(200).optional(),
   description: z.string().max(4000).optional(),
   visibility: z.enum(['private', 'public']).optional(),
+  inputType: z.enum(['query', 'query-response']).optional(),
   projectId: z.string().nullable().optional(),
   tags: z.array(z.string()).optional(),
 });
@@ -27,7 +28,14 @@ export async function GET(
         project: { select: { id: true, name: true } },
         samples: {
           orderBy: { index: 'asc' },
-          take: 100, // paginate later; return first 100
+          take: 100,
+        },
+        versions: {
+          select: { id: true, version: true, createdAt: true, sampleCount: true },
+          orderBy: { version: 'desc' },
+        },
+        parent: {
+          select: { id: true, version: true },
         },
         _count: { select: { samples: true } },
       },

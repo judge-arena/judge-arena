@@ -42,6 +42,9 @@ interface DatasetListItem {
   description: string | null;
   source: string;
   visibility: string;
+  inputType: string;
+  version: number;
+  parentId: string | null;
   sourceUrl: string | null;
   huggingFaceId: string | null;
   sampleCount: number | null;
@@ -116,12 +119,14 @@ export default function DatasetsPage() {
   const [localDescription, setLocalDescription] = useState('');
   const [localFormat, setLocalFormat] = useState<'json' | 'jsonl' | 'csv' | 'text'>('json');
   const [localVisibility, setLocalVisibility] = useState<'private' | 'public'>('private');
+  const [localInputType, setLocalInputType] = useState<'query' | 'query-response'>('query-response');
   const [localData, setLocalData] = useState('');
   const [localTags, setLocalTags] = useState<string[]>([]);
   const [localTagInput, setLocalTagInput] = useState('');
   const [localSamples, setLocalSamples] = useState<
     Array<{ input: string; expected: string }>
   >([{ input: '', expected: '' }]);
+  const [editingSampleIndex, setEditingSampleIndex] = useState<number | null>(null);
   const [localMode, setLocalMode] = useState<'inline' | 'paste' | 'upload'>(
     'inline'
   );
@@ -285,10 +290,12 @@ export default function DatasetsPage() {
     setLocalDescription('');
     setLocalFormat('json');
     setLocalVisibility('private');
+    setLocalInputType('query-response');
     setLocalData('');
     setLocalTags([]);
     setLocalTagInput('');
     setLocalSamples([{ input: '', expected: '' }]);
+    setEditingSampleIndex(null);
     setLocalUploadedSamples([]);
     setLocalUploadedFileName('');
     setLocalUploadError(null);
@@ -400,6 +407,7 @@ export default function DatasetsPage() {
           description: localDescription || undefined,
           source: 'local',
           visibility: localVisibility,
+          inputType: localInputType,
           format: localFormat,
           localData: localMode === 'paste' ? localData : undefined,
           samples,
@@ -804,6 +812,16 @@ export default function DatasetsPage() {
               {!isRemote && dataset.format && (
                 <Badge variant="outline" size="sm">
                   Format: {dataset.format.toUpperCase()}
+                </Badge>
+              )}
+              {!isRemote && dataset.inputType && (
+                <Badge variant="outline" size="sm">
+                  {dataset.inputType === 'query' ? '📝 Query' : '📝 Q+R'}
+                </Badge>
+              )}
+              {dataset.version > 1 && (
+                <Badge variant="outline" size="sm">
+                  v{dataset.version}
                 </Badge>
               )}
               {evaluationSummary?.averageModelScore != null && (
@@ -1271,6 +1289,46 @@ export default function DatasetsPage() {
                   placeholder="What does this dataset evaluate?"
                   rows={2}
                 />
+
+                {/* ─── Input Type Selector ──────────────────── */}
+                <div>
+                  <label className="text-sm font-medium text-surface-700 mb-1.5 block">
+                    Input Type
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => setLocalInputType('query')}
+                      className={`rounded-lg border-2 px-3 py-2.5 text-left transition-colors ${
+                        localInputType === 'query'
+                          ? 'border-brand-500 bg-brand-50'
+                          : 'border-surface-200 hover:bg-surface-50'
+                      }`}
+                    >
+                      <p className={`text-xs font-semibold ${localInputType === 'query' ? 'text-brand-700' : 'text-surface-700'}`}>
+                        Query Only
+                      </p>
+                      <p className="text-2xs text-surface-500 mt-0.5">
+                        Single input per sample (prompt, question, etc.)
+                      </p>
+                    </button>
+                    <button
+                      onClick={() => setLocalInputType('query-response')}
+                      className={`rounded-lg border-2 px-3 py-2.5 text-left transition-colors ${
+                        localInputType === 'query-response'
+                          ? 'border-brand-500 bg-brand-50'
+                          : 'border-surface-200 hover:bg-surface-50'
+                      }`}
+                    >
+                      <p className={`text-xs font-semibold ${localInputType === 'query-response' ? 'text-brand-700' : 'text-surface-700'}`}>
+                        Query + Response
+                      </p>
+                      <p className="text-2xs text-surface-500 mt-0.5">
+                        Input paired with expected output
+                      </p>
+                    </button>
+                  </div>
+                </div>
+
                 <div className="flex gap-3">
                   <div className="flex-1">
                     <label className="text-sm font-medium text-surface-700 mb-1.5 block">
@@ -1361,16 +1419,22 @@ export default function DatasetsPage() {
                       </span>
                     ))}
                   </div>
-                  <p className="text-2xs text-surface-400">
-                    Tags do not affect visibility; they only improve discovery and filtering.
-                  </p>
                 </div>
 
-                {/* Data entry mode toggle */}
+                {/* ─── Sample Editor ──────────────────────── */}
                 <div>
-                  <label className="text-sm font-medium text-surface-700 mb-1.5 block">
-                    Add Samples
-                  </label>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-sm font-medium text-surface-700">
+                      Samples
+                    </label>
+                    <span className="text-2xs text-surface-400">
+                      {localMode === 'inline'
+                        ? `${localSamples.filter((s) => s.input.trim()).length} sample${localSamples.filter((s) => s.input.trim()).length !== 1 ? 's' : ''}`
+                        : localMode === 'upload'
+                          ? `${localUploadedSamples.length} loaded`
+                          : ''}
+                    </span>
+                  </div>
                   <div className="flex items-center gap-1.5 rounded-lg border border-surface-200 p-0.5 mb-3">
                     <button
                       onClick={() => setLocalMode('inline')}
@@ -1405,43 +1469,46 @@ export default function DatasetsPage() {
                   </div>
 
                   {localMode === 'inline' ? (
-                    <div className="space-y-2 max-h-48 overflow-y-auto">
-                      {localSamples.map((sample, i) => (
-                        <div
-                          key={i}
-                          className="flex items-start gap-2 rounded-lg border border-surface-200 p-2"
-                        >
-                          <span className="shrink-0 mt-1.5 text-2xs text-surface-400 w-5 text-right">
-                            {i + 1}.
-                          </span>
-                          <div className="flex-1 space-y-1.5">
-                            <Textarea
-                              placeholder="Input / prompt..."
-                              value={sample.input}
-                              onChange={(e) =>
-                                updateInlineSample(i, 'input', e.target.value)
-                              }
-                              rows={2}
-                              className="text-xs"
-                            />
-                            <Input
-                              placeholder="Expected output (optional)"
-                              value={sample.expected}
-                              onChange={(e) =>
-                                updateInlineSample(
-                                  i,
-                                  'expected',
-                                  e.target.value
-                                )
-                              }
-                              className="text-xs"
-                            />
-                          </div>
-                          {localSamples.length > 1 && (
-                            <button
-                              onClick={() => removeInlineSample(i)}
-                              className="shrink-0 rounded p-1 text-surface-400 hover:text-red-500 mt-1"
+                    <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+                      {localSamples.map((sample, i) => {
+                        const isExpanded = editingSampleIndex === i;
+                        const hasContent = sample.input.trim().length > 0;
+
+                        return (
+                          <div
+                            key={i}
+                            className={`rounded-lg border transition-colors ${
+                              isExpanded
+                                ? 'border-brand-300 bg-brand-50/30 shadow-sm'
+                                : hasContent
+                                  ? 'border-surface-200 bg-white'
+                                  : 'border-dashed border-surface-300 bg-surface-50'
+                            }`}
+                          >
+                            {/* Collapsed header — click to expand */}
+                            <div
+                              className="flex items-center gap-2 px-3 py-2 cursor-pointer select-none"
+                              onClick={() => setEditingSampleIndex(isExpanded ? null : i)}
                             >
+                              <span className="shrink-0 text-2xs text-surface-400 w-5 text-right font-mono">
+                                {i + 1}.
+                              </span>
+                              <div className="flex-1 min-w-0">
+                                {hasContent ? (
+                                  <p className="text-xs text-surface-700 truncate">
+                                    {sample.input}
+                                  </p>
+                                ) : (
+                                  <p className="text-xs text-surface-400 italic">
+                                    Empty sample — click to edit
+                                  </p>
+                                )}
+                              </div>
+                              {localInputType === 'query-response' && sample.expected.trim() && (
+                                <Badge variant="success" size="sm" className="shrink-0">
+                                  has expected
+                                </Badge>
+                              )}
                               <svg
                                 width="12"
                                 height="12"
@@ -1449,19 +1516,112 @@ export default function DatasetsPage() {
                                 fill="none"
                                 stroke="currentColor"
                                 strokeWidth="2"
+                                className={`shrink-0 text-surface-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
                               >
-                                <line x1="18" y1="6" x2="6" y2="18" />
-                                <line x1="6" y1="6" x2="18" y2="18" />
+                                <polyline points="6 9 12 15 18 9" />
                               </svg>
-                            </button>
-                          )}
-                        </div>
-                      ))}
+                              {localSamples.length > 1 && (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); removeInlineSample(i); }}
+                                  className="shrink-0 rounded p-0.5 text-surface-400 hover:text-red-500 transition-colors"
+                                  aria-label="Remove sample"
+                                >
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                    <line x1="18" y1="6" x2="6" y2="18" />
+                                    <line x1="6" y1="6" x2="18" y2="18" />
+                                  </svg>
+                                </button>
+                              )}
+                            </div>
+
+                            {/* Expanded editor */}
+                            {isExpanded && (
+                              <div className="px-3 pb-3 space-y-2 border-t border-surface-100">
+                                <div className="pt-2">
+                                  <label className="text-2xs font-medium text-surface-500 mb-1 block">
+                                    {localInputType === 'query' ? 'Query / Input' : 'Input / Prompt'}
+                                  </label>
+                                  <Textarea
+                                    placeholder={localInputType === 'query'
+                                      ? 'Enter the query or prompt text...'
+                                      : 'Enter the input prompt...'}
+                                    value={sample.input}
+                                    onChange={(e) =>
+                                      updateInlineSample(i, 'input', e.target.value)
+                                    }
+                                    onKeyDown={(e) => {
+                                      // Ctrl/Cmd+Enter to collapse and move to next
+                                      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                                        e.preventDefault();
+                                        if (i === localSamples.length - 1) {
+                                          addInlineSample();
+                                          setEditingSampleIndex(i + 1);
+                                        } else {
+                                          setEditingSampleIndex(i + 1);
+                                        }
+                                      }
+                                    }}
+                                    rows={3}
+                                    className="text-xs"
+                                    autoFocus
+                                  />
+                                </div>
+                                {localInputType === 'query-response' && (
+                                  <div>
+                                    <label className="text-2xs font-medium text-surface-500 mb-1 block">
+                                      Expected Output / Response
+                                    </label>
+                                    <Textarea
+                                      placeholder="Enter the expected response..."
+                                      value={sample.expected}
+                                      onChange={(e) =>
+                                        updateInlineSample(i, 'expected', e.target.value)
+                                      }
+                                      onKeyDown={(e) => {
+                                        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                                          e.preventDefault();
+                                          if (i === localSamples.length - 1) {
+                                            addInlineSample();
+                                            setEditingSampleIndex(i + 1);
+                                          } else {
+                                            setEditingSampleIndex(i + 1);
+                                          }
+                                        }
+                                      }}
+                                      rows={3}
+                                      className="text-xs"
+                                    />
+                                  </div>
+                                )}
+                                <div className="flex items-center justify-between pt-1">
+                                  <p className="text-2xs text-surface-400">
+                                    {navigator.platform?.includes('Mac') ? '⌘' : 'Ctrl'}+Enter → next sample
+                                  </p>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => setEditingSampleIndex(null)}
+                                  >
+                                    Collapse
+                                  </Button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+
                       <button
-                        onClick={addInlineSample}
-                        className="w-full rounded-lg border border-dashed border-surface-300 py-1.5 text-xs text-surface-500 hover:border-brand-400 hover:text-brand-600 transition-colors"
+                        onClick={() => {
+                          addInlineSample();
+                          setEditingSampleIndex(localSamples.length);
+                        }}
+                        className="w-full rounded-lg border border-dashed border-surface-300 py-2 text-xs text-surface-500 hover:border-brand-400 hover:text-brand-600 transition-colors flex items-center justify-center gap-1.5"
                       >
-                        + Add sample
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M12 5v14M5 12h14" />
+                        </svg>
+                        Add sample
                       </button>
                     </div>
                   ) : localMode === 'paste' ? (

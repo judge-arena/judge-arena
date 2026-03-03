@@ -14,6 +14,7 @@ const createDatasetSchema = z.object({
   description: z.string().max(4000).optional(),
   source: z.enum(['local', 'remote']),
   visibility: z.enum(['private', 'public']),
+  inputType: z.enum(['query', 'query-response']).optional().default('query-response'),
   // Remote fields
   sourceUrl: z.string().url().optional(),
   huggingFaceId: z.string().optional(),
@@ -167,6 +168,7 @@ export async function POST(request: Request) {
         description: data.description,
         source: data.source,
         visibility: data.visibility,
+        inputType: data.inputType,
         sourceUrl: data.sourceUrl,
         huggingFaceId,
         remoteMetadata,
