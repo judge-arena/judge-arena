@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
@@ -132,35 +133,6 @@ async function resolveModelIds(modelConfigIds: string[] | undefined): Promise<{ 
   return { ids: selectedModelIds };
 }
 
-async function resolveEffectiveUser(session: any): Promise<{ userId?: string; error?: NextResponse }> {
-  const sessionUser = await prisma.user.findUnique({
-    where: { id: session.user.id },
-    select: { id: true },
-  });
-
-  if (sessionUser) {
-    return { userId: sessionUser.id };
-  }
-
-  if (session.user.email) {
-    const fallbackUser = await prisma.user.findUnique({
-      where: { email: session.user.email },
-      select: { id: true },
-    });
-
-    if (fallbackUser) {
-      return { userId: fallbackUser.id };
-    }
-  }
-
-  return {
-    error: NextResponse.json(
-      { error: 'User not found for current session. Please sign out and sign in again.' },
-      { status: 401 }
-    ),
-  };
-}
-
 // POST /api/evaluations - Create evaluation(s) from text or dataset
 export async function POST(request: Request) {
   const session = await requireAuth();
@@ -172,9 +144,6 @@ export async function POST(request: Request) {
     // Detect mode: explicit 'mode' field, or infer from presence of datasetId vs inputText
     const mode = body.mode ?? (body.datasetId ? 'dataset' : 'single');
 
-    const { userId: effectiveUserId, error: effectiveUserError } = await resolveEffectiveUser(session);
-    if (effectiveUserError) return effectiveUserError;
-
     // ── Verify project ownership ──
     const projectId = body.projectId;
     if (!projectId) return NextResponse.json({ error: 'projectId is required' }, { status: 400 });
@@ -184,7 +153,7 @@ export async function POST(request: Request) {
       select: { id: true, userId: true },
     });
     if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
-    if (project.userId !== effectiveUserId && !isAdmin(session)) {
+    if (project.userId !== session.user.id && !isAdmin(session)) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
@@ -203,7 +172,7 @@ export async function POST(request: Request) {
           projectId: data.projectId,
           title: data.title,
           inputText: data.inputText,
-          userId: effectiveUserId,
+          userId: session.user.id,
           ...(data.rubricId && { rubricId: data.rubricId }),
           modelSelections: {
             create: [...new Set(selectedModelIds)].map((modelConfigId) => ({ modelConfigId })),
@@ -240,7 +209,7 @@ export async function POST(request: Request) {
             projectId: batchData.projectId,
             title: `${dataset.name} #${sample.index + 1}`,
             inputText: sample.input,
-            userId: effectiveUserId,
+            userId: session.user.id,
             datasetId: dataset.id,
             datasetSampleId: sample.id,
             ...(batchData.rubricId && { rubricId: batchData.rubricId }),
@@ -267,9 +236,15 @@ export async function POST(request: Request) {
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: 'Validation failed', details: error.errors }, { status: 400 });
     }
-    if ((error as any)?.code === 'P2003') {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2003'
+    ) {
       return NextResponse.json(
-        { error: 'Failed to create evaluation: invalid relation reference (user/project/dataset). Please refresh and try again.' },
+        {
+          error:
+            'Foreign key constraint failed. Invalid relation reference while creating evaluation.',
+        },
         { status: 400 }
       );
     }

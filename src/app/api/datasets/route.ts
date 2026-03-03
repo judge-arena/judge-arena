@@ -90,29 +90,6 @@ export async function POST(request: Request) {
     const data = createDatasetSchema.parse(body);
     const sanitizedProjectId = data.projectId?.trim() || undefined;
 
-    const sessionUser = await prisma.user.findUnique({
-      where: { id: session.user.id },
-      select: { id: true, email: true },
-    });
-    const fallbackUser =
-      sessionUser ??
-      (await prisma.user.findUnique({
-        where: { email: session.user.email },
-        select: { id: true, email: true },
-      }));
-
-    if (!fallbackUser) {
-      return NextResponse.json(
-        {
-          error:
-            'User not found for current session. Please sign out and sign in again.',
-        },
-        { status: 401 }
-      );
-    }
-
-    const effectiveUserId = fallbackUser.id;
-
     if (sanitizedProjectId) {
       const project = await prisma.project.findUnique({
         where: { id: sanitizedProjectId },
@@ -128,7 +105,7 @@ export async function POST(request: Request) {
 
       const canUseProject =
         isAdmin(session) ||
-        project.userId === effectiveUserId ||
+        project.userId === session.user.id ||
         project.isDefault;
       if (!canUseProject) {
         return NextResponse.json(
@@ -188,7 +165,7 @@ export async function POST(request: Request) {
         features,
         tags,
         projectId: sanitizedProjectId,
-        userId: effectiveUserId,
+        userId: session.user.id,
         ...(data.samples?.length
           ? {
               samples: {
@@ -227,7 +204,7 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error:
-            'Foreign key constraint failed. Check project selection and session user.',
+            'Foreign key constraint failed. Invalid relation reference while creating dataset.',
         },
         { status: 400 }
       );

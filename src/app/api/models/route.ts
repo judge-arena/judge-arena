@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { requireAuth, isAdmin } from '@/lib/auth-guard';
 
@@ -18,30 +19,7 @@ export async function GET() {
   if (session instanceof NextResponse) return session;
 
   try {
-    let effectiveUserId = session.user.id;
-
-    if (!isAdmin(session)) {
-      const sessionUser = await prisma.user.findUnique({
-        where: { id: session.user.id },
-        select: { id: true },
-      });
-
-      if (!sessionUser && session.user.email) {
-        const fallbackUser = await prisma.user.findUnique({
-          where: { email: session.user.email },
-          select: { id: true },
-        });
-        if (!fallbackUser) {
-          return NextResponse.json(
-            { error: 'User not found for current session. Please sign out and sign in again.' },
-            { status: 401 }
-          );
-        }
-        effectiveUserId = fallbackUser.id;
-      }
-    }
-
-    const where = isAdmin(session) ? undefined : { userId: effectiveUserId };
+    const where = isAdmin(session) ? undefined : { userId: session.user.id };
 
     const models = await prisma.modelConfig.findMany({
       where,
@@ -75,28 +53,6 @@ export async function POST(request: Request) {
     const body = await request.json();
     const data = createModelSchema.parse(body);
 
-    const sessionUser = await prisma.user.findUnique({
-      where: { id: session.user.id },
-      select: { id: true },
-    });
-
-    let effectiveUserId = session.user.id;
-    if (!sessionUser && session.user.email) {
-      const fallbackUser = await prisma.user.findUnique({
-        where: { email: session.user.email },
-        select: { id: true },
-      });
-
-      if (!fallbackUser) {
-        return NextResponse.json(
-          { error: 'User not found for current session. Please sign out and sign in again.' },
-          { status: 401 }
-        );
-      }
-
-      effectiveUserId = fallbackUser.id;
-    }
-
     const model = await prisma.modelConfig.create({
       data: {
         name: data.name,
@@ -108,7 +64,7 @@ export async function POST(request: Request) {
         isVerified: false,
         verifiedAt: null,
         verificationError: 'Not tested yet',
-        userId: effectiveUserId,
+        userId: session.user.id,
       },
     });
 
@@ -123,9 +79,15 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-    if ((error as any)?.code === 'P2003') {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2003'
+    ) {
       return NextResponse.json(
-        { error: 'Failed to create model: invalid user reference. Please sign out and sign in again.' },
+        {
+          error:
+            'Foreign key constraint failed. Invalid relation reference while creating model.',
+        },
         { status: 400 }
       );
     }
