@@ -22,6 +22,12 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { buildRubricVersionOptions, formatDate, formatDateTime } from '@/lib/utils';
 import { toast } from 'sonner';
+import {
+  buildDatasetRunGroups,
+  getEvaluationRunCount,
+  getLatestRun,
+  summarizeDatasetRunGroup,
+} from '@/lib/dataset-run-groups';
 
 export default function ProjectDetailPage() {
   const params = useParams();
@@ -270,6 +276,14 @@ export default function ProjectDetailPage() {
     if (version > current) latestVersionByFamily.set(familyId, version);
   }
 
+  const datasetRunGroups = buildDatasetRunGroups(
+    project.evaluations ?? [],
+    project.datasets ?? []
+  );
+  const standaloneEvaluations = (project.evaluations ?? []).filter(
+    (evaluation: any) => !evaluation.datasetId
+  );
+
   return (
     <div>
       <Header
@@ -305,7 +319,7 @@ export default function ProjectDetailPage() {
 
       <div className="p-6">
         {/* Evaluations List */}
-        {project.evaluations?.length === 0 ? (
+        {(project.evaluations ?? []).length === 0 ? (
           <EmptyState
             icon={
               <svg
@@ -338,12 +352,100 @@ export default function ProjectDetailPage() {
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-surface-700">
-                Evaluations ({project.evaluations.length})
+                Evaluations ({(project.evaluations ?? []).length})
               </h2>
             </div>
 
-            <div className="divide-y divide-surface-100 rounded-xl border border-surface-200 bg-white">
-              {project.evaluations.map((evaluation: any) => (
+            {datasetRunGroups.length > 0 && (
+              <div className="space-y-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-surface-500">
+                  Dataset Runs ({datasetRunGroups.length})
+                </h3>
+                <div className="space-y-2">
+                  {datasetRunGroups.map((group) => {
+                    const summary = summarizeDatasetRunGroup(group);
+                    const status = summary.aggregateStatus;
+                    const statusVariant =
+                      status === 'completed'
+                        ? 'success'
+                        : status === 'error'
+                          ? 'error'
+                          : status === 'judging'
+                            ? 'info'
+                            : 'warning';
+
+                    return (
+                      <Link
+                        key={group.key}
+                        href={`/projects/${projectId}/dataset-runs/${encodeURIComponent(group.key)}`}
+                        className="block"
+                      >
+                        <Card className="hover:border-brand-300 hover:shadow-sm transition-all cursor-pointer">
+                          <CardContent className="p-4">
+                            <div className="flex items-center gap-4">
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-2 mb-1">
+                                  <p className="text-sm font-medium text-surface-900 truncate">
+                                    {group.datasetName}
+                                  </p>
+                                  <Badge variant="info" size="sm">Dataset Run</Badge>
+                                  <Badge variant={statusVariant as any} size="sm">
+                                    {status === 'needs_human' ? 'Needs Human' : status}
+                                  </Badge>
+                                  <Badge variant="default" size="sm">
+                                    {summary.sampleCount} sample{summary.sampleCount === 1 ? '' : 's'}
+                                  </Badge>
+                                </div>
+                                <p className="text-xs text-surface-500 truncate">
+                                  Started {formatDateTime(group.startedAt)}
+                                </p>
+                              </div>
+
+                              <div className="flex items-center gap-3 shrink-0">
+                                {summary.modelAverageAcrossSamples !== null && (
+                                  <div className="text-center">
+                                    <div className="text-base font-bold font-mono text-surface-800">
+                                      {summary.modelAverageAcrossSamples.toFixed(1)}
+                                    </div>
+                                    <div className="text-2xs text-surface-400">Model Avg</div>
+                                  </div>
+                                )}
+                                {summary.humanAverageAcrossSamples !== null && (
+                                  <div className="text-center">
+                                    <div className="text-base font-bold font-mono text-surface-800">
+                                      {summary.humanAverageAcrossSamples.toFixed(1)}
+                                    </div>
+                                    <div className="text-2xs text-surface-400">Human Avg</div>
+                                  </div>
+                                )}
+                                <svg
+                                  width="16"
+                                  height="16"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                  className="text-surface-300"
+                                >
+                                  <path d="M9 18l6-6-6-6" />
+                                </svg>
+                              </div>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-surface-500">
+                Individual Evaluations ({standaloneEvaluations.length})
+              </h3>
+              <div className="divide-y divide-surface-100 rounded-xl border border-surface-200 bg-white">
+              {standaloneEvaluations.map((evaluation: any) => (
                 <Link
                   key={evaluation.id}
                   href={`/evaluate/${evaluation.id}`}
@@ -382,8 +484,8 @@ export default function ProjectDetailPage() {
                       </Badge>
                     )}
                     {(() => {
-                      const latestRun = (evaluation.runs ?? [])[0];
-                      const runCount = (evaluation.runs ?? []).length;
+                      const latestRun = getLatestRun(evaluation);
+                      const runCount = getEvaluationRunCount(evaluation);
                       return (
                         <>
                           <Badge variant="default" size="sm">
@@ -424,6 +526,7 @@ export default function ProjectDetailPage() {
                   </div>
                 </Link>
               ))}
+              </div>
             </div>
           </div>
         )}

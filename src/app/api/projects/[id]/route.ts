@@ -47,14 +47,31 @@ export async function GET(
               },
               orderBy: { createdAt: 'asc' },
             },
-            // Include run summaries so the project page can show run count + latest status
+            // Include latest run + run count so project page can group dataset batches
             runs: {
               select: {
                 id: true,
                 status: true,
                 createdAt: true,
+                modelJudgments: {
+                  select: {
+                    status: true,
+                    overallScore: true,
+                  },
+                },
+                humanJudgment: {
+                  select: {
+                    overallScore: true,
+                  },
+                },
               },
               orderBy: { createdAt: 'desc' },
+              take: 1,
+            },
+            _count: {
+              select: {
+                runs: true,
+              },
             },
           },
           orderBy: { createdAt: 'desc' },
