@@ -350,6 +350,28 @@ export default function DatasetDetailPage() {
           </Card>
         )}
 
+        {/* ─── Local dataset specifics ─────────────────────────────── */}
+        {dataset.source === 'local' && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">Local Dataset</CardTitle>
+            </CardHeader>
+            <CardContent className="text-sm space-y-2">
+              <div className="flex items-center gap-2">
+                <Badge variant="outline" size="sm">
+                  Format: {(dataset.format || 'unknown').toUpperCase()}
+                </Badge>
+                <Badge variant="outline" size="sm">
+                  {(dataset.sampleCount ?? dataset._count?.samples ?? 0).toLocaleString()} stored samples
+                </Badge>
+              </div>
+              <p className="text-surface-600 text-xs">
+                Local datasets are managed independently from projects and evaluations. Use tags and visibility to organize access.
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
         {/* ─── Tags ──────────────────────────────────────────────────── */}
         {tags.length > 0 && (
           <Card>

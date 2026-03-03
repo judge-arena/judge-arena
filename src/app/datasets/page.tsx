@@ -1,6 +1,12 @@
 'use client';
 
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, {
+  useEffect,
+  useState,
+  useCallback,
+  useRef,
+  useMemo,
+} from 'react';
 import Link from 'next/link';
 import { Header } from '@/components/layout/header';
 import {
@@ -14,6 +20,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Input } from '@/components/ui/input';
+import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import {
   Dialog,
@@ -38,12 +45,12 @@ interface DatasetListItem {
   sourceUrl: string | null;
   huggingFaceId: string | null;
   sampleCount: number | null;
+  format?: string | null;
   tags: string | null;
   splits: string | null;
   createdAt: string;
   updatedAt: string;
   user: { id: string; name: string | null; email: string };
-  project: { id: string; name: string } | null;
   _count: { samples: number };
 }
 
@@ -66,19 +73,20 @@ interface LocalSamplePayload {
   metadata?: Record<string, unknown>;
 }
 
-type SourceFilter = 'all' | 'local' | 'remote';
 type VisibilityFilter = 'all' | 'private' | 'public';
 type CreateStep = 'type' | 'remote-url' | 'remote-confirm' | 'local-form';
+type DatasetTab = 'remote' | 'local';
 
 /* ─── Component ──────────────────────────────────────────────────────────── */
 
 export default function DatasetsPage() {
   const [datasets, setDatasets] = useState<DatasetListItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
   const [visibilityFilter, setVisibilityFilter] =
     useState<VisibilityFilter>('all');
   const [search, setSearch] = useState('');
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [activeTab, setActiveTab] = useState<DatasetTab>('remote');
 
   // ─── Create dialog ───
   const [createOpen, setCreateOpen] = useState(false);
@@ -90,6 +98,8 @@ export default function DatasetsPage() {
   const [fetchingPreview, setFetchingPreview] = useState(false);
   const [hfPreview, setHfPreview] = useState<HFPreview | null>(null);
   const [remoteVisibility, setRemoteVisibility] = useState<'public' | 'private'>('public');
+  const [remoteTags, setRemoteTags] = useState<string[]>([]);
+  const [remoteTagInput, setRemoteTagInput] = useState('');
 
   // Local creation
   const [localName, setLocalName] = useState('');
@@ -97,6 +107,8 @@ export default function DatasetsPage() {
   const [localFormat, setLocalFormat] = useState<'json' | 'jsonl' | 'csv' | 'text'>('json');
   const [localVisibility, setLocalVisibility] = useState<'private' | 'public'>('private');
   const [localData, setLocalData] = useState('');
+  const [localTags, setLocalTags] = useState<string[]>([]);
+  const [localTagInput, setLocalTagInput] = useState('');
   const [localSamples, setLocalSamples] = useState<
     Array<{ input: string; expected: string }>
   >([{ input: '', expected: '' }]);
@@ -128,7 +140,6 @@ export default function DatasetsPage() {
   const loadDatasets = useCallback(async () => {
     try {
       const params = new URLSearchParams();
-      if (sourceFilter !== 'all') params.set('source', sourceFilter);
       if (visibilityFilter !== 'all')
         params.set('visibility', visibilityFilter);
       const res = await fetch(`/api/datasets?${params}`);
@@ -138,24 +149,59 @@ export default function DatasetsPage() {
     } finally {
       setLoading(false);
     }
-  }, [sourceFilter, visibilityFilter]);
+  }, [visibilityFilter]);
 
   useEffect(() => {
     setLoading(true);
     loadDatasets();
   }, [loadDatasets]);
 
-  /* ─── Filtered datasets ────────────────────────────────────────────────── */
+  /* ─── Derived tags / filters ───────────────────────────────────────────── */
+
+  const allTags = useMemo(() => {
+    const set = new Set<string>();
+    datasets.forEach((d) => {
+      parseTags(d.tags).forEach((tag) => set.add(tag));
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [datasets]);
 
   const filtered = datasets.filter((d) => {
-    if (!search) return true;
-    const q = search.toLowerCase();
-    return (
-      d.name.toLowerCase().includes(q) ||
-      d.description?.toLowerCase().includes(q) ||
-      d.huggingFaceId?.toLowerCase().includes(q)
-    );
+    const q = search.trim().toLowerCase();
+    const tags = parseTags(d.tags).map((t) => t.toLowerCase());
+
+    const matchesVisibility =
+      visibilityFilter === 'all' || d.visibility === visibilityFilter;
+
+    const matchesTags =
+      selectedTags.length === 0 ||
+      selectedTags.every((t) => tags.includes(t.toLowerCase()));
+
+    const matchesSearch = q
+      ? d.name.toLowerCase().includes(q) ||
+        d.description?.toLowerCase().includes(q) ||
+        d.huggingFaceId?.toLowerCase().includes(q) ||
+        tags.some((t) => t.includes(q))
+      : true;
+
+    return matchesVisibility && matchesTags && matchesSearch;
   });
+
+  const localDatasets = filtered.filter((d) => d.source === 'local');
+  const remoteDatasets = filtered.filter((d) => d.source === 'remote');
+  const tabDatasets = activeTab === 'remote' ? remoteDatasets : localDatasets;
+  const activeTabLabel = activeTab === 'remote' ? 'Remote' : 'Local';
+  const selectedTagValue = selectedTags[0] ?? 'all';
+  const activeFilterCount =
+    (visibilityFilter !== 'all' ? 1 : 0) + (selectedTags.length > 0 ? 1 : 0);
+  const hasActiveFilters = activeFilterCount > 0;
+  const tagFilterOptions = useMemo(
+    () => [
+      { value: 'all', label: 'All Tags' },
+      ...allTags.map((tag) => ({ value: tag, label: tag })),
+    ],
+    [allTags]
+  );
 
   /* ─── Create dialog helpers ────────────────────────────────────────────── */
 
@@ -165,11 +211,15 @@ export default function DatasetsPage() {
     setRemoteUrl('');
     setHfPreview(null);
     setRemoteVisibility('public');
+    setRemoteTags([]);
+    setRemoteTagInput('');
     setLocalName('');
     setLocalDescription('');
     setLocalFormat('json');
     setLocalVisibility('private');
     setLocalData('');
+    setLocalTags([]);
+    setLocalTagInput('');
     setLocalSamples([{ input: '', expected: '' }]);
     setLocalUploadedSamples([]);
     setLocalUploadedFileName('');
@@ -195,7 +245,9 @@ export default function DatasetsPage() {
         )}`
       );
       if (res.ok) {
-        setHfPreview(await res.json());
+        const preview = await res.json();
+        setHfPreview(preview);
+        setRemoteTags(preview.tags ?? []);
         setCreateStep('remote-confirm');
       } else {
         const data = await res.json();
@@ -222,7 +274,7 @@ export default function DatasetsPage() {
           visibility: remoteVisibility,
           sourceUrl: remoteUrl.trim(),
           huggingFaceId: hfPreview.id,
-          tags: hfPreview.tags,
+          tags: remoteTags,
         }),
       });
       if (res.ok) {
@@ -283,6 +335,7 @@ export default function DatasetsPage() {
           format: localFormat,
           localData: localMode === 'paste' ? localData : undefined,
           samples,
+          tags: localTags,
         }),
       });
       if (res.ok) {
@@ -318,13 +371,74 @@ export default function DatasetsPage() {
 
   /* ─── Helpers ──────────────────────────────────────────────────────────── */
 
-  const parseTags = (tagsJson: string | null): string[] => {
+  function parseTags(tagsJson: string | null): string[] {
     if (!tagsJson) return [];
     try {
-      return JSON.parse(tagsJson);
+      const parsed = JSON.parse(tagsJson);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((tag) => (tag != null ? String(tag).trim() : ''))
+          .filter(Boolean);
+      }
     } catch {
-      return [];
+      const fallback = tagsJson
+        .split(',')
+        .map((tag) => tag.trim())
+        .filter(Boolean);
+      if (fallback.length) return fallback;
     }
+    return [];
+  }
+
+  const toggleTagFilter = (tag: string) => {
+    const normalized = tag.trim();
+    if (!normalized) return;
+    setSelectedTags((prev) =>
+      prev.includes(normalized)
+        ? prev.filter((t) => t !== normalized)
+        : [...prev, normalized]
+    );
+  };
+
+  const handleVisibilityFilterChange = (value: string) => {
+    setVisibilityFilter(value as VisibilityFilter);
+  };
+
+  const handleTagFilterChange = (value: string) => {
+    if (value === 'all') {
+      setSelectedTags([]);
+      return;
+    }
+    setSelectedTags([value]);
+  };
+
+  const clearAllFilters = () => {
+    setVisibilityFilter('all');
+    setSelectedTags([]);
+  };
+
+  const addRemoteTag = () => {
+    const normalized = remoteTagInput.trim();
+    if (!normalized) return;
+    setRemoteTags((prev) =>
+      prev.includes(normalized) ? prev : [...prev, normalized]
+    );
+    setRemoteTagInput('');
+  };
+
+  const addLocalTag = () => {
+    const normalized = localTagInput.trim();
+    if (!normalized) return;
+    setLocalTags((prev) => (prev.includes(normalized) ? prev : [...prev, normalized]));
+    setLocalTagInput('');
+  };
+
+  const removeRemoteTag = (tag: string) => {
+    setRemoteTags((prev) => prev.filter((t) => t !== tag));
+  };
+
+  const removeLocalTag = (tag: string) => {
+    setLocalTags((prev) => prev.filter((t) => t !== tag));
   };
 
   const addInlineSample = () => {
@@ -531,213 +645,288 @@ export default function DatasetsPage() {
     await handleUploadFile(file);
   };
 
+  const handleAddDatasetForActiveTab = () => {
+    openCreate();
+    setCreateStep(activeTab === 'remote' ? 'remote-url' : 'local-form');
+  };
+
+  const handleSwapTab = () => {
+    setActiveTab((prev) => (prev === 'remote' ? 'local' : 'remote'));
+  };
+
   /* ─── Render ───────────────────────────────────────────────────────────── */
+
+  const renderDatasetCard = (dataset: DatasetListItem) => {
+    const tags = parseTags(dataset.tags);
+    const splits = parseTags(dataset.splits);
+    const sampleCount = dataset.sampleCount ?? dataset._count.samples ?? 0;
+    const isRemote = dataset.source === 'remote';
+
+    return (
+      <Link key={dataset.id} href={`/datasets/${dataset.id}`}>
+        <Card interactive className="h-full">
+          <CardHeader>
+            <div className="flex items-start justify-between">
+              <CardTitle className="truncate pr-2">{dataset.name}</CardTitle>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  onClick={(e) => handleDelete(dataset.id, e)}
+                  className="rounded p-1 text-surface-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+                  aria-label="Delete dataset"
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            {dataset.description && (
+              <CardDescription className="line-clamp-2">
+                {dataset.description}
+              </CardDescription>
+            )}
+          </CardHeader>
+          <CardContent>
+            <div className="flex flex-wrap items-center gap-1.5 mb-2">
+              <Badge variant={isRemote ? 'default' : 'outline'} size="sm">
+                {isRemote ? '🌐 Remote' : '💾 Local'}
+              </Badge>
+              <Badge
+                variant={
+                  dataset.visibility === 'public' ? 'success' : 'warning'
+                }
+                size="sm"
+              >
+                {dataset.visibility === 'public' ? '🔓 Public' : '🔒 Private'}
+              </Badge>
+              {sampleCount > 0 && (
+                <Badge variant="default" size="sm">
+                  {sampleCount.toLocaleString()} samples
+                </Badge>
+              )}
+              {isRemote && splits.length > 0 && (
+                <Badge variant="outline" size="sm">
+                  {splits.length} splits
+                </Badge>
+              )}
+              {!isRemote && dataset.format && (
+                <Badge variant="outline" size="sm">
+                  Format: {dataset.format.toUpperCase()}
+                </Badge>
+              )}
+            </div>
+
+            {isRemote ? (
+              <p className="text-2xs text-surface-500 mb-1">
+                HuggingFace ID: {dataset.huggingFaceId || 'Provided URL'}
+              </p>
+            ) : (
+              <p className="text-2xs text-surface-500 mb-1">
+                Local dataset managed independently from projects.
+              </p>
+            )}
+
+            {tags.length > 0 && (
+              <div className="flex flex-wrap gap-1 mb-2">
+                {tags.slice(0, 6).map((tag) => (
+                  <span
+                    key={tag}
+                    className="inline-block rounded-full bg-surface-100 px-2 py-0.5 text-2xs text-surface-600"
+                  >
+                    {tag}
+                  </span>
+                ))}
+                {tags.length > 6 && (
+                  <span className="text-2xs text-surface-400">
+                    +{tags.length - 6} more
+                  </span>
+                )}
+              </div>
+            )}
+
+            <p className="text-2xs text-surface-400">
+              Updated {formatDate(dataset.updatedAt)}
+            </p>
+          </CardContent>
+        </Card>
+      </Link>
+    );
+  };
 
   return (
     <div>
       <Header
-        title="Datasets"
-        description="Manage evaluation datasets — local or from HuggingFace"
+        title={`${activeTabLabel} Datasets`}
+        description="Manage datasets independently of projects — both local and remote sources."
         actions={
-          <Button variant="primary" size="sm" onClick={openCreate}>
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              aria-hidden="true"
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 rounded-lg border border-surface-200 bg-white p-0.5">
+              <button
+                onClick={() => setActiveTab('remote')}
+                className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
+                  activeTab === 'remote'
+                    ? 'bg-brand-600 text-white'
+                    : 'text-surface-600 hover:bg-surface-100'
+                }`}
+              >
+                Remote
+              </button>
+              <button
+                onClick={() => setActiveTab('local')}
+                className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
+                  activeTab === 'local'
+                    ? 'bg-brand-600 text-white'
+                    : 'text-surface-600 hover:bg-surface-100'
+                }`}
+              >
+                Local
+              </button>
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleSwapTab}
+              aria-label={`Swap to ${activeTab === 'remote' ? 'Local' : 'Remote'}`}
+              title={`Swap to ${activeTab === 'remote' ? 'Local' : 'Remote'}`}
             >
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-            New Dataset
-          </Button>
-        }
-      />
-
-      <div className="p-6">
-        {/* ─── Filters ─────────────────────────────────────────────────── */}
-        <div className="mb-6 flex flex-wrap items-center gap-3">
-          <Input
-            placeholder="Search datasets..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="max-w-xs"
-          />
-          <div className="flex items-center gap-1.5 rounded-lg border border-surface-200 p-0.5">
-            {(['all', 'local', 'remote'] as SourceFilter[]).map((s) => (
-              <button
-                key={s}
-                onClick={() => setSourceFilter(s)}
-                className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
-                  sourceFilter === s
-                    ? 'bg-brand-600 text-white'
-                    : 'text-surface-600 hover:bg-surface-100'
-                }`}
-              >
-                {s === 'all' ? 'All Sources' : s === 'local' ? 'Local' : 'Remote'}
-              </button>
-            ))}
-          </div>
-          <div className="flex items-center gap-1.5 rounded-lg border border-surface-200 p-0.5">
-            {(['all', 'public', 'private'] as VisibilityFilter[]).map((v) => (
-              <button
-                key={v}
-                onClick={() => setVisibilityFilter(v)}
-                className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
-                  visibilityFilter === v
-                    ? 'bg-brand-600 text-white'
-                    : 'text-surface-600 hover:bg-surface-100'
-                }`}
-              >
-                {v === 'all' ? 'All' : v.charAt(0).toUpperCase() + v.slice(1)}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* ─── Dataset grid ────────────────────────────────────────────── */}
-        {loading ? (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {[1, 2, 3].map((i) => (
-              <Skeleton key={i} className="h-44 w-full rounded-xl" />
-            ))}
-          </div>
-        ) : filtered.length === 0 ? (
-          <EmptyState
-            icon={
               <svg
-                width="48"
-                height="48"
+                width="14"
+                height="14"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
-                strokeWidth="1.5"
+                strokeWidth="2"
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                className="text-surface-300"
+                aria-hidden="true"
               >
-                <ellipse cx="12" cy="5" rx="9" ry="3" />
-                <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
-                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+                <path d="M17 3l4 4-4 4" />
+                <path d="M3 7h18" />
+                <path d="M7 21l-4-4 4-4" />
+                <path d="M21 17H3" />
               </svg>
-            }
-            title="No datasets yet"
-            description="Add a public HuggingFace dataset or create your own local dataset for evaluation."
-            action={
-              <Button variant="primary" onClick={openCreate}>
-                Add your first dataset
-              </Button>
-            }
-          />
-        ) : (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {filtered.map((dataset) => {
-              const tags = parseTags(dataset.tags);
-              return (
-                <Link key={dataset.id} href={`/datasets/${dataset.id}`}>
-                  <Card interactive className="h-full">
-                    <CardHeader>
-                      <div className="flex items-start justify-between">
-                        <CardTitle className="truncate pr-2">
-                          {dataset.name}
-                        </CardTitle>
-                        <div className="flex items-center gap-1 shrink-0">
-                          <button
-                            onClick={(e) => handleDelete(dataset.id, e)}
-                            className="rounded p-1 text-surface-400 hover:text-red-500 hover:bg-red-50 transition-colors"
-                            aria-label="Delete dataset"
-                          >
-                            <svg
-                              width="14"
-                              height="14"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            >
-                              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                            </svg>
-                          </button>
-                        </div>
-                      </div>
-                      {dataset.description && (
-                        <CardDescription className="line-clamp-2">
-                          {dataset.description}
-                        </CardDescription>
-                      )}
-                    </CardHeader>
-                    <CardContent>
-                      <div className="flex flex-wrap items-center gap-1.5 mb-2">
-                        <Badge
-                          variant={
-                            dataset.source === 'remote'
-                              ? 'default'
-                              : 'outline'
-                          }
-                          size="sm"
-                        >
-                          {dataset.source === 'remote' ? '🌐 Remote' : '💾 Local'}
-                        </Badge>
-                        <Badge
-                          variant={
-                            dataset.visibility === 'public'
-                              ? 'success'
-                              : 'warning'
-                          }
-                          size="sm"
-                        >
-                          {dataset.visibility === 'public'
-                            ? '🔓 Public'
-                            : '🔒 Private'}
-                        </Badge>
-                        {dataset.sampleCount != null && (
-                          <Badge variant="default" size="sm">
-                            {dataset.sampleCount.toLocaleString()} samples
-                          </Badge>
-                        )}
-                        {dataset._count.samples > 0 &&
-                          dataset.sampleCount == null && (
-                            <Badge variant="default" size="sm">
-                              {dataset._count.samples} samples
-                            </Badge>
-                          )}
-                      </div>
-                      {tags.length > 0 && (
-                        <div className="flex flex-wrap gap-1 mb-2">
-                          {tags.slice(0, 4).map((tag) => (
-                            <span
-                              key={tag}
-                              className="inline-block rounded-full bg-surface-100 px-2 py-0.5 text-2xs text-surface-600"
-                            >
-                              {tag}
-                            </span>
-                          ))}
-                          {tags.length > 4 && (
-                            <span className="text-2xs text-surface-400">
-                              +{tags.length - 4} more
-                            </span>
-                          )}
-                        </div>
-                      )}
-                      {dataset.project && (
-                        <p className="text-2xs text-surface-400 mb-1">
-                          Project: {dataset.project.name}
-                        </p>
-                      )}
-                      <p className="text-2xs text-surface-400">
-                        Updated {formatDate(dataset.updatedAt)}
-                      </p>
-                    </CardContent>
-                  </Card>
-                </Link>
-              );
-            })}
+            </Button>
+            <Button variant="primary" size="sm" onClick={handleAddDatasetForActiveTab}>
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                aria-hidden="true"
+              >
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              New Dataset
+            </Button>
           </div>
-        )}
+        }
+      />
+
+      <div className="p-6 space-y-6">
+        {/* ─── Filters ─────────────────────────────────────────────────── */}
+        <div className="rounded-xl border border-surface-200 bg-surface-50 p-4">
+          <div className="flex flex-wrap items-end gap-3">
+          <Input
+            placeholder="Search by name, tag, or id"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full min-w-[240px] flex-1"
+          />
+          <div className="flex items-center gap-2">
+            <Badge variant={hasActiveFilters ? 'default' : 'outline'} size="sm">
+              {hasActiveFilters
+                ? `${activeFilterCount} active filter${activeFilterCount > 1 ? 's' : ''}`
+                : 'No active filters'}
+            </Badge>
+            {hasActiveFilters && (
+              <Button variant="ghost" size="sm" onClick={clearAllFilters}>
+                Clear
+              </Button>
+            )}
+          </div>
+          <div className="w-full sm:w-[430px]">
+            <p className="mb-1.5 text-xs font-medium text-surface-600">Filters</p>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <Select
+                value={visibilityFilter}
+                onChange={(e) => handleVisibilityFilterChange(e.target.value)}
+                options={[
+                  { value: 'all', label: 'Visibility: All' },
+                  { value: 'public', label: 'Visibility: Public' },
+                  { value: 'private', label: 'Visibility: Private' },
+                ]}
+              />
+              <Select
+                value={selectedTagValue}
+                onChange={(e) => handleTagFilterChange(e.target.value)}
+                options={tagFilterOptions}
+              />
+            </div>
+          </div>
+        </div>
+        </div>
+
+        {/* ─── Tabbed datasets ────────────────────────────────────────── */}
+        <div className="rounded-xl border border-surface-200 p-4 space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-surface-800">Datasets</h3>
+              {!loading && (
+                <Badge variant="outline" size="sm">
+                  {tabDatasets.length}
+                </Badge>
+              )}
+            </div>
+          </div>
+
+          {loading ? (
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+              {[1, 2, 3].map((i) => (
+                <Skeleton key={i} className="h-44 w-full rounded-xl" />
+              ))}
+            </div>
+          ) : tabDatasets.length === 0 ? (
+            <EmptyState
+              icon={
+                <svg
+                  width="40"
+                  height="40"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="text-surface-300"
+                >
+                  <circle cx="12" cy="12" r="10" />
+                  <path d="M8 12h8M12 8v8" />
+                </svg>
+              }
+              title={`No ${activeTabLabel.toLowerCase()} datasets yet`}
+              description={
+                activeTab === 'remote'
+                  ? 'Import HuggingFace or other remote datasets and we will track their metadata separately.'
+                  : 'Create or upload datasets that live independently of projects and evaluations.'
+              }
+            />
+          ) : (
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+              {tabDatasets.map(renderDatasetCard)}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* ═════════════════ Create Dataset Dialog ═════════════════ */}
@@ -922,6 +1111,52 @@ export default function DatasetsPage() {
                     </div>
                   )}
                 </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-surface-700 block">
+                    Tags (used for filtering)
+                  </label>
+                  <div className="flex gap-2">
+                    <Input
+                      value={remoteTagInput}
+                      onChange={(e) => setRemoteTagInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ',') {
+                          e.preventDefault();
+                          addRemoteTag();
+                        }
+                      }}
+                      placeholder="Add a tag and press Enter"
+                    />
+                    <Button variant="secondary" onClick={addRemoteTag}>
+                      Add
+                    </Button>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {remoteTags.length === 0 && (
+                      <p className="text-2xs text-surface-400">No tags yet.</p>
+                    )}
+                    {remoteTags.map((tag) => (
+                      <span
+                        key={tag}
+                        className="inline-flex items-center gap-1 rounded-full bg-surface-100 px-2 py-0.5 text-2xs text-surface-700 border border-surface-200"
+                      >
+                        {tag}
+                        <button
+                          type="button"
+                          onClick={() => removeRemoteTag(tag)}
+                          className="text-surface-400 hover:text-red-500"
+                          aria-label={`Remove tag ${tag}`}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                  <p className="text-2xs text-surface-400">
+                    Visibility stays separate; tags only affect search and filtering.
+                  </p>
+                </div>
               </div>
             )}
 
@@ -990,6 +1225,52 @@ export default function DatasetsPage() {
                       <option value="text">Text</option>
                     </select>
                   </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-surface-700 block">
+                    Tags (optional)
+                  </label>
+                  <div className="flex gap-2">
+                    <Input
+                      value={localTagInput}
+                      onChange={(e) => setLocalTagInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ',') {
+                          e.preventDefault();
+                          addLocalTag();
+                        }
+                      }}
+                      placeholder="Add a tag and press Enter"
+                    />
+                    <Button variant="secondary" onClick={addLocalTag}>
+                      Add
+                    </Button>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {localTags.length === 0 && (
+                      <p className="text-2xs text-surface-400">Use tags to organize and search datasets.</p>
+                    )}
+                    {localTags.map((tag) => (
+                      <span
+                        key={tag}
+                        className="inline-flex items-center gap-1 rounded-full bg-surface-100 px-2 py-0.5 text-2xs text-surface-700 border border-surface-200"
+                      >
+                        {tag}
+                        <button
+                          type="button"
+                          onClick={() => removeLocalTag(tag)}
+                          className="text-surface-400 hover:text-red-500"
+                          aria-label={`Remove tag ${tag}`}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                  <p className="text-2xs text-surface-400">
+                    Tags do not affect visibility; they only improve discovery and filtering.
+                  </p>
                 </div>
 
                 {/* Data entry mode toggle */}
