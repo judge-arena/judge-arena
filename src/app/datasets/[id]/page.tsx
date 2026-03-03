@@ -60,6 +60,14 @@ interface RemoteMeta {
   configs?: string[];
   tags?: string[];
   lastModified?: string;
+  evaluationSummary?: {
+    updatedAt?: string;
+    sampleCount?: number;
+    samplesWithModelScores?: number;
+    samplesWithHumanScores?: number;
+    averageModelScore?: number | null;
+    averageHumanScore?: number | null;
+  };
 }
 
 /* ─── Component ──────────────────────────────────────────────────────────── */
@@ -91,6 +99,68 @@ export default function DatasetDetailPage() {
   useEffect(() => {
     loadDataset();
   }, [loadDataset]);
+
+  useEffect(() => {
+    if (!id) return;
+
+    const eventSource = new EventSource(
+      `/api/events?topic=datasets&datasetId=${encodeURIComponent(id)}`
+    );
+
+    const onDatasetSummaryUpdated = (event: MessageEvent) => {
+      try {
+        const payload = JSON.parse(event.data) as {
+          datasetId: string;
+          summary: {
+            updatedAt: string;
+            sampleCount: number;
+            samplesWithModelScores: number;
+            samplesWithHumanScores: number;
+            averageModelScore: number | null;
+            averageHumanScore: number | null;
+          };
+        };
+
+        if (payload.datasetId !== id) return;
+
+        setDataset((previous) => {
+          if (!previous) return previous;
+
+          const existingMeta = (() => {
+            if (!previous.remoteMetadata) return {} as Record<string, unknown>;
+            try {
+              const parsed = JSON.parse(previous.remoteMetadata);
+              return parsed && typeof parsed === 'object'
+                ? (parsed as Record<string, unknown>)
+                : {};
+            } catch {
+              return {};
+            }
+          })();
+
+          return {
+            ...previous,
+            remoteMetadata: JSON.stringify({
+              ...existingMeta,
+              evaluationSummary: payload.summary,
+            }),
+          };
+        });
+      } catch {
+        // ignore malformed events to keep stream resilient
+      }
+    };
+
+    eventSource.addEventListener('dataset.summary.updated', onDatasetSummaryUpdated);
+
+    return () => {
+      eventSource.removeEventListener(
+        'dataset.summary.updated',
+        onDatasetSummaryUpdated
+      );
+      eventSource.close();
+    };
+  }, [id]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -161,6 +231,7 @@ export default function DatasetDetailPage() {
   const splits = parseJson<string[]>(dataset.splits, []);
   const features = parseJson<any[]>(dataset.features, []);
   const remoteMeta = parseJson<RemoteMeta>(dataset.remoteMetadata, {});
+  const evaluationSummary = remoteMeta.evaluationSummary;
 
   const visibleSamples = showAllSamples
     ? dataset.samples
@@ -389,6 +460,51 @@ export default function DatasetDetailPage() {
                   </span>
                 ))}
               </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {evaluationSummary && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">Evaluation Summary</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+                <div>
+                  <p className="text-xs text-surface-500">Model Avg</p>
+                  <p className="text-base font-semibold text-surface-800">
+                    {evaluationSummary.averageModelScore != null
+                      ? evaluationSummary.averageModelScore.toFixed(1)
+                      : '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-surface-500">Human Avg</p>
+                  <p className="text-base font-semibold text-surface-800">
+                    {evaluationSummary.averageHumanScore != null
+                      ? evaluationSummary.averageHumanScore.toFixed(1)
+                      : '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-surface-500">Model Samples</p>
+                  <p className="text-base font-semibold text-surface-800">
+                    {(evaluationSummary.samplesWithModelScores ?? 0).toLocaleString()}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-surface-500">Human Samples</p>
+                  <p className="text-base font-semibold text-surface-800">
+                    {(evaluationSummary.samplesWithHumanScores ?? 0).toLocaleString()}
+                  </p>
+                </div>
+              </div>
+              {evaluationSummary.updatedAt && (
+                <p className="mt-3 text-2xs text-surface-400">
+                  Updated {formatDate(evaluationSummary.updatedAt)}
+                </p>
+              )}
             </CardContent>
           </Card>
         )}

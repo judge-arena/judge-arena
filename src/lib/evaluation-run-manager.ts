@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { executeJudgment } from '@/lib/llm';
+import { refreshDatasetEvaluationSummaryForEvaluation } from '@/lib/dataset-evaluation-summary';
 
 const RUN_QUEUE_CONCURRENCY = Number(process.env.EVALUATION_RUN_QUEUE_CONCURRENCY ?? '4');
 const MODEL_CONCURRENCY_PER_RUN = Number(process.env.EVALUATION_MODEL_CONCURRENCY_PER_RUN ?? '2');
@@ -211,6 +212,8 @@ async function processRun(runId: string) {
     where: { id: run.id },
     data: { status: finalStatus },
   });
+
+  await refreshDatasetEvaluationSummaryForEvaluation(run.evaluationId);
 }
 
 async function processQueueItem(item: QueueItem) {

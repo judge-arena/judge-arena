@@ -48,10 +48,20 @@ interface DatasetListItem {
   format?: string | null;
   tags: string | null;
   splits: string | null;
+  remoteMetadata?: string | null;
   createdAt: string;
   updatedAt: string;
   user: { id: string; name: string | null; email: string };
   _count: { samples: number };
+}
+
+interface DatasetEvaluationSummaryView {
+  updatedAt?: string;
+  sampleCount?: number;
+  samplesWithModelScores?: number;
+  samplesWithHumanScores?: number;
+  averageModelScore?: number | null;
+  averageHumanScore?: number | null;
 }
 
 interface HFPreview {
@@ -155,6 +165,64 @@ export default function DatasetsPage() {
     setLoading(true);
     loadDatasets();
   }, [loadDatasets]);
+
+  useEffect(() => {
+    const eventSource = new EventSource('/api/events?topic=datasets');
+
+    const onDatasetSummaryUpdated = (event: MessageEvent) => {
+      try {
+        const payload = JSON.parse(event.data) as {
+          datasetId: string;
+          summary: {
+            updatedAt: string;
+            sampleCount: number;
+            samplesWithModelScores: number;
+            samplesWithHumanScores: number;
+            averageModelScore: number | null;
+            averageHumanScore: number | null;
+          };
+        };
+
+        setDatasets((previous) =>
+          previous.map((dataset) => {
+            if (dataset.id !== payload.datasetId) return dataset;
+
+            const existingMeta = (() => {
+              if (!dataset.remoteMetadata) return {} as Record<string, unknown>;
+              try {
+                const parsed = JSON.parse(dataset.remoteMetadata);
+                return parsed && typeof parsed === 'object'
+                  ? (parsed as Record<string, unknown>)
+                  : {};
+              } catch {
+                return {};
+              }
+            })();
+
+            return {
+              ...dataset,
+              remoteMetadata: JSON.stringify({
+                ...existingMeta,
+                evaluationSummary: payload.summary,
+              }),
+            };
+          })
+        );
+      } catch {
+        // ignore malformed events to keep stream resilient
+      }
+    };
+
+    eventSource.addEventListener('dataset.summary.updated', onDatasetSummaryUpdated);
+
+    return () => {
+      eventSource.removeEventListener(
+        'dataset.summary.updated',
+        onDatasetSummaryUpdated
+      );
+      eventSource.close();
+    };
+  }, []);
 
   /* ─── Derived tags / filters ───────────────────────────────────────────── */
 
@@ -661,6 +729,21 @@ export default function DatasetsPage() {
     const splits = parseTags(dataset.splits);
     const sampleCount = dataset.sampleCount ?? dataset._count.samples ?? 0;
     const isRemote = dataset.source === 'remote';
+    const parsedMeta = (() => {
+      if (!dataset.remoteMetadata) return null;
+      try {
+        const parsed = JSON.parse(dataset.remoteMetadata);
+        return parsed && typeof parsed === 'object'
+          ? (parsed as Record<string, unknown>)
+          : null;
+      } catch {
+        return null;
+      }
+    })();
+    const evaluationSummary: DatasetEvaluationSummaryView | null =
+      parsedMeta && typeof parsedMeta === 'object' && 'evaluationSummary' in parsedMeta
+        ? ((parsedMeta as Record<string, any>).evaluationSummary as DatasetEvaluationSummaryView)
+        : null;
 
     return (
       <Link key={dataset.id} href={`/datasets/${dataset.id}`}>
@@ -721,6 +804,16 @@ export default function DatasetsPage() {
               {!isRemote && dataset.format && (
                 <Badge variant="outline" size="sm">
                   Format: {dataset.format.toUpperCase()}
+                </Badge>
+              )}
+              {evaluationSummary?.averageModelScore != null && (
+                <Badge variant="outline" size="sm">
+                  Model Avg: {evaluationSummary.averageModelScore.toFixed(1)}
+                </Badge>
+              )}
+              {evaluationSummary?.averageHumanScore != null && (
+                <Badge variant="outline" size="sm">
+                  Human Avg: {evaluationSummary.averageHumanScore.toFixed(1)}
                 </Badge>
               )}
             </div>

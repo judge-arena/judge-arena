@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { refreshDatasetEvaluationSummaryForEvaluation } from '@/lib/dataset-evaluation-summary';
 
 const humanJudgmentSchema = z.object({
   overallScore: z.number().min(0).max(10),
@@ -78,6 +79,8 @@ export async function POST(
         data: { status: 'completed' },
       });
     }
+
+    await refreshDatasetEvaluationSummaryForEvaluation(run.evaluation.id);
 
     return NextResponse.json(judgment);
   } catch (error) {
