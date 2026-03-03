@@ -34,6 +34,7 @@ export default function ProjectDetailPage() {
   const [evalTitle, setEvalTitle] = useState('');
   const [evalText, setEvalText] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [submitMode, setSubmitMode] = useState<'create' | 'create_and_run' | null>(null);
   const [selectedRubricVersionId, setSelectedRubricVersionId] = useState('');
   const [allRubrics, setAllRubrics] = useState<any[]>([]);
   const [availableModels, setAvailableModels] = useState<any[]>([]);
@@ -149,16 +150,20 @@ export default function ProjectDetailPage() {
     });
   };
 
-  const handleCreateEvaluation = async () => {
+  const handleCreateEvaluation = async (
+    runMode: 'create' | 'create_and_run'
+  ) => {
     if (evalMode === 'text' && !evalText.trim()) return;
     if (evalMode === 'dataset' && !selectedDatasetId) return;
 
+    setSubmitMode(runMode);
     setSubmitting(true);
     try {
       const payload =
         evalMode === 'text'
           ? {
               mode: 'single',
+              runMode,
               projectId,
               title: evalTitle || undefined,
               inputText: evalText,
@@ -167,6 +172,7 @@ export default function ProjectDetailPage() {
             }
           : {
               mode: 'dataset',
+              runMode,
               projectId,
               datasetId: selectedDatasetId,
               ...(selectedRubricVersionId && { rubricId: selectedRubricVersionId }),
@@ -188,12 +194,27 @@ export default function ProjectDetailPage() {
         setEvalMode('text');
 
         if (result.mode === 'dataset') {
-          toast.success(`Created ${result.evaluationsCreated} evaluations from dataset "${result.datasetName}"`);
+          if (runMode === 'create_and_run') {
+            toast.success(
+              `Created ${result.evaluationsCreated} evaluations and queued ${result.runsQueued ?? result.evaluationsCreated} run${(result.runsQueued ?? result.evaluationsCreated) === 1 ? '' : 's'} from dataset "${result.datasetName}"`
+            );
+          } else {
+            toast.success(`Created ${result.evaluationsCreated} evaluations from dataset "${result.datasetName}"`);
+          }
           // Reload project to show new evaluations
           loadProject();
         } else {
-          toast.success('Evaluation created');
-          router.push(`/evaluate/${result.id}`);
+          if (runMode === 'create_and_run') {
+            toast.success('Evaluation created and run queued');
+            if (result.runId) {
+              router.push(`/evaluate/${result.id}/runs/${result.runId}`);
+            } else {
+              router.push(`/evaluate/${result.id}`);
+            }
+          } else {
+            toast.success('Evaluation created');
+            router.push(`/evaluate/${result.id}`);
+          }
         }
       } else {
         const data = await res.json();
@@ -203,6 +224,7 @@ export default function ProjectDetailPage() {
       toast.error('Failed to create evaluation');
     } finally {
       setSubmitting(false);
+      setSubmitMode(null);
     }
   };
 
@@ -616,14 +638,15 @@ export default function ProjectDetailPage() {
             <Button
               variant="secondary"
               onClick={() => setCreateEvalOpen(false)}
+              disabled={submitting}
             >
               Cancel
             </Button>
             <Button
-              variant="primary"
-              onClick={handleCreateEvaluation}
-              loading={submitting}
-              disabled={evalMode === 'text' ? !evalText.trim() : !selectedDatasetId}
+              variant="secondary"
+              onClick={() => handleCreateEvaluation('create')}
+              loading={submitting && submitMode === 'create'}
+              disabled={submitting || (evalMode === 'text' ? !evalText.trim() : !selectedDatasetId)}
             >
               {evalMode === 'dataset'
                 ? `Create ${
@@ -631,7 +654,21 @@ export default function ProjectDetailPage() {
                       ? `${availableDatasets.find((d: any) => d.id === selectedDatasetId)?._count?.samples ?? availableDatasets.find((d: any) => d.id === selectedDatasetId)?.sampleCount ?? ''} `
                       : ''
                   }Evaluation${selectedDatasetId && (availableDatasets.find((d: any) => d.id === selectedDatasetId)?._count?.samples ?? 0) !== 1 ? 's' : ''}`
-                : 'Create & Open'}
+                : 'Create'}
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => handleCreateEvaluation('create_and_run')}
+              loading={submitting && submitMode === 'create_and_run'}
+              disabled={submitting || (evalMode === 'text' ? !evalText.trim() : !selectedDatasetId)}
+            >
+              {evalMode === 'dataset'
+                ? `Create & Run ${
+                    selectedDatasetId
+                      ? `${availableDatasets.find((d: any) => d.id === selectedDatasetId)?._count?.samples ?? availableDatasets.find((d: any) => d.id === selectedDatasetId)?.sampleCount ?? ''} `
+                      : ''
+                  }Evaluation${selectedDatasetId && (availableDatasets.find((d: any) => d.id === selectedDatasetId)?._count?.samples ?? 0) !== 1 ? 's' : ''}`
+                : 'Create & Run'}
             </Button>
           </DialogFooter>
         </DialogContent>

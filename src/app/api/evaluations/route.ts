@@ -3,6 +3,12 @@ import { prisma } from '@/lib/db';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import {
+  createEvaluationRun,
+  enqueueEvaluationRunCreation,
+  enqueueRunProcessing,
+  toHttpError,
+} from '@/lib/evaluation-run-manager';
 
 // ── Single-text evaluation ──
 const createSingleBaseSchema = z.object({
@@ -13,6 +19,7 @@ const createSingleBaseSchema = z.object({
   responseText: z.string().optional(),
   rubricId: z.string().optional(),
   modelConfigIds: z.array(z.string()).max(10).optional(),
+  runMode: z.enum(['create', 'create_and_run']).optional(),
 });
 
 const createSingleSchema = createSingleBaseSchema.refine(
@@ -35,6 +42,7 @@ const createBatchSchema = z.object({
   datasetId: z.string().min(1, 'Dataset is required'),
   rubricId: z.string().optional(),
   modelConfigIds: z.array(z.string()).max(10).optional(),
+  runMode: z.enum(['create', 'create_and_run']).optional(),
 });
 
 const createEvaluationSchema = z.discriminatedUnion('mode', [
@@ -51,6 +59,8 @@ const createEvaluationLegacySchema = z.object({
   responseText: z.string().optional(),
   rubricId: z.string().optional(),
   modelConfigIds: z.array(z.string()).max(10).optional(),
+  runMode: z.enum(['create', 'create_and_run']).optional(),
+  createAndRun: z.boolean().optional(),
 }).refine(
   (data) => {
     const hasSingle = !!data.inputText?.trim();
@@ -170,6 +180,8 @@ export async function POST(request: Request) {
 
   try {
     const body = await request.json();
+    const shouldRunImmediately =
+      body.runMode === 'create_and_run' || body.createAndRun === true;
 
     // Detect mode: explicit 'mode' field, or infer from presence of datasetId vs inputText
     const mode = body.mode ?? (body.datasetId ? 'dataset' : 'single');
@@ -217,6 +229,23 @@ export async function POST(request: Request) {
         include: evaluationInclude,
       });
 
+      if (shouldRunImmediately) {
+        const run = await createEvaluationRun({
+          evaluationId: evaluation.id,
+          triggeredById: session.user.id,
+        });
+        enqueueRunProcessing(run.id);
+        return NextResponse.json(
+          {
+            ...evaluation,
+            runMode: 'create_and_run',
+            runQueued: true,
+            runId: run.id,
+          },
+          { status: 201 }
+        );
+      }
+
       return NextResponse.json(evaluation, { status: 201 });
     }
 
@@ -259,18 +288,38 @@ export async function POST(request: Request) {
       )
     );
 
+    if (shouldRunImmediately) {
+      for (const evaluation of evaluations) {
+        enqueueEvaluationRunCreation(evaluation.id, session.user.id);
+      }
+    }
+
     // Return summary — don't load full includes for potentially thousands of evaluations
     return NextResponse.json(
-      {
+      shouldRunImmediately
+        ? {
+            mode: 'dataset',
+            runMode: 'create_and_run',
+            datasetId: dataset.id,
+            datasetName: dataset.name,
+            evaluationsCreated: evaluations.length,
+            evaluationIds: evaluations.map((e: any) => e.id),
+            runsQueued: evaluations.length,
+          }
+        : {
         mode: 'dataset',
         datasetId: dataset.id,
         datasetName: dataset.name,
         evaluationsCreated: evaluations.length,
         evaluationIds: evaluations.map((e: any) => e.id),
-      },
+          },
       { status: 201 }
     );
   } catch (error) {
+    const httpError = toHttpError(error);
+    if (httpError) {
+      return NextResponse.json({ error: httpError.message }, { status: httpError.status });
+    }
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: 'Validation failed', details: error.errors }, { status: 400 });
     }
