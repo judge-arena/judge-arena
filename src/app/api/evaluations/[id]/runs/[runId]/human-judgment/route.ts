@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { refreshDatasetEvaluationSummaryForEvaluation } from '@/lib/dataset-evaluation-summary';
 
 const humanJudgmentSchema = z.object({
@@ -33,6 +33,8 @@ export async function POST(
 ) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'evaluations:judge');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const body = await request.json();

@@ -1,11 +1,20 @@
 'use client';
 
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { Header } from '@/components/layout/header';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
+import {
+  PERMISSION_SCOPES,
+  SCOPE_GROUPS,
+  SCOPE_PRESETS,
+  ALL_SCOPES,
+  type PermissionScope,
+  type ScopeGroup,
+} from '@/lib/permissions';
 
 type DiffAction = 'create' | 'update' | 'skip';
 
@@ -24,12 +33,247 @@ interface ImportReport {
   message: string;
 }
 
+interface ApiKeyData {
+  id: string;
+  name: string;
+  prefix: string;
+  scopes: string[];
+  isActive: boolean;
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+  createdAt: string;
+  user?: { email: string };
+}
+
+/* ─── Scope Checkbox Grid ─── */
+function ScopeSelector({
+  selectedScopes,
+  onToggle,
+}: {
+  selectedScopes: PermissionScope[];
+  onToggle: (scope: PermissionScope) => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <label className="text-xs font-medium text-surface-700">Permissions</label>
+      {SCOPE_GROUPS.map((group) => (
+        <div key={group.label} className="space-y-1">
+          <p className="text-xs font-semibold text-surface-600">{group.label}</p>
+          <div className="flex flex-wrap gap-2">
+            {group.scopes.map((scope) => {
+              const info = PERMISSION_SCOPES[scope];
+              return (
+                <label
+                  key={scope}
+                  className="inline-flex items-center gap-1.5 text-xs cursor-pointer select-none"
+                  title={info.description}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedScopes.includes(scope)}
+                    onChange={() => onToggle(scope)}
+                    className="rounded border-surface-300 text-primary-600 focus:ring-primary-500"
+                  />
+                  <span className="text-surface-800">{info.label}</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ─── Inline Scope Editor (for existing keys) ─── */
+function EditableScopeSelector({
+  currentScopes,
+  onSave,
+  onCancel,
+}: {
+  currentScopes: PermissionScope[];
+  onSave: (scopes: PermissionScope[]) => void;
+  onCancel: () => void;
+}) {
+  const [scopes, setScopes] = React.useState<PermissionScope[]>(currentScopes);
+
+  const toggle = (scope: PermissionScope) => {
+    setScopes((prev) =>
+      prev.includes(scope) ? prev.filter((s) => s !== scope) : [...prev, scope],
+    );
+  };
+
+  return (
+    <div className="mt-2 rounded-lg border border-surface-200 bg-surface-50 p-3 space-y-3">
+      <div className="flex flex-wrap gap-2">
+        {SCOPE_PRESETS.map((preset) => (
+          <Button
+            key={preset.label}
+            variant="outline"
+            size="sm"
+            onClick={() => setScopes([...preset.scopes])}
+          >
+            {preset.label}
+          </Button>
+        ))}
+      </div>
+
+      <ScopeSelector selectedScopes={scopes} onToggle={toggle} />
+
+      <div className="flex gap-2 justify-end">
+        <Button variant="secondary" size="sm" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={scopes.length === 0}
+          onClick={() => onSave(scopes)}
+        >
+          Save ({scopes.length} scope{scopes.length !== 1 ? 's' : ''})
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState(false);
   const [preview, setPreview] = useState<ImportReport | null>(null);
   const [configText, setConfigText] = useState<string>('');
   const [showPreview, setShowPreview] = useState(false);
+
+  // ── API Key State ──
+  const [apiKeys, setApiKeys] = useState<ApiKeyData[]>([]);
+  const [loadingKeys, setLoadingKeys] = useState(true);
+  const [showCreateKey, setShowCreateKey] = useState(false);
+  const [newKeyName, setNewKeyName] = useState('');
+  const [newKeyScopes, setNewKeyScopes] = useState<PermissionScope[]>([]);
+  const [newKeyExpiry, setNewKeyExpiry] = useState('');
+  const [creatingKey, setCreatingKey] = useState(false);
+  const [revealedKey, setRevealedKey] = useState<string | null>(null);
+  const [editingKeyId, setEditingKeyId] = useState<string | null>(null);
+
+  const fetchApiKeys = useCallback(async () => {
+    try {
+      const res = await fetch('/api/api-keys');
+      if (res.ok) {
+        setApiKeys(await res.json());
+      }
+    } catch {
+      // Ignore
+    } finally {
+      setLoadingKeys(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchApiKeys();
+  }, [fetchApiKeys]);
+
+  const handleCreateKey = async () => {
+    if (!newKeyName.trim()) {
+      toast.error('Please enter a key name');
+      return;
+    }
+    if (newKeyScopes.length === 0) {
+      toast.error('Please select at least one permission scope');
+      return;
+    }
+
+    setCreatingKey(true);
+    try {
+      const res = await fetch('/api/api-keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newKeyName.trim(),
+          scopes: newKeyScopes,
+          expiresAt: newKeyExpiry || undefined,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setRevealedKey(data.key);
+        setNewKeyName('');
+        setNewKeyScopes([]);
+        setNewKeyExpiry('');
+        toast.success('API key created');
+        fetchApiKeys();
+      } else {
+        const err = await res.json();
+        toast.error(err.error || 'Failed to create key');
+      }
+    } catch {
+      toast.error('Failed to connect');
+    } finally {
+      setCreatingKey(false);
+    }
+  };
+
+  const handleToggleKey = async (id: string, isActive: boolean) => {
+    try {
+      const res = await fetch(`/api/api-keys/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isActive: !isActive }),
+      });
+      if (res.ok) {
+        setApiKeys((prev) =>
+          prev.map((k) => (k.id === id ? { ...k, isActive: !isActive } : k))
+        );
+        toast.success(isActive ? 'Key deactivated' : 'Key activated');
+      }
+    } catch {
+      toast.error('Failed to update key');
+    }
+  };
+
+  const handleRevokeKey = async (id: string, name: string) => {
+    if (!confirm(`Permanently revoke API key "${name}"? This cannot be undone.`)) return;
+    try {
+      const res = await fetch(`/api/api-keys/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        setApiKeys((prev) => prev.filter((k) => k.id !== id));
+        toast.success(`Key "${name}" revoked`);
+      }
+    } catch {
+      toast.error('Failed to revoke key');
+    }
+  };
+
+  const handleUpdateScopes = async (id: string, scopes: string[]) => {
+    try {
+      const res = await fetch(`/api/api-keys/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scopes }),
+      });
+      if (res.ok) {
+        setApiKeys((prev) =>
+          prev.map((k) => (k.id === id ? { ...k, scopes } : k))
+        );
+        setEditingKeyId(null);
+        toast.success('Scopes updated');
+      }
+    } catch {
+      toast.error('Failed to update scopes');
+    }
+  };
+
+  const toggleScope = (scope: PermissionScope, list: PermissionScope[], setter: (s: PermissionScope[]) => void) => {
+    if (list.includes(scope)) {
+      setter(list.filter((s) => s !== scope));
+    } else {
+      setter([...list, scope]);
+    }
+  };
+
+  const applyPreset = (presetScopes: PermissionScope[], setter: (s: PermissionScope[]) => void) => {
+    setter([...presetScopes]);
+  };
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -273,6 +517,226 @@ export default function SettingsPage() {
                 </div>
               )}
             </div>
+          </CardContent>
+        </Card>
+
+        {/* ── Developer API Keys ── */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle>Developer API Keys</CardTitle>
+                <CardDescription>
+                  Create API keys for programmatic access to the platform. Each key can be
+                  scoped to specific permissions.
+                </CardDescription>
+              </div>
+              {!showCreateKey && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => { setShowCreateKey(true); setRevealedKey(null); }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+                  Create API Key
+                </Button>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Revealed Key (shown after creation) */}
+            {revealedKey && (
+              <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 space-y-2">
+                <p className="text-sm font-semibold text-amber-900">
+                  Save this key now — it will not be shown again
+                </p>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 rounded bg-white px-3 py-2 text-xs font-mono text-surface-900 border border-amber-200 break-all select-all">
+                    {revealedKey}
+                  </code>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      navigator.clipboard.writeText(revealedKey);
+                      toast.success('Copied to clipboard');
+                    }}
+                  >
+                    Copy
+                  </Button>
+                </div>
+                <p className="text-xs text-amber-700">
+                  Use as: <code className="font-mono">Authorization: Bearer {revealedKey.slice(0, 12)}...</code>
+                </p>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setRevealedKey(null)}
+                >
+                  Dismiss
+                </Button>
+              </div>
+            )}
+
+            {/* Create Key Form */}
+            {showCreateKey && !revealedKey && (
+              <div className="rounded-xl border border-surface-200 bg-surface-50 p-4 space-y-4">
+                <h3 className="text-sm font-semibold text-surface-900">New API Key</h3>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-surface-700">Name</label>
+                  <Input
+                    value={newKeyName}
+                    onChange={(e) => setNewKeyName(e.target.value)}
+                    placeholder="e.g. CI Pipeline, Python SDK"
+                    className="max-w-sm"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-surface-700">Expiration (optional)</label>
+                  <Input
+                    type="datetime-local"
+                    value={newKeyExpiry}
+                    onChange={(e) => setNewKeyExpiry(e.target.value)}
+                    className="max-w-sm"
+                  />
+                  <p className="text-xs text-surface-500">Leave blank for no expiration</p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-surface-700">Presets</label>
+                  <div className="flex flex-wrap gap-2">
+                    {SCOPE_PRESETS.map((preset) => (
+                      <Button
+                        key={preset.label}
+                        variant="outline"
+                        size="sm"
+                        onClick={() => applyPreset(preset.scopes, setNewKeyScopes)}
+                        title={preset.description}
+                      >
+                        {preset.label}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+
+                <ScopeSelector
+                  selectedScopes={newKeyScopes}
+                  onToggle={(scope) => toggleScope(scope, newKeyScopes, setNewKeyScopes)}
+                />
+
+                <div className="flex gap-2 justify-end pt-2">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => { setShowCreateKey(false); setNewKeyName(''); setNewKeyScopes([]); setNewKeyExpiry(''); }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={handleCreateKey}
+                    loading={creatingKey}
+                    disabled={!newKeyName.trim() || newKeyScopes.length === 0}
+                  >
+                    Create Key ({newKeyScopes.length} scope{newKeyScopes.length !== 1 ? 's' : ''})
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Existing Keys List */}
+            {loadingKeys ? (
+              <p className="text-sm text-surface-500">Loading API keys...</p>
+            ) : apiKeys.length === 0 ? (
+              <p className="text-sm text-surface-500">
+                No API keys created yet. Create one to enable programmatic access.
+              </p>
+            ) : (
+              <div className="divide-y divide-surface-200 rounded-lg border border-surface-200 bg-white">
+                {apiKeys.map((key) => (
+                  <div key={key.id} className="px-4 py-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-surface-900">
+                          {key.name}
+                        </span>
+                        <code className="text-xs font-mono text-surface-500 bg-surface-100 px-1.5 py-0.5 rounded">
+                          {key.prefix}...
+                        </code>
+                        {key.isActive ? (
+                          <Badge variant="success" size="sm">Active</Badge>
+                        ) : (
+                          <Badge variant="error" size="sm">Inactive</Badge>
+                        )}
+                        {key.expiresAt && new Date(key.expiresAt) < new Date() && (
+                          <Badge variant="warning" size="sm">Expired</Badge>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setEditingKeyId(editingKeyId === key.id ? null : key.id)}
+                        >
+                          {editingKeyId === key.id ? 'Hide' : 'Edit Scopes'}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleToggleKey(key.id, key.isActive)}
+                        >
+                          {key.isActive ? 'Deactivate' : 'Activate'}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                          onClick={() => handleRevokeKey(key.id, key.name)}
+                        >
+                          Revoke
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-1">
+                      {key.scopes.map((scope) => (
+                        <Badge key={scope} variant="outline" size="sm">
+                          {scope}
+                        </Badge>
+                      ))}
+                    </div>
+
+                    <div className="flex gap-4 text-xs text-surface-500">
+                      <span>Created {new Date(key.createdAt).toLocaleDateString()}</span>
+                      {key.lastUsedAt && (
+                        <span>Last used {new Date(key.lastUsedAt).toLocaleDateString()}</span>
+                      )}
+                      {key.expiresAt && (
+                        <span>Expires {new Date(key.expiresAt).toLocaleDateString()}</span>
+                      )}
+                    </div>
+
+                    {/* Inline scope editor */}
+                    {editingKeyId === key.id && (
+                      <EditableScopeSelector
+                        currentScopes={key.scopes as PermissionScope[]}
+                        onSave={(scopes) => handleUpdateScopes(key.id, scopes)}
+                        onCancel={() => setEditingKeyId(null)}
+                      />
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <p className="text-xs text-surface-500">
+              API keys authenticate via the <code className="font-mono">Authorization: Bearer vgk_...</code> header.
+              Session-based (browser) users have full access. API keys are scoped to the
+              permissions selected at creation time.
+            </p>
           </CardContent>
         </Card>
 

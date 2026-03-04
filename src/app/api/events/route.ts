@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth-guard';
+import { requireAuth, requireScope } from '@/lib/auth-guard';
 import {
   subscribeRealtime,
   type RealtimeEnvelope,
@@ -22,6 +22,8 @@ function encodeSseChunk(event: string, data: unknown, id?: string): string {
 export async function GET(request: Request) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'evaluations:read');
+  if (scopeCheck) return scopeCheck;
 
   const { searchParams } = new URL(request.url);
   const topic = searchParams.get('topic') as RealtimeTopic | null;

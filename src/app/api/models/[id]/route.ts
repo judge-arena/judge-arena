@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 
 const updateModelSchema = z.object({
   name: z.string().min(1).max(100).optional(),
@@ -19,6 +19,8 @@ export async function GET(
 ) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'models:read');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const model = await prisma.modelConfig.findUnique({
@@ -54,6 +56,8 @@ export async function PATCH(
 ) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'models:write');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const body = await request.json();
@@ -125,6 +129,8 @@ export async function DELETE(
 ) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'models:write');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const existing = await prisma.modelConfig.findUnique({ where: { id: params.id }, select: { userId: true } });

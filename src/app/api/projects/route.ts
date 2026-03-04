@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { generateSlug } from '@/lib/config';
 
 const createProjectSchema = z.object({
@@ -13,6 +13,8 @@ const createProjectSchema = z.object({
 export async function GET() {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'projects:read');
+  if (scopeCheck) return scopeCheck;
 
   try {
     // Admins see all; regular users see their own plus default (Leaderboard) projects
@@ -43,6 +45,8 @@ export async function GET() {
 export async function POST(request: Request) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'projects:write');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const body = await request.json();

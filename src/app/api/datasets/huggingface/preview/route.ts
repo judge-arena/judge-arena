@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth-guard';
+import { requireAuth, requireScope } from '@/lib/auth-guard';
 import {
   fetchDatasetMetadata,
   parseHuggingFaceUrl,
@@ -10,6 +10,8 @@ import {
 export async function GET(request: Request) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'datasets:read');
+  if (scopeCheck) return scopeCheck;
 
   const { searchParams } = new URL(request.url);
   const url = searchParams.get('url');

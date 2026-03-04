@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { requireAuth } from '@/lib/auth-guard';
+import { requireAuth, requireScope } from '@/lib/auth-guard';
 import {
   type ConfigDocument,
   type DiffItem,
@@ -32,6 +32,8 @@ import {
 export async function POST(request: Request) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'config:write');
+  if (scopeCheck) return scopeCheck;
 
   const { searchParams } = new URL(request.url);
   const dryRun = searchParams.get('dryRun') === 'true';

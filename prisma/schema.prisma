@@ -21,9 +21,10 @@ model User {
   evaluations    Evaluation[]
   evaluationRuns EvaluationRun[]
   humanJudgments HumanJudgment[]
-  datasets       Dataset[]
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
+  datasets         Dataset[]
+  developerApiKeys DeveloperApiKey[]
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
 }
 
 // ─── Domain ─────────────────────────────────────────────────────────────────
@@ -235,6 +236,29 @@ model ApiKeyStore {
   apiKey    String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// ─── Developer API Keys ──────────────────────────────────────────────────────
+// Fine-grained API keys for programmatic access to the platform.
+// Each key is scoped to a user and carries a set of permission scopes.
+
+model DeveloperApiKey {
+  id          String    @id @default(cuid())
+  name        String                        // human-readable label, e.g. "CI Pipeline Key"
+  prefix      String                        // first 8 chars of raw key for identification (e.g. "vgk_abc1")
+  keyHash     String    @unique             // SHA-256 hash of the full key
+  scopes      String                        // JSON array of permission scope strings
+  isActive    Boolean   @default(true)
+  expiresAt   DateTime?                     // null = never expires
+  lastUsedAt  DateTime?
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([userId])
+  @@index([keyHash])
+  @@index([prefix])
 }
 
 // ─── Datasets ─────────────────────────────────────────────────────────────────

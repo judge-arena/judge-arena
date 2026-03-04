@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import {
   flattenEvaluationForExport,
   toCsv,
@@ -57,6 +57,8 @@ const fullEvaluationInclude = {
 export async function GET(request: Request) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'evaluations:export');
+  if (scopeCheck) return scopeCheck;
 
   const { searchParams } = new URL(request.url);
   const format = (searchParams.get('format') ?? 'csv').toLowerCase();

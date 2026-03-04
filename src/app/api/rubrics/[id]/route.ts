@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 
 const updateRubricSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -27,6 +27,8 @@ export async function GET(
 ) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'rubrics:read');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const rubric = await prisma.rubric.findUnique({
@@ -63,6 +65,8 @@ export async function PATCH(
 ) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'rubrics:write');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const existing = await prisma.rubric.findUnique({ where: { id: params.id }, select: { userId: true } });
@@ -126,6 +130,8 @@ export async function DELETE(
 ) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'rubrics:write');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const existing = await prisma.rubric.findUnique({ where: { id: params.id }, select: { userId: true } });

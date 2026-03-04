@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import {
   createEvaluationRun,
   enqueueEvaluationRunCreation,
@@ -118,6 +118,8 @@ const evaluationInclude = {
 export async function GET(request: Request) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'evaluations:read');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const { searchParams } = new URL(request.url);
@@ -177,6 +179,8 @@ async function resolveModelIds(modelConfigIds: string[] | undefined): Promise<{ 
 export async function POST(request: Request) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'evaluations:write');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const body = await request.json();

@@ -1,11 +1,13 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 
 // GET /api/stats - Dashboard statistics
 export async function GET() {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'stats:read');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const userFilter = isAdmin(session) ? {} : { userId: session.user.id };

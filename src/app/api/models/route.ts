@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { generateSlug } from '@/lib/config';
 
 const createModelSchema = z.object({
@@ -18,6 +18,8 @@ const createModelSchema = z.object({
 export async function GET() {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'models:read');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const where = isAdmin(session) ? undefined : { userId: session.user.id };
@@ -49,6 +51,8 @@ export async function GET() {
 export async function POST(request: Request) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'models:write');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const body = await request.json();

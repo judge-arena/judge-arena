@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { verifyModelConnection } from '@/lib/llm/verify';
-import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 
 const DEFAULT_CLAUDE_MODEL_IDS = new Set([
   'claude-sonnet-4-5-20250514',
@@ -16,6 +16,8 @@ export async function POST(
 ) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'models:verify');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const model = await prisma.modelConfig.findUnique({

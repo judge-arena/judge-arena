@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import {
   type ConfigDocument,
   dbProjectToConfig,
@@ -29,6 +29,8 @@ import {
 export async function GET(request: Request) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'config:read');
+  if (scopeCheck) return scopeCheck;
 
   const { searchParams } = new URL(request.url);
   const includeParam = (searchParams.get('include') ?? 'all').toLowerCase();

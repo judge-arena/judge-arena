@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 
 const addSamplesSchema = z.object({
   samples: z.array(z.object({
@@ -37,6 +37,8 @@ export async function POST(
 ) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'datasets:write');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const dataset = await prisma.dataset.findUnique({
@@ -98,6 +100,8 @@ export async function PATCH(
 ) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'datasets:write');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const dataset = await prisma.dataset.findUnique({
@@ -160,6 +164,8 @@ export async function DELETE(
 ) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'datasets:write');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const dataset = await prisma.dataset.findUnique({
@@ -240,6 +246,8 @@ export async function PUT(
 ) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'datasets:write');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const dataset = await prisma.dataset.findUnique({

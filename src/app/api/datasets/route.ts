@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { generateSlug } from '@/lib/config';
 import {
   fetchDatasetMetadata,
@@ -40,6 +40,8 @@ const createDatasetSchema = z.object({
 export async function GET(request: Request) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'datasets:read');
+  if (scopeCheck) return scopeCheck;
 
   const { searchParams } = new URL(request.url);
   const source = searchParams.get('source'); // 'local' | 'remote'
@@ -86,6 +88,8 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'datasets:write');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const body = await request.json();

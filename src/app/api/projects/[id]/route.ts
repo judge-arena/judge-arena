@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 
 const updateProjectSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -15,6 +15,8 @@ export async function GET(
 ) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'projects:read');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const project = await prisma.project.findUnique({
@@ -127,6 +129,8 @@ export async function PATCH(
 ) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'projects:write');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const existing = await prisma.project.findUnique({ where: { id: params.id }, select: { userId: true } });
@@ -169,6 +173,8 @@ export async function DELETE(
 ) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'projects:write');
+  if (scopeCheck) return scopeCheck;
 
   try {
     const existing = await prisma.project.findUnique({ where: { id: params.id }, select: { userId: true } });
