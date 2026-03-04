@@ -11,6 +11,7 @@ export interface ProjectEvaluation {
   title?: string | null;
   createdAt: string;
   datasetId?: string | null;
+  dataset?: { id: string; name: string } | null;
   datasetSample?: { id: string; index: number } | null;
   runs?: Array<{
     id: string;
@@ -99,7 +100,10 @@ export function buildDatasetRunGroups(
       const startedAt = new Date(batchStart).toISOString();
       const endedAt = new Date(previousTime).toISOString();
       const key = `${datasetId}__${batchStart}`;
-      const datasetName = datasetMap.get(datasetId)?.name ?? `Dataset ${datasetId}`;
+      const datasetName =
+        datasetMap.get(datasetId)?.name ??
+        currentBatch[0]?.dataset?.name ??
+        `Dataset ${datasetId}`;
 
       groups.push({
         key,

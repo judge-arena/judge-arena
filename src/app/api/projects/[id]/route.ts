@@ -23,6 +23,12 @@ export async function GET(
         user: { select: { id: true, name: true, email: true } },
         evaluations: {
           include: {
+            dataset: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
             rubric: {
               select: {
                 id: true,

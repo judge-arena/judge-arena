@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { Header } from '@/components/layout/header';
 import {
   Card,
@@ -90,6 +90,8 @@ interface RemoteMeta {
 export default function DatasetDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const id = params.id as string;
 
   const [dataset, setDataset] = useState<DatasetDetail | null>(null);
@@ -117,10 +119,39 @@ export default function DatasetDetailPage() {
   const [loadingVersions, setLoadingVersions] = useState(false);
   const [creatingVersion, setCreatingVersion] = useState(false);
 
-  // ─── Tag editing state (non-versioned) ───
-  const [editingTags, setEditingTags] = useState(false);
+  const showVersionControl = searchParams.get('vc') === '1';
+
+  const setVersionControlOpen = useCallback(
+    (open: boolean) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (open) {
+        params.set('vc', '1');
+      } else {
+        params.delete('vc');
+      }
+      const nextQuery = params.toString();
+      const nextUrl = nextQuery ? `${pathname}?${nextQuery}` : pathname;
+      router.replace(nextUrl, { scroll: false });
+    },
+    [pathname, router, searchParams]
+  );
+
+  const getDatasetDetailUrl = useCallback(
+    (datasetId: string) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (showVersionControl) {
+        params.set('vc', '1');
+      } else {
+        params.delete('vc');
+      }
+      const query = params.toString();
+      return query ? `/datasets/${datasetId}?${query}` : `/datasets/${datasetId}`;
+    },
+    [searchParams, showVersionControl]
+  );
+
+  // ─── Tag state ───
   const [tagInput, setTagInput] = useState('');
-  const [editedTags, setEditedTags] = useState<string[]>([]);
   const [savingTags, setSavingTags] = useState(false);
 
   // Close export menu on outside click
@@ -368,7 +399,7 @@ export default function DatasetDetailPage() {
       if (res.ok) {
         const newVersion = await res.json();
         toast.success(`Version ${newVersion.version} created`);
-        router.push(`/datasets/${newVersion.id}`);
+        router.push(getDatasetDetailUrl(newVersion.id));
       } else {
         const data = await res.json();
         toast.error(data.error || 'Failed to create version');
@@ -412,55 +443,73 @@ export default function DatasetDetailPage() {
     }
   };
 
-  /* ─── Tag handlers (non-versioned) ─────────────────────────────────────── */
+  /* ─── Tag handlers ─────────────────────────────────────────────────────── */
 
-  const startEditingTags = () => {
-    const currentTags = dataset ? parseJson<string[]>(dataset.tags, []) : [];
-    setEditedTags(currentTags);
-    setTagInput('');
-    setEditingTags(true);
-  };
+  const persistTags = async (nextTags: string[]) => {
+    if (!dataset) return;
+    const previousTags = dataset.tags;
 
-  const addTag = () => {
-    const normalized = tagInput.trim();
-    if (!normalized) return;
-    setEditedTags((prev) => prev.includes(normalized) ? prev : [...prev, normalized]);
-    setTagInput('');
-  };
+    setDataset((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        tags: JSON.stringify(nextTags),
+      };
+    });
 
-  const removeTag = (tag: string) => {
-    setEditedTags((prev) => prev.filter((t) => t !== tag));
-  };
-
-  const saveTags = async () => {
     setSavingTags(true);
     try {
       const res = await fetch(`/api/datasets/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tags: editedTags }),
+        body: JSON.stringify({ tags: nextTags }),
       });
       if (res.ok) {
+        toast.success('Tag updated');
+        router.refresh();
+      } else {
+        const data = await res.json();
         setDataset((prev) => {
           if (!prev) return prev;
           return {
             ...prev,
-            tags: JSON.stringify(editedTags),
+            tags: previousTags,
           };
         });
-        toast.success('Tags updated');
-        setEditingTags(false);
-        router.refresh();
-        await loadDataset();
-      } else {
-        const data = await res.json();
-        toast.error(data.error || 'Failed to update tags');
+        toast.error(data.error || 'Failed to update tag');
       }
     } catch {
-      toast.error('Failed to update tags');
+      setDataset((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          tags: previousTags,
+        };
+      });
+      toast.error('Failed to update tag');
     } finally {
       setSavingTags(false);
     }
+  };
+
+  const addTag = async () => {
+    const normalized = tagInput.trim();
+    if (!normalized || !dataset) return;
+
+    const currentTags = parseJson<string[]>(dataset.tags, []);
+    if (currentTags.includes(normalized)) {
+      setTagInput('');
+      return;
+    }
+
+    setTagInput('');
+    await persistTags([...currentTags, normalized]);
+  };
+
+  const removeTag = async (tag: string) => {
+    if (!dataset) return;
+    const currentTags = parseJson<string[]>(dataset.tags, []);
+    await persistTags(currentTags.filter((t) => t !== tag));
   };
 
   /* ─── Parse helpers ────────────────────────────────────────────────────── */
@@ -658,70 +707,109 @@ export default function DatasetDetailPage() {
         </div>
 
         {/* ─── Version History ────────────────────────────────────────── */}
-        {isLocal && versions.length > 1 && (
+        {isLocal && (
           <Card>
             <CardHeader>
               <div className="flex items-center justify-between">
                 <CardTitle className="text-sm">
-                  Version History
-                  <span className="ml-2 text-xs font-normal text-surface-500">
-                    ({versions.length} versions)
-                  </span>
+                  Latest Version
                 </CardTitle>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setVersionControlOpen(!showVersionControl)}
+                >
+                  Version Control
+                </Button>
               </div>
             </CardHeader>
             <CardContent>
-              <div className="space-y-1.5">
-                {versions.map((v) => {
-                  const isCurrent = v.id === dataset.id;
-                  const sampleCount = v.sampleCount ?? v._count?.samples ?? 0;
-                  return (
-                    <div
-                      key={v.id}
-                      className={`flex items-center justify-between rounded-lg px-3 py-2 text-sm ${
-                        isCurrent
-                          ? 'bg-brand-50 border border-brand-200'
-                          : 'bg-surface-50 border border-surface-100 hover:bg-surface-100'
-                      }`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <Badge variant={isCurrent ? 'default' : 'outline'} size="sm">
-                          v{v.version}
-                        </Badge>
-                        <span className="text-xs text-surface-600">
-                          {sampleCount} samples
-                        </span>
-                        <span className="text-2xs text-surface-400">
-                          {formatDate(v.createdAt)}
-                        </span>
-                        {isCurrent && (
-                          <span className="text-2xs font-medium text-brand-600">current</span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        {!isCurrent && (
-                          <>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => router.push(`/datasets/${v.id}`)}
-                            >
-                              View
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => revertToVersion(v.id)}
-                            >
-                              Revert to this
-                            </Button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
+              <div className="rounded-lg border border-surface-200 bg-surface-50 px-3 py-2.5 text-sm">
+                <div className="flex items-center gap-3">
+                  <Badge variant="default" size="sm">
+                    v{versions[0]?.version ?? dataset.version}
+                  </Badge>
+                  <span className="text-xs text-surface-600">
+                    {(versions[0]?.sampleCount ?? versions[0]?._count?.samples ?? dataset._count?.samples ?? 0)} samples
+                  </span>
+                  <span className="text-2xs text-surface-400">
+                    {formatDate(versions[0]?.createdAt ?? dataset.createdAt)}
+                  </span>
+                  <span className="text-2xs font-medium text-brand-600">latest</span>
+                </div>
               </div>
+
+              {showVersionControl && (
+                <div className="mt-3 space-y-1.5">
+                  <div className="flex items-center justify-between px-1">
+                    <p className="text-xs font-medium text-surface-600">
+                      Version History
+                      <span className="ml-1 text-2xs text-surface-500">({versions.length} versions)</span>
+                    </p>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setVersionControlOpen(false)}
+                    >
+                      Hide
+                    </Button>
+                  </div>
+
+                  {loadingVersions ? (
+                    <p className="px-1 py-2 text-xs text-surface-500">Loading versions…</p>
+                  ) : (
+                    versions.map((v) => {
+                      const isCurrent = v.id === dataset.id;
+                      const sampleCount = v.sampleCount ?? v._count?.samples ?? 0;
+                      return (
+                        <div
+                          key={v.id}
+                          className={`flex items-center justify-between rounded-lg px-3 py-2 text-sm ${
+                            isCurrent
+                              ? 'bg-brand-50 border border-brand-200'
+                              : 'bg-surface-50 border border-surface-100 hover:bg-surface-100'
+                          }`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <Badge variant={isCurrent ? 'default' : 'outline'} size="sm">
+                              v{v.version}
+                            </Badge>
+                            <span className="text-xs text-surface-600">
+                              {sampleCount} samples
+                            </span>
+                            <span className="text-2xs text-surface-400">
+                              {formatDate(v.createdAt)}
+                            </span>
+                            {isCurrent && (
+                              <span className="text-2xs font-medium text-brand-600">current</span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            {!isCurrent && (
+                              <>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => router.push(getDatasetDetailUrl(v.id))}
+                                >
+                                  View
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => revertToVersion(v.id)}
+                                >
+                                  Revert to this
+                                </Button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              )}
             </CardContent>
           </Card>
         )}
@@ -815,86 +903,62 @@ export default function DatasetDetailPage() {
           </Card>
         )}
 
-        {/* ─── Tags (non-versioned, freely editable) ─────────────────── */}
+        {/* ─── Tags ───────────────────────────────────────────────────── */}
         <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
-              <CardTitle className="text-sm">
-                Tags
-                <span className="ml-1.5 text-2xs font-normal text-surface-400">(non-versioned)</span>
-              </CardTitle>
-              {!editingTags && (
-                <Button variant="ghost" size="sm" onClick={startEditingTags}>
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
-                  </svg>
-                  Edit
-                </Button>
-              )}
+              <CardTitle className="text-sm">Tags</CardTitle>
             </div>
           </CardHeader>
           <CardContent>
-            {editingTags ? (
-              <div className="space-y-3">
-                <div className="flex gap-2">
-                  <Input
-                    value={tagInput}
-                    onChange={(e) => setTagInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ',') {
-                        e.preventDefault();
-                        addTag();
-                      }
-                    }}
-                    placeholder="Add a tag and press Enter"
-                    className="flex-1"
-                  />
-                  <Button variant="secondary" size="sm" onClick={addTag}>Add</Button>
-                </div>
+            <div className="space-y-3">
+              <div className="flex gap-2">
+                <Input
+                  value={tagInput}
+                  onChange={(e) => setTagInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if ((e.key === 'Enter' || e.key === ',') && !savingTags) {
+                      e.preventDefault();
+                      void addTag();
+                    }
+                  }}
+                  placeholder="Add a tag"
+                  className="flex-1"
+                />
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void addTag()}
+                  loading={savingTags}
+                  disabled={!tagInput.trim()}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                  Add
+                </Button>
+              </div>
+
+              {tags.length > 0 ? (
                 <div className="flex flex-wrap gap-1.5">
-                  {editedTags.length === 0 && (
-                    <p className="text-2xs text-surface-400">No tags yet.</p>
-                  )}
-                  {editedTags.map((tag) => (
-                    <span
+                  {tags.map((tag) => (
+                    <button
                       key={tag}
-                      className="inline-flex items-center gap-1 rounded-full bg-surface-100 px-2.5 py-0.5 text-xs text-surface-700 border border-surface-200"
+                      type="button"
+                      onClick={() => void removeTag(tag)}
+                      disabled={savingTags}
+                      className="inline-flex items-center gap-1 rounded-full border border-surface-200 bg-surface-100 px-2.5 py-0.5 text-xs text-surface-700 hover:border-red-200 hover:bg-red-50 hover:text-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+                      aria-label={`Remove tag ${tag}`}
                     >
                       {tag}
-                      <button
-                        type="button"
-                        onClick={() => removeTag(tag)}
-                        className="text-surface-400 hover:text-red-500"
-                        aria-label={`Remove tag ${tag}`}
-                      >
-                        ×
-                      </button>
-                    </span>
+                      <span className="text-surface-400">×</span>
+                    </button>
                   ))}
                 </div>
-                <div className="flex items-center gap-2">
-                  <Button variant="primary" size="sm" onClick={saveTags} loading={savingTags}>
-                    Save Tags
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={() => setEditingTags(false)}>
-                    Cancel
-                  </Button>
-                </div>
-              </div>
-            ) : tags.length > 0 ? (
-              <div className="flex flex-wrap gap-1.5">
-                {tags.map((tag) => (
-                  <span
-                    key={tag}
-                    className="inline-block rounded-full bg-surface-100 px-2.5 py-0.5 text-xs text-surface-700"
-                  >
-                    {tag}
-                  </span>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-surface-400">No tags. Click Edit to add some.</p>
-            )}
+              ) : (
+                <p className="text-sm text-surface-400">No tags yet.</p>
+              )}
+            </div>
           </CardContent>
         </Card>
 

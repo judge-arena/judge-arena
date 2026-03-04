@@ -233,13 +233,35 @@ export default function DatasetsPage() {
 
   const allTags = useMemo(() => {
     const set = new Set<string>();
+    const latestByFamily = new Map<string, DatasetListItem>();
     datasets.forEach((d) => {
+      const familyId = d.parentId ?? d.id;
+      const existing = latestByFamily.get(familyId);
+      if (!existing || d.version > existing.version) {
+        latestByFamily.set(familyId, d);
+      }
+    });
+
+    latestByFamily.forEach((d) => {
       parseTags(d.tags).forEach((tag) => set.add(tag));
     });
+
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [datasets]);
 
-  const filtered = datasets.filter((d) => {
+  const latestDatasets = useMemo(() => {
+    const byFamily = new Map<string, DatasetListItem>();
+    datasets.forEach((dataset) => {
+      const familyId = dataset.parentId ?? dataset.id;
+      const existing = byFamily.get(familyId);
+      if (!existing || dataset.version > existing.version) {
+        byFamily.set(familyId, dataset);
+      }
+    });
+    return Array.from(byFamily.values());
+  }, [datasets]);
+
+  const filtered = latestDatasets.filter((d) => {
     const q = search.trim().toLowerCase();
     const tags = parseTags(d.tags).map((t) => t.toLowerCase());
 
@@ -760,6 +782,11 @@ export default function DatasetsPage() {
             <div className="flex items-start justify-between">
               <CardTitle className="truncate pr-2">{dataset.name}</CardTitle>
               <div className="flex items-center gap-1 shrink-0">
+                {!isRemote && (
+                  <Badge variant="outline" size="sm">
+                    Latest v{dataset.version}
+                  </Badge>
+                )}
                 <button
                   onClick={(e) => handleDelete(dataset.id, e)}
                   className="rounded p-1 text-surface-400 hover:text-red-500 hover:bg-red-50 transition-colors"
@@ -817,11 +844,6 @@ export default function DatasetsPage() {
               {!isRemote && dataset.inputType && (
                 <Badge variant="outline" size="sm">
                   {dataset.inputType === 'query' ? '📝 Query' : '📝 Q+R'}
-                </Badge>
-              )}
-              {dataset.version > 1 && (
-                <Badge variant="outline" size="sm">
-                  v{dataset.version}
                 </Badge>
               )}
               {evaluationSummary?.averageModelScore != null && (

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Header } from '@/components/layout/header';
@@ -131,6 +131,44 @@ export default function ProjectDetailPage() {
   useEffect(() => {
     loadProject();
   }, [loadProject]);
+
+  const datasetPickerOptions = useMemo(() => {
+    const byFamily = new Map<string, any>();
+
+    availableDatasets.forEach((dataset) => {
+      const familyId = dataset.parentId ?? dataset.id;
+      const existing = byFamily.get(familyId);
+
+      if (selectedDatasetId && dataset.id === selectedDatasetId) {
+        byFamily.set(familyId, dataset);
+        return;
+      }
+
+      if (!existing) {
+        byFamily.set(familyId, dataset);
+        return;
+      }
+
+      if (selectedDatasetId && existing.id === selectedDatasetId) {
+        return;
+      }
+
+      const existingVersion = existing.version ?? 1;
+      const datasetVersion = dataset.version ?? 1;
+      if (datasetVersion > existingVersion) {
+        byFamily.set(familyId, dataset);
+      }
+    });
+
+    return Array.from(byFamily.values()).sort((a, b) =>
+      String(a.name ?? '').localeCompare(String(b.name ?? ''))
+    );
+  }, [availableDatasets, selectedDatasetId]);
+
+  const selectedDatasetForPicker = useMemo(
+    () => datasetPickerOptions.find((dataset: any) => dataset.id === selectedDatasetId) ?? null,
+    [datasetPickerOptions, selectedDatasetId]
+  );
 
   // Default rubric selection to latest available version
   useEffect(() => {
@@ -495,7 +533,7 @@ export default function ProjectDetailPage() {
                               <div className="min-w-0 flex-1">
                                 <div className="flex flex-wrap items-center gap-2 mb-1">
                                   <p className="text-sm font-medium text-surface-900 truncate">
-                                    {group.datasetName}
+                                    Dataset {group.datasetName}
                                   </p>
                                   <Badge variant="info" size="sm">Dataset Run</Badge>
                                   <Badge variant={statusVariant as any} size="sm">
@@ -505,9 +543,12 @@ export default function ProjectDetailPage() {
                                     {summary.sampleCount} sample{summary.sampleCount === 1 ? '' : 's'}
                                   </Badge>
                                 </div>
-                                <p className="text-xs text-surface-500 truncate">
-                                  Started {formatDateTime(group.startedAt)}
-                                </p>
+                                <div className="flex flex-wrap items-center gap-2 text-xs text-surface-500">
+                                  <span className="truncate">Started {formatDateTime(group.startedAt)}</span>
+                                  <span className="inline-flex items-center rounded-full border border-surface-200 bg-surface-100 px-2 py-0.5 text-2xs text-surface-600">
+                                    {group.datasetId}
+                                  </span>
+                                </div>
                               </div>
 
                               <div className="flex items-center gap-3 shrink-0">
@@ -715,20 +756,20 @@ export default function ProjectDetailPage() {
                     onChange={(e) => setSelectedDatasetId(e.target.value)}
                     options={[
                       { value: '', label: 'Select a dataset...' },
-                      ...availableDatasets.map((d: any) => ({
+                      ...datasetPickerOptions.map((d: any) => ({
                         value: d.id,
-                        label: `${d.name} (${d._count?.samples ?? d.sampleCount ?? '?'} samples)`,
+                        label: `${d.name} (${d._count?.samples ?? d.sampleCount ?? '?'} samples)${d.version ? ` · v${d.version}` : ''}`,
                       })),
                     ]}
                     hint="Each sample in the dataset will become a separate evaluation"
                   />
                   {selectedDatasetId && (() => {
-                    const ds = availableDatasets.find((d: any) => d.id === selectedDatasetId);
+                    const ds = selectedDatasetForPicker;
                     if (!ds) return null;
                     const count = ds._count?.samples ?? ds.sampleCount ?? 0;
                     return (
                       <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
-                        <p className="font-medium mb-1">Dataset: {ds.name}</p>
+                        <p className="font-medium mb-1">Dataset: {ds.name}{ds.version ? ` (v${ds.version})` : ''}</p>
                         {ds.description && <p className="text-blue-700 mb-1">{ds.description}</p>}
                         <p>
                           This will create <span className="font-bold">{count} evaluation{count !== 1 ? 's' : ''}</span>
@@ -737,7 +778,7 @@ export default function ProjectDetailPage() {
                       </div>
                     );
                   })()}
-                  {availableDatasets.length === 0 && (
+                  {datasetPickerOptions.length === 0 && (
                     <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
                       No datasets with samples available.{' '}
                       <a href="/datasets" className="underline font-medium hover:text-amber-900">

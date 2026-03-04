@@ -109,12 +109,12 @@ export default function DatasetRunDetailPage() {
   return (
     <div>
       <Header
-        title={`${group.datasetName} Run`}
-        description={`${group.evaluations.length} samples · started ${formatDateTime(group.startedAt)}`}
+        title={`Dataset ${group.datasetName} Run`}
+        description={`${group.evaluations.length} samples`}
         breadcrumbs={[
           { label: 'Projects', href: '/projects' },
           { label: project.name, href: `/projects/${projectId}` },
-          { label: `${group.datasetName} Run` },
+          { label: `Dataset ${group.datasetName} Run` },
         ]}
       />
 
@@ -123,6 +123,7 @@ export default function DatasetRunDetailPage() {
           <CardContent className="p-5">
             <div className="flex flex-wrap items-center gap-2 mb-4">
               <Badge variant="info" size="sm">Dataset Run</Badge>
+              <Badge variant="outline" size="sm">{group.datasetId}</Badge>
               <Badge variant={statusVariantMap[aggregateStatus] ?? 'default'} size="sm">
                 {aggregateStatus === 'needs_human' ? 'Needs Human' : aggregateStatus}
               </Badge>
@@ -154,7 +155,12 @@ export default function DatasetRunDetailPage() {
 
               <div className="rounded-lg border border-surface-200 p-3">
                 <p className="text-2xs uppercase tracking-wide text-surface-500">Started</p>
-                <p className="text-sm font-medium text-surface-800">{formatDateTime(group.startedAt)}</p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-sm font-medium text-surface-800">{formatDateTime(group.startedAt)}</p>
+                  <span className="inline-flex items-center rounded-full border border-surface-200 bg-surface-100 px-2 py-0.5 text-2xs text-surface-600">
+                    {group.datasetId}
+                  </span>
+                </div>
               </div>
 
               <div className="rounded-lg border border-surface-200 p-3">
