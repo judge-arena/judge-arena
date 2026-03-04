@@ -489,27 +489,35 @@ async function testConfigWrite() {
 async function cleanup() {
   console.log('\n── Cleanup ──');
 
-  // Delete in reverse dependency order
-  if (created.evaluationId) {
-    const { status } = await request('DELETE', `/api/evaluations/${created.evaluationId}`);
-    log(status < 300 ? '🧹' : '⚠️', `DELETE evaluation ${created.evaluationId} → ${status}`);
+  // Delete in reverse dependency order. Each delete is wrapped individually
+  // so one failure doesn't prevent the rest from being cleaned up.
+  const toDelete: [string, string][] = [
+    ['evaluation', created.evaluationId ?? ''],
+    ['dataset', created.datasetId ?? ''],
+    ['rubric', created.rubricId ?? ''],
+    ['model', created.modelId ?? ''],
+    ['project', created.projectId ?? ''],
+  ];
+
+  const endpoints: Record<string, string> = {
+    evaluation: '/api/evaluations',
+    dataset: '/api/datasets',
+    rubric: '/api/rubrics',
+    model: '/api/models',
+    project: '/api/projects',
+  };
+
+  for (const [type, id] of toDelete) {
+    if (!id) continue;
+    try {
+      const { status } = await request('DELETE', `${endpoints[type]}/${id}`);
+      log(status < 300 ? '🧹' : '⚠️', `DELETE ${type} ${id} → ${status}`);
+    } catch (err) {
+      log('⚠️', `DELETE ${type} ${id} → error: ${err}`);
+    }
   }
-  if (created.datasetId) {
-    const { status } = await request('DELETE', `/api/datasets/${created.datasetId}`);
-    log(status < 300 ? '🧹' : '⚠️', `DELETE dataset ${created.datasetId} → ${status}`);
-  }
-  if (created.rubricId) {
-    const { status } = await request('DELETE', `/api/rubrics/${created.rubricId}`);
-    log(status < 300 ? '🧹' : '⚠️', `DELETE rubric ${created.rubricId} → ${status}`);
-  }
-  if (created.modelId) {
-    const { status } = await request('DELETE', `/api/models/${created.modelId}`);
-    log(status < 300 ? '🧹' : '⚠️', `DELETE model ${created.modelId} → ${status}`);
-  }
-  if (created.projectId) {
-    const { status } = await request('DELETE', `/api/projects/${created.projectId}`);
-    log(status < 300 ? '🧹' : '⚠️', `DELETE project ${created.projectId} → ${status}`);
-  }
+
+  log('🧹', 'Cleanup complete');
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -533,34 +541,38 @@ async function main() {
 
   // ── Run all scope tests ──
   // Write tests run first so read tests have resources to fetch
-  await testStatsRead();
+  try {
+    await testStatsRead();
 
-  await testProjectsWrite();
-  await testProjectsRead();
-  await testProjectsExport();
+    await testProjectsWrite();
+    await testProjectsRead();
+    await testProjectsExport();
 
-  await testRubricsWrite();
-  await testRubricsRead();
+    await testRubricsWrite();
+    await testRubricsRead();
 
-  await testModelsWrite();
-  await testModelsRead();
-  await testModelsVerify();
+    await testModelsWrite();
+    await testModelsRead();
+    await testModelsVerify();
 
-  await testDatasetsWrite();
-  await testDatasetsRead();
-  await testDatasetsExport();
+    await testDatasetsWrite();
+    await testDatasetsRead();
+    await testDatasetsExport();
 
-  await testEvaluationsWrite();
-  await testEvaluationsRead();
-  await testEvaluationsRun();
-  await testEvaluationsJudge();
-  await testEvaluationsExport();
+    await testEvaluationsWrite();
+    await testEvaluationsRead();
+    await testEvaluationsRun();
+    await testEvaluationsJudge();
+    await testEvaluationsExport();
 
-  await testConfigRead();
-  await testConfigWrite();
-
-  // ── Cleanup resources ──
-  await cleanup();
+    await testConfigRead();
+    await testConfigWrite();
+  } catch (err) {
+    console.error('\n💥 Error during tests:', err);
+  } finally {
+    // ── Cleanup resources (always runs, even on error) ──
+    await cleanup();
+  }
 
   // ── Summary ──
   console.log('\n╔════════════════════════════════════════════════════╗');
