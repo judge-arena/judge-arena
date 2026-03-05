@@ -149,7 +149,7 @@ export default function ProjectsPage() {
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
             {projects.map((project) => (
               <Link key={project.id} href={`/projects/${project.id}`}>
-                <Card interactive className={`h-full ${project.isDefault ? 'border-brand-200 dark:border-brand-700 bg-brand-50/30 dark:bg-brand-950/20' : ''}`}>
+                <Card interactive className={`h-full ${project.isDefault ? 'border-orange-200 dark:border-orange-900/60' : ''}`}>
                   <CardHeader>
                     <div className="flex items-start justify-between">
                       <div className="flex items-center gap-2 min-w-0">

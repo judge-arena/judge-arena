@@ -209,11 +209,11 @@ export default function DashboardPage() {
             <Link href={`/projects/${leaderboard.id}`}>
               <Card
                 interactive
-                className="border-brand-200 dark:border-brand-700 bg-gradient-to-r from-brand-50 to-cyan-50 dark:from-brand-950/30 dark:to-cyan-950/20 hover:from-brand-100 hover:to-cyan-100 dark:hover:from-brand-950/40 dark:hover:to-cyan-950/30 transition-colors"
+                className="border-blue-200 dark:border-blue-800 bg-gradient-to-r from-blue-50 to-cyan-50 dark:from-blue-950/25 dark:to-cyan-950/20 hover:from-blue-100 hover:to-cyan-100 dark:hover:from-blue-950/35 dark:hover:to-cyan-950/30 transition-colors"
               >
                 <CardContent className="pt-5 pb-5">
                   <div className="flex items-center gap-4">
-                    <div className="rounded-xl border border-brand-200 dark:border-brand-800 bg-brand-100 dark:bg-brand-900/50 p-3">
+                    <div className="rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-100 dark:bg-blue-900/40 p-3">
                       <svg
                         width="24"
                         height="24"
@@ -223,7 +223,7 @@ export default function DashboardPage() {
                         strokeWidth="2"
                         strokeLinecap="round"
                         strokeLinejoin="round"
-                        className="text-brand-600 dark:text-brand-300"
+                        className="text-blue-600 dark:text-blue-300"
                       >
                         <path d="M8 21h8M12 17v4M7 4h10M4 8h16M5 4v4M19 4v4M9 8v3a3 3 0 0 0 6 0V8" />
                       </svg>
