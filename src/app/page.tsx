@@ -70,7 +70,6 @@ export default function DashboardPage() {
     {
       label: 'Evaluations',
       value: stats?.totalEvaluations ?? 0,
-      sub: `${stats?.completedEvaluations ?? 0} completed`,
       href: '/projects',
       icon: (
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -171,27 +170,22 @@ export default function DashboardPage() {
           {statCards.map((stat) => (
             <Link key={stat.label} href={stat.href}>
               <Card interactive className="h-full">
-                <CardContent className="pt-5">
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <p className="text-xs font-medium text-surface-500 dark:text-surface-400 uppercase tracking-wider">
+                <CardContent className="pt-5 h-full">
+                  <div className="flex h-full items-center justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs font-medium text-surface-500 dark:text-surface-400 uppercase tracking-wider whitespace-nowrap">
                         {stat.label}
                       </p>
                       {loading ? (
                         <Skeleton className="h-8 w-16 mt-1" />
                       ) : (
-                        <p className="text-2xl font-bold text-surface-900 dark:text-surface-100 mt-1">
+                        <p className="text-2xl font-bold leading-none text-surface-900 dark:text-surface-100 mt-1">
                           {stat.value}
-                        </p>
-                      )}
-                      {stat.sub && !loading && (
-                        <p className="text-xs text-surface-400 mt-0.5">
-                          {stat.sub}
                         </p>
                       )}
                     </div>
                     <div
-                      className={`rounded-lg border p-2 ${stat.iconWrap} ${stat.iconColor}`}
+                      className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border ${stat.iconWrap} ${stat.iconColor}`}
                       aria-hidden="true"
                     >
                       {stat.icon}

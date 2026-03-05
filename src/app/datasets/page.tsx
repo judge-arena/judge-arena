@@ -873,7 +873,7 @@ export default function DatasetsPage() {
                 {tags.slice(0, 6).map((tag) => (
                   <span
                     key={tag}
-                    className="inline-block rounded-full bg-surface-100 dark:bg-surface-700 px-2 py-0.5 text-2xs text-surface-600 dark:text-surface-400"
+                    className="inline-block rounded-full bg-surface-100 dark:bg-surface-700 px-2 py-0.5 text-2xs text-surface-700 dark:text-surface-200 border border-surface-200 dark:border-blue-200"
                   >
                     {tag}
                   </span>
@@ -1236,7 +1236,7 @@ export default function DatasetsPage() {
                       {hfPreview.tags.slice(0, 8).map((tag) => (
                         <span
                           key={tag}
-                          className="inline-block rounded-full bg-white dark:bg-surface-800 px-2 py-0.5 text-2xs text-surface-600 dark:text-surface-400 border border-surface-200 dark:border-surface-700"
+                          className="inline-block rounded-full bg-white dark:bg-surface-800 px-2 py-0.5 text-2xs text-surface-700 dark:text-surface-200 border border-surface-200 dark:border-blue-200"
                         >
                           {tag}
                         </span>
@@ -1272,7 +1272,7 @@ export default function DatasetsPage() {
                     {remoteTags.map((tag) => (
                       <span
                         key={tag}
-                        className="inline-flex items-center gap-1 rounded-full bg-surface-100 dark:bg-surface-700 px-2 py-0.5 text-2xs text-surface-700 dark:text-surface-300 border border-surface-200 dark:border-surface-700"
+                        className="inline-flex items-center gap-1 rounded-full bg-surface-100 dark:bg-surface-700 px-2 py-0.5 text-2xs text-surface-800 dark:text-surface-200 border border-surface-200 dark:border-blue-200"
                       >
                         {tag}
                         <button
@@ -1427,7 +1427,7 @@ export default function DatasetsPage() {
                     {localTags.map((tag) => (
                       <span
                         key={tag}
-                        className="inline-flex items-center gap-1 rounded-full bg-surface-100 dark:bg-surface-700 px-2 py-0.5 text-2xs text-surface-700 dark:text-surface-300 border border-surface-200 dark:border-surface-700"
+                        className="inline-flex items-center gap-1 rounded-full bg-surface-100 dark:bg-surface-700 px-2 py-0.5 text-2xs text-surface-800 dark:text-surface-200 border border-surface-200 dark:border-blue-200"
                       >
                         {tag}
                         <button

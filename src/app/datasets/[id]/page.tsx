@@ -947,7 +947,7 @@ export default function DatasetDetailPage() {
                       type="button"
                       onClick={() => void removeTag(tag)}
                       disabled={savingTags}
-                      className="inline-flex items-center gap-1 rounded-full border border-surface-200 dark:border-surface-700 bg-surface-100 dark:bg-surface-700 px-2.5 py-0.5 text-xs text-surface-700 dark:text-surface-300 hover:border-red-200 hover:bg-red-50 hover:text-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+                      className="inline-flex items-center gap-1 rounded-full border border-surface-200 dark:border-blue-200 bg-surface-100 dark:bg-surface-700 px-2.5 py-0.5 text-xs text-surface-800 dark:text-surface-200 hover:border-red-200 hover:bg-red-50 hover:text-red-700 disabled:cursor-not-allowed disabled:opacity-60"
                       aria-label={`Remove tag ${tag}`}
                     >
                       {tag}

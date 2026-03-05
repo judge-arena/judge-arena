@@ -34,7 +34,7 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
       danger:
         'bg-red-600 text-white hover:bg-red-700 active:bg-red-800 shadow-sm',
       outline:
-        'border border-surface-300 text-surface-700 hover:bg-surface-50 active:bg-surface-100 dark:border-surface-600 dark:text-surface-300 dark:hover:bg-surface-800 dark:active:bg-surface-700',
+        'border border-surface-300 text-surface-700 hover:bg-surface-50 hover:border-brand-300 hover:text-brand-700 active:bg-surface-100 dark:border-surface-600 dark:text-surface-300 dark:hover:bg-surface-800 dark:hover:border-brand-600 dark:hover:text-brand-200 dark:active:bg-surface-700',
     };
 
     const sizes: Record<string, string> = {
