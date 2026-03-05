@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { encryptIfNeeded } from '@/lib/crypto';
+import { logger } from '@/lib/logger';
 
 const updateModelSchema = z.object({
   name: z.string().min(1).max(100).optional(),
@@ -41,7 +43,7 @@ export async function GET(
       hasApiKey: !!model.apiKey,
     });
   } catch (error) {
-    console.error('Failed to fetch model:', error);
+    logger.error('Failed to fetch model', { error, modelId: params.id });
     return NextResponse.json(
       { error: 'Failed to fetch model' },
       { status: 500 }
@@ -81,7 +83,7 @@ export async function PATCH(
     if (data.modelId !== undefined) updateData.modelId = data.modelId;
     if (data.endpoint !== undefined)
       updateData.endpoint = data.endpoint || null;
-    if (data.apiKey !== undefined) updateData.apiKey = data.apiKey || null;
+    if (data.apiKey !== undefined) updateData.apiKey = data.apiKey ? encryptIfNeeded(data.apiKey) : null;
     if (data.isActive !== undefined) updateData.isActive = data.isActive;
 
     const connectionChanged =
@@ -114,7 +116,7 @@ export async function PATCH(
         { status: 400 }
       );
     }
-    console.error('Failed to update model:', error);
+    logger.error('Failed to update model', { error, modelId: params.id });
     return NextResponse.json(
       { error: 'Failed to update model' },
       { status: 500 }
@@ -142,7 +144,7 @@ export async function DELETE(
     await prisma.modelConfig.delete({ where: { id: params.id } });
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('Failed to delete model:', error);
+    logger.error('Failed to delete model', { error, modelId: params.id });
     return NextResponse.json(
       { error: 'Failed to delete model' },
       { status: 500 }

@@ -8,6 +8,8 @@ import {
   fetchDatasetMetadata,
   parseHuggingFaceUrl,
 } from '@/lib/huggingface';
+import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib/pagination';
+import { logger } from '@/lib/logger';
 
 const createDatasetSchema = z.object({
   name: z.string().min(1, 'Name is required').max(200),
@@ -37,6 +39,7 @@ const createDatasetSchema = z.object({
 });
 
 // GET /api/datasets - List datasets visible to the current user
+// Supports ?limit=N&cursor=ID for pagination
 export async function GET(request: Request) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
@@ -47,6 +50,8 @@ export async function GET(request: Request) {
   const source = searchParams.get('source'); // 'local' | 'remote'
   const visibility = searchParams.get('visibility'); // 'private' | 'public'
   const projectId = searchParams.get('projectId');
+  const { limit, cursor } = parsePaginationParams(searchParams);
+  const pageArgs = buildPrismaPageArgs({ limit, cursor });
 
   try {
     // Users see their own private datasets + all public datasets
@@ -64,19 +69,23 @@ export async function GET(request: Request) {
     if (visibility) where.visibility = visibility;
     if (projectId) where.projectId = projectId;
 
-    const datasets = await prisma.dataset.findMany({
-      where,
-      include: {
-        user: { select: { id: true, name: true, email: true } },
-        project: { select: { id: true, name: true } },
-        _count: { select: { samples: true } },
-      },
-      orderBy: { updatedAt: 'desc' },
-    });
+    const [datasets, total] = await Promise.all([
+      prisma.dataset.findMany({
+        where,
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+          project: { select: { id: true, name: true } },
+          _count: { select: { samples: true } },
+        },
+        orderBy: { updatedAt: 'desc' },
+        ...pageArgs,
+      }),
+      prisma.dataset.count({ where }),
+    ]);
 
-    return NextResponse.json(datasets);
+    return paginatedJson(datasets, limit, total);
   } catch (error) {
-    console.error('Failed to fetch datasets:', error);
+    logger.error('Failed to fetch datasets', { error });
     return NextResponse.json(
       { error: 'Failed to fetch datasets' },
       { status: 500 }
@@ -228,7 +237,7 @@ export async function POST(request: Request) {
       );
     }
 
-    console.error('Failed to create dataset:', error);
+    logger.error('Failed to create dataset', { error });
     return NextResponse.json(
       { error: 'Failed to create dataset' },
       { status: 500 }

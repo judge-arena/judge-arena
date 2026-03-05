@@ -2,6 +2,8 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { executeJudgment, executeRespond } from '@/lib/llm';
 import { refreshDatasetEvaluationSummaryForEvaluation } from '@/lib/dataset-evaluation-summary';
+import { decryptSafe } from '@/lib/crypto';
+import { logger } from '@/lib/logger';
 
 const RUN_QUEUE_CONCURRENCY = Number(process.env.EVALUATION_RUN_QUEUE_CONCURRENCY ?? '4');
 const MODEL_CONCURRENCY_PER_RUN = Number(process.env.EVALUATION_MODEL_CONCURRENCY_PER_RUN ?? '2');
@@ -170,7 +172,7 @@ async function processRun(runId: string) {
                   },
                   {
                     modelId: model.modelId,
-                    apiKey: model.apiKey || undefined,
+                    apiKey: decryptSafe(model.apiKey) || undefined,
                     endpoint: model.endpoint || undefined,
                   }
                 ),
@@ -201,7 +203,7 @@ async function processRun(runId: string) {
                   },
                   {
                     modelId: model.modelId,
-                    apiKey: model.apiKey || undefined,
+                    apiKey: decryptSafe(model.apiKey) || undefined,
                     endpoint: model.endpoint || undefined,
                   }
                 ),

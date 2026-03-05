@@ -9,6 +9,8 @@ import {
   enqueueRunProcessing,
   toHttpError,
 } from '@/lib/evaluation-run-manager';
+import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib/pagination';
+import { logger } from '@/lib/logger';
 
 // ── Single-text evaluation ──
 const createSingleBaseSchema = z.object({
@@ -119,6 +121,7 @@ const evaluationInclude = {
 };
 
 // GET /api/evaluations - List evaluation templates (optionally filtered by project or dataset)
+// Supports ?limit=N&cursor=ID for pagination
 export async function GET(request: Request) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
@@ -129,21 +132,27 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const projectId = searchParams.get('projectId');
     const datasetId = searchParams.get('datasetId');
+    const { limit, cursor } = parsePaginationParams(searchParams);
+    const pageArgs = buildPrismaPageArgs({ limit, cursor });
 
     const where: any = {};
     if (projectId) where.projectId = projectId;
     if (datasetId) where.datasetId = datasetId;
     if (!isAdmin(session)) where.userId = session.user.id;
 
-    const evaluations = await prisma.evaluation.findMany({
-      where,
-      include: evaluationInclude,
-      orderBy: { createdAt: 'desc' },
-    });
+    const [evaluations, total] = await Promise.all([
+      prisma.evaluation.findMany({
+        where,
+        include: evaluationInclude,
+        orderBy: { createdAt: 'desc' },
+        ...pageArgs,
+      }),
+      prisma.evaluation.count({ where }),
+    ]);
 
-    return NextResponse.json(evaluations);
+    return paginatedJson(evaluations, limit, total);
   } catch (error) {
-    console.error('Failed to fetch evaluations:', error);
+    logger.error('Failed to fetch evaluations', { error });
     return NextResponse.json({ error: 'Failed to fetch evaluations' }, { status: 500 });
   }
 }
@@ -377,7 +386,7 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-    console.error('Failed to create evaluation:', error);
+    logger.error('Failed to create evaluation', { error });
     return NextResponse.json({ error: 'Failed to create evaluation' }, { status: 500 });
   }
 }

@@ -1,0 +1,96 @@
+# ─── Judge Arena — Production Docker Compose ──────────────────────────────
+#
+# Services:
+#   - app:      Next.js application (Judge Arena)
+#   - postgres: PostgreSQL 16 database
+#   - redis:    Redis 7 for rate limiting & realtime events
+#
+# Usage:
+#   cp .env.example .env.production
+#   # Edit .env.production with real values
+#   docker compose up -d
+#
+# First run:
+#   docker compose exec app npx prisma migrate deploy
+#   docker compose exec app npx tsx prisma/seed.ts
+#
+
+services:
+  # ─── Application ──
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: judge-arena-app
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    env_file:
+      - .env.production
+    environment:
+      - DATABASE_URL=postgresql://judgearena:${POSTGRES_PASSWORD:-changeme}@postgres:5432/judgearena
+      - REDIS_URL=redis://redis:6379
+      - REALTIME_ADAPTER=redis
+      - NODE_ENV=production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - judge-arena-net
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  # ─── PostgreSQL ──
+  postgres:
+    image: postgres:16-alpine
+    container_name: judge-arena-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: judgearena
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: judgearena
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - judge-arena-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U judgearena -d judgearena"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis ──
+  redis:
+    image: redis:7-alpine
+    container_name: judge-arena-redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning --maxmemory 128mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - judge-arena-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  judge-arena-net:
+    driver: bridge

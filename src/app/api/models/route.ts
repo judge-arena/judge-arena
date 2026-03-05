@@ -4,6 +4,8 @@ import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { generateSlug } from '@/lib/config';
+import { encryptIfNeeded } from '@/lib/crypto';
+import { logger } from '@/lib/logger';
 
 const createModelSchema = z.object({
   name: z.string().min(1, 'Name is required').max(100),
@@ -39,7 +41,7 @@ export async function GET() {
 
     return NextResponse.json(sanitized);
   } catch (error) {
-    console.error('Failed to fetch models:', error);
+    logger.error('Failed to fetch models', { error });
     return NextResponse.json(
       { error: 'Failed to fetch models' },
       { status: 500 }
@@ -68,6 +70,9 @@ export async function POST(request: Request) {
       ? `${slug}-${Date.now().toString(36).slice(-4)}`
       : slug;
 
+    // Encrypt API key at rest
+    const encryptedApiKey = data.apiKey ? encryptIfNeeded(data.apiKey) : null;
+
     const model = await prisma.modelConfig.create({
       data: {
         name: data.name,
@@ -75,7 +80,7 @@ export async function POST(request: Request) {
         provider: data.provider,
         modelId: data.modelId,
         endpoint: data.endpoint || null,
-        apiKey: data.apiKey || null,
+        apiKey: encryptedApiKey,
         isActive: data.isActive,
         isVerified: false,
         verifiedAt: null,
@@ -107,7 +112,7 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-    console.error('Failed to create model:', error);
+    logger.error('Failed to create model', { error });
     return NextResponse.json(
       { error: 'Failed to create model' },
       { status: 500 }

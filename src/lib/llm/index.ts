@@ -16,6 +16,7 @@ import type {
 } from './provider';
 import { AnthropicProvider } from './anthropic';
 import { OpenAICompatibleProvider } from './openai-compatible';
+import { resilientCall } from './resilience';
 
 const providers: Record<string, JudgmentProvider> = {
   anthropic: new AnthropicProvider(),
@@ -35,7 +36,8 @@ export function getProvider(providerName: ModelProvider | string): JudgmentProvi
 }
 
 /**
- * Execute a judgment using the appropriate provider
+ * Execute a judgment using the appropriate provider.
+ * Wraps the call with retry + circuit breaker for resilience.
  */
 export async function executeJudgment(
   providerName: string,
@@ -43,16 +45,20 @@ export async function executeJudgment(
   config: ProviderConfig
 ): Promise<JudgmentResponse> {
   const provider = getProvider(providerName);
-  return provider.judge(request, config);
+  return resilientCall(providerName, () => provider.judge(request, config));
 }
 
+/**
+ * Execute a respond call using the appropriate provider.
+ * Wraps the call with retry + circuit breaker for resilience.
+ */
 export async function executeRespond(
   providerName: string,
   request: RespondRequest,
   config: ProviderConfig
 ): Promise<RespondResponse> {
   const provider = getProvider(providerName);
-  return provider.respond(request, config);
+  return resilientCall(providerName, () => provider.respond(request, config));
 }
 
 /**

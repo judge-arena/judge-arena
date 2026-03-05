@@ -3,6 +3,8 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { generateSlug } from '@/lib/config';
+import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib/pagination';
+import { logger } from '@/lib/logger';
 
 const createProjectSchema = z.object({
   name: z.string().min(1, 'Name is required').max(200),
@@ -10,30 +12,39 @@ const createProjectSchema = z.object({
 });
 
 // GET /api/projects - List projects visible to the current user
-export async function GET() {
+// Supports ?limit=N&cursor=ID for pagination
+export async function GET(request: Request) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'projects:read');
   if (scopeCheck) return scopeCheck;
 
   try {
+    const { searchParams } = new URL(request.url);
+    const { limit, cursor } = parsePaginationParams(searchParams);
+    const pageArgs = buildPrismaPageArgs({ limit, cursor });
+
     // Admins see all; regular users see their own plus default (Leaderboard) projects
     const where = isAdmin(session)
       ? undefined
       : { OR: [{ userId: session.user.id }, { isDefault: true }] };
 
-    const projects = await prisma.project.findMany({
-      where,
-      include: {
-        user: { select: { id: true, name: true, email: true } },
-        _count: { select: { evaluations: true } },
-      },
-      orderBy: [{ isDefault: 'desc' }, { updatedAt: 'desc' }],
-    });
+    const [projects, total] = await Promise.all([
+      prisma.project.findMany({
+        where,
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+          _count: { select: { evaluations: true } },
+        },
+        orderBy: [{ isDefault: 'desc' }, { updatedAt: 'desc' }],
+        ...pageArgs,
+      }),
+      prisma.project.count({ where }),
+    ]);
 
-    return NextResponse.json(projects);
+    return paginatedJson(projects, limit, total);
   } catch (error) {
-    console.error('Failed to fetch projects:', error);
+    logger.error('Failed to fetch projects', { error });
     return NextResponse.json(
       { error: 'Failed to fetch projects' },
       { status: 500 }
@@ -83,7 +94,7 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-    console.error('Failed to create project:', error);
+    logger.error('Failed to create project', { error });
     return NextResponse.json(
       { error: 'Failed to create project' },
       { status: 500 }

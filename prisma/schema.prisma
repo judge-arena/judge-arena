@@ -3,28 +3,33 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
 // ─── Auth ───────────────────────────────────────────────────────────────────
 
 model User {
-  id             String          @id @default(cuid())
-  email          String          @unique
-  name           String?
-  passwordHash   String
-  role           String          @default("user") // "user" | "admin"
-  projects       Project[]
-  rubrics        Rubric[]
-  modelConfigs   ModelConfig[]
-  evaluations    Evaluation[]
-  evaluationRuns EvaluationRun[]
-  humanJudgments HumanJudgment[]
-  datasets         Dataset[]
-  developerApiKeys DeveloperApiKey[]
-  createdAt        DateTime        @default(now())
-  updatedAt        DateTime        @updatedAt
+  id                String          @id @default(cuid())
+  email             String          @unique
+  name              String?
+  passwordHash      String
+  role              String          @default("user") // "user" | "admin"
+  emailVerified     Boolean         @default(false)
+  verificationToken String?         @unique
+  resetToken        String?         @unique
+  resetTokenExpiry  DateTime?
+  projects          Project[]
+  rubrics           Rubric[]
+  modelConfigs      ModelConfig[]
+  evaluations       Evaluation[]
+  evaluationRuns    EvaluationRun[]
+  humanJudgments    HumanJudgment[]
+  datasets          Dataset[]
+  developerApiKeys  DeveloperApiKey[]
+  auditLogs         AuditLog[]
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
 }
 
 // ─── Domain ─────────────────────────────────────────────────────────────────
@@ -331,4 +336,25 @@ model DatasetSample {
 
   @@index([datasetId])
   @@unique([datasetId, index])
+}
+
+// ─── Audit Log ──────────────────────────────────────────────────────────────
+// Tracks security-critical operations for compliance and debugging.
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String   // e.g. 'user.login', 'apikey.create', 'evaluation.run', 'config.import'
+  resource   String?  // e.g. 'project', 'evaluation', 'apikey'
+  resourceId String?  // ID of the affected resource
+  metadata   String?  // JSON: additional context (old values, new values, etc.)
+  ip         String?  // client IP address
+  userAgent  String?  // client user agent
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([resource, resourceId])
+  @@index([createdAt])
 }
