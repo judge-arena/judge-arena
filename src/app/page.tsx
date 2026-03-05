@@ -64,7 +64,8 @@ export default function DashboardPage() {
           <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
         </svg>
       ),
-      color: 'text-blue-600 bg-blue-50',
+      iconWrap: 'border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-950/30',
+      iconColor: 'text-blue-700 dark:text-blue-300',
     },
     {
       label: 'Evaluations',
@@ -77,7 +78,8 @@ export default function DashboardPage() {
           <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
         </svg>
       ),
-      color: 'text-emerald-600 bg-emerald-50',
+      iconWrap: 'border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/30',
+      iconColor: 'text-emerald-700 dark:text-emerald-300',
     },
     {
       label: 'Active Models',
@@ -90,7 +92,8 @@ export default function DashboardPage() {
           <path d="M2 12l10 5 10-5" />
         </svg>
       ),
-      color: 'text-purple-600 bg-purple-50',
+      iconWrap: 'border-purple-200 bg-purple-50 dark:border-purple-800 dark:bg-purple-950/30',
+      iconColor: 'text-purple-700 dark:text-purple-300',
     },
     {
       label: 'Rubrics',
@@ -106,7 +109,8 @@ export default function DashboardPage() {
           <line x1="3" y1="18" x2="3.01" y2="18" />
         </svg>
       ),
-      color: 'text-amber-600 bg-amber-50',
+      iconWrap: 'border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30',
+      iconColor: 'text-amber-700 dark:text-amber-300',
     },
     {
       label: 'Datasets',
@@ -119,7 +123,8 @@ export default function DashboardPage() {
           <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
         </svg>
       ),
-      color: 'text-cyan-600 bg-cyan-50',
+      iconWrap: 'border-cyan-200 bg-cyan-50 dark:border-cyan-800 dark:bg-cyan-950/30',
+      iconColor: 'text-cyan-700 dark:text-cyan-300',
     },
   ];
 
@@ -147,12 +152,12 @@ export default function DashboardPage() {
               </Button>
             </Link>
             <Link href="/rubrics">
-              <Button variant="outline" size="sm">
+              <Button variant="primary" size="sm">
                 Build Rubric
               </Button>
             </Link>
             <Link href="/models">
-              <Button variant="outline" size="sm">
+              <Button variant="primary" size="sm">
                 Configure Models
               </Button>
             </Link>
@@ -186,7 +191,7 @@ export default function DashboardPage() {
                       )}
                     </div>
                     <div
-                      className={`rounded-lg p-2 ${stat.color}`}
+                      className={`rounded-lg border p-2 ${stat.iconWrap} ${stat.iconColor}`}
                       aria-hidden="true"
                     >
                       {stat.icon}
@@ -202,10 +207,13 @@ export default function DashboardPage() {
           {/* Leaderboard CTA */}
           {!loading && leaderboard && (
             <Link href={`/projects/${leaderboard.id}`}>
-              <Card interactive className="border-brand-200 bg-gradient-to-r from-brand-50 to-cyan-50">
+              <Card
+                interactive
+                className="border-brand-200 dark:border-brand-700 bg-gradient-to-r from-brand-50 to-cyan-50 dark:from-brand-950/30 dark:to-cyan-950/20 hover:from-brand-100 hover:to-cyan-100 dark:hover:from-brand-950/40 dark:hover:to-cyan-950/30 transition-colors"
+              >
                 <CardContent className="pt-5 pb-5">
                   <div className="flex items-center gap-4">
-                    <div className="rounded-xl bg-brand-100 p-3">
+                    <div className="rounded-xl border border-brand-200 dark:border-brand-800 bg-brand-100 dark:bg-brand-900/50 p-3">
                       <svg
                         width="24"
                         height="24"
@@ -215,7 +223,7 @@ export default function DashboardPage() {
                         strokeWidth="2"
                         strokeLinecap="round"
                         strokeLinejoin="round"
-                        className="text-brand-600"
+                        className="text-brand-600 dark:text-brand-300"
                       >
                         <path d="M8 21h8M12 17v4M7 4h10M4 8h16M5 4v4M19 4v4M9 8v3a3 3 0 0 0 6 0V8" />
                       </svg>
@@ -228,21 +236,23 @@ export default function DashboardPage() {
                         Evaluate models against public datasets and benchmark performance
                       </p>
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <Badge variant="success" size="sm">Public</Badge>
-                      <Badge variant="default" size="sm">
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <Badge variant="success" size="sm" className="font-semibold">
+                        Public
+                      </Badge>
+                      <Badge variant="default" size="sm" className="dark:bg-surface-700 dark:text-surface-200 dark:border-surface-600">
                         {leaderboard._count?.evaluations ?? 0} evaluations
                       </Badge>
                       <svg
-                        width="20"
-                        height="20"
+                        width="16"
+                        height="16"
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
                         strokeWidth="2"
                         strokeLinecap="round"
                         strokeLinejoin="round"
-                        className="text-surface-400"
+                        className="text-surface-400 dark:text-surface-300"
                       >
                         <polyline points="9 18 15 12 9 6" />
                       </svg>
@@ -255,7 +265,7 @@ export default function DashboardPage() {
 
           <Card>
             <CardContent className="pt-5">
-            <div className="flex items-center justify-between gap-3 mb-3">
+            <div className="flex items-center justify-between gap-3 mb-2.5">
               <h2 className="text-sm font-semibold text-surface-700 dark:text-surface-300">
                 Jump back into a project
               </h2>
@@ -299,12 +309,12 @@ export default function DashboardPage() {
                       Last edited {new Date(recentProject.updatedAt).toLocaleDateString()}
                     </p>
                   </div>
-                  <Badge variant="default" size="sm">
+                  <Badge variant="default" size="sm" className="dark:bg-surface-700 dark:text-surface-200 dark:border-surface-600">
                     {recentProject._count?.evaluations ?? 0} evaluations
                   </Badge>
                 </div>
                 <div className="mt-4">
-                  <Button variant="outline" size="sm">
+                  <Button variant="primary" size="sm">
                     Jump back into project
                   </Button>
                 </div>
@@ -315,7 +325,7 @@ export default function DashboardPage() {
 
           <Card>
             <CardContent className="pt-5">
-              <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center justify-between mb-2.5">
                 <h2 className="text-sm font-semibold text-surface-700 dark:text-surface-300">
                   Recent Evaluations
                 </h2>
@@ -344,7 +354,7 @@ export default function DashboardPage() {
                     <Link
                       key={evaluation.id}
                       href={`/evaluate/${evaluation.id}`}
-                      className="flex items-center gap-3 py-3 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 -mx-2 px-2 rounded-lg transition-colors"
+                      className="flex items-center gap-3 py-3 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 -mx-2 px-2 rounded-lg transition-colors"
                     >
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-medium text-surface-900 dark:text-surface-100 truncate">
@@ -355,7 +365,7 @@ export default function DashboardPage() {
                           {new Date(evaluation.createdAt).toLocaleDateString()}
                         </p>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1.5">
                         {(() => {
                           const latestRun = (evaluation.runs ?? [])[0];
                           const runCount = (evaluation.runs ?? []).length;
@@ -366,7 +376,7 @@ export default function DashboardPage() {
                             : 'default';
                           return (
                             <>
-                              <Badge variant="default" size="sm">
+                              <Badge variant="default" size="sm" className="dark:bg-surface-700 dark:text-surface-200 dark:border-surface-600">
                                 {runCount} run{runCount === 1 ? '' : 's'}
                               </Badge>
                               {latestRun && (
@@ -388,7 +398,7 @@ export default function DashboardPage() {
 
         {/* Getting Started Guide */}
         {!loading && stats && stats.totalEvaluations === 0 && (
-          <Card className="border-brand-200 bg-brand-50/50">
+          <Card className="border-brand-200 dark:border-brand-700 bg-brand-50/50 dark:bg-brand-950/20">
             <CardContent className="pt-5">
               <h2 className="text-base font-semibold text-brand-900 mb-2">
                 Getting Started with Judge Arena

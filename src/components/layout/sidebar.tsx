@@ -151,7 +151,7 @@ export function Sidebar({ collapsed = false, onToggle }: SidebarProps) {
                 'group flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500',
                 isActive
-                  ? 'bg-brand-50 text-brand-700 dark:bg-brand-950/40 dark:text-brand-400'
+                  ? 'bg-brand-50 text-brand-700 dark:bg-brand-900/50 dark:text-white'
                   : 'text-surface-600 hover:bg-surface-100 hover:text-surface-900 dark:text-surface-400 dark:hover:bg-surface-800 dark:hover:text-surface-200'
               )}
               aria-current={isActive ? 'page' : undefined}
@@ -159,7 +159,7 @@ export function Sidebar({ collapsed = false, onToggle }: SidebarProps) {
               <span
                 className={cn(
                   'shrink-0',
-                  isActive ? 'text-brand-600 dark:text-brand-400' : 'text-surface-400 group-hover:text-surface-600 dark:group-hover:text-surface-300'
+                  isActive ? 'text-brand-600 dark:text-white' : 'text-surface-400 group-hover:text-surface-600 dark:group-hover:text-surface-300'
                 )}
               >
                 {item.icon}

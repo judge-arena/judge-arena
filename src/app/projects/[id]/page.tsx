@@ -416,13 +416,13 @@ export default function ProjectDetailPage() {
                   <div className="absolute right-0 top-full mt-1 z-20 w-56 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 py-1 shadow-lg">
                     <p className="px-3 py-1.5 text-2xs font-semibold text-surface-400 uppercase tracking-wide">Evaluations</p>
                     <button
-                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 transition-colors"
                       onClick={() => { handleProjectExport('csv', 'evaluations'); setExportMenuOpen(false); }}
                     >
                       📄 Evaluations as CSV
                     </button>
                     <button
-                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 transition-colors"
                       onClick={() => { handleProjectExport('jsonl', 'evaluations'); setExportMenuOpen(false); }}
                     >
                       📋 Evaluations as JSONL
@@ -430,13 +430,13 @@ export default function ProjectDetailPage() {
                     <div className="my-1 border-t border-surface-100 dark:border-surface-700" />
                     <p className="px-3 py-1.5 text-2xs font-semibold text-surface-400 uppercase tracking-wide">Full Export</p>
                     <button
-                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 transition-colors"
                       onClick={() => { handleProjectExport('csv', 'all'); setExportMenuOpen(false); }}
                     >
                       📄 All data as CSV
                     </button>
                     <button
-                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 transition-colors"
                       onClick={() => { handleProjectExport('jsonl', 'all'); setExportMenuOpen(false); }}
                     >
                       📋 All data as JSONL
@@ -444,13 +444,13 @@ export default function ProjectDetailPage() {
                     <div className="my-1 border-t border-surface-100 dark:border-surface-700" />
                     <p className="px-3 py-1.5 text-2xs font-semibold text-surface-400 uppercase tracking-wide">Configuration</p>
                     <button
-                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 transition-colors"
                       onClick={() => { handleConfigExport('yaml'); setExportMenuOpen(false); }}
                     >
                       ⚙️ Config as YAML
                     </button>
                     <button
-                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 transition-colors"
                       onClick={() => { handleConfigExport('yaml', true); setExportMenuOpen(false); }}
                     >
                       ⚙️ Config + Data as YAML
@@ -589,7 +589,7 @@ export default function ProjectDetailPage() {
                               <div className="flex items-center gap-3 shrink-0">
                                 {summary.modelAverageAcrossSamples !== null && (
                                   <div className="text-center">
-                                    <div className="text-base font-bold font-mono text-surface-800">
+                                    <div className="text-base font-bold font-mono text-surface-800 dark:text-surface-200">
                                       {summary.modelAverageAcrossSamples.toFixed(1)}
                                     </div>
                                     <div className="text-2xs text-surface-400">Model Avg</div>
@@ -597,7 +597,7 @@ export default function ProjectDetailPage() {
                                 )}
                                 {summary.humanAverageAcrossSamples !== null && (
                                   <div className="text-center">
-                                    <div className="text-base font-bold font-mono text-surface-800">
+                                    <div className="text-base font-bold font-mono text-surface-800 dark:text-surface-200">
                                       {summary.humanAverageAcrossSamples.toFixed(1)}
                                     </div>
                                     <div className="text-2xs text-surface-400">Human Avg</div>
@@ -634,7 +634,7 @@ export default function ProjectDetailPage() {
                 <Link
                   key={evaluation.id}
                   href={`/evaluate/${evaluation.id}`}
-                  className="flex items-center gap-4 px-4 py-3 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors first:rounded-t-xl last:rounded-b-xl"
+                  className="flex items-center gap-4 px-4 py-3 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 transition-colors first:rounded-t-xl last:rounded-b-xl"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
@@ -746,7 +746,7 @@ export default function ProjectDetailPage() {
                     className={`flex-1 px-4 py-2.5 text-sm font-medium transition-colors ${
                       evalMode === 'text'
                         ? 'bg-brand-600 text-white'
-                        : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800'
+                        : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-700'
                     }`}
                   >
                     <span className="flex items-center justify-center gap-2">
@@ -765,7 +765,7 @@ export default function ProjectDetailPage() {
                     className={`flex-1 px-4 py-2.5 text-sm font-medium transition-colors border-l border-surface-200 dark:border-surface-700 ${
                       evalMode === 'dataset'
                         ? 'bg-brand-600 text-white'
-                        : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800'
+                        : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-700'
                     }`}
                   >
                     <span className="flex items-center justify-center gap-2">
@@ -800,7 +800,7 @@ export default function ProjectDetailPage() {
                         className={`flex-1 px-4 py-2.5 text-sm font-medium transition-colors ${
                           textEvalFormat === 'respond'
                             ? 'bg-brand-600 text-white'
-                            : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800'
+                            : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-700'
                         }`}
                       >
                         Respond + Human Judgment
@@ -811,7 +811,7 @@ export default function ProjectDetailPage() {
                         className={`flex-1 px-4 py-2.5 text-sm font-medium transition-colors border-l border-surface-200 dark:border-surface-700 ${
                           textEvalFormat === 'judge'
                             ? 'bg-brand-600 text-white'
-                            : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800'
+                            : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-700'
                         }`}
                       >
                         Judge Existing Response
@@ -918,10 +918,10 @@ export default function ProjectDetailPage() {
                       return (
                         <label
                           key={model.id}
-                          className="flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 cursor-pointer"
+                          className="flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 cursor-pointer"
                         >
                           <div className="min-w-0">
-                            <p className="font-medium text-surface-800 truncate">
+                            <p className="font-medium text-surface-800 dark:text-surface-200 truncate">
                               {model.name}
                             </p>
                             <p className="text-xs text-surface-500 dark:text-surface-400 truncate">
@@ -997,7 +997,7 @@ export default function ProjectDetailPage() {
               Cancel
             </Button>
             <Button
-              variant="secondary"
+              variant="primary"
               onClick={() => handleCreateEvaluation('create')}
               loading={submitting && submitMode === 'create'}
               disabled={

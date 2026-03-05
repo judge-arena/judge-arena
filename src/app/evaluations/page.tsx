@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useCallback, useEffect, useState, useRef } from 'react';
 import Link from 'next/link';
 import { Header } from '@/components/layout/header';
 import { Card, CardContent } from '@/components/ui/card';
@@ -29,6 +29,8 @@ interface RunSummary {
   projectName: string;
 }
 
+type RunStatus = 'pending' | 'judging' | 'needs_human' | 'completed' | 'error';
+
 const statusConfig: Record<string, { label: string; variant: 'default' | 'success' | 'warning' | 'error' | 'info' }> = {
   pending:     { label: 'Pending',      variant: 'warning' },
   judging:     { label: 'Judging',      variant: 'info' },
@@ -41,9 +43,30 @@ function getNeedsHumanActionLabel(mode: 'respond' | 'judge') {
   return mode === 'respond' ? 'Select Best Response' : 'Needs Human Feedback';
 }
 
+function getEffectiveRunStatus(run: RunSummary): RunStatus {
+  const baseStatus = run.status as RunStatus;
+  const judgments = run.modelJudgments ?? [];
+
+  if (run.humanJudgment) return 'completed';
+  if (baseStatus === 'error') return 'error';
+
+  const hasRunning = judgments.some((judgment) => judgment.status === 'running');
+  const hasPending = judgments.some((judgment) => judgment.status === 'pending');
+  const hasFinished = judgments.some(
+    (judgment) => judgment.status === 'completed' || judgment.status === 'error'
+  );
+
+  if (hasRunning) return 'judging';
+  if (hasPending) return baseStatus === 'judging' ? 'judging' : 'pending';
+  if (hasFinished) return 'needs_human';
+
+  return baseStatus;
+}
+
 export default function EvaluationsPage() {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [queueingRunId, setQueueingRunId] = useState<string | null>(null);
   const [filter, setFilter] = useState<'all' | 'pending' | 'needs_human' | 'completed' | 'error'>('all');
   const [modeFilter, setModeFilter] = useState<'all' | 'respond' | 'judge'>('all');
   const [search, setSearch] = useState('');
@@ -84,44 +107,85 @@ export default function EvaluationsPage() {
     toast.success(`Exporting configuration as ${format.toUpperCase()}…`);
   };
 
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const res = await fetch('/api/evaluations');
-        if (res.ok) {
-          const templates: any[] = await res.json();
-          // Flatten all runs from all templates, injecting template/project context
-          const flat: RunSummary[] = [];
-          for (const template of templates) {
-            for (const run of template.runs ?? []) {
-              flat.push({
-                ...run,
-                mode: template.responseText ? 'judge' : 'respond',
-                evaluationTitle: template.title ?? null,
-                projectId: template.project?.id ?? '',
-                projectName: template.project?.name ?? '',
-              });
-            }
+  const loadRuns = useCallback(async () => {
+    try {
+      const res = await fetch('/api/evaluations');
+      if (res.ok) {
+        const templates: any[] = await res.json();
+        const flat: RunSummary[] = [];
+        for (const template of templates) {
+          for (const run of template.runs ?? []) {
+            flat.push({
+              ...run,
+              mode: template.responseText ? 'judge' : 'respond',
+              evaluationTitle: template.title ?? null,
+              projectId: template.project?.id ?? '',
+              projectName: template.project?.name ?? '',
+            });
           }
-          // Sort newest first
-          flat.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-          setRuns(flat);
         }
-      } catch (err) {
-        console.error('Failed to load runs:', err);
-      } finally {
-        setLoading(false);
+        flat.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        setRuns(flat);
       }
-    };
-    load();
+    } catch (err) {
+      console.error('Failed to load runs:', err);
+      toast.error('Failed to refresh evaluations');
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
+  useEffect(() => {
+    loadRuns();
+  }, [loadRuns]);
+
+  const handleQueueRun = async (
+    event: React.MouseEvent<HTMLButtonElement>,
+    run: RunSummary
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (queueingRunId) return;
+
+    setQueueingRunId(run.id);
+    try {
+      const body: Record<string, unknown> = {
+        modelConfigIds: run.runModelSelections.map((selection) => selection.modelConfigId),
+      };
+      if (run.rubric?.id) {
+        body.rubricId = run.rubric.id;
+      }
+
+      const response = await fetch(`/api/evaluations/${run.evaluationId}/runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        toast.error(payload.error || 'Failed to queue run');
+        return;
+      }
+
+      toast.success('Run queued');
+      await loadRuns();
+    } catch {
+      toast.error('Failed to queue run');
+    } finally {
+      setQueueingRunId(null);
+    }
+  };
+
   const filtered = runs.filter((run) => {
+    const effectiveStatus = getEffectiveRunStatus(run);
+
     // Status filter
-    if (filter === 'pending' && run.status !== 'pending' && run.status !== 'judging') return false;
-    if (filter === 'needs_human' && run.status !== 'needs_human') return false;
-    if (filter === 'completed' && run.status !== 'completed') return false;
-    if (filter === 'error' && run.status !== 'error') return false;
+    if (filter === 'pending' && effectiveStatus !== 'pending' && effectiveStatus !== 'judging') return false;
+    if (filter === 'needs_human' && effectiveStatus !== 'needs_human') return false;
+    if (filter === 'completed' && effectiveStatus !== 'completed') return false;
+    if (filter === 'error' && effectiveStatus !== 'error') return false;
     if (modeFilter !== 'all' && run.mode !== modeFilter) return false;
 
     // Text search
@@ -140,10 +204,13 @@ export default function EvaluationsPage() {
 
   const counts = {
     all: runs.length,
-    pending: runs.filter((r) => r.status === 'pending' || r.status === 'judging').length,
-    needs_human: runs.filter((r) => r.status === 'needs_human').length,
-    completed: runs.filter((r) => r.status === 'completed').length,
-    error: runs.filter((r) => r.status === 'error').length,
+    pending: runs.filter((r) => {
+      const status = getEffectiveRunStatus(r);
+      return status === 'pending' || status === 'judging';
+    }).length,
+    needs_human: runs.filter((r) => getEffectiveRunStatus(r) === 'needs_human').length,
+    completed: runs.filter((r) => getEffectiveRunStatus(r) === 'completed').length,
+    error: runs.filter((r) => getEffectiveRunStatus(r) === 'error').length,
   };
 
   return (
@@ -180,13 +247,13 @@ export default function EvaluationsPage() {
                 <div className="absolute right-0 top-full mt-1 z-20 w-56 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 py-1 shadow-lg">
                   <p className="px-3 py-1.5 text-2xs font-semibold text-surface-400 uppercase tracking-wide">Evaluation Data</p>
                   <button
-                    className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
+                    className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 transition-colors"
                     onClick={() => { handleExportEvaluations('csv'); setExportMenuOpen(false); }}
                   >
                     📄 Export as CSV
                   </button>
                   <button
-                    className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
+                    className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 transition-colors"
                     onClick={() => { handleExportEvaluations('jsonl'); setExportMenuOpen(false); }}
                   >
                     📋 Export as JSONL
@@ -194,7 +261,7 @@ export default function EvaluationsPage() {
                   <div className="my-1 border-t border-surface-100 dark:border-surface-700" />
                   <p className="px-3 py-1.5 text-2xs font-semibold text-surface-400 uppercase tracking-wide">Configuration</p>
                   <button
-                    className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
+                    className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 transition-colors"
                     onClick={() => { handleConfigExport('yaml'); setExportMenuOpen(false); }}
                   >
                     ⚙️ Config as YAML
@@ -208,43 +275,55 @@ export default function EvaluationsPage() {
 
       <div className="p-6 space-y-6">
         {/* ── Filters ── */}
-        <div className="flex flex-col sm:flex-row gap-3">
+        <div className="space-y-3">
           <input
             type="text"
             placeholder="Search by title, project, rubric, or run ID…"
-            className="flex-1 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 px-3 py-2 text-sm text-surface-900 dark:text-surface-100 placeholder:text-surface-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+            className="w-full rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 px-3 py-2 text-sm text-surface-900 dark:text-surface-100 placeholder:text-surface-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
-          <div className="flex gap-1.5 flex-wrap">
-            {(['all', 'pending', 'needs_human', 'completed', 'error'] as const).map((f) => (
-              <button
-                key={f}
-                onClick={() => setFilter(f)}
-                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
-                  filter === f
-                    ? 'bg-brand-600 text-white'
-                    : 'bg-surface-100 dark:bg-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-700'
-                }`}
-              >
-                {f === 'all' ? 'All' : f === 'needs_human' ? 'Needs Human Action' : f.charAt(0).toUpperCase() + f.slice(1)} ({counts[f]})
-              </button>
-            ))}
-          </div>
-          <div className="flex gap-1.5 flex-wrap">
-            {(['all', 'respond', 'judge'] as const).map((m) => (
-              <button
-                key={m}
-                onClick={() => setModeFilter(m)}
-                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
-                  modeFilter === m
-                    ? 'bg-brand-600 text-white'
-                    : 'bg-surface-100 dark:bg-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-700'
-                }`}
-              >
-                {m === 'all' ? 'All Modes' : m === 'respond' ? 'Respond Mode' : 'Judge Mode'}
-              </button>
-            ))}
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            <div className="rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 p-3">
+              <p className="mb-2 text-2xs font-semibold uppercase tracking-wide text-surface-500 dark:text-surface-400">
+                Run Status
+              </p>
+              <div className="flex gap-1.5 flex-wrap">
+                {(['all', 'pending', 'needs_human', 'completed', 'error'] as const).map((f) => (
+                  <button
+                    key={f}
+                    onClick={() => setFilter(f)}
+                    className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                      filter === f
+                        ? 'bg-brand-600 text-white'
+                        : 'bg-surface-100 dark:bg-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-700'
+                    }`}
+                  >
+                    {f === 'all' ? 'All' : f === 'needs_human' ? 'Needs Human Action' : f.charAt(0).toUpperCase() + f.slice(1)} ({counts[f]})
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 p-3">
+              <p className="mb-2 text-2xs font-semibold uppercase tracking-wide text-surface-500 dark:text-surface-400">
+                Evaluation Mode
+              </p>
+              <div className="flex gap-1.5 flex-wrap">
+                {(['all', 'respond', 'judge'] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setModeFilter(m)}
+                    className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                      modeFilter === m
+                        ? 'bg-brand-600 text-white'
+                        : 'bg-surface-100 dark:bg-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-700'
+                    }`}
+                  >
+                    {m === 'all' ? 'All Modes' : m === 'respond' ? 'Respond Mode' : 'Judge Mode'}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -267,9 +346,10 @@ export default function EvaluationsPage() {
         ) : (
           <div className="space-y-3">
             {filtered.map((run) => {
-              const sc = statusConfig[run.status] ?? statusConfig.pending;
+              const effectiveStatus = getEffectiveRunStatus(run);
+              const sc = statusConfig[effectiveStatus] ?? statusConfig.pending;
               const runStatusLabel =
-                run.status === 'needs_human'
+                effectiveStatus === 'needs_human'
                   ? getNeedsHumanActionLabel(run.mode)
                   : sc.label;
               const completedJudgments = run.modelJudgments.filter(
@@ -293,27 +373,29 @@ export default function EvaluationsPage() {
                         {/* ── Main info ── */}
                         <div className="min-w-0 flex-1">
                           {/* Title + status */}
-                          <div className="flex flex-wrap items-center gap-2 mb-1">
+                          <div className="flex flex-wrap items-center gap-1.5 mb-1.5">
                             <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 truncate">
                               {run.evaluationTitle || 'Untitled Evaluation'}
                             </h3>
-                            <Badge variant={sc.variant} size="sm">{runStatusLabel}</Badge>
-                            <Badge variant="default" size="sm">
+                            <Badge variant={sc.variant} size="sm" className="font-semibold">
+                              {runStatusLabel}
+                            </Badge>
+                            <Badge variant="outline" size="sm" className="dark:text-surface-200 dark:border-surface-600">
                               {run.mode === 'respond' ? 'Respond + Human Judgment' : 'Judge Existing Response'}
                             </Badge>
                           </div>
 
                           {/* Project / rubric / date */}
-                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-surface-500 dark:text-surface-400 mb-2">
-                            <span className="flex items-center gap-1">
-                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-surface-500 dark:text-surface-400 mb-1.5">
+                            <span className="flex items-center gap-1.5">
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="text-surface-400 dark:text-surface-300">
                                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
                               </svg>
                               {run.projectName}
                             </span>
                             {run.rubric && (
-                              <span className="flex items-center gap-1">
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <span className="flex items-center gap-1.5">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="text-surface-400 dark:text-surface-300">
                                   <path d="M9 11l3 3L22 4" />
                                   <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
                                 </svg>
@@ -324,7 +406,7 @@ export default function EvaluationsPage() {
                           </div>
 
                           {/* Triggered by + model list */}
-                          <div className="flex flex-wrap items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-1.5">
                             <span className="text-xs text-surface-500 dark:text-surface-400">
                               By{' '}
                               <span className="font-medium text-surface-700 dark:text-surface-300">
@@ -332,12 +414,12 @@ export default function EvaluationsPage() {
                               </span>
                             </span>
                             {run.runModelSelections.slice(0, 4).map((s) => (
-                              <Badge key={s.modelConfigId} variant="default" size="sm">
+                              <Badge key={s.modelConfigId} variant="default" size="sm" className="dark:bg-surface-700 dark:text-surface-200 dark:border-surface-600">
                                 {s.modelConfig.name}
                               </Badge>
                             ))}
                             {run.runModelSelections.length > 4 && (
-                              <Badge variant="default" size="sm">
+                              <Badge variant="default" size="sm" className="dark:bg-surface-700 dark:text-surface-200 dark:border-surface-600">
                                 +{run.runModelSelections.length - 4} more
                               </Badge>
                             )}
@@ -346,6 +428,16 @@ export default function EvaluationsPage() {
 
                         {/* ── Scores ── */}
                         <div className="flex items-center gap-4 shrink-0">
+                          {(effectiveStatus === 'pending' || effectiveStatus === 'judging') && (
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              onClick={(event) => handleQueueRun(event, run)}
+                              disabled={queueingRunId === run.id}
+                            >
+                              {queueingRunId === run.id ? 'Queueing…' : 'Queue Run'}
+                            </Button>
+                          )}
                           {avgScore !== null && (
                             <div className="text-center">
                               <div className={cn('text-lg font-bold font-mono', getScoreColor(avgScore))}>

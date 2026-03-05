@@ -313,7 +313,7 @@ export default function ModelsPage() {
                           Test
                         </Button>
                         <Button
-                          variant="secondary"
+                          variant="primary"
                           size="sm"
                           onClick={(e) => {
                             e.preventDefault();

@@ -74,7 +74,7 @@ function ScopeSelector({
                     onChange={() => onToggle(scope)}
                     className="rounded border-surface-300 dark:border-surface-600 text-brand-600 focus:ring-brand-500"
                   />
-                  <span className="text-surface-800">{info.label}</span>
+                  <span className="text-surface-800 dark:text-surface-200">{info.label}</span>
                 </label>
               );
             })}
@@ -677,7 +677,7 @@ export default function SettingsPage() {
                       </div>
                       <div className="flex items-center gap-1">
                         <Button
-                          variant="ghost"
+                          variant="primary"
                           size="sm"
                           onClick={() => setEditingKeyId(editingKeyId === key.id ? null : key.id)}
                         >

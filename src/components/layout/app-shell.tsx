@@ -183,7 +183,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         position="bottom-right"
         toastOptions={{
           className:
-            'bg-white border border-surface-200 text-surface-900 shadow-lg dark:bg-surface-800 dark:border-surface-700 dark:text-surface-100 dark:bg-surface-800 dark:border-surface-700 dark:text-surface-100',
+            'bg-white border border-surface-200 text-surface-900 shadow-lg dark:bg-surface-800 dark:border-surface-700 dark:text-surface-100',
         }}
       />
     </div>

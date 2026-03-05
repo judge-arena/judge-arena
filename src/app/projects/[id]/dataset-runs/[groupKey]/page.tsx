@@ -178,7 +178,7 @@ export default function DatasetRunDetailPage() {
               <div className="rounded-lg border border-surface-200 dark:border-surface-700 p-3">
                 <p className="text-2xs uppercase tracking-wide text-surface-500 dark:text-surface-400">Started</p>
                 <div className="flex flex-wrap items-center gap-2">
-                  <p className="text-sm font-medium text-surface-800">{formatDateTime(group.startedAt)}</p>
+                  <p className="text-sm font-medium text-surface-800 dark:text-surface-200">{formatDateTime(group.startedAt)}</p>
                   <span className="inline-flex items-center rounded-full border border-surface-200 dark:border-surface-700 bg-surface-100 dark:bg-surface-700 px-2 py-0.5 text-2xs text-surface-600 dark:text-surface-400">
                     {group.datasetId}
                   </span>
@@ -187,7 +187,7 @@ export default function DatasetRunDetailPage() {
 
               <div className="rounded-lg border border-surface-200 dark:border-surface-700 p-3">
                 <p className="text-2xs uppercase tracking-wide text-surface-500 dark:text-surface-400">Ended</p>
-                <p className="text-sm font-medium text-surface-800">{formatDateTime(group.endedAt)}</p>
+                <p className="text-sm font-medium text-surface-800 dark:text-surface-200">{formatDateTime(group.endedAt)}</p>
               </div>
             </div>
           </CardContent>
@@ -217,7 +217,7 @@ export default function DatasetRunDetailPage() {
                 <Link
                   key={evaluation.id}
                   href={latestRun ? `/evaluate/${evaluation.id}/runs/${latestRun.id}` : `/evaluate/${evaluation.id}`}
-                  className="flex items-center gap-4 px-4 py-3 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
+                  className="flex items-center gap-4 px-4 py-3 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 transition-colors"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">

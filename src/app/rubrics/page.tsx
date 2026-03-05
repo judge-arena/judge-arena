@@ -365,7 +365,11 @@ function RubricFamilyCard({
   return (
     <Card>
       <CardHeader className="relative">
-        <Badge variant="info" size="sm" className="absolute right-5 top-5">
+        <Badge
+          variant="info"
+          size="sm"
+          className="absolute right-5 top-5 font-semibold dark:text-blue-200"
+        >
           v{latest.version}
         </Badge>
         <div className="flex items-start justify-between gap-3">
@@ -382,14 +386,21 @@ function RubricFamilyCard({
         <div className="space-y-3">
           {/* Criteria list */}
           <div>
-            <div className="flex flex-wrap gap-1">
+            <div className="flex flex-wrap gap-1.5">
               {visibleCriteria.map((criterion, i) => (
-                <Badge key={criterion.id ?? i} variant="default" size="sm">
+                <Badge
+                  key={criterion.id ?? i}
+                  variant="default"
+                  size="sm"
+                  className="dark:bg-surface-700 dark:text-surface-200 dark:border-surface-600"
+                >
                   {criterion.name}
                 </Badge>
               ))}
               {(latest.criteria?.length ?? 0) > 10 && (
-                <Badge variant="default" size="sm">+{(latest.criteria?.length ?? 0) - 10} more</Badge>
+                <Badge variant="default" size="sm" className="dark:bg-surface-700 dark:text-surface-200 dark:border-surface-600">
+                  +{(latest.criteria?.length ?? 0) - 10} more
+                </Badge>
               )}
               {visibleCriteria.length === 0 && (
                 <p className="text-xs text-surface-400 italic">No criteria</p>
@@ -398,13 +409,13 @@ function RubricFamilyCard({
           </div>
 
           {/* Footer */}
-          <div className="flex items-center justify-end gap-1 pt-2 border-t border-surface-100 dark:border-surface-700">
+          <div className="flex items-center justify-end gap-1.5 pt-2 border-t border-surface-100 dark:border-surface-700">
             {hasHistory && (
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => setShowVersions((prev) => !prev)}
-                className="text-surface-400 hover:text-surface-700 dark:hover:text-surface-300 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-700 dark:bg-surface-700 mr-auto"
+                className="text-surface-500 dark:text-surface-300 hover:text-surface-800 dark:hover:text-surface-100 hover:bg-surface-100 dark:bg-surface-800 dark:hover:bg-surface-700 mr-auto"
                 aria-label="Toggle version history"
                 title="Toggle version history"
               >
@@ -416,10 +427,9 @@ function RubricFamilyCard({
               </Button>
             )}
             <Button
-              variant="ghost"
+              variant="primary"
               size="sm"
               onClick={() => onEdit(latest)}
-              className="text-surface-400 hover:text-brand-700 hover:bg-brand-50 dark:hover:bg-brand-950/30"
               aria-label="Edit rubric"
               title="Edit rubric"
             >
@@ -432,7 +442,7 @@ function RubricFamilyCard({
               variant="ghost"
               size="sm"
               onClick={() => onDelete(latest.id)}
-              className="text-surface-400 hover:text-red-600 hover:bg-red-50"
+              className="text-surface-500 dark:text-surface-300 hover:text-red-600 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-950/30"
               aria-label="Delete latest version"
               title="Delete this version"
             >
@@ -444,14 +454,14 @@ function RubricFamilyCard({
 
           {hasHistory && showVersions && (
             <div className="pt-2 border-t border-surface-100 dark:border-surface-700">
-              <div className="flex flex-wrap items-center gap-1">
+              <div className="flex flex-wrap items-center gap-1.5">
                 {versions.map((v, i) => (
                   <React.Fragment key={v.id}>
                     <span
                       title={`v${v.version}`}
                       className={
                         v.id === latest.id
-                          ? 'inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-semibold bg-brand-100 text-brand-700'
+                          ? 'inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-semibold bg-brand-100 dark:bg-brand-900/40 text-brand-700 dark:text-brand-300'
                           : 'inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium bg-surface-100 dark:bg-surface-700 text-surface-500 dark:text-surface-400'
                       }
                     >
@@ -461,7 +471,7 @@ function RubricFamilyCard({
                       )}
                     </span>
                     {i < versions.length - 1 && (
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-surface-300 shrink-0">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-surface-300 shrink-0">
                         <path d="M9 18l6-6-6-6" />
                       </svg>
                     )}

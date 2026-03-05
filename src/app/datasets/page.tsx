@@ -1014,7 +1014,7 @@ export default function DatasetsPage() {
         <div className="rounded-xl border border-surface-200 dark:border-surface-700 p-4 space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <h3 className="text-sm font-semibold text-surface-800">Datasets</h3>
+              <h3 className="text-sm font-semibold text-surface-800 dark:text-surface-200">Datasets</h3>
               {!loading && (
                 <Badge variant="outline" size="sm">
                   {tabDatasets.length}
@@ -1086,7 +1086,7 @@ export default function DatasetsPage() {
               <div className="grid grid-cols-2 gap-3">
                 <button
                   onClick={() => setCreateStep('remote-url')}
-                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-surface-200 dark:border-surface-600 dark:border-surface-700 p-6 transition-all hover:border-brand-400 hover:bg-brand-50 dark:hover:bg-brand-950/30"
+                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-surface-200 dark:border-surface-700 p-6 transition-all hover:border-brand-400 hover:bg-brand-50 dark:hover:bg-brand-950/30"
                 >
                   <svg
                     width="32"
@@ -1114,7 +1114,7 @@ export default function DatasetsPage() {
                 </button>
                 <button
                   onClick={() => setCreateStep('local-form')}
-                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-surface-200 dark:border-surface-600 dark:border-surface-700 p-6 transition-all hover:border-brand-400 hover:bg-brand-50 dark:hover:bg-brand-950/30"
+                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-surface-200 dark:border-surface-700 p-6 transition-all hover:border-brand-400 hover:bg-brand-50 dark:hover:bg-brand-950/30"
                 >
                   <svg
                     width="32"
@@ -1171,8 +1171,8 @@ export default function DatasetsPage() {
                       onClick={() => setRemoteVisibility('public')}
                       className={`flex-1 rounded-lg border-2 px-3 py-2 text-sm font-medium transition-colors ${
                         remoteVisibility === 'public'
-                          ? 'border-brand-500 bg-brand-50 text-brand-700'
-                          : 'border-surface-200 dark:border-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800'
+                          ? 'border-brand-500 dark:border-brand-700 bg-brand-50 dark:bg-brand-950/30 text-brand-700 dark:text-brand-300'
+                          : 'border-surface-200 dark:border-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700'
                       }`}
                     >
                       🔓 Public
@@ -1181,8 +1181,8 @@ export default function DatasetsPage() {
                       onClick={() => setRemoteVisibility('private')}
                       className={`flex-1 rounded-lg border-2 px-3 py-2 text-sm font-medium transition-colors ${
                         remoteVisibility === 'private'
-                          ? 'border-brand-500 bg-brand-50 text-brand-700'
-                          : 'border-surface-200 dark:border-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800'
+                          ? 'border-brand-500 dark:border-brand-700 bg-brand-50 dark:bg-brand-950/30 text-brand-700 dark:text-brand-300'
+                          : 'border-surface-200 dark:border-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700'
                       }`}
                     >
                       🔒 Private
@@ -1261,7 +1261,7 @@ export default function DatasetsPage() {
                       }}
                       placeholder="Add a tag and press Enter"
                     />
-                    <Button variant="secondary" onClick={addRemoteTag}>
+                    <Button variant="primary" onClick={addRemoteTag}>
                       Add
                     </Button>
                   </div>
@@ -1322,11 +1322,11 @@ export default function DatasetsPage() {
                       onClick={() => setLocalInputType('query')}
                       className={`rounded-lg border-2 px-3 py-2.5 text-left transition-colors ${
                         localInputType === 'query'
-                          ? 'border-brand-500 bg-brand-50'
-                          : 'border-surface-200 dark:border-surface-700 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800'
+                          ? 'border-brand-500 dark:border-brand-700 bg-brand-50 dark:bg-brand-950/30'
+                          : 'border-surface-200 dark:border-surface-700 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700'
                       }`}
                     >
-                      <p className={`text-xs font-semibold ${localInputType === 'query' ? 'text-brand-700' : 'text-surface-700 dark:text-surface-300'}`}>
+                      <p className={`text-xs font-semibold ${localInputType === 'query' ? 'text-brand-700 dark:text-brand-300' : 'text-surface-700 dark:text-surface-300'}`}>
                         Query Only
                       </p>
                       <p className="text-2xs text-surface-500 dark:text-surface-400 mt-0.5">
@@ -1337,11 +1337,11 @@ export default function DatasetsPage() {
                       onClick={() => setLocalInputType('query-response')}
                       className={`rounded-lg border-2 px-3 py-2.5 text-left transition-colors ${
                         localInputType === 'query-response'
-                          ? 'border-brand-500 bg-brand-50'
-                          : 'border-surface-200 dark:border-surface-700 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800'
+                          ? 'border-brand-500 dark:border-brand-700 bg-brand-50 dark:bg-brand-950/30'
+                          : 'border-surface-200 dark:border-surface-700 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700'
                       }`}
                     >
-                      <p className={`text-xs font-semibold ${localInputType === 'query-response' ? 'text-brand-700' : 'text-surface-700 dark:text-surface-300'}`}>
+                      <p className={`text-xs font-semibold ${localInputType === 'query-response' ? 'text-brand-700 dark:text-brand-300' : 'text-surface-700 dark:text-surface-300'}`}>
                         Query + Response
                       </p>
                       <p className="text-2xs text-surface-500 dark:text-surface-400 mt-0.5">
@@ -1361,8 +1361,8 @@ export default function DatasetsPage() {
                         onClick={() => setLocalVisibility('private')}
                         className={`flex-1 rounded-lg border-2 px-3 py-1.5 text-xs font-medium transition-colors ${
                           localVisibility === 'private'
-                            ? 'border-brand-500 bg-brand-50 text-brand-700'
-                            : 'border-surface-200 dark:border-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800'
+                            ? 'border-brand-500 dark:border-brand-700 bg-brand-50 dark:bg-brand-950/30 text-brand-700 dark:text-brand-300'
+                            : 'border-surface-200 dark:border-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700'
                         }`}
                       >
                         🔒 Private
@@ -1371,8 +1371,8 @@ export default function DatasetsPage() {
                         onClick={() => setLocalVisibility('public')}
                         className={`flex-1 rounded-lg border-2 px-3 py-1.5 text-xs font-medium transition-colors ${
                           localVisibility === 'public'
-                            ? 'border-brand-500 bg-brand-50 text-brand-700'
-                            : 'border-surface-200 dark:border-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800'
+                            ? 'border-brand-500 dark:border-brand-700 bg-brand-50 dark:bg-brand-950/30 text-brand-700 dark:text-brand-300'
+                            : 'border-surface-200 dark:border-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700'
                         }`}
                       >
                         🔓 Public
@@ -1416,7 +1416,7 @@ export default function DatasetsPage() {
                       }}
                       placeholder="Add a tag and press Enter"
                     />
-                    <Button variant="secondary" onClick={addLocalTag}>
+                    <Button variant="primary" onClick={addLocalTag}>
                       Add
                     </Button>
                   </div>
@@ -1501,7 +1501,7 @@ export default function DatasetsPage() {
                             key={i}
                             className={`rounded-lg border transition-colors ${
                               isExpanded
-                                ? 'border-brand-300 bg-brand-50/30 shadow-sm'
+                                ? 'border-brand-300 dark:border-brand-700 bg-brand-50/30 dark:bg-brand-950/30 shadow-sm'
                                 : hasContent
                                   ? 'border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800'
                                   : 'border-dashed border-surface-300 dark:border-surface-600 bg-surface-50 dark:bg-surface-800'
@@ -1677,7 +1677,7 @@ export default function DatasetsPage() {
                         onDrop={handleDropUpload}
                         className={`rounded-xl border-2 border-dashed p-6 text-center transition-colors ${
                           isDraggingFile
-                            ? 'border-brand-500 bg-brand-50'
+                            ? 'border-brand-500 dark:border-brand-700 bg-brand-50 dark:bg-brand-950/30'
                             : 'border-surface-300 dark:border-surface-600 bg-surface-50 dark:bg-surface-800'
                         }`}
                       >

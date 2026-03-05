@@ -602,13 +602,13 @@ export default function DatasetDetailPage() {
                 {exportMenuOpen && (
                   <div className="absolute right-0 top-full mt-1 z-20 w-48 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 py-1 shadow-lg">
                     <button
-                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 transition-colors"
                       onClick={() => { handleExport('csv'); setExportMenuOpen(false); }}
                     >
                       📄 Export as CSV
                     </button>
                     <button
-                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 transition-colors"
                       onClick={() => { handleExport('jsonl'); setExportMenuOpen(false); }}
                     >
                       📋 Export as JSONL
@@ -621,7 +621,7 @@ export default function DatasetDetailPage() {
             {/* New version button for local datasets */}
             {isLocal && (
               <Button
-                variant="secondary"
+                variant="primary"
                 size="sm"
                 onClick={createNewVersion}
                 loading={creatingVersion}
@@ -766,8 +766,8 @@ export default function DatasetDetailPage() {
                           key={v.id}
                           className={`flex items-center justify-between rounded-lg px-3 py-2 text-sm ${
                             isCurrent
-                              ? 'bg-brand-50 border border-brand-200'
-                              : 'bg-surface-50 dark:bg-surface-800 border border-surface-100 dark:border-surface-700 hover:bg-surface-100 dark:hover:bg-surface-700 dark:bg-surface-700'
+                              ? 'bg-brand-50 dark:bg-brand-950/30 border border-brand-200 dark:border-brand-800'
+                              : 'bg-surface-50 dark:bg-surface-800 border border-surface-100 dark:border-surface-700 hover:bg-surface-100 dark:hover:bg-surface-700'
                           }`}
                         >
                           <div className="flex items-center gap-3">
@@ -824,30 +824,30 @@ export default function DatasetDetailPage() {
               <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
                 <div>
                   <p className="text-xs text-surface-500 dark:text-surface-400">Dataset ID</p>
-                  <p className="font-mono text-xs text-surface-800">{dataset.huggingFaceId}</p>
+                  <p className="font-mono text-xs text-surface-800 dark:text-surface-200">{dataset.huggingFaceId}</p>
                 </div>
                 {remoteMeta.author && (
                   <div>
                     <p className="text-xs text-surface-500 dark:text-surface-400">Author</p>
-                    <p className="text-surface-800">{remoteMeta.author}</p>
+                    <p className="text-surface-800 dark:text-surface-200">{remoteMeta.author}</p>
                   </div>
                 )}
                 {remoteMeta.downloads != null && (
                   <div>
                     <p className="text-xs text-surface-500 dark:text-surface-400">Downloads</p>
-                    <p className="text-surface-800">{remoteMeta.downloads.toLocaleString()}</p>
+                    <p className="text-surface-800 dark:text-surface-200">{remoteMeta.downloads.toLocaleString()}</p>
                   </div>
                 )}
                 {remoteMeta.likes != null && (
                   <div>
                     <p className="text-xs text-surface-500 dark:text-surface-400">Likes</p>
-                    <p className="text-surface-800">{remoteMeta.likes}</p>
+                    <p className="text-surface-800 dark:text-surface-200">{remoteMeta.likes}</p>
                   </div>
                 )}
                 {remoteMeta.lastModified && (
                   <div>
                     <p className="text-xs text-surface-500 dark:text-surface-400">Last Modified</p>
-                    <p className="text-surface-800">{formatDate(remoteMeta.lastModified)}</p>
+                    <p className="text-surface-800 dark:text-surface-200">{formatDate(remoteMeta.lastModified)}</p>
                   </div>
                 )}
               </div>
@@ -926,7 +926,7 @@ export default function DatasetDetailPage() {
                   className="flex-1"
                 />
                 <Button
-                  variant="secondary"
+                  variant="primary"
                   size="sm"
                   onClick={() => void addTag()}
                   loading={savingTags}
@@ -971,7 +971,7 @@ export default function DatasetDetailPage() {
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
                 <div>
                   <p className="text-xs text-surface-500 dark:text-surface-400">Model Avg</p>
-                  <p className="text-base font-semibold text-surface-800">
+                  <p className="text-base font-semibold text-surface-800 dark:text-surface-200">
                     {evaluationSummary.averageModelScore != null
                       ? evaluationSummary.averageModelScore.toFixed(1)
                       : '—'}
@@ -979,7 +979,7 @@ export default function DatasetDetailPage() {
                 </div>
                 <div>
                   <p className="text-xs text-surface-500 dark:text-surface-400">Human Avg</p>
-                  <p className="text-base font-semibold text-surface-800">
+                  <p className="text-base font-semibold text-surface-800 dark:text-surface-200">
                     {evaluationSummary.averageHumanScore != null
                       ? evaluationSummary.averageHumanScore.toFixed(1)
                       : '—'}
@@ -987,13 +987,13 @@ export default function DatasetDetailPage() {
                 </div>
                 <div>
                   <p className="text-xs text-surface-500 dark:text-surface-400">Model Samples</p>
-                  <p className="text-base font-semibold text-surface-800">
+                  <p className="text-base font-semibold text-surface-800 dark:text-surface-200">
                     {(evaluationSummary.samplesWithModelScores ?? 0).toLocaleString()}
                   </p>
                 </div>
                 <div>
                   <p className="text-xs text-surface-500 dark:text-surface-400">Human Samples</p>
-                  <p className="text-base font-semibold text-surface-800">
+                  <p className="text-base font-semibold text-surface-800 dark:text-surface-200">
                     {(evaluationSummary.samplesWithHumanScores ?? 0).toLocaleString()}
                   </p>
                 </div>
@@ -1025,7 +1025,7 @@ export default function DatasetDetailPage() {
                   <tbody>
                     {features.map((f: any, i: number) => (
                       <tr key={i} className="border-b border-surface-100 dark:border-surface-700 last:border-0">
-                        <td className="py-1.5 pr-4 font-mono text-xs text-surface-800">{f.name}</td>
+                        <td className="py-1.5 pr-4 font-mono text-xs text-surface-800 dark:text-surface-200">{f.name}</td>
                         <td className="py-1.5 text-xs text-surface-600 dark:text-surface-400">{f.type || JSON.stringify(f)}</td>
                       </tr>
                     ))}
@@ -1050,7 +1050,7 @@ export default function DatasetDetailPage() {
               </CardTitle>
               {isLocal && (
                 <Button
-                  variant="secondary"
+                  variant="primary"
                   size="sm"
                   onClick={() => { setAddingSample(true); setNewInput(''); setNewExpected(''); }}
                 >
@@ -1065,8 +1065,8 @@ export default function DatasetDetailPage() {
           <CardContent>
             {/* ─── Add new sample inline ─── */}
             {addingSample && (
-              <div className="mb-4 rounded-lg border-2 border-dashed border-brand-300 bg-brand-50/30 p-4 space-y-3">
-                <p className="text-xs font-semibold text-brand-700">New Sample</p>
+              <div className="mb-4 rounded-lg border-2 border-dashed border-brand-300 dark:border-brand-700 bg-brand-50/30 dark:bg-brand-950/30 p-4 space-y-3">
+                <p className="text-xs font-semibold text-brand-700 dark:text-brand-300">New Sample</p>
                 <div>
                   <label className="text-2xs font-medium text-surface-500 dark:text-surface-400 mb-1 block">
                     {isQueryOnly ? 'Query / Input' : 'Input / Prompt'}
@@ -1122,12 +1122,12 @@ export default function DatasetDetailPage() {
                       <div key={sample.id} className={`py-3 first:pt-0 last:pb-0 ${isDeleting ? 'opacity-50' : ''}`}>
                         {isEditing ? (
                           /* ─── Editing view ─── */
-                          <div className="rounded-lg border border-brand-200 bg-brand-50/20 p-3 space-y-3">
+                          <div className="rounded-lg border border-brand-200 dark:border-brand-700 bg-brand-50/20 dark:bg-brand-950/20 p-3 space-y-3">
                             <div className="flex items-center justify-between">
-                              <span className="rounded-md bg-brand-100 px-1.5 py-0.5 text-2xs font-mono text-brand-700">
+                              <span className="rounded-md bg-brand-100 dark:bg-brand-900/50 px-1.5 py-0.5 text-2xs font-mono text-brand-700 dark:text-brand-300">
                                 #{sample.index + 1}
                               </span>
-                              <span className="text-2xs text-brand-600 font-medium">Editing</span>
+                              <span className="text-2xs text-brand-600 dark:text-brand-300 font-medium">Editing</span>
                             </div>
                             <div>
                               <label className="text-2xs font-medium text-surface-500 dark:text-surface-400 mb-1 block">
@@ -1170,13 +1170,15 @@ export default function DatasetDetailPage() {
                               #{sample.index + 1}
                             </span>
                             <div className="flex-1 min-w-0">
-                              <p className="text-xs text-surface-800 whitespace-pre-wrap line-clamp-4">
-                                {sample.input}
-                              </p>
-                              {sample.expected && (
-                                <div className="mt-1.5 rounded-md bg-green-50 border border-green-200 px-2.5 py-1.5">
-                                  <p className="text-2xs text-green-700 font-medium mb-0.5">Expected:</p>
-                                  <p className="text-xs text-green-800 whitespace-pre-wrap line-clamp-3">
+                              <div className="rounded-md border border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-800 px-2.5 py-1.5">
+                                <p className="text-xs text-surface-800 dark:text-surface-200 whitespace-pre-wrap line-clamp-4">
+                                  {sample.input}
+                                </p>
+                              </div>
+                              {sample.expected?.trim() && (
+                                <div className="mt-1.5 rounded-md border border-green-200 dark:border-green-900 bg-green-50 dark:bg-green-950/30 px-2.5 py-1.5">
+                                  <p className="text-2xs font-medium text-green-700 dark:text-green-300 mb-0.5">Expected:</p>
+                                  <p className="text-xs text-green-800 dark:text-green-200 whitespace-pre-wrap line-clamp-3">
                                     {sample.expected}
                                   </p>
                                 </div>

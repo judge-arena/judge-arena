@@ -262,7 +262,7 @@ export default function EvaluateTemplatePage() {
                   {evaluationMode === 'respond' ? 'Respond + Human Judgment' : 'Judge Existing Response'}
                 </Badge>
                 <Button
-                  variant="secondary"
+                  variant="primary"
                   size="sm"
                   onClick={() => {
                     setNextRubricId(rubric?.id ?? '');
@@ -280,7 +280,7 @@ export default function EvaluateTemplatePage() {
                   Default Rubric
                 </p>
                 {rubric ? (
-                  <p className="text-sm text-surface-800 font-medium">
+                  <p className="text-sm text-surface-800 dark:text-surface-200 font-medium">
                     {rubric.name}
                     <span className="ml-1 text-xs text-surface-400">v{rubric.version}</span>
                   </p>
@@ -498,10 +498,10 @@ export default function EvaluateTemplatePage() {
                     {filteredRunModels.map((model: any) => (
                       <label
                         key={model.id}
-                        className="flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 cursor-pointer"
+                        className="flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 cursor-pointer"
                       >
                         <div className="min-w-0">
-                          <p className="font-medium text-surface-800 truncate">{model.name}</p>
+                          <p className="font-medium text-surface-800 dark:text-surface-200 truncate">{model.name}</p>
                           <p className="text-xs text-surface-500 dark:text-surface-400 truncate">{model.provider} · {model.modelId}</p>
                         </div>
                         <input
