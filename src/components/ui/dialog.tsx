@@ -137,7 +137,7 @@ const DialogContent = React.forwardRef<
         role="dialog"
         aria-modal="true"
         className={cn(
-          'relative z-50 w-full rounded-xl bg-white shadow-xl animate-scale-in',
+          'relative z-50 w-full rounded-xl bg-white dark:bg-surface-800 shadow-xl animate-scale-in',
           'mx-4 max-h-[85vh] overflow-y-auto',
           sizes[size],
           className
@@ -149,7 +149,7 @@ const DialogContent = React.forwardRef<
         {/* Close button */}
         <button
           type="button"
-          className="absolute right-3 top-3 rounded-md p-1 text-surface-400 hover:text-surface-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+          className="absolute right-3 top-3 rounded-md p-1 text-surface-400 hover:text-surface-600 dark:hover:text-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
           onClick={() => setOpen(false)}
           aria-label="Close dialog"
         >
@@ -192,7 +192,7 @@ function DialogTitle({
 }: React.HTMLAttributes<HTMLHeadingElement>) {
   return (
     <h2
-      className={cn('text-lg font-semibold text-surface-900', className)}
+      className={cn('text-lg font-semibold text-surface-900 dark:text-surface-100', className)}
       {...props}
     />
   );
@@ -204,7 +204,7 @@ function DialogDescription({
   ...props
 }: React.HTMLAttributes<HTMLParagraphElement>) {
   return (
-    <p className={cn('text-sm text-surface-500', className)} {...props} />
+    <p className={cn('text-sm text-surface-500 dark:text-surface-400', className)} {...props} />
   );
 }
 

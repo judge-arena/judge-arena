@@ -21,7 +21,7 @@ const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
         {label && (
           <label
             htmlFor={selectId}
-            className="mb-1.5 block text-sm font-medium text-surface-700"
+            className="mb-1.5 block text-sm font-medium text-surface-700 dark:text-surface-300"
           >
             {label}
           </label>
@@ -38,12 +38,12 @@ const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
                 : undefined
           }
           className={cn(
-            'flex h-9 w-full rounded-lg border bg-white px-3 py-1 text-sm shadow-sm transition-colors appearance-none',
+            'flex h-9 w-full rounded-lg border bg-white dark:bg-surface-800 px-3 py-1 text-sm shadow-sm transition-colors appearance-none dark:text-surface-100',
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:border-brand-500',
-            'disabled:cursor-not-allowed disabled:opacity-50 disabled:bg-surface-50',
+            'disabled:cursor-not-allowed disabled:opacity-50 disabled:bg-surface-50 dark:disabled:bg-surface-900',
             error
               ? 'border-red-500 focus-visible:ring-red-500'
-              : 'border-surface-300',
+              : 'border-surface-300 dark:border-surface-600',
             className
           )}
           {...props}
@@ -62,7 +62,7 @@ const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
         {error && (
           <p
             id={`${selectId}-error`}
-            className="mt-1 text-xs text-red-600"
+            className="mt-1 text-xs text-red-600 dark:text-red-400"
             role="alert"
           >
             {error}
@@ -71,7 +71,7 @@ const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
         {hint && !error && (
           <p
             id={`${selectId}-hint`}
-            className="mt-1 text-xs text-surface-500"
+            className="mt-1 text-xs text-surface-500 dark:text-surface-400"
           >
             {hint}
           </p>

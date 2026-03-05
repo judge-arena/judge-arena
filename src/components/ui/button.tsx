@@ -22,19 +22,19 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
     ref
   ) => {
     const baseStyles =
-      'inline-flex items-center justify-center font-medium rounded-lg transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 select-none';
+      'inline-flex items-center justify-center font-medium rounded-lg transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-surface-900 disabled:pointer-events-none disabled:opacity-50 select-none';
 
     const variants: Record<string, string> = {
       primary:
         'bg-brand-600 text-white hover:bg-brand-700 active:bg-brand-800 shadow-sm',
       secondary:
-        'bg-surface-100 text-surface-800 hover:bg-surface-200 active:bg-surface-300 border border-surface-200',
+        'bg-surface-100 text-surface-800 hover:bg-surface-200 active:bg-surface-300 border border-surface-200 dark:bg-surface-800 dark:text-surface-200 dark:border-surface-700 dark:hover:bg-surface-700 dark:active:bg-surface-600',
       ghost:
-        'text-surface-600 hover:bg-surface-100 hover:text-surface-900 active:bg-surface-200',
+        'text-surface-600 hover:bg-surface-100 hover:text-surface-900 active:bg-surface-200 dark:text-surface-400 dark:hover:bg-surface-800 dark:hover:text-surface-100 dark:active:bg-surface-700',
       danger:
         'bg-red-600 text-white hover:bg-red-700 active:bg-red-800 shadow-sm',
       outline:
-        'border border-surface-300 text-surface-700 hover:bg-surface-50 active:bg-surface-100',
+        'border border-surface-300 text-surface-700 hover:bg-surface-50 active:bg-surface-100 dark:border-surface-600 dark:text-surface-300 dark:hover:bg-surface-800 dark:active:bg-surface-700',
     };
 
     const sizes: Record<string, string> = {

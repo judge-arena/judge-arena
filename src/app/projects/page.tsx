@@ -192,7 +192,7 @@ export default function ProjectsPage() {
                     )}
                   </CardHeader>
                   <CardContent>
-                    <div className="flex items-center gap-2 text-xs text-surface-500">
+                    <div className="flex items-center gap-2 text-xs text-surface-500 dark:text-surface-400">
                       <Badge variant="default" size="sm">
                         {project._count?.evaluations ?? 0} evaluations
                       </Badge>

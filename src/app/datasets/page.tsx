@@ -859,11 +859,11 @@ export default function DatasetsPage() {
             </div>
 
             {isRemote ? (
-              <p className="text-2xs text-surface-500 mb-1">
+              <p className="text-2xs text-surface-500 dark:text-surface-400 mb-1">
                 HuggingFace ID: {dataset.huggingFaceId || 'Provided URL'}
               </p>
             ) : (
-              <p className="text-2xs text-surface-500 mb-1">
+              <p className="text-2xs text-surface-500 dark:text-surface-400 mb-1">
                 Local dataset managed independently from projects.
               </p>
             )}
@@ -873,7 +873,7 @@ export default function DatasetsPage() {
                 {tags.slice(0, 6).map((tag) => (
                   <span
                     key={tag}
-                    className="inline-block rounded-full bg-surface-100 px-2 py-0.5 text-2xs text-surface-600"
+                    className="inline-block rounded-full bg-surface-100 dark:bg-surface-700 px-2 py-0.5 text-2xs text-surface-600 dark:text-surface-400"
                   >
                     {tag}
                   </span>
@@ -902,13 +902,13 @@ export default function DatasetsPage() {
         description="Manage datasets independently of projects — both local and remote sources."
         actions={
           <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5 rounded-lg border border-surface-200 bg-white p-0.5">
+            <div className="flex items-center gap-1.5 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 p-0.5">
               <button
                 onClick={() => setActiveTab('remote')}
                 className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
                   activeTab === 'remote'
                     ? 'bg-brand-600 text-white'
-                    : 'text-surface-600 hover:bg-surface-100'
+                    : 'text-surface-600 dark:text-surface-400 hover:bg-surface-100 dark:hover:bg-surface-700 dark:bg-surface-700'
                 }`}
               >
                 Remote
@@ -918,7 +918,7 @@ export default function DatasetsPage() {
                 className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
                   activeTab === 'local'
                     ? 'bg-brand-600 text-white'
-                    : 'text-surface-600 hover:bg-surface-100'
+                    : 'text-surface-600 dark:text-surface-400 hover:bg-surface-100 dark:hover:bg-surface-700 dark:bg-surface-700'
                 }`}
               >
                 Local
@@ -968,7 +968,7 @@ export default function DatasetsPage() {
 
       <div className="p-6 space-y-6">
         {/* ─── Filters ─────────────────────────────────────────────────── */}
-        <div className="rounded-xl border border-surface-200 bg-surface-50 p-4">
+        <div className="rounded-xl border border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-800 p-4">
           <div className="flex flex-wrap items-end gap-3">
           <Input
             placeholder="Search by name, tag, or id"
@@ -989,7 +989,7 @@ export default function DatasetsPage() {
             )}
           </div>
           <div className="w-full sm:w-[430px]">
-            <p className="mb-1.5 text-xs font-medium text-surface-600">Filters</p>
+            <p className="mb-1.5 text-xs font-medium text-surface-600 dark:text-surface-400">Filters</p>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               <Select
                 value={visibilityFilter}
@@ -1011,7 +1011,7 @@ export default function DatasetsPage() {
         </div>
 
         {/* ─── Tabbed datasets ────────────────────────────────────────── */}
-        <div className="rounded-xl border border-surface-200 p-4 space-y-4">
+        <div className="rounded-xl border border-surface-200 dark:border-surface-700 p-4 space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <h3 className="text-sm font-semibold text-surface-800">Datasets</h3>
@@ -1086,7 +1086,7 @@ export default function DatasetsPage() {
               <div className="grid grid-cols-2 gap-3">
                 <button
                   onClick={() => setCreateStep('remote-url')}
-                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-surface-200 p-6 transition-all hover:border-brand-400 hover:bg-brand-50"
+                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-surface-200 dark:border-surface-600 dark:border-surface-700 p-6 transition-all hover:border-brand-400 hover:bg-brand-50 dark:hover:bg-brand-950/30"
                 >
                   <svg
                     width="32"
@@ -1104,17 +1104,17 @@ export default function DatasetsPage() {
                     <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
                   </svg>
                   <div className="text-center">
-                    <p className="text-sm font-semibold text-surface-900">
+                    <p className="text-sm font-semibold text-surface-900 dark:text-surface-100">
                       Remote Dataset
                     </p>
-                    <p className="mt-1 text-xs text-surface-500">
+                    <p className="mt-1 text-xs text-surface-500 dark:text-surface-400">
                       Import from HuggingFace or URL
                     </p>
                   </div>
                 </button>
                 <button
                   onClick={() => setCreateStep('local-form')}
-                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-surface-200 p-6 transition-all hover:border-brand-400 hover:bg-brand-50"
+                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-surface-200 dark:border-surface-600 dark:border-surface-700 p-6 transition-all hover:border-brand-400 hover:bg-brand-50 dark:hover:bg-brand-950/30"
                 >
                   <svg
                     width="32"
@@ -1133,10 +1133,10 @@ export default function DatasetsPage() {
                     <line x1="9" y1="15" x2="15" y2="15" />
                   </svg>
                   <div className="text-center">
-                    <p className="text-sm font-semibold text-surface-900">
+                    <p className="text-sm font-semibold text-surface-900 dark:text-surface-100">
                       Local Dataset
                     </p>
-                    <p className="mt-1 text-xs text-surface-500">
+                    <p className="mt-1 text-xs text-surface-500 dark:text-surface-400">
                       Create inline or paste data
                     </p>
                   </div>
@@ -1148,7 +1148,7 @@ export default function DatasetsPage() {
             {createStep === 'remote-url' && (
               <div className="space-y-4">
                 <div>
-                  <label className="text-sm font-medium text-surface-700 mb-1.5 block">
+                  <label className="text-sm font-medium text-surface-700 dark:text-surface-300 mb-1.5 block">
                     HuggingFace Dataset URL
                   </label>
                   <Input
@@ -1163,7 +1163,7 @@ export default function DatasetsPage() {
                   </p>
                 </div>
                 <div>
-                  <label className="text-sm font-medium text-surface-700 mb-1.5 block">
+                  <label className="text-sm font-medium text-surface-700 dark:text-surface-300 mb-1.5 block">
                     Visibility
                   </label>
                   <div className="flex gap-2">
@@ -1172,7 +1172,7 @@ export default function DatasetsPage() {
                       className={`flex-1 rounded-lg border-2 px-3 py-2 text-sm font-medium transition-colors ${
                         remoteVisibility === 'public'
                           ? 'border-brand-500 bg-brand-50 text-brand-700'
-                          : 'border-surface-200 text-surface-600 hover:bg-surface-50'
+                          : 'border-surface-200 dark:border-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800'
                       }`}
                     >
                       🔓 Public
@@ -1182,7 +1182,7 @@ export default function DatasetsPage() {
                       className={`flex-1 rounded-lg border-2 px-3 py-2 text-sm font-medium transition-colors ${
                         remoteVisibility === 'private'
                           ? 'border-brand-500 bg-brand-50 text-brand-700'
-                          : 'border-surface-200 text-surface-600 hover:bg-surface-50'
+                          : 'border-surface-200 dark:border-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800'
                       }`}
                     >
                       🔒 Private
@@ -1195,22 +1195,22 @@ export default function DatasetsPage() {
             {/* ─── Step: Remote Confirm ──────────────────── */}
             {createStep === 'remote-confirm' && hfPreview && (
               <div className="space-y-4">
-                <div className="rounded-xl border border-surface-200 bg-surface-50 p-4">
+                <div className="rounded-xl border border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-800 p-4">
                   <div className="flex items-start justify-between mb-2">
                     <div>
-                      <h3 className="text-sm font-bold text-surface-900">
+                      <h3 className="text-sm font-bold text-surface-900 dark:text-surface-100">
                         {hfPreview.id}
                       </h3>
-                      <p className="text-xs text-surface-500">
+                      <p className="text-xs text-surface-500 dark:text-surface-400">
                         by {hfPreview.author}
                       </p>
                     </div>
-                    <div className="flex items-center gap-2 text-xs text-surface-500">
+                    <div className="flex items-center gap-2 text-xs text-surface-500 dark:text-surface-400">
                       <span>⬇ {hfPreview.downloads?.toLocaleString() ?? 0}</span>
                       <span>❤ {hfPreview.likes ?? 0}</span>
                     </div>
                   </div>
-                  <p className="text-xs text-surface-600 line-clamp-3 mb-3">
+                  <p className="text-xs text-surface-600 dark:text-surface-400 line-clamp-3 mb-3">
                     {hfPreview.description}
                   </p>
                   <div className="flex flex-wrap gap-1.5">
@@ -1236,7 +1236,7 @@ export default function DatasetsPage() {
                       {hfPreview.tags.slice(0, 8).map((tag) => (
                         <span
                           key={tag}
-                          className="inline-block rounded-full bg-white px-2 py-0.5 text-2xs text-surface-600 border border-surface-200"
+                          className="inline-block rounded-full bg-white dark:bg-surface-800 px-2 py-0.5 text-2xs text-surface-600 dark:text-surface-400 border border-surface-200 dark:border-surface-700"
                         >
                           {tag}
                         </span>
@@ -1246,7 +1246,7 @@ export default function DatasetsPage() {
                 </div>
 
                 <div className="space-y-2">
-                  <label className="text-sm font-medium text-surface-700 block">
+                  <label className="text-sm font-medium text-surface-700 dark:text-surface-300 block">
                     Tags (used for filtering)
                   </label>
                   <div className="flex gap-2">
@@ -1272,7 +1272,7 @@ export default function DatasetsPage() {
                     {remoteTags.map((tag) => (
                       <span
                         key={tag}
-                        className="inline-flex items-center gap-1 rounded-full bg-surface-100 px-2 py-0.5 text-2xs text-surface-700 border border-surface-200"
+                        className="inline-flex items-center gap-1 rounded-full bg-surface-100 dark:bg-surface-700 px-2 py-0.5 text-2xs text-surface-700 dark:text-surface-300 border border-surface-200 dark:border-surface-700"
                       >
                         {tag}
                         <button
@@ -1314,7 +1314,7 @@ export default function DatasetsPage() {
 
                 {/* ─── Input Type Selector ──────────────────── */}
                 <div>
-                  <label className="text-sm font-medium text-surface-700 mb-1.5 block">
+                  <label className="text-sm font-medium text-surface-700 dark:text-surface-300 mb-1.5 block">
                     Input Type
                   </label>
                   <div className="grid grid-cols-2 gap-2">
@@ -1323,13 +1323,13 @@ export default function DatasetsPage() {
                       className={`rounded-lg border-2 px-3 py-2.5 text-left transition-colors ${
                         localInputType === 'query'
                           ? 'border-brand-500 bg-brand-50'
-                          : 'border-surface-200 hover:bg-surface-50'
+                          : 'border-surface-200 dark:border-surface-700 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800'
                       }`}
                     >
-                      <p className={`text-xs font-semibold ${localInputType === 'query' ? 'text-brand-700' : 'text-surface-700'}`}>
+                      <p className={`text-xs font-semibold ${localInputType === 'query' ? 'text-brand-700' : 'text-surface-700 dark:text-surface-300'}`}>
                         Query Only
                       </p>
-                      <p className="text-2xs text-surface-500 mt-0.5">
+                      <p className="text-2xs text-surface-500 dark:text-surface-400 mt-0.5">
                         Single input per sample (prompt, question, etc.)
                       </p>
                     </button>
@@ -1338,13 +1338,13 @@ export default function DatasetsPage() {
                       className={`rounded-lg border-2 px-3 py-2.5 text-left transition-colors ${
                         localInputType === 'query-response'
                           ? 'border-brand-500 bg-brand-50'
-                          : 'border-surface-200 hover:bg-surface-50'
+                          : 'border-surface-200 dark:border-surface-700 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800'
                       }`}
                     >
-                      <p className={`text-xs font-semibold ${localInputType === 'query-response' ? 'text-brand-700' : 'text-surface-700'}`}>
+                      <p className={`text-xs font-semibold ${localInputType === 'query-response' ? 'text-brand-700' : 'text-surface-700 dark:text-surface-300'}`}>
                         Query + Response
                       </p>
-                      <p className="text-2xs text-surface-500 mt-0.5">
+                      <p className="text-2xs text-surface-500 dark:text-surface-400 mt-0.5">
                         Input paired with expected output
                       </p>
                     </button>
@@ -1353,7 +1353,7 @@ export default function DatasetsPage() {
 
                 <div className="flex gap-3">
                   <div className="flex-1">
-                    <label className="text-sm font-medium text-surface-700 mb-1.5 block">
+                    <label className="text-sm font-medium text-surface-700 dark:text-surface-300 mb-1.5 block">
                       Visibility
                     </label>
                     <div className="flex gap-2">
@@ -1362,7 +1362,7 @@ export default function DatasetsPage() {
                         className={`flex-1 rounded-lg border-2 px-3 py-1.5 text-xs font-medium transition-colors ${
                           localVisibility === 'private'
                             ? 'border-brand-500 bg-brand-50 text-brand-700'
-                            : 'border-surface-200 text-surface-600 hover:bg-surface-50'
+                            : 'border-surface-200 dark:border-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800'
                         }`}
                       >
                         🔒 Private
@@ -1372,7 +1372,7 @@ export default function DatasetsPage() {
                         className={`flex-1 rounded-lg border-2 px-3 py-1.5 text-xs font-medium transition-colors ${
                           localVisibility === 'public'
                             ? 'border-brand-500 bg-brand-50 text-brand-700'
-                            : 'border-surface-200 text-surface-600 hover:bg-surface-50'
+                            : 'border-surface-200 dark:border-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800'
                         }`}
                       >
                         🔓 Public
@@ -1380,7 +1380,7 @@ export default function DatasetsPage() {
                     </div>
                   </div>
                   <div className="flex-1">
-                    <label className="text-sm font-medium text-surface-700 mb-1.5 block">
+                    <label className="text-sm font-medium text-surface-700 dark:text-surface-300 mb-1.5 block">
                       Format
                     </label>
                     <select
@@ -1390,7 +1390,7 @@ export default function DatasetsPage() {
                           e.target.value as 'json' | 'jsonl' | 'csv' | 'text'
                         )
                       }
-                      className="w-full rounded-lg border border-surface-300 px-3 py-1.5 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                      className="w-full rounded-lg border border-surface-300 dark:border-surface-600 px-3 py-1.5 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
                     >
                       <option value="json">JSON</option>
                       <option value="jsonl">JSONL</option>
@@ -1401,7 +1401,7 @@ export default function DatasetsPage() {
                 </div>
 
                 <div className="space-y-2">
-                  <label className="text-sm font-medium text-surface-700 block">
+                  <label className="text-sm font-medium text-surface-700 dark:text-surface-300 block">
                     Tags (optional)
                   </label>
                   <div className="flex gap-2">
@@ -1427,7 +1427,7 @@ export default function DatasetsPage() {
                     {localTags.map((tag) => (
                       <span
                         key={tag}
-                        className="inline-flex items-center gap-1 rounded-full bg-surface-100 px-2 py-0.5 text-2xs text-surface-700 border border-surface-200"
+                        className="inline-flex items-center gap-1 rounded-full bg-surface-100 dark:bg-surface-700 px-2 py-0.5 text-2xs text-surface-700 dark:text-surface-300 border border-surface-200 dark:border-surface-700"
                       >
                         {tag}
                         <button
@@ -1446,7 +1446,7 @@ export default function DatasetsPage() {
                 {/* ─── Sample Editor ──────────────────────── */}
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
-                    <label className="text-sm font-medium text-surface-700">
+                    <label className="text-sm font-medium text-surface-700 dark:text-surface-300">
                       Samples
                     </label>
                     <span className="text-2xs text-surface-400">
@@ -1457,13 +1457,13 @@ export default function DatasetsPage() {
                           : ''}
                     </span>
                   </div>
-                  <div className="flex items-center gap-1.5 rounded-lg border border-surface-200 p-0.5 mb-3">
+                  <div className="flex items-center gap-1.5 rounded-lg border border-surface-200 dark:border-surface-700 p-0.5 mb-3">
                     <button
                       onClick={() => setLocalMode('inline')}
                       className={`flex-1 rounded-md px-3 py-1 text-xs font-medium transition-colors ${
                         localMode === 'inline'
                           ? 'bg-brand-600 text-white'
-                          : 'text-surface-600 hover:bg-surface-100'
+                          : 'text-surface-600 dark:text-surface-400 hover:bg-surface-100 dark:hover:bg-surface-700 dark:bg-surface-700'
                       }`}
                     >
                       Inline Editor
@@ -1473,7 +1473,7 @@ export default function DatasetsPage() {
                       className={`flex-1 rounded-md px-3 py-1 text-xs font-medium transition-colors ${
                         localMode === 'paste'
                           ? 'bg-brand-600 text-white'
-                          : 'text-surface-600 hover:bg-surface-100'
+                          : 'text-surface-600 dark:text-surface-400 hover:bg-surface-100 dark:hover:bg-surface-700 dark:bg-surface-700'
                       }`}
                     >
                       Paste JSON
@@ -1483,7 +1483,7 @@ export default function DatasetsPage() {
                       className={`flex-1 rounded-md px-3 py-1 text-xs font-medium transition-colors ${
                         localMode === 'upload'
                           ? 'bg-brand-600 text-white'
-                          : 'text-surface-600 hover:bg-surface-100'
+                          : 'text-surface-600 dark:text-surface-400 hover:bg-surface-100 dark:hover:bg-surface-700 dark:bg-surface-700'
                       }`}
                     >
                       Upload File
@@ -1503,8 +1503,8 @@ export default function DatasetsPage() {
                               isExpanded
                                 ? 'border-brand-300 bg-brand-50/30 shadow-sm'
                                 : hasContent
-                                  ? 'border-surface-200 bg-white'
-                                  : 'border-dashed border-surface-300 bg-surface-50'
+                                  ? 'border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800'
+                                  : 'border-dashed border-surface-300 dark:border-surface-600 bg-surface-50 dark:bg-surface-800'
                             }`}
                           >
                             {/* Collapsed header — click to expand */}
@@ -1517,7 +1517,7 @@ export default function DatasetsPage() {
                               </span>
                               <div className="flex-1 min-w-0">
                                 {hasContent ? (
-                                  <p className="text-xs text-surface-700 truncate">
+                                  <p className="text-xs text-surface-700 dark:text-surface-300 truncate">
                                     {sample.input}
                                   </p>
                                 ) : (
@@ -1558,9 +1558,9 @@ export default function DatasetsPage() {
 
                             {/* Expanded editor */}
                             {isExpanded && (
-                              <div className="px-3 pb-3 space-y-2 border-t border-surface-100">
+                              <div className="px-3 pb-3 space-y-2 border-t border-surface-100 dark:border-surface-700">
                                 <div className="pt-2">
-                                  <label className="text-2xs font-medium text-surface-500 mb-1 block">
+                                  <label className="text-2xs font-medium text-surface-500 dark:text-surface-400 mb-1 block">
                                     {localInputType === 'query' ? 'Query / Input' : 'Input / Prompt'}
                                   </label>
                                   <Textarea
@@ -1590,7 +1590,7 @@ export default function DatasetsPage() {
                                 </div>
                                 {localInputType === 'query-response' && (
                                   <div>
-                                    <label className="text-2xs font-medium text-surface-500 mb-1 block">
+                                    <label className="text-2xs font-medium text-surface-500 dark:text-surface-400 mb-1 block">
                                       Expected Output / Response
                                     </label>
                                     <Textarea
@@ -1638,7 +1638,7 @@ export default function DatasetsPage() {
                           addInlineSample();
                           setEditingSampleIndex(localSamples.length);
                         }}
-                        className="w-full rounded-lg border border-dashed border-surface-300 py-2 text-xs text-surface-500 hover:border-brand-400 hover:text-brand-600 transition-colors flex items-center justify-center gap-1.5"
+                        className="w-full rounded-lg border border-dashed border-surface-300 dark:border-surface-600 py-2 text-xs text-surface-500 dark:text-surface-400 hover:border-brand-400 hover:text-brand-600 transition-colors flex items-center justify-center gap-1.5"
                       >
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                           <path d="M12 5v14M5 12h14" />
@@ -1678,7 +1678,7 @@ export default function DatasetsPage() {
                         className={`rounded-xl border-2 border-dashed p-6 text-center transition-colors ${
                           isDraggingFile
                             ? 'border-brand-500 bg-brand-50'
-                            : 'border-surface-300 bg-surface-50'
+                            : 'border-surface-300 dark:border-surface-600 bg-surface-50 dark:bg-surface-800'
                         }`}
                       >
                         <svg
@@ -1690,16 +1690,16 @@ export default function DatasetsPage() {
                           strokeWidth="1.8"
                           strokeLinecap="round"
                           strokeLinejoin="round"
-                          className="mx-auto mb-2 text-surface-500"
+                          className="mx-auto mb-2 text-surface-500 dark:text-surface-400"
                         >
                           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                           <polyline points="17 8 12 3 7 8" />
                           <line x1="12" y1="3" x2="12" y2="15" />
                         </svg>
-                        <p className="text-sm font-medium text-surface-700">
+                        <p className="text-sm font-medium text-surface-700 dark:text-surface-300">
                           Drag and drop a dataset file here
                         </p>
-                        <p className="mt-1 text-xs text-surface-500">
+                        <p className="mt-1 text-xs text-surface-500 dark:text-surface-400">
                           Supports CSV, JSON, JSONL
                         </p>
                         <Button
@@ -1713,11 +1713,11 @@ export default function DatasetsPage() {
                       </div>
 
                       {localUploadedFileName && (
-                        <div className="rounded-lg border border-surface-200 p-3">
-                          <p className="text-xs text-surface-600">
+                        <div className="rounded-lg border border-surface-200 dark:border-surface-700 p-3">
+                          <p className="text-xs text-surface-600 dark:text-surface-400">
                             File: <span className="font-medium">{localUploadedFileName}</span>
                           </p>
-                          <p className="text-xs text-surface-500 mt-1">
+                          <p className="text-xs text-surface-500 dark:text-surface-400 mt-1">
                             Parsed {localUploadedSamples.length} records
                           </p>
                           <div className="mt-2 flex items-center gap-2">

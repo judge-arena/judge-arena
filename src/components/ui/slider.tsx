@@ -38,13 +38,13 @@ function Slider({
           {label && (
             <label
               htmlFor={sliderId}
-              className="text-sm font-medium text-surface-700"
+              className="text-sm font-medium text-surface-700 dark:text-surface-300"
             >
               {label}
             </label>
           )}
           {showValue && (
-            <span className="text-sm font-mono font-semibold text-surface-800">
+            <span className="text-sm font-mono font-semibold text-surface-800 dark:text-surface-200">
               {value}/{max}
             </span>
           )}
@@ -61,7 +61,7 @@ function Slider({
         disabled={disabled}
         className={cn(
           'w-full h-2 rounded-full appearance-none cursor-pointer',
-          'bg-surface-200',
+          'bg-surface-200 dark:bg-surface-600',
           'disabled:cursor-not-allowed disabled:opacity-50',
           '[&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4',
           '[&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-brand-600',

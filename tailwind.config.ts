@@ -10,31 +10,33 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
+        /* ── Accent / Primary action (Terra Cotta) ── */
         brand: {
-          50: '#eff6ff',
-          100: '#dbeafe',
-          200: '#bfdbfe',
-          300: '#93c5fd',
-          400: '#60a5fa',
-          500: '#3b82f6',
-          600: '#2563eb',
-          700: '#1d4ed8',
-          800: '#1e40af',
-          900: '#1e3a8a',
-          950: '#172554',
+          50: '#fff7ed',
+          100: '#ffedd5',
+          200: '#fed7aa',
+          300: '#fdba74',
+          400: '#fb923c',
+          500: '#f97316',
+          600: '#E65100',   // Primary: Terra Cotta
+          700: '#CC4400',   // Hover state
+          800: '#9a3412',
+          900: '#7c2d12',
+          950: '#431407',
         },
+        /* ── Surface / Neutral scale (Slate) ── */
         surface: {
           0: '#ffffff',
-          50: '#f8fafc',
+          50: '#f8fafc',    // Light background
           100: '#f1f5f9',
           200: '#e2e8f0',
           300: '#cbd5e1',
-          400: '#94a3b8',
+          400: '#94a3b8',   // Dark-mode secondary text
           500: '#64748b',
-          600: '#475569',
-          700: '#334155',
-          800: '#1e293b',
-          900: '#0f172a',
+          600: '#475569',   // Light-mode secondary text
+          700: '#334155',   // Secondary: Slate Blue
+          800: '#1e293b',   // Dark surface/cards
+          900: '#0f172a',   // Primary: Midnight Navy
           950: '#020617',
         },
       },

@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation';
 import { useSession, signOut } from 'next-auth/react';
 import { cn } from '@/lib/utils';
 import { Kbd } from '@/components/ui/kbd';
+import { ThemeToggle } from '@/components/theme-toggle';
 
 const navItems = [
   {
@@ -105,14 +106,14 @@ export function Sidebar({ collapsed = false, onToggle }: SidebarProps) {
   return (
     <aside
       className={cn(
-        'flex h-full flex-col border-r border-surface-200 bg-surface-50 transition-all duration-200',
+        'flex h-full flex-col border-r border-surface-200 bg-surface-50 transition-all duration-200 dark:border-surface-700 dark:bg-surface-900',
         collapsed ? 'w-16' : 'w-60'
       )}
       role="navigation"
       aria-label="Main navigation"
     >
       {/* Logo */}
-      <div className="flex h-14 items-center border-b border-surface-200 px-4">
+      <div className="flex h-14 items-center border-b border-surface-200 dark:border-surface-700 px-4">
         <Link
           href="/"
           className="flex items-center gap-2.5 overflow-hidden"
@@ -123,7 +124,7 @@ export function Sidebar({ collapsed = false, onToggle }: SidebarProps) {
           </div>
           {!collapsed && (
             <div className="flex flex-col overflow-hidden">
-              <span className="text-sm font-bold text-surface-900 truncate">
+              <span className="text-sm font-bold text-surface-900 dark:text-surface-100 truncate">
                 Judge Arena
               </span>
               <span className="text-2xs text-surface-400">
@@ -150,15 +151,15 @@ export function Sidebar({ collapsed = false, onToggle }: SidebarProps) {
                 'group flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500',
                 isActive
-                  ? 'bg-brand-50 text-brand-700'
-                  : 'text-surface-600 hover:bg-surface-100 hover:text-surface-900'
+                  ? 'bg-brand-50 text-brand-700 dark:bg-brand-950/40 dark:text-brand-400'
+                  : 'text-surface-600 hover:bg-surface-100 hover:text-surface-900 dark:text-surface-400 dark:hover:bg-surface-800 dark:hover:text-surface-200'
               )}
               aria-current={isActive ? 'page' : undefined}
             >
               <span
                 className={cn(
                   'shrink-0',
-                  isActive ? 'text-brand-600' : 'text-surface-400 group-hover:text-surface-600'
+                  isActive ? 'text-brand-600 dark:text-brand-400' : 'text-surface-400 group-hover:text-surface-600 dark:group-hover:text-surface-300'
                 )}
               >
                 {item.icon}
@@ -177,19 +178,19 @@ export function Sidebar({ collapsed = false, onToggle }: SidebarProps) {
       </nav>
 
       {/* Bottom section */}
-      <div className="border-t border-surface-200 p-2">
+      <div className="border-t border-surface-200 dark:border-surface-700 p-2">
         {/* User info */}
         {session?.user && (
           <div className={cn(
             'flex items-center gap-3 rounded-lg px-3 py-2 mb-1',
             collapsed ? 'justify-center' : ''
           )}>
-            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-100 text-brand-700 text-xs font-bold uppercase">
+            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-100 text-brand-700 dark:bg-brand-900/40 dark:text-brand-400 text-xs font-bold uppercase">
               {session.user.name?.[0] || session.user.email?.[0] || '?'}
             </div>
             {!collapsed && (
               <div className="flex flex-col overflow-hidden min-w-0">
-                <span className="text-xs font-medium text-surface-800 truncate">
+                <span className="text-xs font-medium text-surface-800 dark:text-surface-200 truncate">
                   {session.user.name || 'User'}
                 </span>
                 <span className="text-2xs text-surface-400 truncate">
@@ -203,7 +204,7 @@ export function Sidebar({ collapsed = false, onToggle }: SidebarProps) {
         {/* Sign out */}
         <button
           onClick={() => signOut({ callbackUrl: '/login' })}
-          className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-surface-500 hover:bg-red-50 hover:text-red-600 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+          className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-surface-500 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/30 dark:hover:text-red-400 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
           aria-label="Sign out"
         >
           <svg
@@ -226,7 +227,7 @@ export function Sidebar({ collapsed = false, onToggle }: SidebarProps) {
 
         <button
           onClick={onToggle}
-          className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-surface-500 hover:bg-surface-100 hover:text-surface-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+          className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-surface-500 hover:bg-surface-100 hover:text-surface-700 dark:hover:bg-surface-800 dark:hover:text-surface-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
           aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         >
           <svg
@@ -249,9 +250,11 @@ export function Sidebar({ collapsed = false, onToggle }: SidebarProps) {
           {!collapsed && <span>Collapse</span>}
         </button>
 
+        <ThemeToggle collapsed={collapsed} />
+
         {!collapsed && (
           <button
-            className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-surface-500 hover:bg-surface-100 hover:text-surface-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+            className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-surface-500 hover:bg-surface-100 hover:text-surface-700 dark:hover:bg-surface-800 dark:hover:text-surface-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
             onClick={() => {
               const event = new KeyboardEvent('keydown', {
                 key: '?',

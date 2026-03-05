@@ -169,24 +169,24 @@ export default function EvaluationsPage() {
                 Export All
               </Button>
               {exportMenuOpen && (
-                <div className="absolute right-0 top-full mt-1 z-20 w-56 rounded-lg border border-surface-200 bg-white py-1 shadow-lg">
+                <div className="absolute right-0 top-full mt-1 z-20 w-56 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 py-1 shadow-lg">
                   <p className="px-3 py-1.5 text-2xs font-semibold text-surface-400 uppercase tracking-wide">Evaluation Data</p>
                   <button
-                    className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
+                    className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
                     onClick={() => { handleExportEvaluations('csv'); setExportMenuOpen(false); }}
                   >
                     📄 Export as CSV
                   </button>
                   <button
-                    className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
+                    className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
                     onClick={() => { handleExportEvaluations('jsonl'); setExportMenuOpen(false); }}
                   >
                     📋 Export as JSONL
                   </button>
-                  <div className="my-1 border-t border-surface-100" />
+                  <div className="my-1 border-t border-surface-100 dark:border-surface-700" />
                   <p className="px-3 py-1.5 text-2xs font-semibold text-surface-400 uppercase tracking-wide">Configuration</p>
                   <button
-                    className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
+                    className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
                     onClick={() => { handleConfigExport('yaml'); setExportMenuOpen(false); }}
                   >
                     ⚙️ Config as YAML
@@ -204,7 +204,7 @@ export default function EvaluationsPage() {
           <input
             type="text"
             placeholder="Search by title, project, rubric, or run ID…"
-            className="flex-1 rounded-lg border border-surface-200 bg-white px-3 py-2 text-sm text-surface-900 placeholder:text-surface-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+            className="flex-1 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 px-3 py-2 text-sm text-surface-900 dark:text-surface-100 placeholder:text-surface-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -216,7 +216,7 @@ export default function EvaluationsPage() {
                 className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
                   filter === f
                     ? 'bg-brand-600 text-white'
-                    : 'bg-surface-100 text-surface-600 hover:bg-surface-200'
+                    : 'bg-surface-100 dark:bg-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-700'
                 }`}
               >
                 {f === 'all' ? 'All' : f === 'needs_human' ? 'Needs Human' : f.charAt(0).toUpperCase() + f.slice(1)} ({counts[f]})
@@ -260,21 +260,21 @@ export default function EvaluationsPage() {
                   href={`/evaluate/${run.evaluationId}/runs/${run.id}`}
                   className="block"
                 >
-                  <Card className="hover:border-brand-300 hover:shadow-sm transition-all cursor-pointer">
+                  <Card className="hover:border-brand-300 dark:hover:border-brand-600 hover:shadow-sm transition-all cursor-pointer">
                     <CardContent className="p-4">
                       <div className="flex items-start gap-4">
                         {/* ── Main info ── */}
                         <div className="min-w-0 flex-1">
                           {/* Title + status */}
                           <div className="flex flex-wrap items-center gap-2 mb-1">
-                            <h3 className="text-sm font-semibold text-surface-900 truncate">
+                            <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 truncate">
                               {run.evaluationTitle || 'Untitled Evaluation'}
                             </h3>
                             <Badge variant={sc.variant} size="sm">{sc.label}</Badge>
                           </div>
 
                           {/* Project / rubric / date */}
-                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-surface-500 mb-2">
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-surface-500 dark:text-surface-400 mb-2">
                             <span className="flex items-center gap-1">
                               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
@@ -295,9 +295,9 @@ export default function EvaluationsPage() {
 
                           {/* Triggered by + model list */}
                           <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-xs text-surface-500">
+                            <span className="text-xs text-surface-500 dark:text-surface-400">
                               By{' '}
-                              <span className="font-medium text-surface-700">
+                              <span className="font-medium text-surface-700 dark:text-surface-300">
                                 {run.triggeredBy?.name || run.triggeredBy?.email}
                               </span>
                             </span>
@@ -334,7 +334,7 @@ export default function EvaluationsPage() {
                           )}
                           {completedJudgments.length > 0 && (
                             <div className="text-center">
-                              <div className="text-sm font-medium text-surface-600">
+                              <div className="text-sm font-medium text-surface-600 dark:text-surface-400">
                                 {completedJudgments.length}
                               </div>
                               <div className="text-2xs text-surface-400">Judges</div>

@@ -169,13 +169,13 @@ export default function DashboardPage() {
                 <CardContent className="pt-5">
                   <div className="flex items-start justify-between">
                     <div>
-                      <p className="text-xs font-medium text-surface-500 uppercase tracking-wider">
+                      <p className="text-xs font-medium text-surface-500 dark:text-surface-400 uppercase tracking-wider">
                         {stat.label}
                       </p>
                       {loading ? (
                         <Skeleton className="h-8 w-16 mt-1" />
                       ) : (
-                        <p className="text-2xl font-bold text-surface-900 mt-1">
+                        <p className="text-2xl font-bold text-surface-900 dark:text-surface-100 mt-1">
                           {stat.value}
                         </p>
                       )}
@@ -221,10 +221,10 @@ export default function DashboardPage() {
                       </svg>
                     </div>
                     <div className="flex-1 min-w-0">
-                      <h2 className="text-base font-bold text-surface-900">
+                      <h2 className="text-base font-bold text-surface-900 dark:text-surface-100">
                         Leaderboard
                       </h2>
-                      <p className="text-sm text-surface-600 mt-0.5">
+                      <p className="text-sm text-surface-600 dark:text-surface-400 mt-0.5">
                         Evaluate models against public datasets and benchmark performance
                       </p>
                     </div>
@@ -256,7 +256,7 @@ export default function DashboardPage() {
           <Card>
             <CardContent className="pt-5">
             <div className="flex items-center justify-between gap-3 mb-3">
-              <h2 className="text-sm font-semibold text-surface-700">
+              <h2 className="text-sm font-semibold text-surface-700 dark:text-surface-300">
                 Jump back into a project
               </h2>
               <Link
@@ -270,8 +270,8 @@ export default function DashboardPage() {
             {loading ? (
               <Skeleton className="h-36 w-full rounded-xl" />
             ) : !recentProject ? (
-              <div className="rounded-xl border border-dashed border-surface-300 p-6 text-center">
-                <p className="text-sm text-surface-500 mb-3">
+              <div className="rounded-xl border border-dashed border-surface-300 dark:border-surface-600 p-6 text-center">
+                <p className="text-sm text-surface-500 dark:text-surface-400 mb-3">
                   No projects yet. Create your first project to start evaluating.
                 </p>
                 <Link href="/projects">
@@ -283,15 +283,15 @@ export default function DashboardPage() {
             ) : (
               <Link
                 href={`/projects/${recentProject.id}`}
-                className="block rounded-xl border border-surface-200 p-5 hover:border-brand-300 hover:bg-brand-50/30 transition-colors"
+                className="block rounded-xl border border-surface-200 dark:border-surface-700 p-5 hover:border-brand-300 dark:hover:border-brand-600 hover:bg-brand-50/30 dark:hover:bg-brand-950/20 transition-colors"
               >
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0">
-                    <p className="text-base font-semibold text-surface-900 truncate">
+                    <p className="text-base font-semibold text-surface-900 dark:text-surface-100 truncate">
                       {recentProject.name}
                     </p>
                     {recentProject.description && (
-                      <p className="text-sm text-surface-500 mt-1 line-clamp-2">
+                      <p className="text-sm text-surface-500 dark:text-surface-400 mt-1 line-clamp-2">
                         {recentProject.description}
                       </p>
                     )}
@@ -316,7 +316,7 @@ export default function DashboardPage() {
           <Card>
             <CardContent className="pt-5">
               <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold text-surface-700">
+                <h2 className="text-sm font-semibold text-surface-700 dark:text-surface-300">
                   Recent Evaluations
                 </h2>
                 <Link
@@ -339,15 +339,15 @@ export default function DashboardPage() {
                   for evaluation.
                 </p>
               ) : (
-                <div className="divide-y divide-surface-100">
+                <div className="divide-y divide-surface-100 dark:divide-surface-700">
                   {recentEvaluations.map((evaluation: any) => (
                     <Link
                       key={evaluation.id}
                       href={`/evaluate/${evaluation.id}`}
-                      className="flex items-center gap-3 py-3 hover:bg-surface-50 -mx-2 px-2 rounded-lg transition-colors"
+                      className="flex items-center gap-3 py-3 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 -mx-2 px-2 rounded-lg transition-colors"
                     >
                       <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium text-surface-900 truncate">
+                        <p className="text-sm font-medium text-surface-900 dark:text-surface-100 truncate">
                           {evaluation.title || 'Untitled Evaluation'}
                         </p>
                         <p className="text-xs text-surface-400 truncate">

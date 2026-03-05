@@ -90,8 +90,8 @@ function TabsTrigger({
         'inline-flex items-center justify-center rounded-md px-3 py-1.5 text-sm font-medium transition-all',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500',
         isActive
-          ? 'bg-white text-surface-900 shadow-sm'
-          : 'text-surface-500 hover:text-surface-700 hover:bg-surface-50',
+          ? 'bg-white dark:bg-surface-700 text-surface-900 dark:text-surface-100 shadow-sm'
+          : 'text-surface-500 dark:text-surface-400 hover:text-surface-700 dark:hover:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800',
         className
       )}
       {...props}

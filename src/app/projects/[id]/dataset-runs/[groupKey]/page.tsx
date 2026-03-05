@@ -133,8 +133,8 @@ export default function DatasetRunDetailPage() {
             </div>
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
-              <div className="rounded-lg border border-surface-200 p-3">
-                <p className="text-2xs uppercase tracking-wide text-surface-500">Model Avg</p>
+              <div className="rounded-lg border border-surface-200 dark:border-surface-700 p-3">
+                <p className="text-2xs uppercase tracking-wide text-surface-500 dark:text-surface-400">Model Avg</p>
                 <p className={cn('text-xl font-bold font-mono', getScoreColor(summary.modelAverageAcrossSamples ?? 0))}>
                   {summary.modelAverageAcrossSamples !== null ? summary.modelAverageAcrossSamples.toFixed(1) : '—'}
                 </p>
@@ -143,8 +143,8 @@ export default function DatasetRunDetailPage() {
                 </p>
               </div>
 
-              <div className="rounded-lg border border-surface-200 p-3">
-                <p className="text-2xs uppercase tracking-wide text-surface-500">Human Avg</p>
+              <div className="rounded-lg border border-surface-200 dark:border-surface-700 p-3">
+                <p className="text-2xs uppercase tracking-wide text-surface-500 dark:text-surface-400">Human Avg</p>
                 <p className={cn('text-xl font-bold font-mono', getScoreColor(summary.humanAverageAcrossSamples ?? 0))}>
                   {summary.humanAverageAcrossSamples !== null ? summary.humanAverageAcrossSamples.toFixed(1) : '—'}
                 </p>
@@ -153,18 +153,18 @@ export default function DatasetRunDetailPage() {
                 </p>
               </div>
 
-              <div className="rounded-lg border border-surface-200 p-3">
-                <p className="text-2xs uppercase tracking-wide text-surface-500">Started</p>
+              <div className="rounded-lg border border-surface-200 dark:border-surface-700 p-3">
+                <p className="text-2xs uppercase tracking-wide text-surface-500 dark:text-surface-400">Started</p>
                 <div className="flex flex-wrap items-center gap-2">
                   <p className="text-sm font-medium text-surface-800">{formatDateTime(group.startedAt)}</p>
-                  <span className="inline-flex items-center rounded-full border border-surface-200 bg-surface-100 px-2 py-0.5 text-2xs text-surface-600">
+                  <span className="inline-flex items-center rounded-full border border-surface-200 dark:border-surface-700 bg-surface-100 dark:bg-surface-700 px-2 py-0.5 text-2xs text-surface-600 dark:text-surface-400">
                     {group.datasetId}
                   </span>
                 </div>
               </div>
 
-              <div className="rounded-lg border border-surface-200 p-3">
-                <p className="text-2xs uppercase tracking-wide text-surface-500">Ended</p>
+              <div className="rounded-lg border border-surface-200 dark:border-surface-700 p-3">
+                <p className="text-2xs uppercase tracking-wide text-surface-500 dark:text-surface-400">Ended</p>
                 <p className="text-sm font-medium text-surface-800">{formatDateTime(group.endedAt)}</p>
               </div>
             </div>
@@ -172,11 +172,11 @@ export default function DatasetRunDetailPage() {
         </Card>
 
         <div className="space-y-2">
-          <h2 className="text-sm font-semibold text-surface-700">
+          <h2 className="text-sm font-semibold text-surface-700 dark:text-surface-300">
             Samples ({group.evaluations.length})
           </h2>
 
-          <div className="divide-y divide-surface-100 rounded-xl border border-surface-200 bg-white">
+          <div className="divide-y divide-surface-100 dark:divide-surface-700 rounded-xl border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800">
             {group.evaluations.map((evaluation) => {
               const latestRun = getLatestRun(evaluation);
               const runCount = getEvaluationRunCount(evaluation);
@@ -186,11 +186,11 @@ export default function DatasetRunDetailPage() {
                 <Link
                   key={evaluation.id}
                   href={latestRun ? `/evaluate/${evaluation.id}/runs/${latestRun.id}` : `/evaluate/${evaluation.id}`}
-                  className="flex items-center gap-4 px-4 py-3 hover:bg-surface-50 transition-colors"
+                  className="flex items-center gap-4 px-4 py-3 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <p className="text-sm font-medium text-surface-900 truncate">
+                      <p className="text-sm font-medium text-surface-900 dark:text-surface-100 truncate">
                         Sample #{(evaluation.datasetSample?.index ?? 0) + 1}
                       </p>
                       {latestRun && (

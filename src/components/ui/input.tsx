@@ -17,7 +17,7 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
         {label && (
           <label
             htmlFor={inputId}
-            className="mb-1.5 block text-sm font-medium text-surface-700"
+            className="mb-1.5 block text-sm font-medium text-surface-700 dark:text-surface-300"
           >
             {label}
           </label>
@@ -31,13 +31,13 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
             error ? `${inputId}-error` : hint ? `${inputId}-hint` : undefined
           }
           className={cn(
-            'flex h-9 w-full rounded-lg border bg-white px-3 py-1 text-sm shadow-sm transition-colors',
-            'placeholder:text-surface-400',
+            'flex h-9 w-full rounded-lg border bg-white px-3 py-1 text-sm shadow-sm transition-colors dark:bg-surface-800 dark:text-surface-100',
+            'placeholder:text-surface-400 dark:placeholder:text-surface-500',
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:border-brand-500',
-            'disabled:cursor-not-allowed disabled:opacity-50 disabled:bg-surface-50',
+            'disabled:cursor-not-allowed disabled:opacity-50 disabled:bg-surface-50 dark:disabled:bg-surface-900',
             error
               ? 'border-red-500 focus-visible:ring-red-500'
-              : 'border-surface-300',
+              : 'border-surface-300 dark:border-surface-600',
             className
           )}
           {...props}
@@ -45,14 +45,14 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
         {error && (
           <p
             id={`${inputId}-error`}
-            className="mt-1 text-xs text-red-600"
+            className="mt-1 text-xs text-red-600 dark:text-red-400"
             role="alert"
           >
             {error}
           </p>
         )}
         {hint && !error && (
-          <p id={`${inputId}-hint`} className="mt-1 text-xs text-surface-500">
+          <p id={`${inputId}-hint`} className="mt-1 text-xs text-surface-500 dark:text-surface-400">
             {hint}
           </p>
         )}

@@ -396,44 +396,44 @@ export default function ProjectDetailPage() {
                   Export
                 </Button>
                 {exportMenuOpen && (
-                  <div className="absolute right-0 top-full mt-1 z-20 w-56 rounded-lg border border-surface-200 bg-white py-1 shadow-lg">
+                  <div className="absolute right-0 top-full mt-1 z-20 w-56 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 py-1 shadow-lg">
                     <p className="px-3 py-1.5 text-2xs font-semibold text-surface-400 uppercase tracking-wide">Evaluations</p>
                     <button
-                      className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
                       onClick={() => { handleProjectExport('csv', 'evaluations'); setExportMenuOpen(false); }}
                     >
                       📄 Evaluations as CSV
                     </button>
                     <button
-                      className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
                       onClick={() => { handleProjectExport('jsonl', 'evaluations'); setExportMenuOpen(false); }}
                     >
                       📋 Evaluations as JSONL
                     </button>
-                    <div className="my-1 border-t border-surface-100" />
+                    <div className="my-1 border-t border-surface-100 dark:border-surface-700" />
                     <p className="px-3 py-1.5 text-2xs font-semibold text-surface-400 uppercase tracking-wide">Full Export</p>
                     <button
-                      className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
                       onClick={() => { handleProjectExport('csv', 'all'); setExportMenuOpen(false); }}
                     >
                       📄 All data as CSV
                     </button>
                     <button
-                      className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
                       onClick={() => { handleProjectExport('jsonl', 'all'); setExportMenuOpen(false); }}
                     >
                       📋 All data as JSONL
                     </button>
-                    <div className="my-1 border-t border-surface-100" />
+                    <div className="my-1 border-t border-surface-100 dark:border-surface-700" />
                     <p className="px-3 py-1.5 text-2xs font-semibold text-surface-400 uppercase tracking-wide">Configuration</p>
                     <button
-                      className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
                       onClick={() => { handleConfigExport('yaml'); setExportMenuOpen(false); }}
                     >
                       ⚙️ Config as YAML
                     </button>
                     <button
-                      className="w-full px-3 py-2 text-left text-sm text-surface-700 hover:bg-surface-50 transition-colors"
+                      className="w-full px-3 py-2 text-left text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors"
                       onClick={() => { handleConfigExport('yaml', true); setExportMenuOpen(false); }}
                     >
                       ⚙️ Config + Data as YAML
@@ -498,14 +498,14 @@ export default function ProjectDetailPage() {
         ) : (
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-surface-700">
+              <h2 className="text-sm font-semibold text-surface-700 dark:text-surface-300">
                 Evaluations ({(project.evaluations ?? []).length})
               </h2>
             </div>
 
             {datasetRunGroups.length > 0 && (
               <div className="space-y-2">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-surface-500">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-surface-500 dark:text-surface-400">
                   Dataset Runs ({datasetRunGroups.length})
                 </h3>
                 <div className="space-y-2">
@@ -527,12 +527,12 @@ export default function ProjectDetailPage() {
                         href={`/projects/${projectId}/dataset-runs/${encodeURIComponent(group.key)}`}
                         className="block"
                       >
-                        <Card className="hover:border-brand-300 hover:shadow-sm transition-all cursor-pointer">
+                        <Card className="hover:border-brand-300 dark:hover:border-brand-600 hover:shadow-sm transition-all cursor-pointer">
                           <CardContent className="p-4">
                             <div className="flex items-center gap-4">
                               <div className="min-w-0 flex-1">
                                 <div className="flex flex-wrap items-center gap-2 mb-1">
-                                  <p className="text-sm font-medium text-surface-900 truncate">
+                                  <p className="text-sm font-medium text-surface-900 dark:text-surface-100 truncate">
                                     Dataset {group.datasetName}
                                   </p>
                                   <Badge variant="info" size="sm">Dataset Run</Badge>
@@ -543,9 +543,9 @@ export default function ProjectDetailPage() {
                                     {summary.sampleCount} sample{summary.sampleCount === 1 ? '' : 's'}
                                   </Badge>
                                 </div>
-                                <div className="flex flex-wrap items-center gap-2 text-xs text-surface-500">
+                                <div className="flex flex-wrap items-center gap-2 text-xs text-surface-500 dark:text-surface-400">
                                   <span className="truncate">Started {formatDateTime(group.startedAt)}</span>
-                                  <span className="inline-flex items-center rounded-full border border-surface-200 bg-surface-100 px-2 py-0.5 text-2xs text-surface-600">
+                                  <span className="inline-flex items-center rounded-full border border-surface-200 dark:border-surface-700 bg-surface-100 dark:bg-surface-700 px-2 py-0.5 text-2xs text-surface-600 dark:text-surface-400">
                                     {group.datasetId}
                                   </span>
                                 </div>
@@ -591,19 +591,19 @@ export default function ProjectDetailPage() {
             )}
 
             <div className="space-y-2">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-surface-500">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-surface-500 dark:text-surface-400">
                 Individual Evaluations ({standaloneEvaluations.length})
               </h3>
-              <div className="divide-y divide-surface-100 rounded-xl border border-surface-200 bg-white">
+              <div className="divide-y divide-surface-100 dark:divide-surface-700 rounded-xl border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800">
               {standaloneEvaluations.map((evaluation: any) => (
                 <Link
                   key={evaluation.id}
                   href={`/evaluate/${evaluation.id}`}
-                  className="flex items-center gap-4 px-4 py-3 hover:bg-surface-50 transition-colors first:rounded-t-xl last:rounded-b-xl"
+                  className="flex items-center gap-4 px-4 py-3 hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 transition-colors first:rounded-t-xl last:rounded-b-xl"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <p className="text-sm font-medium text-surface-900 truncate">
+                      <p className="text-sm font-medium text-surface-900 dark:text-surface-100 truncate">
                         {evaluation.title || 'Untitled Evaluation'}
                       </p>
                       {evaluation.datasetId && (
@@ -692,15 +692,15 @@ export default function ProjectDetailPage() {
             <div className="space-y-4">
               {/* ── Source toggle: Text vs Dataset ── */}
               <div className="space-y-1.5">
-                <label className="text-sm font-medium text-surface-700">Evaluation Source</label>
-                <div className="flex rounded-lg border border-surface-200 overflow-hidden">
+                <label className="text-sm font-medium text-surface-700 dark:text-surface-300">Evaluation Source</label>
+                <div className="flex rounded-lg border border-surface-200 dark:border-surface-700 overflow-hidden">
                   <button
                     type="button"
                     onClick={() => setEvalMode('text')}
                     className={`flex-1 px-4 py-2.5 text-sm font-medium transition-colors ${
                       evalMode === 'text'
                         ? 'bg-brand-600 text-white'
-                        : 'bg-white text-surface-600 hover:bg-surface-50'
+                        : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800'
                     }`}
                   >
                     <span className="flex items-center justify-center gap-2">
@@ -716,10 +716,10 @@ export default function ProjectDetailPage() {
                   <button
                     type="button"
                     onClick={() => setEvalMode('dataset')}
-                    className={`flex-1 px-4 py-2.5 text-sm font-medium transition-colors border-l border-surface-200 ${
+                    className={`flex-1 px-4 py-2.5 text-sm font-medium transition-colors border-l border-surface-200 dark:border-surface-700 ${
                       evalMode === 'dataset'
                         ? 'bg-brand-600 text-white'
-                        : 'bg-white text-surface-600 hover:bg-surface-50'
+                        : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800'
                     }`}
                   >
                     <span className="flex items-center justify-center gap-2">
@@ -802,10 +802,10 @@ export default function ProjectDetailPage() {
 
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <label className="text-sm font-medium text-surface-700">
+                  <label className="text-sm font-medium text-surface-700 dark:text-surface-300">
                     Models for this Evaluation
                   </label>
-                  <span className="text-xs text-surface-500">
+                  <span className="text-xs text-surface-500 dark:text-surface-400">
                     {selectedModelIds.length}/10 selected
                   </span>
                 </div>
@@ -831,23 +831,23 @@ export default function ProjectDetailPage() {
                 </div>
 
                 {availableModels.length === 0 ? (
-                  <div className="rounded-lg border border-surface-200 bg-surface-50 px-3 py-2 text-xs text-surface-500">
+                  <div className="rounded-lg border border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-800 px-3 py-2 text-xs text-surface-500 dark:text-surface-400">
                     No verified active models available. You can still create a human-only evaluation.
                   </div>
                 ) : (
-                  <div className="max-h-44 overflow-y-auto rounded-lg border border-surface-200 divide-y divide-surface-100">
+                  <div className="max-h-44 overflow-y-auto rounded-lg border border-surface-200 dark:border-surface-700 divide-y divide-surface-100 dark:divide-surface-700">
                     {filteredAvailableModels.map((model: any) => {
                       const selected = selectedModelIds.includes(model.id);
                       return (
                         <label
                           key={model.id}
-                          className="flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-surface-50 cursor-pointer"
+                          className="flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 cursor-pointer"
                         >
                           <div className="min-w-0">
                             <p className="font-medium text-surface-800 truncate">
                               {model.name}
                             </p>
-                            <p className="text-xs text-surface-500 truncate">
+                            <p className="text-xs text-surface-500 dark:text-surface-400 truncate">
                               {model.provider} · {model.modelId}
                             </p>
                           </div>
@@ -855,20 +855,20 @@ export default function ProjectDetailPage() {
                             type="checkbox"
                             checked={selected}
                             onChange={() => toggleModelSelection(model.id)}
-                            className="rounded border-surface-300 text-brand-600 focus:ring-brand-500"
+                            className="rounded border-surface-300 dark:border-surface-600 text-brand-600 focus:ring-brand-500"
                           />
                         </label>
                       );
                     })}
                     {filteredAvailableModels.length === 0 && (
-                      <div className="px-3 py-2 text-xs text-surface-500">
+                      <div className="px-3 py-2 text-xs text-surface-500 dark:text-surface-400">
                         No models match your search.
                       </div>
                     )}
                   </div>
                 )}
 
-                <p className="text-xs text-surface-500">
+                <p className="text-xs text-surface-500 dark:text-surface-400">
                   Select 0 models for human-only evaluation, or up to 10 models.
                 </p>
               </div>

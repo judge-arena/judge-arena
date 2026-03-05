@@ -8,15 +8,17 @@
   *,
   *::before,
   *::after {
-    @apply border-surface-200;
+    @apply border-surface-200 dark:border-surface-700;
   }
 
   body {
-    @apply bg-surface-50 text-surface-900 font-sans antialiased;
+    @apply bg-surface-50 text-surface-900 font-sans antialiased
+           dark:bg-surface-900 dark:text-gray-100;
   }
 
   :focus-visible {
-    @apply outline-none ring-2 ring-brand-500 ring-offset-2;
+    @apply outline-none ring-2 ring-brand-500 ring-offset-2
+           dark:ring-offset-surface-900;
   }
 
   /* Scrollbar styling */
@@ -30,16 +32,17 @@
   }
 
   ::-webkit-scrollbar-thumb {
-    @apply bg-surface-300 rounded-full;
+    @apply bg-surface-300 rounded-full dark:bg-surface-600;
   }
 
   ::-webkit-scrollbar-thumb:hover {
-    @apply bg-surface-400;
+    @apply bg-surface-400 dark:bg-surface-500;
   }
 
   /* Selection color */
   ::selection {
-    @apply bg-brand-200 text-brand-900;
+    @apply bg-brand-200 text-brand-900
+           dark:bg-brand-800 dark:text-brand-100;
   }
 }
 
@@ -61,11 +64,13 @@
   }
 
   .prose-sm code {
-    @apply rounded bg-surface-100 px-1 py-0.5 font-mono text-xs;
+    @apply rounded bg-surface-100 px-1 py-0.5 font-mono text-xs
+           dark:bg-surface-800;
   }
 
   .prose-sm pre {
-    @apply rounded-lg bg-surface-900 p-4 overflow-x-auto;
+    @apply rounded-lg bg-surface-900 p-4 overflow-x-auto
+           dark:bg-surface-950;
   }
 
   .prose-sm pre code {

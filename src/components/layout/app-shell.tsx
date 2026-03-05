@@ -137,7 +137,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // Show loading state while checking auth
   if (status === 'loading') {
     return (
-      <div className="flex h-screen items-center justify-center bg-surface-50">
+      <div className="flex h-screen items-center justify-center bg-surface-50 dark:bg-surface-900">
         <div className="text-surface-400 text-sm">Loading...</div>
       </div>
     );
@@ -152,7 +152,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           position="bottom-right"
           toastOptions={{
             className:
-              'bg-white border border-surface-200 text-surface-900 shadow-lg',
+              'bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 text-surface-900 dark:text-surface-100 shadow-lg',
           }}
         />
       </>
@@ -170,7 +170,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
       />
-      <main className="flex-1 overflow-y-auto bg-surface-50">
+      <main className="flex-1 overflow-y-auto bg-surface-50 dark:bg-surface-900">
         {children}
       </main>
 
@@ -183,7 +183,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         position="bottom-right"
         toastOptions={{
           className:
-            'bg-white border border-surface-200 text-surface-900 shadow-lg',
+            'bg-white border border-surface-200 text-surface-900 shadow-lg dark:bg-surface-800 dark:border-surface-700 dark:text-surface-100 dark:bg-surface-800 dark:border-surface-700 dark:text-surface-100',
         }}
       />
     </div>

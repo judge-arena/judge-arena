@@ -283,22 +283,22 @@ export default function ModelsPage() {
                     <div className="space-y-3">
                       <div className="space-y-1">
                         <div className="flex items-center justify-between text-xs">
-                          <span className="text-surface-500">Model ID</span>
-                          <span className="font-mono text-surface-700 truncate ml-2 max-w-[60%] text-right">
+                          <span className="text-surface-500 dark:text-surface-400">Model ID</span>
+                          <span className="font-mono text-surface-700 dark:text-surface-300 truncate ml-2 max-w-[60%] text-right">
                             {model.modelId}
                           </span>
                         </div>
                         {model.endpoint && (
                           <div className="flex items-center justify-between text-xs">
-                            <span className="text-surface-500">Endpoint</span>
-                            <span className="font-mono text-surface-700 truncate ml-2 max-w-[60%] text-right">
+                            <span className="text-surface-500 dark:text-surface-400">Endpoint</span>
+                            <span className="font-mono text-surface-700 dark:text-surface-300 truncate ml-2 max-w-[60%] text-right">
                               {model.endpoint}
                             </span>
                           </div>
                         )}
                       </div>
 
-                      <div className="flex items-center gap-2 pt-2 border-t border-surface-100">
+                      <div className="flex items-center gap-2 pt-2 border-t border-surface-100 dark:border-surface-700">
                         <Button
                           variant="outline"
                           size="sm"

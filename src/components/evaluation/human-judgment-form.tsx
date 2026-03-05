@@ -109,18 +109,18 @@ export function HumanJudgmentForm({
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
       <div>
-        <h3 className="text-base font-semibold text-surface-900 mb-1">
+        <h3 className="text-base font-semibold text-surface-900 dark:text-surface-100 mb-1">
           Your Judgment
         </h3>
-        <p className="text-xs text-surface-500">
+        <p className="text-xs text-surface-500 dark:text-surface-400">
           Score the submission and select the best model response. Press 1-9 for quick scoring.
         </p>
       </div>
 
       {/* Overall Score */}
-      <div className="bg-surface-50 rounded-xl p-4">
+      <div className="bg-surface-50 dark:bg-surface-800 rounded-xl p-4">
         <div className="flex items-baseline justify-between mb-3">
-          <span className="text-sm font-medium text-surface-700">
+          <span className="text-sm font-medium text-surface-700 dark:text-surface-300">
             Overall Score
           </span>
           <span
@@ -146,7 +146,7 @@ export function HumanJudgmentForm({
       {/* Criteria Scores */}
       {criteriaScores.length > 0 && (
         <div className="space-y-3">
-          <h4 className="text-xs font-semibold text-surface-500 uppercase tracking-wider">
+          <h4 className="text-xs font-semibold text-surface-500 dark:text-surface-400 uppercase tracking-wider">
             Criteria Scores
           </h4>
           {criteriaScores.map((cs) => {
@@ -154,13 +154,13 @@ export function HumanJudgmentForm({
             return (
               <div
                 key={cs.criterionId}
-                className="rounded-lg border border-surface-200 p-3"
+                className="rounded-lg border border-surface-200 dark:border-surface-700 p-3"
               >
                 <div className="flex items-baseline justify-between mb-1">
-                  <span className="text-sm font-medium text-surface-700">
+                  <span className="text-sm font-medium text-surface-700 dark:text-surface-300">
                     {cs.criterionName}
                   </span>
-                  <span className="text-xs font-mono text-surface-500">
+                  <span className="text-xs font-mono text-surface-500 dark:text-surface-400">
                     ×{cs.weight}
                   </span>
                 </div>
@@ -183,7 +183,7 @@ export function HumanJudgmentForm({
                   onChange={(e) =>
                     updateCriterionComment(cs.criterionId, e.target.value)
                   }
-                  className="mt-2 w-full rounded border border-surface-200 bg-white px-2 py-1 text-xs text-surface-600 placeholder:text-surface-400 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-brand-500"
+                  className="mt-2 w-full rounded border border-surface-200 dark:border-surface-600 bg-white dark:bg-surface-700 px-2 py-1 text-xs text-surface-600 dark:text-surface-300 placeholder:text-surface-400 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-brand-500"
                 />
               </div>
             );
@@ -194,7 +194,7 @@ export function HumanJudgmentForm({
       {/* Best Model Selection */}
       {modelJudgmentIds.length > 0 && (
         <div>
-          <h4 className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-2">
+          <h4 className="text-xs font-semibold text-surface-500 dark:text-surface-400 uppercase tracking-wider mb-2">
             Best Model Response
           </h4>
           <div className="flex flex-wrap gap-2">
@@ -211,8 +211,8 @@ export function HumanJudgmentForm({
                   'rounded-lg border px-3 py-1.5 text-xs font-medium transition-all',
                   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500',
                   selectedBestModelId === model.id
-                    ? 'border-brand-500 bg-brand-50 text-brand-700'
-                    : 'border-surface-200 text-surface-600 hover:border-surface-300'
+                    ? 'border-brand-500 bg-brand-50 dark:bg-brand-950/30 text-brand-700 dark:text-brand-400'
+                    : 'border-surface-200 dark:border-surface-600 text-surface-600 dark:text-surface-400 hover:border-surface-300 dark:hover:border-surface-500'
                 )}
               >
                 {model.name}

@@ -398,13 +398,13 @@ function RubricFamilyCard({
           </div>
 
           {/* Footer */}
-          <div className="flex items-center justify-end gap-1 pt-2 border-t border-surface-100">
+          <div className="flex items-center justify-end gap-1 pt-2 border-t border-surface-100 dark:border-surface-700">
             {hasHistory && (
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => setShowVersions((prev) => !prev)}
-                className="text-surface-400 hover:text-surface-700 hover:bg-surface-100 mr-auto"
+                className="text-surface-400 hover:text-surface-700 dark:hover:text-surface-300 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-700 dark:bg-surface-700 mr-auto"
                 aria-label="Toggle version history"
                 title="Toggle version history"
               >
@@ -419,7 +419,7 @@ function RubricFamilyCard({
               variant="ghost"
               size="sm"
               onClick={() => onEdit(latest)}
-              className="text-surface-400 hover:text-brand-700 hover:bg-brand-50"
+              className="text-surface-400 hover:text-brand-700 hover:bg-brand-50 dark:hover:bg-brand-950/30"
               aria-label="Edit rubric"
               title="Edit rubric"
             >
@@ -443,7 +443,7 @@ function RubricFamilyCard({
           </div>
 
           {hasHistory && showVersions && (
-            <div className="pt-2 border-t border-surface-100">
+            <div className="pt-2 border-t border-surface-100 dark:border-surface-700">
               <div className="flex flex-wrap items-center gap-1">
                 {versions.map((v, i) => (
                   <React.Fragment key={v.id}>
@@ -452,7 +452,7 @@ function RubricFamilyCard({
                       className={
                         v.id === latest.id
                           ? 'inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-semibold bg-brand-100 text-brand-700'
-                          : 'inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium bg-surface-100 text-surface-500'
+                          : 'inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium bg-surface-100 dark:bg-surface-700 text-surface-500 dark:text-surface-400'
                       }
                     >
                       v{v.version}

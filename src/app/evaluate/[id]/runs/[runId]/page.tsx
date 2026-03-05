@@ -154,7 +154,7 @@ export default function RunDetailPage() {
                 🤖 {runModelSelections.length} model{runModelSelections.length === 1 ? '' : 's'}
               </Badge>
               {avgModelScore !== null && (
-                <div className="px-2 py-1 rounded-md bg-surface-50 border border-surface-200 text-right">
+                <div className="px-2 py-1 rounded-md bg-surface-50 dark:bg-surface-800 border border-surface-200 dark:border-surface-700 text-right">
                   <p className="text-2xs text-surface-400">Model Avg</p>
                   <p className={cn('text-sm font-bold font-mono', getScoreColor(avgModelScore))}>
                     {avgModelScore.toFixed(1)}
@@ -162,7 +162,7 @@ export default function RunDetailPage() {
                 </div>
               )}
               {humanJudgment && (
-                <div className="px-2 py-1 rounded-md bg-surface-50 border border-surface-200 text-right">
+                <div className="px-2 py-1 rounded-md bg-surface-50 dark:bg-surface-800 border border-surface-200 dark:border-surface-700 text-right">
                   <p className="text-2xs text-surface-400">Human</p>
                   <p className={cn('text-sm font-bold font-mono', getScoreColor(humanJudgment.overallScore))}>
                     {humanJudgment.overallScore.toFixed(1)}
@@ -172,10 +172,10 @@ export default function RunDetailPage() {
             </div>
 
             {/* Secondary meta row */}
-            <div className="flex items-center gap-3 text-xs text-surface-500">
+            <div className="flex items-center gap-3 text-xs text-surface-500 dark:text-surface-400">
               <span>
                 Run by{' '}
-                <span className="font-medium text-surface-700">
+                <span className="font-medium text-surface-700 dark:text-surface-300">
                   {run.triggeredBy?.name || run.triggeredBy?.email}
                 </span>
               </span>
@@ -219,10 +219,10 @@ export default function RunDetailPage() {
             {/* Submission */}
             {evaluation?.promptText ? (
               <div className="space-y-4">
-                <div className="rounded-xl border border-surface-200 bg-white overflow-hidden">
-                  <div className="flex items-center justify-between border-b border-surface-100 px-4 py-3">
+                <div className="rounded-xl border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 overflow-hidden">
+                  <div className="flex items-center justify-between border-b border-surface-100 dark:border-surface-700 px-4 py-3">
                     <div className="flex items-center gap-2">
-                      <h3 className="text-sm font-semibold text-surface-900">Prompt (Input)</h3>
+                      <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100">Prompt (Input)</h3>
                       {evaluation?.dataset && (
                         <Badge variant="info" size="sm">
                           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="mr-0.5" aria-hidden="true">
@@ -240,31 +240,31 @@ export default function RunDetailPage() {
                     </span>
                   </div>
                   <div className="p-4 overflow-y-auto">
-                    <div className="prose prose-sm max-w-none text-surface-700 whitespace-pre-wrap break-words">
+                    <div className="prose prose-sm max-w-none text-surface-700 dark:text-surface-300 whitespace-pre-wrap break-words">
                       {evaluation?.promptText}
                     </div>
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-surface-200 bg-white overflow-hidden">
-                  <div className="flex items-center justify-between border-b border-surface-100 px-4 py-3">
-                    <h3 className="text-sm font-semibold text-surface-900">Response (Output to Judge)</h3>
+                <div className="rounded-xl border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 overflow-hidden">
+                  <div className="flex items-center justify-between border-b border-surface-100 dark:border-surface-700 px-4 py-3">
+                    <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100">Response (Output to Judge)</h3>
                     <span className="text-2xs text-surface-400">
                       {(evaluation?.responseText || evaluation?.inputText || '').length.toLocaleString()} chars
                     </span>
                   </div>
                   <div className="p-4 overflow-y-auto">
-                    <div className="prose prose-sm max-w-none text-surface-700 whitespace-pre-wrap break-words">
+                    <div className="prose prose-sm max-w-none text-surface-700 dark:text-surface-300 whitespace-pre-wrap break-words">
                       {evaluation?.responseText || evaluation?.inputText}
                     </div>
                   </div>
                 </div>
               </div>
             ) : (
-              <div className="rounded-xl border border-surface-200 bg-white overflow-hidden">
-                <div className="flex items-center justify-between border-b border-surface-100 px-4 py-3">
+              <div className="rounded-xl border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 overflow-hidden">
+                <div className="flex items-center justify-between border-b border-surface-100 dark:border-surface-700 px-4 py-3">
                   <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-semibold text-surface-900">Submission</h3>
+                    <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100">Submission</h3>
                     {evaluation?.dataset && (
                       <Badge variant="info" size="sm">
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="mr-0.5" aria-hidden="true">
@@ -282,7 +282,7 @@ export default function RunDetailPage() {
                   </span>
                 </div>
                 <div className="p-4 overflow-y-auto">
-                  <div className="prose prose-sm max-w-none text-surface-700 whitespace-pre-wrap break-words">
+                  <div className="prose prose-sm max-w-none text-surface-700 dark:text-surface-300 whitespace-pre-wrap break-words">
                     {evaluation?.inputText}
                   </div>
                 </div>
@@ -293,7 +293,7 @@ export default function RunDetailPage() {
             {modelJudgments.length > 0 && (
               <div>
                 <div className="flex items-center justify-between mb-3">
-                  <h2 className="text-sm font-semibold text-surface-700">
+                  <h2 className="text-sm font-semibold text-surface-700 dark:text-surface-300">
                     Model Judgments ({modelJudgments.length})
                   </h2>
                   {completedJudgments.length > 0 && (
@@ -336,15 +336,15 @@ export default function RunDetailPage() {
                   </TabsContent>
 
                   <TabsContent value="comparison">
-                    <div className="rounded-xl border border-surface-200 bg-white overflow-x-auto">
+                    <div className="rounded-xl border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 overflow-x-auto">
                       <table className="w-full text-sm">
                         <thead>
-                          <tr className="border-b border-surface-100">
-                            <th className="px-4 py-3 text-left text-xs font-semibold text-surface-500">
+                          <tr className="border-b border-surface-100 dark:border-surface-700">
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-surface-500 dark:text-surface-400">
                               Criterion
                             </th>
                             {completedJudgments.map((j: any) => (
-                              <th key={j.id} className="px-4 py-3 text-center text-xs font-semibold text-surface-500">
+                              <th key={j.id} className="px-4 py-3 text-center text-xs font-semibold text-surface-500 dark:text-surface-400">
                                 {j.modelConfig.name}
                               </th>
                             ))}
@@ -353,7 +353,7 @@ export default function RunDetailPage() {
                         <tbody>
                           {criteria.map((criterion: any) => (
                             <tr key={criterion.id} className="border-b border-surface-50">
-                              <td className="px-4 py-2 text-xs font-medium text-surface-700">
+                              <td className="px-4 py-2 text-xs font-medium text-surface-700 dark:text-surface-300">
                                 {criterion.name}
                               </td>
                               {completedJudgments.map((j: any) => {
@@ -371,8 +371,8 @@ export default function RunDetailPage() {
                               })}
                             </tr>
                           ))}
-                          <tr className="bg-surface-50 font-semibold">
-                            <td className="px-4 py-2 text-xs text-surface-700">Overall</td>
+                          <tr className="bg-surface-50 dark:bg-surface-800 font-semibold">
+                            <td className="px-4 py-2 text-xs text-surface-700 dark:text-surface-300">Overall</td>
                             {completedJudgments.map((j: any) => (
                               <td key={j.id} className="px-4 py-2 text-center">
                                 <span className={cn('font-mono text-base', getScoreColor(j.overallScore))}>
@@ -390,8 +390,8 @@ export default function RunDetailPage() {
             )}
 
             {modelJudgments.length === 0 && run.status === 'pending' && (
-              <div className="rounded-xl border border-surface-200 bg-surface-50 p-8 text-center">
-                <p className="text-sm text-surface-500">
+              <div className="rounded-xl border border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-800 p-8 text-center">
+                <p className="text-sm text-surface-500 dark:text-surface-400">
                   No model judgments yet. This run is pending.
                 </p>
               </div>
@@ -401,7 +401,7 @@ export default function RunDetailPage() {
           {/* ── Right: Human Judgment ─────────────────────────────────── */}
           <div className="lg:col-span-2">
             <div className="sticky top-6">
-              <div className="rounded-xl border border-surface-200 bg-white p-5">
+              <div className="rounded-xl border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 p-5">
                 {rubric ? (
                   <HumanJudgmentForm
                     criteria={criteria}
@@ -427,7 +427,7 @@ export default function RunDetailPage() {
                   />
                 ) : (
                   <div className="text-center py-8">
-                    <p className="text-sm text-surface-500">
+                    <p className="text-sm text-surface-500 dark:text-surface-400">
                       No rubric assigned to this run. Assign a rubric to enable structured scoring.
                     </p>
                   </div>

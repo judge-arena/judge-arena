@@ -61,26 +61,26 @@ export default function RegisterPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-surface-50 px-4">
+    <div className="min-h-screen flex items-center justify-center bg-surface-50 dark:bg-surface-900 px-4">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
           <div className="inline-flex h-12 w-12 items-center justify-center rounded-xl bg-brand-600 text-white font-bold text-lg mb-3">
             JA
           </div>
-          <h1 className="text-xl font-bold text-surface-900">
+          <h1 className="text-xl font-bold text-surface-900 dark:text-surface-100">
             Create your account
           </h1>
-          <p className="text-sm text-surface-500 mt-1">
+          <p className="text-sm text-surface-500 dark:text-surface-400 mt-1">
             Join Judge Arena to start evaluating LLMs
           </p>
         </div>
 
         <form
           onSubmit={handleSubmit}
-          className="bg-white rounded-xl border border-surface-200 shadow-sm p-6 space-y-4"
+          className="bg-white rounded-xl border border-surface-200 shadow-sm p-6 space-y-4 dark:bg-surface-800 dark:border-surface-700"
         >
           {error && (
-            <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+            <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700 dark:bg-red-950/30 dark:border-red-800 dark:text-red-400">
               {error}
             </div>
           )}
@@ -88,7 +88,7 @@ export default function RegisterPage() {
           <div>
             <label
               htmlFor="name"
-              className="block text-sm font-medium text-surface-700 mb-1"
+              className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-1"
             >
               Name
             </label>
@@ -99,7 +99,7 @@ export default function RegisterPage() {
               onChange={(e) => setName(e.target.value)}
               required
               autoFocus
-              className="w-full rounded-lg border border-surface-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
+              className="w-full rounded-lg border border-surface-300 dark:border-surface-600 px-3 py-2 text-sm bg-white dark:bg-surface-800 dark:text-surface-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
               placeholder="Your name"
             />
           </div>
@@ -107,7 +107,7 @@ export default function RegisterPage() {
           <div>
             <label
               htmlFor="email"
-              className="block text-sm font-medium text-surface-700 mb-1"
+              className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-1"
             >
               Email
             </label>
@@ -117,7 +117,7 @@ export default function RegisterPage() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
-              className="w-full rounded-lg border border-surface-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
+              className="w-full rounded-lg border border-surface-300 dark:border-surface-600 px-3 py-2 text-sm bg-white dark:bg-surface-800 dark:text-surface-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
               placeholder="you@example.com"
             />
           </div>
@@ -125,7 +125,7 @@ export default function RegisterPage() {
           <div>
             <label
               htmlFor="password"
-              className="block text-sm font-medium text-surface-700 mb-1"
+              className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-1"
             >
               Password
             </label>
@@ -136,7 +136,7 @@ export default function RegisterPage() {
               onChange={(e) => setPassword(e.target.value)}
               required
               minLength={8}
-              className="w-full rounded-lg border border-surface-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
+              className="w-full rounded-lg border border-surface-300 dark:border-surface-600 px-3 py-2 text-sm bg-white dark:bg-surface-800 dark:text-surface-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
               placeholder="Min. 8 characters"
             />
           </div>
@@ -144,7 +144,7 @@ export default function RegisterPage() {
           <div>
             <label
               htmlFor="confirmPassword"
-              className="block text-sm font-medium text-surface-700 mb-1"
+              className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-1"
             >
               Confirm Password
             </label>
@@ -155,7 +155,7 @@ export default function RegisterPage() {
               onChange={(e) => setConfirmPassword(e.target.value)}
               required
               minLength={8}
-              className="w-full rounded-lg border border-surface-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
+              className="w-full rounded-lg border border-surface-300 dark:border-surface-600 px-3 py-2 text-sm bg-white dark:bg-surface-800 dark:text-surface-100 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
               placeholder="••••••••"
             />
           </div>
@@ -168,7 +168,7 @@ export default function RegisterPage() {
             {loading ? 'Creating account...' : 'Create Account'}
           </button>
 
-          <p className="text-center text-sm text-surface-500">
+          <p className="text-center text-sm text-surface-500 dark:text-surface-400">
             Already have an account?{' '}
             <Link
               href="/login"

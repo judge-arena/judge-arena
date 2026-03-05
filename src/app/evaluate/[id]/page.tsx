@@ -246,7 +246,7 @@ export default function EvaluateTemplatePage() {
         <Card>
           <CardContent className="p-5">
             <div className="flex items-start justify-between gap-4 mb-4">
-              <h2 className="text-sm font-semibold text-surface-700">Evaluation Template</h2>
+              <h2 className="text-sm font-semibold text-surface-700 dark:text-surface-300">Evaluation Template</h2>
               <div className="flex items-center gap-2">
                 <Button
                   variant="secondary"
@@ -322,7 +322,7 @@ export default function EvaluateTemplatePage() {
         {/* ── Runs list ─────────────────────────────────────────────────── */}
         <div>
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-surface-700">
+            <h2 className="text-sm font-semibold text-surface-700 dark:text-surface-300">
               Runs ({runs.length})
             </h2>
           </div>
@@ -356,12 +356,12 @@ export default function EvaluateTemplatePage() {
                     href={`/evaluate/${evaluationId}/runs/${run.id}`}
                     className="block"
                   >
-                    <Card className="hover:border-brand-300 hover:shadow-sm transition-all cursor-pointer">
+                    <Card className="hover:border-brand-300 dark:hover:border-brand-600 hover:shadow-sm transition-all cursor-pointer">
                       <CardContent className="p-4">
                         <div className="flex items-center gap-4">
                           {/* Run number + ID */}
                           <div className="shrink-0 hidden sm:flex flex-col items-center w-10">
-                            <span className="text-xs font-bold text-surface-500">#{runs.length - index}</span>
+                            <span className="text-xs font-bold text-surface-500 dark:text-surface-400">#{runs.length - index}</span>
                           </div>
 
                           {/* Meta */}
@@ -377,10 +377,10 @@ export default function EvaluateTemplatePage() {
                                 🤖 {(run.runModelSelections ?? []).length} model{(run.runModelSelections ?? []).length === 1 ? '' : 's'}
                               </Badge>
                             </div>
-                            <div className="flex flex-wrap items-center gap-3 text-xs text-surface-500">
+                            <div className="flex flex-wrap items-center gap-3 text-xs text-surface-500 dark:text-surface-400">
                               <span>
                                 Triggered by{' '}
-                                <span className="font-medium text-surface-700">
+                                <span className="font-medium text-surface-700 dark:text-surface-300">
                                   {run.triggeredBy?.name || run.triggeredBy?.email}
                                 </span>
                               </span>
@@ -430,7 +430,7 @@ export default function EvaluateTemplatePage() {
           </DialogHeader>
           <DialogBody>
             <div className="space-y-4">
-              <p className="text-sm text-surface-500">
+              <p className="text-sm text-surface-500 dark:text-surface-400">
                 Configure this run by selecting a rubric and one or more models.
               </p>
 
@@ -444,8 +444,8 @@ export default function EvaluateTemplatePage() {
 
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <label className="text-sm font-medium text-surface-700">Models</label>
-                  <span className="text-xs text-surface-500">{runModelIds.length}/10</span>
+                  <label className="text-sm font-medium text-surface-700 dark:text-surface-300">Models</label>
+                  <span className="text-xs text-surface-500 dark:text-surface-400">{runModelIds.length}/10</span>
                 </div>
                 <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
                   <Input
@@ -462,34 +462,34 @@ export default function EvaluateTemplatePage() {
                   />
                 </div>
                 {allModels.length === 0 ? (
-                  <div className="rounded-lg border border-surface-200 bg-surface-50 px-3 py-2 text-xs text-surface-500">
+                  <div className="rounded-lg border border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-800 px-3 py-2 text-xs text-surface-500 dark:text-surface-400">
                     No verified active models available.
                   </div>
                 ) : (
-                  <div className="max-h-52 overflow-y-auto rounded-lg border border-surface-200 divide-y divide-surface-100">
+                  <div className="max-h-52 overflow-y-auto rounded-lg border border-surface-200 dark:border-surface-700 divide-y divide-surface-100 dark:divide-surface-700">
                     {filteredRunModels.map((model: any) => (
                       <label
                         key={model.id}
-                        className="flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-surface-50 cursor-pointer"
+                        className="flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-surface-50 dark:hover:bg-surface-800 dark:bg-surface-800 cursor-pointer"
                       >
                         <div className="min-w-0">
                           <p className="font-medium text-surface-800 truncate">{model.name}</p>
-                          <p className="text-xs text-surface-500 truncate">{model.provider} · {model.modelId}</p>
+                          <p className="text-xs text-surface-500 dark:text-surface-400 truncate">{model.provider} · {model.modelId}</p>
                         </div>
                         <input
                           type="checkbox"
                           checked={runModelIds.includes(model.id)}
                           onChange={() => toggleRunModel(model.id)}
-                          className="rounded border-surface-300 text-brand-600 focus:ring-brand-500"
+                          className="rounded border-surface-300 dark:border-surface-600 text-brand-600 focus:ring-brand-500"
                         />
                       </label>
                     ))}
                     {filteredRunModels.length === 0 && (
-                      <div className="px-3 py-2 text-xs text-surface-500">No models match your search.</div>
+                      <div className="px-3 py-2 text-xs text-surface-500 dark:text-surface-400">No models match your search.</div>
                     )}
                   </div>
                 )}
-                <p className="text-xs text-surface-500">Select 1–10 models. Scores and feedback will be recorded per model per run.</p>
+                <p className="text-xs text-surface-500 dark:text-surface-400">Select 1–10 models. Scores and feedback will be recorded per model per run.</p>
               </div>
             </div>
           </DialogBody>

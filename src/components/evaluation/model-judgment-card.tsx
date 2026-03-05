@@ -50,10 +50,10 @@ export function ModelJudgmentCard({
   return (
     <div
       className={cn(
-        'rounded-xl border bg-white transition-all',
+        'rounded-xl border bg-white dark:bg-surface-800 transition-all',
         isSelected
-          ? 'border-brand-500 ring-2 ring-brand-200 shadow-md'
-          : 'border-surface-200 hover:border-surface-300 shadow-sm',
+          ? 'border-brand-500 ring-2 ring-brand-200 dark:ring-brand-800 shadow-md'
+          : 'border-surface-200 dark:border-surface-700 hover:border-surface-300 dark:hover:border-surface-600 shadow-sm',
         onSelect && 'cursor-pointer',
         status === 'running' && 'animate-pulse-subtle'
       )}
@@ -73,9 +73,9 @@ export function ModelJudgmentCard({
       aria-pressed={isSelected}
     >
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-surface-100">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-surface-100 dark:border-surface-700">
         <div className="flex items-center gap-2 min-w-0">
-          <h3 className="text-sm font-semibold text-surface-900 truncate">
+          <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 truncate">
             {modelName}
           </h3>
           <Badge variant="default" size="sm" className={providerInfo.color}>
@@ -97,7 +97,7 @@ export function ModelJudgmentCard({
       {/* Content */}
       <div className="p-4">
         {status === 'running' && (
-          <div className="flex items-center gap-2 text-sm text-surface-500">
+          <div className="flex items-center gap-2 text-sm text-surface-500 dark:text-surface-400">
             <svg
               className="h-4 w-4 animate-spin"
               viewBox="0 0 24 24"
@@ -118,7 +118,7 @@ export function ModelJudgmentCard({
         )}
 
         {status === 'error' && (
-          <div className="text-sm text-red-600 bg-red-50 rounded-lg p-3">
+          <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 rounded-lg p-3">
             <p className="font-medium">Error</p>
             <p className="mt-1 text-xs">{error || 'Unknown error occurred'}</p>
           </div>
@@ -149,17 +149,17 @@ export function ModelJudgmentCard({
             {/* Criteria Scores */}
             {criteriaScores.length > 0 && (
               <div className="mb-3 space-y-2">
-                <h4 className="text-xs font-semibold text-surface-500 uppercase tracking-wider">
+                <h4 className="text-xs font-semibold text-surface-500 dark:text-surface-400 uppercase tracking-wider">
                   Criteria Scores
                 </h4>
                 <div className="space-y-1.5">
                   {criteriaScores.map((cs) => (
                     <div key={cs.criterionId} className="flex items-center gap-2">
-                      <span className="text-xs text-surface-600 flex-1 truncate">
+                      <span className="text-xs text-surface-600 dark:text-surface-400 flex-1 truncate">
                         {cs.criterionName}
                       </span>
                       <div className="flex items-center gap-1">
-                        <div className="w-16 h-1.5 bg-surface-100 rounded-full overflow-hidden">
+                        <div className="w-16 h-1.5 bg-surface-100 dark:bg-surface-700 rounded-full overflow-hidden">
                           <div
                             className={cn(
                               'h-full rounded-full transition-all',
@@ -176,7 +176,7 @@ export function ModelJudgmentCard({
                             }}
                           />
                         </div>
-                        <span className="text-xs font-mono text-surface-600 w-10 text-right">
+                        <span className="text-xs font-mono text-surface-600 dark:text-surface-400 w-10 text-right">
                           {cs.score}/{cs.maxScore}
                         </span>
                       </div>
@@ -189,11 +189,11 @@ export function ModelJudgmentCard({
             {/* Reasoning */}
             {reasoning && (
               <div>
-                <h4 className="text-xs font-semibold text-surface-500 uppercase tracking-wider mb-1">
+                <h4 className="text-xs font-semibold text-surface-500 dark:text-surface-400 uppercase tracking-wider mb-1">
                   Reasoning
                 </h4>
                 <p className={cn(
-                  'text-sm text-surface-700 leading-relaxed whitespace-pre-wrap',
+                  'text-sm text-surface-700 dark:text-surface-300 leading-relaxed whitespace-pre-wrap',
                   !expandedReasoning && 'line-clamp-4'
                 )}>
                   {reasoning}

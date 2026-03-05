@@ -15,9 +15,9 @@ export function SubmissionViewer({
   className,
 }: SubmissionViewerProps) {
   return (
-    <div className={cn('rounded-xl border border-surface-200 bg-white', className)}>
-      <div className="flex items-center justify-between border-b border-surface-100 px-4 py-3">
-        <h3 className="text-sm font-semibold text-surface-900">
+    <div className={cn('rounded-xl border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800', className)}>
+      <div className="flex items-center justify-between border-b border-surface-100 dark:border-surface-700 px-4 py-3">
+        <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100">
           {title || 'Submission'}
         </h3>
         <span className="text-2xs text-surface-400">
@@ -25,26 +25,26 @@ export function SubmissionViewer({
         </span>
       </div>
       <div className="max-h-[500px] overflow-y-auto p-4">
-        <div className="prose prose-sm max-w-none text-surface-700">
+        <div className="prose prose-sm max-w-none text-surface-700 dark:text-surface-300">
           {text.split('\n').map((line, i) => {
             // Basic markdown rendering for headers
             if (line.startsWith('### ')) {
               return (
-                <h4 key={i} className="text-sm font-semibold text-surface-800 mt-3 mb-1">
+                <h4 key={i} className="text-sm font-semibold text-surface-800 dark:text-surface-200 mt-3 mb-1">
                   {line.slice(4)}
                 </h4>
               );
             }
             if (line.startsWith('## ')) {
               return (
-                <h3 key={i} className="text-base font-semibold text-surface-900 mt-4 mb-1">
+                <h3 key={i} className="text-base font-semibold text-surface-900 dark:text-surface-100 mt-4 mb-1">
                   {line.slice(3)}
                 </h3>
               );
             }
             if (line.startsWith('# ')) {
               return (
-                <h2 key={i} className="text-lg font-bold text-surface-900 mt-4 mb-2">
+                <h2 key={i} className="text-lg font-bold text-surface-900 dark:text-surface-100 mt-4 mb-2">
                   {line.slice(2)}
                 </h2>
               );
@@ -70,7 +70,7 @@ export function SubmissionViewer({
                   part.startsWith('`') && part.endsWith('`') ? (
                     <code
                       key={pi}
-                      className="rounded bg-surface-100 px-1 py-0.5 font-mono text-xs text-brand-700"
+                      className="rounded bg-surface-100 dark:bg-surface-700 px-1 py-0.5 font-mono text-xs text-brand-700 dark:text-brand-400"
                     >
                       {part.slice(1, -1)}
                     </code>
