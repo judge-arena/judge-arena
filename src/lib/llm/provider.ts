@@ -25,6 +25,17 @@ export interface JudgmentResponse {
   tokenCount?: number;
 }
 
+export interface RespondRequest {
+  promptText: string;
+}
+
+export interface RespondResponse {
+  responseText: string;
+  rawResponse: string;
+  latencyMs: number;
+  tokenCount?: number;
+}
+
 export interface ProviderConfig {
   apiKey?: string;
   endpoint?: string;
@@ -34,6 +45,23 @@ export interface ProviderConfig {
 export interface JudgmentProvider {
   name: string;
   judge(request: JudgmentRequest, config: ProviderConfig): Promise<JudgmentResponse>;
+  respond(request: RespondRequest, config: ProviderConfig): Promise<RespondResponse>;
+}
+
+export function buildRespondSystemPrompt(): string {
+  return `You are a helpful, precise assistant. Respond directly to the user prompt.
+
+Instructions:
+- Directly answer the prompt as the primary objective whenever possible.
+- If the prompt is ambiguous or missing key details, state assumptions briefly and still provide the best possible answer.
+- Be accurate and concise.
+- Follow the prompt exactly.
+- Do not include meta-commentary about being an AI.
+- Return plain text only.`;
+}
+
+export function buildRespondUserPrompt(request: RespondRequest): string {
+  return request.promptText.trim();
 }
 
 /**

@@ -31,6 +31,12 @@ export async function GET(
                 name: true,
               },
             },
+            datasetSample: {
+              select: {
+                id: true,
+                index: true,
+              },
+            },
             rubric: {
               select: {
                 id: true,

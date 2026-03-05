@@ -105,6 +105,16 @@ export default function DatasetRunDetailPage() {
 
   const summary = summarizeDatasetRunGroup(group);
   const aggregateStatus = summary.aggregateStatus;
+  const needsBestSelectionCount = group.evaluations.filter((evaluation) => {
+    const latestRun = getLatestRun(evaluation);
+    const isRespondMode = !evaluation.responseText;
+    return latestRun?.status === 'needs_human' && isRespondMode;
+  }).length;
+  const needsFeedbackCount = group.evaluations.filter((evaluation) => {
+    const latestRun = getLatestRun(evaluation);
+    const isJudgeMode = !!evaluation.responseText;
+    return latestRun?.status === 'needs_human' && isJudgeMode;
+  }).length;
 
   return (
     <div>
@@ -125,11 +135,23 @@ export default function DatasetRunDetailPage() {
               <Badge variant="info" size="sm">Dataset Run</Badge>
               <Badge variant="outline" size="sm">{group.datasetId}</Badge>
               <Badge variant={statusVariantMap[aggregateStatus] ?? 'default'} size="sm">
-                {aggregateStatus === 'needs_human' ? 'Needs Human' : aggregateStatus}
+                {aggregateStatus === 'needs_human'
+                  ? 'Needs Human Action'
+                  : aggregateStatus}
               </Badge>
               <Badge variant="default" size="sm">
                 {group.evaluations.length} sample{group.evaluations.length === 1 ? '' : 's'}
               </Badge>
+              {needsBestSelectionCount > 0 && (
+                <Badge variant="warning" size="sm">
+                  {needsBestSelectionCount} need best response selection
+                </Badge>
+              )}
+              {needsFeedbackCount > 0 && (
+                <Badge variant="warning" size="sm">
+                  {needsFeedbackCount} need human feedback
+                </Badge>
+              )}
             </div>
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
@@ -181,6 +203,15 @@ export default function DatasetRunDetailPage() {
               const latestRun = getLatestRun(evaluation);
               const runCount = getEvaluationRunCount(evaluation);
               const modelAverage = getLatestModelAverage(evaluation);
+              const isRespondMode = !evaluation.responseText;
+
+              const runStatusLabel = latestRun
+                ? latestRun.status === 'needs_human'
+                  ? isRespondMode
+                    ? 'Select Best Response'
+                    : 'Needs Human Feedback'
+                  : latestRun.status
+                : null;
 
               return (
                 <Link
@@ -195,9 +226,12 @@ export default function DatasetRunDetailPage() {
                       </p>
                       {latestRun && (
                         <Badge variant={statusVariantMap[latestRun.status] ?? 'default'} size="sm">
-                          {latestRun.status === 'needs_human' ? 'Needs Human' : latestRun.status}
+                          {runStatusLabel}
                         </Badge>
                       )}
+                      <Badge variant="default" size="sm">
+                        {isRespondMode ? 'Respond Mode' : 'Judge Mode'}
+                      </Badge>
                       <Badge variant="default" size="sm">
                         {runCount} run{runCount === 1 ? '' : 's'}
                       </Badge>

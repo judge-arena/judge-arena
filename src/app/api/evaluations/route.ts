@@ -14,6 +14,7 @@ import {
 const createSingleBaseSchema = z.object({
   projectId: z.string().min(1),
   title: z.string().max(200).optional(),
+  evaluationMode: z.enum(['respond', 'judge']).optional(),
   inputText: z.string().optional(),
   promptText: z.string().optional(),
   responseText: z.string().optional(),
@@ -25,13 +26,14 @@ const createSingleBaseSchema = z.object({
 const createSingleSchema = createSingleBaseSchema.refine(
   (data) => {
     const hasSingle = !!data.inputText?.trim();
+    const hasPromptOnly = !!data.promptText?.trim() && !data.responseText?.trim();
     const hasPair = !!data.promptText?.trim() && !!data.responseText?.trim();
     const hasResponseOnly = !!data.responseText?.trim();
-    return hasSingle || hasPair || hasResponseOnly;
+    return hasSingle || hasPromptOnly || hasPair || hasResponseOnly;
   },
   {
     message:
-      'Provide either inputText, or promptText+responseText, or responseText.',
+      'Provide one of: promptText (respond mode), inputText (legacy), promptText+responseText (judge mode), or responseText.',
     path: ['inputText'],
   }
 );
@@ -54,6 +56,7 @@ const createEvaluationSchema = z.discriminatedUnion('mode', [
 const createEvaluationLegacySchema = z.object({
   projectId: z.string().min(1),
   title: z.string().max(200).optional(),
+  evaluationMode: z.enum(['respond', 'judge']).optional(),
   inputText: z.string().optional(),
   promptText: z.string().optional(),
   responseText: z.string().optional(),
@@ -64,13 +67,14 @@ const createEvaluationLegacySchema = z.object({
 }).refine(
   (data) => {
     const hasSingle = !!data.inputText?.trim();
+    const hasPromptOnly = !!data.promptText?.trim() && !data.responseText?.trim();
     const hasPair = !!data.promptText?.trim() && !!data.responseText?.trim();
     const hasResponseOnly = !!data.responseText?.trim();
-    return hasSingle || hasPair || hasResponseOnly;
+    return hasSingle || hasPromptOnly || hasPair || hasResponseOnly;
   },
   {
     message:
-      'Provide either inputText, or promptText+responseText, or responseText.',
+      'Provide one of: promptText (respond mode), inputText (legacy), promptText+responseText (judge mode), or responseText.',
     path: ['inputText'],
   }
 );
@@ -213,17 +217,42 @@ export async function POST(request: Request) {
     if (mode === 'single') {
       const data = createEvaluationLegacySchema.parse(body);
 
+      const normalizedPrompt =
+        data.promptText?.trim() || data.inputText?.trim() || '';
+      const normalizedResponse = data.responseText?.trim() || '';
+      const evaluationMode =
+        data.evaluationMode ?? (normalizedResponse ? 'judge' : 'respond');
+
+      if (evaluationMode === 'judge' && !normalizedResponse) {
+        return NextResponse.json(
+          { error: 'Judge mode requires a response/output to evaluate.' },
+          { status: 400 }
+        );
+      }
+      if (evaluationMode === 'respond' && !normalizedPrompt) {
+        return NextResponse.json(
+          { error: 'Respond mode requires an input/prompt.' },
+          { status: 400 }
+        );
+      }
+
+      const persistedPrompt = normalizedPrompt || undefined;
+      const persistedResponse =
+        evaluationMode === 'judge' && normalizedResponse
+          ? normalizedResponse
+          : undefined;
+      const persistedInputText =
+        evaluationMode === 'judge'
+          ? persistedResponse || persistedPrompt || ''
+          : persistedPrompt || '';
+
       const evaluation = await prisma.evaluation.create({
         data: {
           projectId: data.projectId,
           title: data.title,
-          inputText:
-            data.inputText?.trim() ||
-            data.responseText?.trim() ||
-            data.promptText?.trim() ||
-            '',
-          promptText: data.promptText?.trim() || undefined,
-          responseText: data.responseText?.trim() || undefined,
+          inputText: persistedInputText,
+          promptText: persistedPrompt,
+          responseText: persistedResponse,
           userId: session.user.id,
           ...(data.rubricId && { rubricId: data.rubricId }),
           modelSelections: {
@@ -242,6 +271,7 @@ export async function POST(request: Request) {
         return NextResponse.json(
           {
             ...evaluation,
+            mode: evaluationMode,
             runMode: 'create_and_run',
             runQueued: true,
             runId: run.id,
@@ -250,7 +280,7 @@ export async function POST(request: Request) {
         );
       }
 
-      return NextResponse.json(evaluation, { status: 201 });
+      return NextResponse.json({ ...evaluation, mode: evaluationMode }, { status: 201 });
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -275,11 +305,19 @@ export async function POST(request: Request) {
       dataset.samples.map((sample: any) =>
         prisma.evaluation.create({
           data: {
+            // query => respond mode, query-response => judge mode
+            // We infer mode from dataset.inputType and store via prompt/response shape.
             projectId: batchData.projectId,
             title: `${dataset.name} #${sample.index + 1}`,
-            inputText: sample.expected || sample.input,
+            inputText:
+              dataset.inputType === 'query-response'
+                ? sample.expected || sample.input
+                : sample.input,
             promptText: sample.input,
-            responseText: sample.expected || undefined,
+            responseText:
+              dataset.inputType === 'query-response'
+                ? sample.expected || undefined
+                : undefined,
             userId: session.user.id,
             datasetId: dataset.id,
             datasetSampleId: sample.id,

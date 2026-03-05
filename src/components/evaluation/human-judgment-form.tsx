@@ -8,16 +8,17 @@ import { cn, getScoreColor } from '@/lib/utils';
 import type { CriteriaScore, RubricCriterionView } from '@/types';
 
 interface HumanJudgmentFormProps {
+  mode: 'respond' | 'judge';
   criteria: RubricCriterionView[];
   modelJudgmentIds: Array<{ id: string; name: string }>;
   existingJudgment?: {
-    overallScore: number;
+    overallScore?: number;
     reasoning: string | null;
     criteriaScores: CriteriaScore[];
     selectedBestModelId: string | null;
   };
   onSubmit: (data: {
-    overallScore: number;
+    overallScore?: number;
     reasoning: string;
     criteriaScores: CriteriaScore[];
     selectedBestModelId: string | null;
@@ -26,6 +27,7 @@ interface HumanJudgmentFormProps {
 }
 
 export function HumanJudgmentForm({
+  mode,
   criteria,
   modelJudgmentIds,
   existingJudgment,
@@ -72,15 +74,17 @@ export function HumanJudgmentForm({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     onSubmit({
-      overallScore,
+      overallScore: mode === 'judge' ? overallScore : undefined,
       reasoning,
-      criteriaScores,
-      selectedBestModelId,
+      criteriaScores: mode === 'judge' ? criteriaScores : [],
+      selectedBestModelId: mode === 'respond' ? selectedBestModelId : null,
     });
   };
 
   // Handle numeric keyboard shortcuts for quick scoring
   React.useEffect(() => {
+    if (mode !== 'judge') return;
+
     const handleKeyDown = (e: KeyboardEvent) => {
       // Don't trigger if typing in an input
       const target = e.target as HTMLElement;
@@ -104,20 +108,23 @@ export function HumanJudgmentForm({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [mode]);
 
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
       <div>
         <h3 className="text-base font-semibold text-surface-900 dark:text-surface-100 mb-1">
-          Your Judgment
+          {mode === 'respond' ? 'Human Response Review' : 'Human Judgment'}
         </h3>
         <p className="text-xs text-surface-500 dark:text-surface-400">
-          Score the submission and select the best model response. Press 1-9 for quick scoring.
+          {mode === 'respond'
+            ? 'Review generated responses, select the best answer, and add optional feedback.'
+            : 'Score the submission quality and add optional human feedback.'}
         </p>
       </div>
 
       {/* Overall Score */}
+      {mode === 'judge' && (
       <div className="bg-surface-50 dark:bg-surface-800 rounded-xl p-4">
         <div className="flex items-baseline justify-between mb-3">
           <span className="text-sm font-medium text-surface-700 dark:text-surface-300">
@@ -142,9 +149,10 @@ export function HumanJudgmentForm({
           showValue={false}
         />
       </div>
+      )}
 
       {/* Criteria Scores */}
-      {criteriaScores.length > 0 && (
+      {mode === 'judge' && criteriaScores.length > 0 && (
         <div className="space-y-3">
           <h4 className="text-xs font-semibold text-surface-500 dark:text-surface-400 uppercase tracking-wider">
             Criteria Scores
@@ -178,7 +186,7 @@ export function HumanJudgmentForm({
                 />
                 <input
                   type="text"
-                  placeholder="Optional comment..."
+                  placeholder="Optional criterion comment..."
                   value={cs.comment || ''}
                   onChange={(e) =>
                     updateCriterionComment(cs.criterionId, e.target.value)
@@ -192,10 +200,10 @@ export function HumanJudgmentForm({
       )}
 
       {/* Best Model Selection */}
-      {modelJudgmentIds.length > 0 && (
+      {mode === 'respond' && modelJudgmentIds.length > 0 && (
         <div>
           <h4 className="text-xs font-semibold text-surface-500 dark:text-surface-400 uppercase tracking-wider mb-2">
-            Best Model Response
+            Best Model Response (Required)
           </h4>
           <div className="flex flex-wrap gap-2">
             {modelJudgmentIds.map((model) => (
@@ -224,12 +232,16 @@ export function HumanJudgmentForm({
 
       {/* Reasoning */}
       <Textarea
-        label="Reasoning"
+        label={mode === 'respond' ? 'Human Feedback (Optional)' : 'Human Feedback / Reasoning'}
         value={reasoning}
         onChange={(e) => setReasoning(e.target.value)}
-        placeholder="Explain your judgment... What stood out? Where did models agree or disagree?"
+        placeholder={
+          mode === 'respond'
+            ? 'Optional notes on why this response is best, issues noticed, or follow-up comments...'
+            : 'Optional notes on model scoring quality, disagreements, or rubric interpretation...'
+        }
         rows={4}
-        hint="Use 1-9 for quick score"
+        hint={mode === 'judge' ? 'Use 1-9 for quick score' : undefined}
       />
 
       {/* Submit */}
@@ -239,8 +251,9 @@ export function HumanJudgmentForm({
         size="lg"
         className="w-full"
         loading={loading}
+        disabled={mode === 'respond' && !selectedBestModelId}
       >
-        {existingJudgment ? 'Update Judgment' : 'Submit Judgment'}
+        {existingJudgment ? 'Update Human Review' : 'Submit Human Review'}
       </Button>
     </form>
   );

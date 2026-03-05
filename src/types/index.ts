@@ -14,6 +14,7 @@ export interface CriteriaScore {
 export interface EvaluationWithRelations {
   id: string;
   projectId: string;
+  mode?: EvaluationMode;
   inputText: string;
   promptText?: string | null;
   responseText?: string | null;
@@ -103,6 +104,7 @@ export interface EvaluationRunDetail {
   status: string;
   createdAt: string;
   updatedAt: string;
+  mode?: EvaluationMode;
   rubric?: {
     id: string;
     name: string;
@@ -274,6 +276,7 @@ export interface DatasetDetail extends DatasetListItem {
 export type EvaluationStatus = 'pending' | 'judging' | 'needs_human' | 'completed' | 'error';
 export type JudgmentStatus = 'pending' | 'running' | 'completed' | 'error';
 export type ModelProvider = 'anthropic' | 'openai' | 'local';
+export type EvaluationMode = 'judge' | 'respond';
 
 export interface KeyboardShortcut {
   key: string;

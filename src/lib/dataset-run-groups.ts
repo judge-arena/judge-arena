@@ -13,6 +13,7 @@ export interface ProjectEvaluation {
   datasetId?: string | null;
   dataset?: { id: string; name: string } | null;
   datasetSample?: { id: string; index: number } | null;
+  responseText?: string | null;
   runs?: Array<{
     id: string;
     status: string;

@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { executeJudgment } from '@/lib/llm';
+import { executeJudgment, executeRespond } from '@/lib/llm';
 import { refreshDatasetEvaluationSummaryForEvaluation } from '@/lib/dataset-evaluation-summary';
 
 const RUN_QUEUE_CONCURRENCY = Number(process.env.EVALUATION_RUN_QUEUE_CONCURRENCY ?? '4');
@@ -112,7 +112,9 @@ async function processRun(runId: string) {
   });
 
   if (!run) return;
-  if (!run.rubric) {
+  const isJudgeMode = Boolean(run.evaluation.responseText?.trim());
+
+  if (isJudgeMode && !run.rubric) {
     await prisma.evaluationRun.update({
       where: { id: run.id },
       data: { status: 'error' },
@@ -153,39 +155,72 @@ async function processRun(runId: string) {
             },
           });
 
-          const result = await withTimeout(
-            () =>
-              executeJudgment(
-                model.provider,
-                {
-                  inputText: run.evaluation.inputText,
-                  promptText: run.evaluation.promptText ?? undefined,
-                  responseText: run.evaluation.responseText ?? undefined,
-                  rubricCriteria: run.rubric!.criteria,
-                  rubricName: run.rubric!.name,
-                  rubricDescription: run.rubric!.description || undefined,
-                },
-                {
-                  modelId: model.modelId,
-                  apiKey: model.apiKey || undefined,
-                  endpoint: model.endpoint || undefined,
-                }
-              ),
-            MODEL_REQUEST_TIMEOUT_MS
-          );
+          if (isJudgeMode) {
+            const result = await withTimeout(
+              () =>
+                executeJudgment(
+                  model.provider,
+                  {
+                    inputText: run.evaluation.inputText,
+                    promptText: run.evaluation.promptText ?? undefined,
+                    responseText: run.evaluation.responseText ?? undefined,
+                    rubricCriteria: run.rubric!.criteria,
+                    rubricName: run.rubric!.name,
+                    rubricDescription: run.rubric!.description || undefined,
+                  },
+                  {
+                    modelId: model.modelId,
+                    apiKey: model.apiKey || undefined,
+                    endpoint: model.endpoint || undefined,
+                  }
+                ),
+              MODEL_REQUEST_TIMEOUT_MS
+            );
 
-          await prisma.modelJudgment.update({
-            where: { id: judgmentId },
-            data: {
-              overallScore: result.overallScore,
-              reasoning: result.reasoning,
-              rawResponse: result.rawResponse,
-              criteriaScores: JSON.stringify(result.criteriaScores),
-              latencyMs: result.latencyMs,
-              tokenCount: result.tokenCount,
-              status: 'completed',
-            },
-          });
+            await prisma.modelJudgment.update({
+              where: { id: judgmentId },
+              data: {
+                overallScore: result.overallScore,
+                reasoning: result.reasoning,
+                rawResponse: result.rawResponse,
+                criteriaScores: JSON.stringify(result.criteriaScores),
+                latencyMs: result.latencyMs,
+                tokenCount: result.tokenCount,
+                status: 'completed',
+              },
+            });
+          } else {
+            const result = await withTimeout(
+              () =>
+                executeRespond(
+                  model.provider,
+                  {
+                    promptText:
+                      run.evaluation.promptText?.trim() ||
+                      run.evaluation.inputText,
+                  },
+                  {
+                    modelId: model.modelId,
+                    apiKey: model.apiKey || undefined,
+                    endpoint: model.endpoint || undefined,
+                  }
+                ),
+              MODEL_REQUEST_TIMEOUT_MS
+            );
+
+            await prisma.modelJudgment.update({
+              where: { id: judgmentId },
+              data: {
+                overallScore: null,
+                reasoning: result.responseText,
+                rawResponse: result.rawResponse,
+                criteriaScores: null,
+                latencyMs: result.latencyMs,
+                tokenCount: result.tokenCount,
+                status: 'completed',
+              },
+            });
+          }
 
           completedCount += 1;
         } catch (error) {
@@ -278,20 +313,24 @@ export async function createEvaluationRun(params: {
 
   if (!evaluation) throw new HttpError(404, 'Evaluation not found');
 
+  const isJudgeMode = Boolean(evaluation.responseText?.trim());
+
   const rubricId = params.rubricId ?? evaluation.rubricId ?? null;
-  if (!rubricId) {
+  if (isJudgeMode && !rubricId) {
     throw new HttpError(
       400,
       'No rubric assigned. Assign a rubric to the evaluation template or pass rubricId.'
     );
   }
 
-  const rubric = await prisma.rubric.findUnique({
-    where: { id: rubricId },
-    include: { criteria: { orderBy: { order: 'asc' } } },
-  });
-
-  if (!rubric) throw new HttpError(404, 'Rubric not found');
+  let rubric: { id: string } | null = null;
+  if (rubricId) {
+    rubric = await prisma.rubric.findUnique({
+      where: { id: rubricId },
+      select: { id: true },
+    });
+    if (!rubric) throw new HttpError(404, 'Rubric not found');
+  }
 
   const selectedModelIds = params.modelConfigIds?.length
     ? [...new Set(params.modelConfigIds)]
@@ -318,7 +357,7 @@ export async function createEvaluationRun(params: {
   return prisma.evaluationRun.create({
     data: {
       evaluationId: params.evaluationId,
-      rubricId: rubric.id,
+      rubricId: rubric?.id ?? null,
       status: 'pending',
       triggeredById: params.triggeredById,
       runModelSelections: {

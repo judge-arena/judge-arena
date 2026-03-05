@@ -33,7 +33,7 @@ import { toast } from 'sonner';
 const statusConfig: Record<string, { label: string; variant: 'default' | 'success' | 'warning' | 'error' | 'info' }> = {
   pending:     { label: 'Pending',      variant: 'warning' },
   judging:     { label: 'Judging',      variant: 'info' },
-  needs_human: { label: 'Needs Human',  variant: 'warning' },
+  needs_human: { label: 'Needs Human Action',  variant: 'warning' },
   completed:   { label: 'Completed',    variant: 'success' },
   error:       { label: 'Error',        variant: 'error' },
 };
@@ -119,7 +119,9 @@ export default function EvaluateTemplatePage() {
   };
 
   const launchRun = async () => {
-    if (!runRubricId) {
+    const mode: 'respond' | 'judge' = evaluation?.responseText ? 'judge' : 'respond';
+
+    if (mode === 'judge' && !runRubricId) {
       toast.error('Please select a rubric for this run');
       return;
     }
@@ -132,7 +134,10 @@ export default function EvaluateTemplatePage() {
       const res = await fetch(`/api/evaluations/${evaluationId}/runs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rubricId: runRubricId, modelConfigIds: runModelIds }),
+        body: JSON.stringify({
+          ...(runRubricId ? { rubricId: runRubricId } : {}),
+          modelConfigIds: runModelIds,
+        }),
       });
       if (res.ok) {
         const run = await res.json();
@@ -189,6 +194,9 @@ export default function EvaluateTemplatePage() {
 
   const rubric = evaluation.rubric;
   const runs: any[] = evaluation.runs ?? [];
+  const evaluationMode: 'respond' | 'judge' = evaluation?.responseText ? 'judge' : 'respond';
+  const needsHumanLabel =
+    evaluationMode === 'respond' ? 'Select Best Response' : 'Needs Human Feedback';
 
   // Computed: latest run status for the header badge
   const latestRun = runs[0] ?? null;
@@ -227,7 +235,9 @@ export default function EvaluateTemplatePage() {
                 variant={statusConfig[latestRun.status]?.variant ?? 'default'}
                 size="md"
               >
-                {statusConfig[latestRun.status]?.label ?? latestRun.status}
+                {latestRun.status === 'needs_human'
+                  ? needsHumanLabel
+                  : statusConfig[latestRun.status]?.label ?? latestRun.status}
               </Badge>
             )}
             <Button variant="primary" size="sm" onClick={openNewRun}>
@@ -248,6 +258,9 @@ export default function EvaluateTemplatePage() {
             <div className="flex items-start justify-between gap-4 mb-4">
               <h2 className="text-sm font-semibold text-surface-700 dark:text-surface-300">Evaluation Template</h2>
               <div className="flex items-center gap-2">
+                <Badge variant="default" size="sm">
+                  {evaluationMode === 'respond' ? 'Respond + Human Judgment' : 'Judge Existing Response'}
+                </Badge>
                 <Button
                   variant="secondary"
                   size="sm"
@@ -299,7 +312,7 @@ export default function EvaluateTemplatePage() {
               </div>
             )}
 
-            {evaluation.promptText ? (
+            {evaluationMode === 'judge' ? (
               <div className="space-y-4">
                 <SubmissionViewer
                   text={evaluation.promptText}
@@ -312,8 +325,8 @@ export default function EvaluateTemplatePage() {
               </div>
             ) : (
               <SubmissionViewer
-                text={evaluation.inputText}
-                title="Submission"
+                text={evaluation.promptText || evaluation.inputText}
+                title="Prompt (Input)"
               />
             )}
           </CardContent>
@@ -341,6 +354,8 @@ export default function EvaluateTemplatePage() {
             <div className="space-y-2">
               {runs.map((run: any, index: number) => {
                 const sc = statusConfig[run.status] ?? statusConfig.pending;
+                const runStatusLabel =
+                  run.status === 'needs_human' ? needsHumanLabel : sc.label;
                 const completedJudgments = (run.modelJudgments ?? []).filter(
                   (j: any) => j.status === 'completed' && j.overallScore !== null
                 );
@@ -367,7 +382,7 @@ export default function EvaluateTemplatePage() {
                           {/* Meta */}
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-2 mb-1">
-                              <Badge variant={sc.variant} size="sm">{sc.label}</Badge>
+                              <Badge variant={sc.variant} size="sm">{runStatusLabel}</Badge>
                               {run.rubric && (
                                 <Badge variant="info" size="sm">
                                   📋 {run.rubric.name} v{run.rubric.version}
@@ -431,15 +446,28 @@ export default function EvaluateTemplatePage() {
           <DialogBody>
             <div className="space-y-4">
               <p className="text-sm text-surface-500 dark:text-surface-400">
-                Configure this run by selecting a rubric and one or more models.
+                {evaluationMode === 'respond'
+                  ? 'Configure this run by selecting models. Each model will generate a response to the prompt, then human reviewers choose the best response.'
+                  : 'Configure this run by selecting a rubric and one or more models. Models will score the existing response against the rubric.'}
               </p>
 
               <Select
                 label="Rubric"
                 value={runRubricId}
                 onChange={(e) => setRunRubricId(e.target.value)}
-                options={buildRubricVersionOptions(allRubrics)}
-                hint="The rubric version will be pinned for this run."
+                options={
+                  evaluationMode === 'respond'
+                    ? [
+                        { value: '', label: 'No rubric (response-only review)' },
+                        ...buildRubricVersionOptions(allRubrics),
+                      ]
+                    : buildRubricVersionOptions(allRubrics)
+                }
+                hint={
+                  evaluationMode === 'respond'
+                    ? 'Optional in respond mode; required if you want structured scoring criteria during human review.'
+                    : 'The rubric version will be pinned for this run.'
+                }
               />
 
               <div className="space-y-2">
@@ -498,7 +526,7 @@ export default function EvaluateTemplatePage() {
             <Button
               variant="primary"
               loading={launching}
-              disabled={!runRubricId || runModelIds.length === 0}
+              disabled={runModelIds.length === 0}
               onClick={launchRun}
             >
               Launch Run

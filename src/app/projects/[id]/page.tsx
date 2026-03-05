@@ -38,7 +38,10 @@ export default function ProjectDetailPage() {
   const [loading, setLoading] = useState(true);
   const [createEvalOpen, setCreateEvalOpen] = useState(false);
   const [evalTitle, setEvalTitle] = useState('');
-  const [evalText, setEvalText] = useState('');
+  const [textEvalFormat, setTextEvalFormat] = useState<'respond' | 'judge'>('respond');
+  const [respondInputText, setRespondInputText] = useState('');
+  const [judgePromptText, setJudgePromptText] = useState('');
+  const [judgeResponseText, setJudgeResponseText] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitMode, setSubmitMode] = useState<'create' | 'create_and_run' | null>(null);
   const [selectedRubricVersionId, setSelectedRubricVersionId] = useState('');
@@ -234,7 +237,10 @@ export default function ProjectDetailPage() {
   const handleCreateEvaluation = async (
     runMode: 'create' | 'create_and_run'
   ) => {
-    if (evalMode === 'text' && !evalText.trim()) return;
+    if (evalMode === 'text') {
+      if (textEvalFormat === 'respond' && !respondInputText.trim()) return;
+      if (textEvalFormat === 'judge' && (!judgePromptText.trim() || !judgeResponseText.trim())) return;
+    }
     if (evalMode === 'dataset' && !selectedDatasetId) return;
 
     setSubmitMode(runMode);
@@ -244,10 +250,18 @@ export default function ProjectDetailPage() {
         evalMode === 'text'
           ? {
               mode: 'single',
+              evaluationMode: textEvalFormat,
               runMode,
               projectId,
               title: evalTitle || undefined,
-              inputText: evalText,
+              ...(textEvalFormat === 'respond'
+                ? {
+                    promptText: respondInputText,
+                  }
+                : {
+                    promptText: judgePromptText,
+                    responseText: judgeResponseText,
+                  }),
               ...(selectedRubricVersionId && { rubricId: selectedRubricVersionId }),
               modelConfigIds: selectedModelIds,
             }
@@ -269,7 +283,10 @@ export default function ProjectDetailPage() {
         const result = await res.json();
         setCreateEvalOpen(false);
         setEvalTitle('');
-        setEvalText('');
+        setTextEvalFormat('respond');
+        setRespondInputText('');
+        setJudgePromptText('');
+        setJudgeResponseText('');
         setSelectedModelIds([]);
         setSelectedDatasetId('');
         setEvalMode('text');
@@ -491,7 +508,7 @@ export default function ProjectDetailPage() {
                 variant="primary"
                 onClick={() => setCreateEvalOpen(true)}
               >
-                Submit Text for Evaluation
+                Create Evaluation
               </Button>
             }
           />
@@ -512,6 +529,14 @@ export default function ProjectDetailPage() {
                   {datasetRunGroups.map((group) => {
                     const summary = summarizeDatasetRunGroup(group);
                     const status = summary.aggregateStatus;
+                    const needsBestSelectionCount = group.evaluations.filter((evaluation) => {
+                      const latestRun = getLatestRun(evaluation);
+                      return latestRun?.status === 'needs_human' && !evaluation.responseText;
+                    }).length;
+                    const needsFeedbackCount = group.evaluations.filter((evaluation) => {
+                      const latestRun = getLatestRun(evaluation);
+                      return latestRun?.status === 'needs_human' && !!evaluation.responseText;
+                    }).length;
                     const statusVariant =
                       status === 'completed'
                         ? 'success'
@@ -537,11 +562,21 @@ export default function ProjectDetailPage() {
                                   </p>
                                   <Badge variant="info" size="sm">Dataset Run</Badge>
                                   <Badge variant={statusVariant as any} size="sm">
-                                    {status === 'needs_human' ? 'Needs Human' : status}
+                                    {status === 'needs_human' ? 'Needs Human Action' : status}
                                   </Badge>
                                   <Badge variant="default" size="sm">
                                     {summary.sampleCount} sample{summary.sampleCount === 1 ? '' : 's'}
                                   </Badge>
+                                  {needsBestSelectionCount > 0 && (
+                                    <Badge variant="warning" size="sm">
+                                      {needsBestSelectionCount} select best response
+                                    </Badge>
+                                  )}
+                                  {needsFeedbackCount > 0 && (
+                                    <Badge variant="warning" size="sm">
+                                      {needsFeedbackCount} need human feedback
+                                    </Badge>
+                                  )}
                                 </div>
                                 <div className="flex flex-wrap items-center gap-2 text-xs text-surface-500 dark:text-surface-400">
                                   <span className="truncate">Started {formatDateTime(group.startedAt)}</span>
@@ -606,6 +641,9 @@ export default function ProjectDetailPage() {
                       <p className="text-sm font-medium text-surface-900 dark:text-surface-100 truncate">
                         {evaluation.title || 'Untitled Evaluation'}
                       </p>
+                      <Badge variant="default" size="sm">
+                        {evaluation.responseText ? 'Judge' : 'Respond'}
+                      </Badge>
                       {evaluation.datasetId && (
                         <Badge variant="info" size="sm">
                           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="mr-0.5" aria-hidden="true">
@@ -636,6 +674,14 @@ export default function ProjectDetailPage() {
                     {(() => {
                       const latestRun = getLatestRun(evaluation);
                       const runCount = getEvaluationRunCount(evaluation);
+                      const mode: 'respond' | 'judge' = evaluation.responseText ? 'judge' : 'respond';
+                      const statusLabel = latestRun
+                        ? latestRun.status === 'needs_human'
+                          ? mode === 'respond'
+                            ? 'Select Best Response'
+                            : 'Needs Human Feedback'
+                          : latestRun.status
+                        : null;
                       return (
                         <>
                           <Badge variant="default" size="sm">
@@ -656,7 +702,7 @@ export default function ProjectDetailPage() {
                               }
                               size="sm"
                             >
-                              {latestRun.status === 'needs_human' ? 'Needs Human' : latestRun.status}
+                              {statusLabel}
                             </Badge>
                           )}
                         </>
@@ -744,6 +790,37 @@ export default function ProjectDetailPage() {
                     placeholder="e.g., PR #42 Code Review"
                     autoFocus
                   />
+
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium text-surface-700 dark:text-surface-300">Evaluation Format</label>
+                    <div className="flex rounded-lg border border-surface-200 dark:border-surface-700 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setTextEvalFormat('respond')}
+                        className={`flex-1 px-4 py-2.5 text-sm font-medium transition-colors ${
+                          textEvalFormat === 'respond'
+                            ? 'bg-brand-600 text-white'
+                            : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800'
+                        }`}
+                      >
+                        Respond + Human Judgment
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTextEvalFormat('judge')}
+                        className={`flex-1 px-4 py-2.5 text-sm font-medium transition-colors border-l border-surface-200 dark:border-surface-700 ${
+                          textEvalFormat === 'judge'
+                            ? 'bg-brand-600 text-white'
+                            : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-800'
+                        }`}
+                      >
+                        Judge Existing Response
+                      </button>
+                    </div>
+                    <p className="text-xs text-surface-500 dark:text-surface-400">
+                      Respond mode: models generate answers and humans pick the best one. Judge mode: models score an existing response against the rubric.
+                    </p>
+                  </div>
                 </>
               )}
 
@@ -875,15 +952,39 @@ export default function ProjectDetailPage() {
 
               {/* ── Text input (only in text mode) ── */}
               {evalMode === 'text' && (
-                <Textarea
-                  label="Text to Evaluate"
-                  value={evalText}
-                  onChange={(e) => setEvalText(e.target.value)}
-                  placeholder="Paste the text, code, document, or artifact you want to evaluate..."
-                  rows={12}
-                  required
-                  hint="This text will be sent to all active models for judgment"
-                />
+                <>
+                  {textEvalFormat === 'respond' ? (
+                    <Textarea
+                      label="Input Prompt"
+                      value={respondInputText}
+                      onChange={(e) => setRespondInputText(e.target.value)}
+                      placeholder="Enter the prompt/input. Models will generate responses, then humans select the best one."
+                      rows={10}
+                      required
+                      hint="Models generate responses in run mode; human judges choose the best response."
+                    />
+                  ) : (
+                    <div className="space-y-3">
+                      <Textarea
+                        label="Prompt (Input)"
+                        value={judgePromptText}
+                        onChange={(e) => setJudgePromptText(e.target.value)}
+                        placeholder="Enter the original prompt/input..."
+                        rows={6}
+                        required
+                      />
+                      <Textarea
+                        label="Response to Judge (Output)"
+                        value={judgeResponseText}
+                        onChange={(e) => setJudgeResponseText(e.target.value)}
+                        placeholder="Enter the response/output to be scored against the rubric..."
+                        rows={8}
+                        required
+                        hint="Models score this response against the selected rubric; human can add feedback."
+                      />
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </DialogBody>
@@ -899,7 +1000,14 @@ export default function ProjectDetailPage() {
               variant="secondary"
               onClick={() => handleCreateEvaluation('create')}
               loading={submitting && submitMode === 'create'}
-              disabled={submitting || (evalMode === 'text' ? !evalText.trim() : !selectedDatasetId)}
+              disabled={
+                submitting ||
+                (evalMode === 'text'
+                  ? (textEvalFormat === 'respond'
+                      ? !respondInputText.trim()
+                      : !judgePromptText.trim() || !judgeResponseText.trim())
+                  : !selectedDatasetId)
+              }
             >
               {evalMode === 'dataset'
                 ? `Create ${
@@ -913,7 +1021,14 @@ export default function ProjectDetailPage() {
               variant="primary"
               onClick={() => handleCreateEvaluation('create_and_run')}
               loading={submitting && submitMode === 'create_and_run'}
-              disabled={submitting || (evalMode === 'text' ? !evalText.trim() : !selectedDatasetId)}
+              disabled={
+                submitting ||
+                (evalMode === 'text'
+                  ? (textEvalFormat === 'respond'
+                      ? !respondInputText.trim()
+                      : !judgePromptText.trim() || !judgeResponseText.trim())
+                  : !selectedDatasetId)
+              }
             >
               {evalMode === 'dataset'
                 ? `Create & Run ${

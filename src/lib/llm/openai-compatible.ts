@@ -13,11 +13,15 @@ import type {
   JudgmentProvider,
   JudgmentRequest,
   JudgmentResponse,
+  RespondRequest,
+  RespondResponse,
   ProviderConfig,
 } from './provider';
 import {
   buildJudgmentSystemPrompt,
   buildJudgmentUserPrompt,
+  buildRespondSystemPrompt,
+  buildRespondUserPrompt,
   parseJudgmentResponse,
 } from './provider';
 
@@ -81,5 +85,54 @@ export class OpenAICompatibleProvider implements JudgmentProvider {
       latencyMs,
       tokenCount
     );
+  }
+
+  async respond(
+    request: RespondRequest,
+    config: ProviderConfig
+  ): Promise<RespondResponse> {
+    const apiKey =
+      config.apiKey ||
+      process.env.OPENAI_API_KEY ||
+      (config.endpoint ? 'not-needed' : undefined);
+
+    if (!apiKey) {
+      throw new Error(
+        'API key not configured. Set OPENAI_API_KEY in environment or configure per-model.'
+      );
+    }
+
+    const client = new OpenAI({
+      apiKey,
+      baseURL: config.endpoint || undefined,
+    });
+
+    const systemPrompt = buildRespondSystemPrompt();
+    const userPrompt = buildRespondUserPrompt(request);
+    const startTime = Date.now();
+
+    const response = await client.chat.completions.create({
+      model: config.modelId,
+      max_tokens: 4096,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      temperature: 0.4,
+    });
+
+    const latencyMs = Date.now() - startTime;
+    const rawText = response.choices[0]?.message?.content || '';
+    const tokenCount = response.usage
+      ? (response.usage.prompt_tokens || 0) +
+        (response.usage.completion_tokens || 0)
+      : undefined;
+
+    return {
+      responseText: rawText.trim(),
+      rawResponse: rawText,
+      latencyMs,
+      tokenCount,
+    };
   }
 }

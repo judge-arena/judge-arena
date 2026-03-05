@@ -65,7 +65,7 @@ export default function RunDetailPage() {
   }, [run?.status, loadRun]);
 
   const submitHumanJudgment = async (data: {
-    overallScore: number;
+    overallScore?: number;
     reasoning: string;
     criteriaScores: CriteriaScore[];
     selectedBestModelId: string | null;
@@ -112,6 +112,7 @@ export default function RunDetailPage() {
   if (!run) return null;
 
   const evaluation = run.evaluation;
+  const evaluationMode: 'respond' | 'judge' = evaluation?.responseText ? 'judge' : 'respond';
   const rubric = run.rubric ?? null;
   const criteria = rubric?.criteria ?? [];
   const modelJudgments: any[] = run.modelJudgments ?? [];
@@ -145,6 +146,9 @@ export default function RunDetailPage() {
             {/* Primary status row */}
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant={sc.variant} size="md">{sc.label}</Badge>
+              <Badge variant="default" size="md">
+                {evaluationMode === 'respond' ? 'Respond + Human Judgment' : 'Judge Existing Response'}
+              </Badge>
               {rubric && (
                 <Badge variant="info" size="md">
                   📋 {rubric.name} v{rubric.version}
@@ -208,7 +212,9 @@ export default function RunDetailPage() {
               <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
               <circle cx="12" cy="7" r="4" />
             </svg>
-            Model evaluations complete. Submit your human judgment to finalize this run.
+            {evaluationMode === 'respond'
+              ? 'Model responses are ready. Select the best response and submit human feedback to finalize this run.'
+              : 'Model evaluations are complete. Add optional human feedback to finalize this run.'}
           </div>
         )}
 
@@ -217,7 +223,7 @@ export default function RunDetailPage() {
           <div className="lg:col-span-3 space-y-6">
 
             {/* Submission */}
-            {evaluation?.promptText ? (
+            {evaluationMode === 'judge' ? (
               <div className="space-y-4">
                 <div className="rounded-xl border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 overflow-hidden">
                   <div className="flex items-center justify-between border-b border-surface-100 dark:border-surface-700 px-4 py-3">
@@ -250,12 +256,12 @@ export default function RunDetailPage() {
                   <div className="flex items-center justify-between border-b border-surface-100 dark:border-surface-700 px-4 py-3">
                     <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100">Response (Output to Judge)</h3>
                     <span className="text-2xs text-surface-400">
-                      {(evaluation?.responseText || evaluation?.inputText || '').length.toLocaleString()} chars
+                      {(evaluation?.responseText || '').length.toLocaleString()} chars
                     </span>
                   </div>
                   <div className="p-4 overflow-y-auto">
                     <div className="prose prose-sm max-w-none text-surface-700 dark:text-surface-300 whitespace-pre-wrap break-words">
-                      {evaluation?.responseText || evaluation?.inputText}
+                      {evaluation?.responseText}
                     </div>
                   </div>
                 </div>
@@ -264,7 +270,7 @@ export default function RunDetailPage() {
               <div className="rounded-xl border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 overflow-hidden">
                 <div className="flex items-center justify-between border-b border-surface-100 dark:border-surface-700 px-4 py-3">
                   <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100">Submission</h3>
+                    <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100">Prompt (Input)</h3>
                     {evaluation?.dataset && (
                       <Badge variant="info" size="sm">
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="mr-0.5" aria-hidden="true">
@@ -283,7 +289,7 @@ export default function RunDetailPage() {
                 </div>
                 <div className="p-4 overflow-y-auto">
                   <div className="prose prose-sm max-w-none text-surface-700 dark:text-surface-300 whitespace-pre-wrap break-words">
-                    {evaluation?.inputText}
+                    {evaluation?.promptText || evaluation?.inputText}
                   </div>
                 </div>
               </div>
@@ -294,17 +300,21 @@ export default function RunDetailPage() {
               <div>
                 <div className="flex items-center justify-between mb-3">
                   <h2 className="text-sm font-semibold text-surface-700 dark:text-surface-300">
-                    Model Judgments ({modelJudgments.length})
+                    {evaluationMode === 'respond' ? 'Model Responses' : 'Model Judgments'} ({modelJudgments.length})
                   </h2>
-                  {completedJudgments.length > 0 && (
+                  {evaluationMode === 'respond' && completedJudgments.length > 0 && (
                     <span className="text-xs text-surface-400">Click to select as best</span>
                   )}
                 </div>
 
                 <Tabs defaultValue="grid">
                   <TabsList>
-                    <TabsTrigger value="grid">Grid</TabsTrigger>
-                    <TabsTrigger value="comparison">Compare</TabsTrigger>
+                    <TabsTrigger value="grid">
+                      {evaluationMode === 'respond' ? 'Responses' : 'Grid'}
+                    </TabsTrigger>
+                    {evaluationMode === 'judge' && (
+                      <TabsTrigger value="comparison">Compare</TabsTrigger>
+                    )}
                   </TabsList>
 
                   <TabsContent value="grid">
@@ -321,14 +331,21 @@ export default function RunDetailPage() {
                           tokenCount={judgment.tokenCount}
                           status={judgment.status}
                           error={judgment.error}
-                          isSelected={selectedBestModelId === judgment.modelConfig.id}
+                          mode={evaluationMode}
+                          isSelected={
+                            evaluationMode === 'respond' &&
+                            selectedBestModelId === judgment.modelConfig.id
+                          }
                           expandedReasoning={true}
-                          onSelect={() =>
-                            setSelectedBestModelId(
-                              selectedBestModelId === judgment.modelConfig.id
-                                ? null
-                                : judgment.modelConfig.id
-                            )
+                          onSelect={
+                            evaluationMode === 'respond'
+                              ? () =>
+                                  setSelectedBestModelId(
+                                    selectedBestModelId === judgment.modelConfig.id
+                                      ? null
+                                      : judgment.modelConfig.id
+                                  )
+                              : undefined
                           }
                         />
                       ))}
@@ -402,8 +419,9 @@ export default function RunDetailPage() {
           <div className="lg:col-span-2">
             <div className="sticky top-6">
               <div className="rounded-xl border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 p-5">
-                {rubric ? (
+                {evaluationMode === 'respond' || rubric ? (
                   <HumanJudgmentForm
+                    mode={evaluationMode}
                     criteria={criteria}
                     modelJudgmentIds={completedJudgments.map((j: any) => ({
                       id: j.modelConfig.id,

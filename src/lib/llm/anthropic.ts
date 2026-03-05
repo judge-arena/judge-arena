@@ -7,11 +7,15 @@ import type {
   JudgmentProvider,
   JudgmentRequest,
   JudgmentResponse,
+  RespondRequest,
+  RespondResponse,
   ProviderConfig,
 } from './provider';
 import {
   buildJudgmentSystemPrompt,
   buildJudgmentUserPrompt,
+  buildRespondSystemPrompt,
+  buildRespondUserPrompt,
   parseJudgmentResponse,
 } from './provider';
 
@@ -60,5 +64,43 @@ export class AnthropicProvider implements JudgmentProvider {
       latencyMs,
       tokenCount
     );
+  }
+
+  async respond(
+    request: RespondRequest,
+    config: ProviderConfig
+  ): Promise<RespondResponse> {
+    const apiKey = config.apiKey || process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      throw new Error(
+        'Anthropic API key not configured. Set ANTHROPIC_API_KEY in environment or configure per-model.'
+      );
+    }
+
+    const client = new Anthropic({ apiKey });
+    const systemPrompt = buildRespondSystemPrompt();
+    const userPrompt = buildRespondUserPrompt(request);
+    const startTime = Date.now();
+
+    const response = await client.messages.create({
+      model: config.modelId,
+      max_tokens: 4096,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }],
+    });
+
+    const latencyMs = Date.now() - startTime;
+    const rawText =
+      response.content[0].type === 'text' ? response.content[0].text : '';
+    const tokenCount =
+      (response.usage?.input_tokens || 0) +
+      (response.usage?.output_tokens || 0);
+
+    return {
+      responseText: rawText.trim(),
+      rawResponse: rawText,
+      latencyMs,
+      tokenCount,
+    };
   }
 }

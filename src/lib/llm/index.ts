@@ -6,7 +6,14 @@
  */
 
 import type { ModelProvider } from '@/types';
-import type { JudgmentProvider, JudgmentRequest, JudgmentResponse, ProviderConfig } from './provider';
+import type {
+  JudgmentProvider,
+  JudgmentRequest,
+  JudgmentResponse,
+  RespondRequest,
+  RespondResponse,
+  ProviderConfig,
+} from './provider';
 import { AnthropicProvider } from './anthropic';
 import { OpenAICompatibleProvider } from './openai-compatible';
 
@@ -39,6 +46,15 @@ export async function executeJudgment(
   return provider.judge(request, config);
 }
 
+export async function executeRespond(
+  providerName: string,
+  request: RespondRequest,
+  config: ProviderConfig
+): Promise<RespondResponse> {
+  const provider = getProvider(providerName);
+  return provider.respond(request, config);
+}
+
 /**
  * List available providers
  */
@@ -49,4 +65,11 @@ export function listProviders(): Array<{ id: string; name: string }> {
   }));
 }
 
-export type { JudgmentProvider, JudgmentRequest, JudgmentResponse, ProviderConfig };
+export type {
+  JudgmentProvider,
+  JudgmentRequest,
+  JudgmentResponse,
+  RespondRequest,
+  RespondResponse,
+  ProviderConfig,
+};

@@ -5,7 +5,7 @@ import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { refreshDatasetEvaluationSummaryForEvaluation } from '@/lib/dataset-evaluation-summary';
 
 const humanJudgmentSchema = z.object({
-  overallScore: z.number().min(0).max(10),
+  overallScore: z.number().min(0).max(10).optional(),
   reasoning: z.string().max(5000).optional(),
   criteriaScores: z
     .array(
@@ -43,7 +43,22 @@ export async function POST(
     // Verify run exists and belongs to specified evaluation
     const run = await prisma.evaluationRun.findUnique({
       where: { id: params.runId },
-      include: { evaluation: { select: { id: true, userId: true } } },
+      include: {
+        evaluation: {
+          select: {
+            id: true,
+            userId: true,
+            promptText: true,
+            responseText: true,
+          },
+        },
+        modelJudgments: {
+          select: {
+            modelConfigId: true,
+            status: true,
+          },
+        },
+      },
     });
 
     if (!run) return NextResponse.json({ error: 'Run not found' }, { status: 404 });
@@ -54,22 +69,52 @@ export async function POST(
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
+    const mode = run.evaluation.responseText?.trim() ? 'judge' : 'respond';
+    const completedModelIds = run.modelJudgments
+      .filter((judgment) => judgment.status === 'completed')
+      .map((judgment) => judgment.modelConfigId);
+
+    if (mode === 'respond') {
+      if (!data.selectedBestModelId) {
+        return NextResponse.json(
+          { error: 'Respond mode requires selecting the best model response.' },
+          { status: 400 }
+        );
+      }
+      if (!completedModelIds.includes(data.selectedBestModelId)) {
+        return NextResponse.json(
+          { error: 'Selected best model must be one of the completed run responses.' },
+          { status: 400 }
+        );
+      }
+    }
+
+    if (mode === 'judge' && data.selectedBestModelId) {
+      return NextResponse.json(
+        { error: 'Judge mode does not use best-model selection.' },
+        { status: 400 }
+      );
+    }
+
+    const normalizedOverallScore =
+      typeof data.overallScore === 'number' ? data.overallScore : 0;
+
     // Upsert human judgment for this run
     const judgment = await prisma.humanJudgment.upsert({
       where: { runId: params.runId },
       update: {
-        overallScore: data.overallScore,
+        overallScore: normalizedOverallScore,
         reasoning: data.reasoning,
         criteriaScores: data.criteriaScores ? JSON.stringify(data.criteriaScores) : null,
-        selectedBestModelId: data.selectedBestModelId,
+        selectedBestModelId: mode === 'respond' ? data.selectedBestModelId : null,
       },
       create: {
         runId: params.runId,
         userId: session.user.id,
-        overallScore: data.overallScore,
+        overallScore: normalizedOverallScore,
         reasoning: data.reasoning,
         criteriaScores: data.criteriaScores ? JSON.stringify(data.criteriaScores) : null,
-        selectedBestModelId: data.selectedBestModelId,
+        selectedBestModelId: mode === 'respond' ? data.selectedBestModelId : null,
       },
     });
 

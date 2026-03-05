@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import type { CriteriaScore } from '@/types';
 
 interface ModelJudgmentCardProps {
+  mode?: 'respond' | 'judge';
   modelName: string;
   provider: string;
   overallScore: number | null;
@@ -22,6 +23,7 @@ interface ModelJudgmentCardProps {
 }
 
 export function ModelJudgmentCard({
+  mode = 'judge',
   modelName,
   provider,
   overallScore,
@@ -127,7 +129,7 @@ export function ModelJudgmentCard({
         {status === 'completed' && (
           <>
             {/* Overall Score */}
-            {overallScore !== null && (
+            {mode === 'judge' && overallScore !== null && (
               <div className="mb-3 flex items-baseline gap-2">
                 <span
                   className={cn(
@@ -147,7 +149,7 @@ export function ModelJudgmentCard({
             )}
 
             {/* Criteria Scores */}
-            {criteriaScores.length > 0 && (
+            {mode === 'judge' && criteriaScores.length > 0 && (
               <div className="mb-3 space-y-2">
                 <h4 className="text-xs font-semibold text-surface-500 dark:text-surface-400 uppercase tracking-wider">
                   Criteria Scores
@@ -190,7 +192,7 @@ export function ModelJudgmentCard({
             {reasoning && (
               <div>
                 <h4 className="text-xs font-semibold text-surface-500 dark:text-surface-400 uppercase tracking-wider mb-1">
-                  Reasoning
+                  {mode === 'respond' ? 'Response' : 'Reasoning'}
                 </h4>
                 <p className={cn(
                   'text-sm text-surface-700 dark:text-surface-300 leading-relaxed whitespace-pre-wrap',

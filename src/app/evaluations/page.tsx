@@ -16,6 +16,7 @@ interface RunSummary {
   id: string;
   evaluationId: string;
   status: string;
+  mode: 'respond' | 'judge';
   createdAt: string;
   triggeredBy: { id: string; name: string | null; email: string };
   rubric?: { id: string; name: string; version: number } | null;
@@ -31,15 +32,20 @@ interface RunSummary {
 const statusConfig: Record<string, { label: string; variant: 'default' | 'success' | 'warning' | 'error' | 'info' }> = {
   pending:     { label: 'Pending',      variant: 'warning' },
   judging:     { label: 'Judging',      variant: 'info' },
-  needs_human: { label: 'Needs Human',  variant: 'warning' },
+  needs_human: { label: 'Needs Human Action',  variant: 'warning' },
   completed:   { label: 'Completed',    variant: 'success' },
   error:       { label: 'Error',        variant: 'error' },
 };
+
+function getNeedsHumanActionLabel(mode: 'respond' | 'judge') {
+  return mode === 'respond' ? 'Select Best Response' : 'Needs Human Feedback';
+}
 
 export default function EvaluationsPage() {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'pending' | 'needs_human' | 'completed' | 'error'>('all');
+  const [modeFilter, setModeFilter] = useState<'all' | 'respond' | 'judge'>('all');
   const [search, setSearch] = useState('');
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement>(null);
@@ -90,6 +96,7 @@ export default function EvaluationsPage() {
             for (const run of template.runs ?? []) {
               flat.push({
                 ...run,
+                mode: template.responseText ? 'judge' : 'respond',
                 evaluationTitle: template.title ?? null,
                 projectId: template.project?.id ?? '',
                 projectName: template.project?.name ?? '',
@@ -115,6 +122,7 @@ export default function EvaluationsPage() {
     if (filter === 'needs_human' && run.status !== 'needs_human') return false;
     if (filter === 'completed' && run.status !== 'completed') return false;
     if (filter === 'error' && run.status !== 'error') return false;
+    if (modeFilter !== 'all' && run.mode !== modeFilter) return false;
 
     // Text search
     if (search) {
@@ -219,7 +227,22 @@ export default function EvaluationsPage() {
                     : 'bg-surface-100 dark:bg-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-700'
                 }`}
               >
-                {f === 'all' ? 'All' : f === 'needs_human' ? 'Needs Human' : f.charAt(0).toUpperCase() + f.slice(1)} ({counts[f]})
+                {f === 'all' ? 'All' : f === 'needs_human' ? 'Needs Human Action' : f.charAt(0).toUpperCase() + f.slice(1)} ({counts[f]})
+              </button>
+            ))}
+          </div>
+          <div className="flex gap-1.5 flex-wrap">
+            {(['all', 'respond', 'judge'] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setModeFilter(m)}
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                  modeFilter === m
+                    ? 'bg-brand-600 text-white'
+                    : 'bg-surface-100 dark:bg-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-700'
+                }`}
+              >
+                {m === 'all' ? 'All Modes' : m === 'respond' ? 'Respond Mode' : 'Judge Mode'}
               </button>
             ))}
           </div>
@@ -245,6 +268,10 @@ export default function EvaluationsPage() {
           <div className="space-y-3">
             {filtered.map((run) => {
               const sc = statusConfig[run.status] ?? statusConfig.pending;
+              const runStatusLabel =
+                run.status === 'needs_human'
+                  ? getNeedsHumanActionLabel(run.mode)
+                  : sc.label;
               const completedJudgments = run.modelJudgments.filter(
                 (j) => j.status === 'completed' && j.overallScore !== null
               );
@@ -270,7 +297,10 @@ export default function EvaluationsPage() {
                             <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 truncate">
                               {run.evaluationTitle || 'Untitled Evaluation'}
                             </h3>
-                            <Badge variant={sc.variant} size="sm">{sc.label}</Badge>
+                            <Badge variant={sc.variant} size="sm">{runStatusLabel}</Badge>
+                            <Badge variant="default" size="sm">
+                              {run.mode === 'respond' ? 'Respond + Human Judgment' : 'Judge Existing Response'}
+                            </Badge>
                           </div>
 
                           {/* Project / rubric / date */}
