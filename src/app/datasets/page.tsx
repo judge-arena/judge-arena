@@ -1340,7 +1340,6 @@ export default function DatasetsPage() {
                   )}
                 </div>
               </div>
-            }
           </DialogBody>
 
           <DialogFooter>

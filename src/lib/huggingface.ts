@@ -52,6 +52,8 @@ export interface DatasetMetadata {
   features: HuggingFaceFeature[];
   sampleCount: number | null;
   configs: string[];
+  /** Maps each config name to its available split names */
+  configSplits: Record<string, string[]>;
 }
 
 const HF_API_BASE = 'https://huggingface.co/api';
@@ -80,14 +82,17 @@ export async function fetchHuggingFaceDatasetInfo(
 }
 
 /**
- * Fetch available splits for a HF dataset config.
+ * Fetch available splits for a HF dataset from the Datasets Server.
+ * Endpoint: GET https://datasets-server.huggingface.co/splits?dataset={id}
+ * Returns objects with { dataset, config, split } shape.
  */
 async function fetchSplits(datasetId: string): Promise<HuggingFaceSplit[]> {
   try {
-    const res = await fetch(
-      `${HF_API_BASE}/datasets/${datasetId}/splits`,
-      { headers: { Accept: 'application/json' } }
-    );
+    const url = new URL(`${HF_DATASETS_SERVER}/splits`);
+    url.searchParams.set('dataset', datasetId);
+    const res = await fetch(url.toString(), {
+      headers: { Accept: 'application/json' },
+    });
     if (!res.ok) return [];
     const data = await res.json();
     return data.splits ?? [];
@@ -131,8 +136,16 @@ export async function fetchDatasetMetadata(
       ? splitsData.reduce((sum, s) => sum + (s.num_examples || 0), 0)
       : null;
 
-  // Extract unique config names
+  // Extract unique config names and build config→splits mapping
   const configs = [...new Set(splitsData.map((s) => s.config).filter(Boolean))];
+  const configSplits: Record<string, string[]> = {};
+  for (const s of splitsData) {
+    const cfg = s.config || 'default';
+    const splitName = s.name || s.split;
+    if (!splitName) continue;
+    if (!configSplits[cfg]) configSplits[cfg] = [];
+    if (!configSplits[cfg].includes(splitName)) configSplits[cfg].push(splitName);
+  }
 
   // Extract tags
   const tags = [
@@ -161,6 +174,7 @@ export async function fetchDatasetMetadata(
     features: [], // Features require /parquet endpoint; populated on detail page if needed
     sampleCount,
     configs,
+    configSplits,
   };
 }
 

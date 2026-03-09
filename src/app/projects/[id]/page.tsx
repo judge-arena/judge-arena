@@ -267,20 +267,6 @@ export default function ProjectDetailPage() {
     const rawId = hfIdInput.trim();
     if (!rawId) return;
 
-    // Support both direct IDs and full URLs
-    let datasetId = rawId;
-    if (rawId.startsWith('http')) {
-      const params = new URLSearchParams({ url: rawId });
-      const previewRes = await fetch(`/api/datasets/huggingface/preview?${params}`);
-      if (previewRes.ok) {
-        const meta = await previewRes.json();
-        datasetId = meta.id;
-      } else {
-        toast.error('Could not parse HuggingFace URL');
-        return;
-      }
-    }
-
     setHfFetching(true);
     setHfMeta(null);
     setHfPreview(null);
@@ -292,25 +278,34 @@ export default function ProjectDetailPage() {
     setHfSplit('');
 
     try {
-      // Fetch metadata
-      const metaRes = await fetch(`/api/datasets/huggingface/preview?id=${encodeURIComponent(datasetId)}`);
+      // Support both direct IDs (org/name) and full URLs — single fetch
+      const isUrl = rawId.startsWith('http');
+      const params = new URLSearchParams(
+        isUrl ? { url: rawId } : { id: rawId }
+      );
+      const metaRes = await fetch(`/api/datasets/huggingface/preview?${params}`);
       if (!metaRes.ok) {
-        const err = await metaRes.json();
+        const err = await metaRes.json().catch(() => ({}));
         toast.error(err.error || 'Dataset not found on HuggingFace');
         return;
       }
       const meta = await metaRes.json();
       setHfMeta(meta);
 
-      // Auto-select first config and split
-      const defaultConfig = meta.configs?.[0] || 'default';
-      const defaultSplit = meta.splits?.[0] || 'train';
+      // Determine available configs and pick the first config
+      const configs: string[] = meta.configs?.length ? meta.configs : ['default'];
+      const defaultConfig = configs[0];
       setHfConfig(defaultConfig);
+
+      // Determine splits for the selected config
+      const configSplits: Record<string, string[]> = meta.configSplits || {};
+      const splitsForConfig = configSplits[defaultConfig] ?? meta.splits ?? [];
+      const defaultSplit = splitsForConfig[0] || 'train';
       setHfSplit(defaultSplit);
 
       // Fetch preview rows to discover columns
       const rowsParams = new URLSearchParams({
-        id: datasetId,
+        id: meta.id,
         config: defaultConfig,
         split: defaultSplit,
         preview: 'true',
@@ -322,7 +317,7 @@ export default function ProjectDetailPage() {
         const cols = (rowsData.features || []).map((f: any) => f.name);
         setHfColumns(cols);
         setHfPreviewRows(rowsData.rows?.map((r: any) => r.row) || []);
-        // Auto-detect input column: prefer 'question', 'prompt', 'input', 'text', or first string column
+        // Auto-detect input column
         const preferredInput = ['question', 'prompt', 'input', 'text', 'instruction', 'query'];
         const autoInput = cols.find((c: string) => preferredInput.includes(c.toLowerCase())) || cols[0] || '';
         setHfInputColumn(autoInput);
@@ -330,6 +325,8 @@ export default function ProjectDetailPage() {
         const preferredExpected = ['answer', 'response', 'output', 'expected', 'completion', 'target', 'reference'];
         const autoExpected = cols.find((c: string) => preferredExpected.includes(c.toLowerCase())) || '';
         setHfExpectedColumn(autoExpected);
+      } else {
+        console.warn('Could not fetch preview rows — columns will not auto-populate');
       }
     } catch {
       toast.error('Failed to fetch HuggingFace dataset');
@@ -1135,11 +1132,17 @@ export default function ProjectDetailPage() {
                               label="Config"
                               value={hfConfig}
                               onChange={(e) => {
-                                setHfConfig(e.target.value);
-                                handleRefetchPreview(e.target.value, hfSplit);
+                                const newConfig = e.target.value;
+                                setHfConfig(newConfig);
+                                // Update split to the first available for this config
+                                const configSplits: Record<string, string[]> = hfMeta.configSplits || {};
+                                const splitsForConfig = configSplits[newConfig] ?? hfMeta.splits ?? [];
+                                const newSplit = splitsForConfig[0] || 'train';
+                                setHfSplit(newSplit);
+                                handleRefetchPreview(newConfig, newSplit);
                               }}
                               options={
-                                (hfMeta.configs || ['default']).map((c: string) => ({
+                                (hfMeta.configs?.length ? hfMeta.configs : ['default']).map((c: string) => ({
                                   value: c,
                                   label: c,
                                 }))
@@ -1153,10 +1156,14 @@ export default function ProjectDetailPage() {
                                 handleRefetchPreview(hfConfig, e.target.value);
                               }}
                               options={
-                                (hfMeta.splits || ['train']).map((s: string) => ({
-                                  value: s,
-                                  label: s,
-                                }))
+                                (() => {
+                                  const configSplits: Record<string, string[]> = hfMeta.configSplits || {};
+                                  const available = configSplits[hfConfig] ?? hfMeta.splits ?? [];
+                                  return (available.length ? available : ['train']).map((s: string) => ({
+                                    value: s,
+                                    label: s,
+                                  }));
+                                })()
                               }
                             />
                           </div>
