@@ -6,8 +6,6 @@ import {
   type DiffItem,
   type ImportDiffReport,
   deserializeConfig,
-  generateSlug,
-  generateUniqueSlug,
 } from '@/lib/config';
 
 /**

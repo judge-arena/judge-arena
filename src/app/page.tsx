@@ -10,6 +10,19 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { AppStats } from '@/types';
 
+function toList<T>(payload: unknown): T[] {
+  if (Array.isArray(payload)) return payload as T[];
+  if (
+    payload &&
+    typeof payload === 'object' &&
+    'data' in payload &&
+    Array.isArray((payload as { data: unknown }).data)
+  ) {
+    return (payload as { data: T[] }).data;
+  }
+  return [];
+}
+
 export default function DashboardPage() {
   const { data: session } = useSession();
   const [stats, setStats] = useState<AppStats | null>(null);
@@ -33,11 +46,11 @@ export default function DashboardPage() {
         ]);
         if (statsRes.ok) setStats(await statsRes.json());
         if (evalsRes.ok) {
-          const evals = await evalsRes.json();
+          const evals = toList(await evalsRes.json());
           setRecentEvaluations(evals.slice(0, 5));
         }
         if (projectsRes.ok) {
-          const projects = await projectsRes.json();
+          const projects = toList(await projectsRes.json());
           // Find the Leaderboard (default) project
           const lb = projects.find((p: any) => p.isDefault);
           setLeaderboard(lb ?? null);

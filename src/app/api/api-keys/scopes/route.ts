@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import {
   PERMISSION_SCOPES,
   SCOPE_GROUPS,
@@ -10,7 +10,7 @@ import {
 // Public endpoint returning all available permission scopes and groups.
 // No auth required — this is reference documentation.
 
-export async function GET(_req: NextRequest) {
+export async function GET() {
   return NextResponse.json({
     scopes: PERMISSION_SCOPES,
     groups: SCOPE_GROUPS,

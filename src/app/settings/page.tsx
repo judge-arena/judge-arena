@@ -11,9 +11,7 @@ import {
   PERMISSION_SCOPES,
   SCOPE_GROUPS,
   SCOPE_PRESETS,
-  ALL_SCOPES,
   type PermissionScope,
-  type ScopeGroup,
 } from '@/lib/permissions';
 
 type DiffAction = 'create' | 'update' | 'skip';
@@ -61,12 +59,12 @@ function ScopeSelector({
           <p className="text-xs font-semibold text-surface-600 dark:text-surface-400">{group.label}</p>
           <div className="flex flex-wrap gap-2">
             {group.scopes.map((scope) => {
-              const info = PERMISSION_SCOPES[scope];
+              const description = PERMISSION_SCOPES[scope];
               return (
                 <label
                   key={scope}
                   className="inline-flex items-center gap-1.5 text-xs cursor-pointer select-none"
-                  title={info.description}
+                  title={description}
                 >
                   <input
                     type="checkbox"
@@ -74,7 +72,7 @@ function ScopeSelector({
                     onChange={() => onToggle(scope)}
                     className="rounded border-surface-300 dark:border-surface-600 text-brand-600 focus:ring-brand-500"
                   />
-                  <span className="text-surface-800 dark:text-surface-200">{info.label}</span>
+                  <span className="text-surface-800 dark:text-surface-200">{scope}</span>
                 </label>
               );
             })}
@@ -375,7 +373,7 @@ export default function SettingsPage() {
         description="Export and import your evaluation harness configuration."
       />
 
-      <div className="p-6 space-y-6 max-w-3xl">
+      <div className="p-6 space-y-6">
         {/* ── Config Export ── */}
         <Card>
           <CardHeader>
@@ -527,8 +525,7 @@ export default function SettingsPage() {
               <div>
                 <CardTitle>Developer API Keys</CardTitle>
                 <CardDescription>
-                  Create API keys for programmatic access to the platform. Each key can be
-                  scoped to specific permissions.
+                  Create API keys for scoped programmatic access to the platform.
                 </CardDescription>
               </div>
               {!showCreateKey && (
@@ -538,7 +535,7 @@ export default function SettingsPage() {
                   onClick={() => { setShowCreateKey(true); setRevealedKey(null); }}
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
-                  Create API Key
+                  API Key
                 </Button>
               )}
             </div>

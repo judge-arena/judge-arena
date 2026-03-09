@@ -90,6 +90,19 @@ type VisibilityFilter = 'all' | 'private' | 'public';
 type CreateStep = 'type' | 'remote-url' | 'remote-confirm' | 'local-form';
 type DatasetTab = 'remote' | 'local';
 
+function toList<T>(payload: unknown): T[] {
+  if (Array.isArray(payload)) return payload as T[];
+  if (
+    payload &&
+    typeof payload === 'object' &&
+    'data' in payload &&
+    Array.isArray((payload as { data: unknown }).data)
+  ) {
+    return (payload as { data: T[] }).data;
+  }
+  return [];
+}
+
 /* ─── Component ──────────────────────────────────────────────────────────── */
 
 export default function DatasetsPage() {
@@ -158,7 +171,10 @@ export default function DatasetsPage() {
       if (visibilityFilter !== 'all')
         params.set('visibility', visibilityFilter);
       const res = await fetch(`/api/datasets?${params}`);
-      if (res.ok) setDatasets(await res.json());
+      if (res.ok) {
+        const payload = await res.json();
+        setDatasets(toList<DatasetListItem>(payload));
+      }
     } catch (err) {
       console.error('Failed to load datasets:', err);
     } finally {
@@ -487,16 +503,6 @@ export default function DatasetsPage() {
     }
     return [];
   }
-
-  const toggleTagFilter = (tag: string) => {
-    const normalized = tag.trim();
-    if (!normalized) return;
-    setSelectedTags((prev) =>
-      prev.includes(normalized)
-        ? prev.filter((t) => t !== normalized)
-        : [...prev, normalized]
-    );
-  };
 
   const handleVisibilityFilterChange = (value: string) => {
     setVisibilityFilter(value as VisibilityFilter);

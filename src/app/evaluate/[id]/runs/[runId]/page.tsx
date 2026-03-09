@@ -3,13 +3,11 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Header } from '@/components/layout/header';
-import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { ModelJudgmentCard } from '@/components/evaluation/model-judgment-card';
 import { HumanJudgmentForm } from '@/components/evaluation/human-judgment-form';
-import { SubmissionViewer } from '@/components/evaluation/submission-viewer';
 import { safeParseJSON, getScoreColor, cn, formatDateTime } from '@/lib/utils';
 import { toast } from 'sonner';
 import type { CriteriaScore } from '@/types';

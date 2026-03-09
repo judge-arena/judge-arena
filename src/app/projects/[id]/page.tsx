@@ -20,7 +20,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
-import { buildRubricVersionOptions, formatDate, formatDateTime } from '@/lib/utils';
+import { buildRubricVersionOptions, formatDateTime } from '@/lib/utils';
 import { toast } from 'sonner';
 import {
   buildDatasetRunGroups,
@@ -28,6 +28,19 @@ import {
   getLatestRun,
   summarizeDatasetRunGroup,
 } from '@/lib/dataset-run-groups';
+
+function toList<T>(payload: unknown): T[] {
+  if (Array.isArray(payload)) return payload as T[];
+  if (
+    payload &&
+    typeof payload === 'object' &&
+    'data' in payload &&
+    Array.isArray((payload as { data: unknown }).data)
+  ) {
+    return (payload as { data: T[] }).data;
+  }
+  return [];
+}
 
 export default function ProjectDetailPage() {
   const params = useParams();
@@ -120,7 +133,7 @@ export default function ProjectDetailPage() {
       }
 
       if (datasetsRes.ok) {
-        const datasets = await datasetsRes.json();
+        const datasets = toList(await datasetsRes.json());
         // Only show datasets that have samples
         setAvailableDatasets(datasets.filter((d: any) => (d._count?.samples ?? d.sampleCount ?? 0) > 0));
       }

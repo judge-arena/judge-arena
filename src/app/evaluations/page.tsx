@@ -39,6 +39,19 @@ const statusConfig: Record<string, { label: string; variant: 'default' | 'succes
   error:       { label: 'Error',        variant: 'error' },
 };
 
+function toList<T>(payload: unknown): T[] {
+  if (Array.isArray(payload)) return payload as T[];
+  if (
+    payload &&
+    typeof payload === 'object' &&
+    'data' in payload &&
+    Array.isArray((payload as { data: unknown }).data)
+  ) {
+    return (payload as { data: T[] }).data;
+  }
+  return [];
+}
+
 function getNeedsHumanActionLabel(mode: 'respond' | 'judge') {
   return mode === 'respond' ? 'Select Best Response' : 'Needs Human Feedback';
 }
@@ -111,7 +124,8 @@ export default function EvaluationsPage() {
     try {
       const res = await fetch('/api/evaluations');
       if (res.ok) {
-        const templates: any[] = await res.json();
+        const payload = await res.json();
+        const templates = toList<any>(payload);
         const flat: RunSummary[] = [];
         for (const template of templates) {
           for (const run of template.runs ?? []) {

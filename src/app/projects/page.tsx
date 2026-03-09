@@ -21,6 +21,19 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { formatDate } from '@/lib/utils';
 import { toast } from 'sonner';
 
+function toList<T>(payload: unknown): T[] {
+  if (Array.isArray(payload)) return payload as T[];
+  if (
+    payload &&
+    typeof payload === 'object' &&
+    'data' in payload &&
+    Array.isArray((payload as { data: unknown }).data)
+  ) {
+    return (payload as { data: T[] }).data;
+  }
+  return [];
+}
+
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -32,7 +45,10 @@ export default function ProjectsPage() {
   const loadData = async () => {
     try {
       const projectsRes = await fetch('/api/projects');
-      if (projectsRes.ok) setProjects(await projectsRes.json());
+      if (projectsRes.ok) {
+        const payload = await projectsRes.json();
+        setProjects(toList(payload));
+      }
     } catch (err) {
       console.error('Failed to load data:', err);
     } finally {

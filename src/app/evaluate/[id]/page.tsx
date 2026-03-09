@@ -23,10 +23,8 @@ import { SubmissionViewer } from '@/components/evaluation/submission-viewer';
 import {
   buildRubricVersionOptions,
   cn,
-  formatDate,
   formatDateTime,
   getScoreColor,
-  safeParseJSON,
 } from '@/lib/utils';
 import { toast } from 'sonner';
 

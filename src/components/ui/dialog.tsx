@@ -106,7 +106,7 @@ const DialogContent = React.forwardRef<
       document.body.style.overflow = '';
       clearTimeout(timer);
     };
-  }, [open]);
+  }, [open, setOpen]);
 
   if (!open) return null;
 

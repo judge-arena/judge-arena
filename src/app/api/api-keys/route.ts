@@ -21,7 +21,7 @@ function hashKey(rawKey: string): string {
 // List all API keys for the current user (admin sees all).
 // Raw keys are NEVER returned — only prefix and metadata.
 
-export async function GET(req: NextRequest) {
+export async function GET() {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
 

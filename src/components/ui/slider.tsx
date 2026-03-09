@@ -28,7 +28,8 @@ function Slider({
   disabled,
   id,
 }: SliderProps) {
-  const sliderId = id || React.useId();
+  const generatedId = React.useId();
+  const sliderId = id ?? generatedId;
   const percentage = ((value - min) / (max - min)) * 100;
 
   return (

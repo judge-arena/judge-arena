@@ -12,34 +12,6 @@ import {
 import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib/pagination';
 import { logger } from '@/lib/logger';
 
-// ── Single-text evaluation ──
-const createSingleBaseSchema = z.object({
-  projectId: z.string().min(1),
-  title: z.string().max(200).optional(),
-  evaluationMode: z.enum(['respond', 'judge']).optional(),
-  inputText: z.string().optional(),
-  promptText: z.string().optional(),
-  responseText: z.string().optional(),
-  rubricId: z.string().optional(),
-  modelConfigIds: z.array(z.string()).max(10).optional(),
-  runMode: z.enum(['create', 'create_and_run']).optional(),
-});
-
-const createSingleSchema = createSingleBaseSchema.refine(
-  (data) => {
-    const hasSingle = !!data.inputText?.trim();
-    const hasPromptOnly = !!data.promptText?.trim() && !data.responseText?.trim();
-    const hasPair = !!data.promptText?.trim() && !!data.responseText?.trim();
-    const hasResponseOnly = !!data.responseText?.trim();
-    return hasSingle || hasPromptOnly || hasPair || hasResponseOnly;
-  },
-  {
-    message:
-      'Provide one of: promptText (respond mode), inputText (legacy), promptText+responseText (judge mode), or responseText.',
-    path: ['inputText'],
-  }
-);
-
 // ── Dataset batch evaluation ──
 const createBatchSchema = z.object({
   projectId: z.string().min(1),
@@ -48,11 +20,6 @@ const createBatchSchema = z.object({
   modelConfigIds: z.array(z.string()).max(10).optional(),
   runMode: z.enum(['create', 'create_and_run']).optional(),
 });
-
-const createEvaluationSchema = z.discriminatedUnion('mode', [
-  createSingleBaseSchema.extend({ mode: z.literal('single') }),
-  createBatchSchema.extend({ mode: z.literal('dataset') }),
-]);
 
 // Accept old-style requests too (no mode field = single)
 const createEvaluationLegacySchema = z.object({

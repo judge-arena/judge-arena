@@ -11,7 +11,6 @@ import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'crypt
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 16;
-const AUTH_TAG_LENGTH = 16;
 
 /**
  * Derive a 32-byte key from the ENCRYPTION_KEY env var.

@@ -25,7 +25,7 @@
  */
 
 import { readFileSync, writeFileSync } from 'fs';
-import { resolve, relative } from 'path';
+import { resolve } from 'path';
 
 // Mapping: class -> dark variant to ADD (inserted right after the match)
 const DARK_VARIANT_MAP = [
@@ -99,7 +99,7 @@ for (const file of FILES) {
   let content;
   try {
     content = readFileSync(filePath, 'utf8');
-  } catch (e) {
+  } catch {
     console.log(`⚠ Skipping ${file} (not found)`);
     continue;
   }
@@ -128,7 +128,6 @@ for (const file of FILES) {
     
     // Match the light class as a standalone word boundary within quotes/template literals
     const escapedLight = escapeRegex(lightClass);
-    const escapedDark = escapeRegex(darkClass);
     
     // Pattern: find lightClass that is NOT already followed by the corresponding dark class
     // We look for the lightClass followed by either a space or end-of-string-delimiter
@@ -136,11 +135,6 @@ for (const file of FILES) {
     
     // Simple approach: find all className-like strings, check if they contain lightClass
     // but not darkClass, and add darkClass after lightClass
-    const regex = new RegExp(
-      `(?<=[" \`{])${escapedLight}(?=[ "\`}])(?!.*${escapedDark})`,
-      'g'
-    );
-    
     // Actually, a simpler and more reliable approach:
     // Find lightClass word boundary, replace with lightClass + ' ' + darkClass
     // But only if darkClass is not already present on the same line

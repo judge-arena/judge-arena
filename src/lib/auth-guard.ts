@@ -1,5 +1,5 @@
 import { getServerSession } from 'next-auth';
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { headers } from 'next/headers';
 import { createHash } from 'crypto';
 import { authOptions } from '@/lib/auth';
