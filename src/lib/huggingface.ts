@@ -55,6 +55,7 @@ export interface DatasetMetadata {
 }
 
 const HF_API_BASE = 'https://huggingface.co/api';
+const HF_DATASETS_SERVER = 'https://datasets-server.huggingface.co';
 
 /**
  * Fetch dataset info from HuggingFace API.
@@ -161,4 +162,125 @@ export async function fetchDatasetMetadata(
     sampleCount,
     configs,
   };
+}
+
+// ── Row-level data fetching ──────────────────────────────────────────────────
+
+export interface HFRowFeature {
+  name: string;
+  type: { type?: string; dtype?: string; _type?: string;[key: string]: unknown };
+}
+
+export interface HFFirstRowsResponse {
+  features: HFRowFeature[];
+  rows: Array<{
+    row_idx: number;
+    row: Record<string, unknown>;
+    truncated_cells: string[];
+  }>;
+}
+
+export interface HFRowsResponse {
+  features: HFRowFeature[];
+  rows: Array<{
+    row_idx: number;
+    row: Record<string, unknown>;
+    truncated_cells: string[];
+  }>;
+  num_rows_total: number;
+  num_rows_per_page: number;
+  partial: boolean;
+}
+
+/**
+ * Fetch the first rows (up to 100) from a HuggingFace dataset split.
+ * Also returns feature/column information so we can offer column-mapping.
+ */
+export async function fetchFirstRows(
+  datasetId: string,
+  config: string,
+  split: string
+): Promise<HFFirstRowsResponse> {
+  const url = new URL(`${HF_DATASETS_SERVER}/first-rows`);
+  url.searchParams.set('dataset', datasetId);
+  url.searchParams.set('config', config);
+  url.searchParams.set('split', split);
+
+  const res = await fetch(url.toString(), {
+    headers: { Accept: 'application/json' },
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(
+      `Failed to fetch first rows for "${datasetId}" (${config}/${split}): ${res.status} ${text}`
+    );
+  }
+
+  return res.json();
+}
+
+/**
+ * Fetch a page of rows from a HuggingFace dataset split.
+ * @param offset - 0-based row offset
+ * @param length - number of rows to fetch (max 100 per request)
+ */
+export async function fetchRows(
+  datasetId: string,
+  config: string,
+  split: string,
+  offset: number,
+  length: number
+): Promise<HFRowsResponse> {
+  const url = new URL(`${HF_DATASETS_SERVER}/rows`);
+  url.searchParams.set('dataset', datasetId);
+  url.searchParams.set('config', config);
+  url.searchParams.set('split', split);
+  url.searchParams.set('offset', String(offset));
+  url.searchParams.set('length', String(Math.min(length, 100)));
+
+  const res = await fetch(url.toString(), {
+    headers: { Accept: 'application/json' },
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(
+      `Failed to fetch rows for "${datasetId}" (${config}/${split}): ${res.status} ${text}`
+    );
+  }
+
+  return res.json();
+}
+
+/**
+ * Fetch N rows from a dataset, paginating through the API as needed.
+ * Returns plain row objects.
+ */
+export async function fetchNRows(
+  datasetId: string,
+  config: string,
+  split: string,
+  count: number
+): Promise<Record<string, unknown>[]> {
+  const rows: Record<string, unknown>[] = [];
+  const pageSize = 100;
+  let offset = 0;
+
+  while (rows.length < count) {
+    const remaining = count - rows.length;
+    const batchSize = Math.min(remaining, pageSize);
+    const data = await fetchRows(datasetId, config, split, offset, batchSize);
+
+    for (const item of data.rows) {
+      rows.push(item.row);
+      if (rows.length >= count) break;
+    }
+
+    // If we got fewer rows than requested, the dataset is exhausted
+    if (data.rows.length < batchSize) break;
+    offset += data.rows.length;
+  }
+
+  return rows;
 }

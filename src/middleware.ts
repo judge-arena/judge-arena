@@ -67,7 +67,7 @@ function addSecurityHeaders(response: NextResponse): NextResponse {
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob: https:",
       "font-src 'self' data:",
-      "connect-src 'self' https://huggingface.co https://api.anthropic.com https://api.openai.com",
+      "connect-src 'self' https://huggingface.co https://datasets-server.huggingface.co https://api.anthropic.com https://api.openai.com",
       "frame-ancestors 'none'",
       "base-uri 'self'",
       "form-action 'self'",

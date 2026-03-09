@@ -11,6 +11,8 @@ import {
 } from '@/lib/evaluation-run-manager';
 import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib/pagination';
 import { logger } from '@/lib/logger';
+import { fetchNRows, fetchDatasetMetadata } from '@/lib/huggingface';
+import { generateSlug } from '@/lib/config';
 
 // ── Dataset batch evaluation ──
 const createBatchSchema = z.object({
@@ -19,6 +21,21 @@ const createBatchSchema = z.object({
   rubricId: z.string().optional(),
   modelConfigIds: z.array(z.string()).max(10).optional(),
   runMode: z.enum(['create', 'create_and_run']).optional(),
+});
+
+// ── Remote (HuggingFace) dataset evaluation ──
+const createRemoteDatasetSchema = z.object({
+  projectId: z.string().min(1),
+  huggingFaceId: z.string().min(1, 'HuggingFace dataset ID is required'),
+  config: z.string().min(1, 'Config is required'),
+  split: z.string().min(1, 'Split is required'),
+  sampleCount: z.number().int().min(1).max(500).default(10),
+  inputColumn: z.string().min(1, 'Input column is required'),
+  expectedColumn: z.string().optional(),
+  rubricId: z.string().optional(),
+  modelConfigIds: z.array(z.string()).max(10).optional(),
+  runMode: z.enum(['create', 'create_and_run']).optional(),
+  inputType: z.enum(['query', 'query-response']).optional(),
 });
 
 // Accept old-style requests too (no mode field = single)
@@ -168,7 +185,7 @@ export async function POST(request: Request) {
       body.runMode === 'create_and_run' || body.createAndRun === true;
 
     // Detect mode: explicit 'mode' field, or infer from presence of datasetId vs inputText
-    const mode = body.mode ?? (body.datasetId ? 'dataset' : 'single');
+    const mode = body.mode ?? (body.huggingFaceId ? 'remote-dataset' : body.datasetId ? 'dataset' : 'single');
 
     // ── Verify project ownership ──
     const projectId = body.projectId;
@@ -257,6 +274,179 @@ export async function POST(request: Request) {
       }
 
       return NextResponse.json({ ...evaluation, mode: evaluationMode }, { status: 201 });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // REMOTE-DATASET MODE — fetch rows from HuggingFace, create dataset + evaluations
+    // ══════════════════════════════════════════════════════════════════════
+    if (mode === 'remote-dataset') {
+      const remoteData = createRemoteDatasetSchema.parse(body);
+
+      // Fetch metadata for the HF dataset
+      let meta;
+      try {
+        meta = await fetchDatasetMetadata(remoteData.huggingFaceId);
+      } catch (err) {
+        logger.error('Failed to fetch HF metadata', { err, huggingFaceId: remoteData.huggingFaceId });
+        return NextResponse.json(
+          { error: `Could not fetch HuggingFace dataset "${remoteData.huggingFaceId}". Check the ID and try again.` },
+          { status: 502 }
+        );
+      }
+
+      // Fetch the actual rows
+      let hfRows: Record<string, unknown>[];
+      try {
+        hfRows = await fetchNRows(
+          remoteData.huggingFaceId,
+          remoteData.config,
+          remoteData.split,
+          remoteData.sampleCount
+        );
+      } catch (err) {
+        logger.error('Failed to fetch HF rows', { err, huggingFaceId: remoteData.huggingFaceId });
+        return NextResponse.json(
+          { error: `Failed to fetch rows from HuggingFace "${remoteData.huggingFaceId}". The dataset may not support row access.` },
+          { status: 502 }
+        );
+      }
+
+      if (hfRows.length === 0) {
+        return NextResponse.json(
+          { error: 'No rows returned from the HuggingFace dataset for this config/split.' },
+          { status: 400 }
+        );
+      }
+
+      // Determine input type from column mapping
+      const inputType = remoteData.inputType ?? (remoteData.expectedColumn ? 'query-response' : 'query');
+
+      // Generate a unique slug for the dataset
+      const dsSlug = generateSlug(`hf-${meta.name}`);
+      const existingSlugs = (
+        await prisma.dataset.findMany({
+          where: { userId: session.user.id },
+          select: { slug: true },
+        })
+      )
+        .map((d) => d.slug)
+        .filter(Boolean) as string[];
+      const uniqueSlug = existingSlugs.includes(dsSlug)
+        ? `${dsSlug}-${Date.now().toString(36).slice(-4)}`
+        : dsSlug;
+
+      // Create the dataset record with samples in a single transaction
+      const samples = hfRows.map((row, i) => {
+        const input = String(row[remoteData.inputColumn] ?? '');
+        const expected = remoteData.expectedColumn
+          ? String(row[remoteData.expectedColumn] ?? '')
+          : undefined;
+        // Store the full row as metadata (excluding mapped columns to avoid duplication)
+        const metadata: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(row)) {
+          if (k !== remoteData.inputColumn && k !== remoteData.expectedColumn) {
+            metadata[k] = v;
+          }
+        }
+        return { index: i, input, expected, metadata };
+      });
+
+      const dataset = await prisma.dataset.create({
+        data: {
+          name: `${meta.name} (${remoteData.split}, ${hfRows.length} samples)`,
+          slug: uniqueSlug,
+          description: meta.description?.slice(0, 4000),
+          source: 'remote',
+          visibility: 'private',
+          inputType,
+          sourceUrl: `https://huggingface.co/datasets/${remoteData.huggingFaceId}`,
+          huggingFaceId: remoteData.huggingFaceId,
+          remoteMetadata: JSON.stringify({
+            ...meta,
+            fetchedConfig: remoteData.config,
+            fetchedSplit: remoteData.split,
+            fetchedSampleCount: hfRows.length,
+            inputColumn: remoteData.inputColumn,
+            expectedColumn: remoteData.expectedColumn,
+          }),
+          sampleCount: hfRows.length,
+          splits: JSON.stringify(meta.splits),
+          features: JSON.stringify(meta.features),
+          tags: meta.tags.length > 0 ? JSON.stringify(meta.tags) : undefined,
+          projectId,
+          userId: session.user.id,
+          samples: {
+            create: samples.map((s) => ({
+              index: s.index,
+              input: s.input,
+              expected: s.expected,
+              metadata: Object.keys(s.metadata).length > 0 ? JSON.stringify(s.metadata) : undefined,
+            })),
+          },
+        },
+        include: {
+          samples: { orderBy: { index: 'asc' } },
+        },
+      });
+
+      // Now create evaluations — one per sample
+      const evaluations = await prisma.$transaction(
+        dataset.samples.map((sample: any) =>
+          prisma.evaluation.create({
+            data: {
+              projectId,
+              title: `${meta.name} #${sample.index + 1}`,
+              inputText:
+                inputType === 'query-response'
+                  ? sample.expected || sample.input
+                  : sample.input,
+              promptText: sample.input,
+              responseText:
+                inputType === 'query-response'
+                  ? sample.expected || undefined
+                  : undefined,
+              userId: session.user.id,
+              datasetId: dataset.id,
+              datasetSampleId: sample.id,
+              ...(remoteData.rubricId && { rubricId: remoteData.rubricId }),
+              modelSelections: {
+                create: [...new Set(selectedModelIds)].map((modelConfigId) => ({ modelConfigId })),
+              },
+            } satisfies Prisma.EvaluationUncheckedCreateInput,
+          })
+        )
+      );
+
+      if (shouldRunImmediately) {
+        for (const evaluation of evaluations) {
+          enqueueEvaluationRunCreation(evaluation.id, session.user.id);
+        }
+      }
+
+      return NextResponse.json(
+        shouldRunImmediately
+          ? {
+              mode: 'dataset',
+              runMode: 'create_and_run',
+              datasetId: dataset.id,
+              datasetName: dataset.name,
+              evaluationsCreated: evaluations.length,
+              evaluationIds: evaluations.map((e: any) => e.id),
+              runsQueued: evaluations.length,
+              source: 'huggingface',
+              huggingFaceId: remoteData.huggingFaceId,
+            }
+          : {
+              mode: 'dataset',
+              datasetId: dataset.id,
+              datasetName: dataset.name,
+              evaluationsCreated: evaluations.length,
+              evaluationIds: evaluations.map((e: any) => e.id),
+              source: 'huggingface',
+              huggingFaceId: remoteData.huggingFaceId,
+            },
+        { status: 201 }
+      );
     }
 
     // ══════════════════════════════════════════════════════════════════════

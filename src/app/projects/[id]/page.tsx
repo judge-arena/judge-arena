@@ -68,6 +68,21 @@ export default function ProjectDetailPage() {
   const [evalMode, setEvalMode] = useState<'text' | 'dataset'>('text');
   const [availableDatasets, setAvailableDatasets] = useState<any[]>([]);
   const [selectedDatasetId, setSelectedDatasetId] = useState('');
+  const [datasetSource, setDatasetSource] = useState<'local' | 'remote'>('local');
+
+  // ── Remote (HuggingFace) dataset state ──
+  const [hfIdInput, setHfIdInput] = useState('');
+  const [hfMeta, setHfMeta] = useState<any>(null);
+  const [hfPreview, setHfPreview] = useState<any>(null);
+  const [hfFetching, setHfFetching] = useState(false);
+  const [hfConfig, setHfConfig] = useState('');
+  const [hfSplit, setHfSplit] = useState('');
+  const [hfSampleCount, setHfSampleCount] = useState(10);
+  const [hfInputColumn, setHfInputColumn] = useState('');
+  const [hfExpectedColumn, setHfExpectedColumn] = useState('');
+  const [hfColumns, setHfColumns] = useState<string[]>([]);
+  const [hfPreviewRows, setHfPreviewRows] = useState<any[]>([]);
+
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement>(null);
 
@@ -247,6 +262,108 @@ export default function ProjectDetailPage() {
     });
   };
 
+  // ── HuggingFace dataset preview fetch ──
+  const handleFetchHfDataset = async () => {
+    const rawId = hfIdInput.trim();
+    if (!rawId) return;
+
+    // Support both direct IDs and full URLs
+    let datasetId = rawId;
+    if (rawId.startsWith('http')) {
+      const params = new URLSearchParams({ url: rawId });
+      const previewRes = await fetch(`/api/datasets/huggingface/preview?${params}`);
+      if (previewRes.ok) {
+        const meta = await previewRes.json();
+        datasetId = meta.id;
+      } else {
+        toast.error('Could not parse HuggingFace URL');
+        return;
+      }
+    }
+
+    setHfFetching(true);
+    setHfMeta(null);
+    setHfPreview(null);
+    setHfColumns([]);
+    setHfPreviewRows([]);
+    setHfInputColumn('');
+    setHfExpectedColumn('');
+    setHfConfig('');
+    setHfSplit('');
+
+    try {
+      // Fetch metadata
+      const metaRes = await fetch(`/api/datasets/huggingface/preview?id=${encodeURIComponent(datasetId)}`);
+      if (!metaRes.ok) {
+        const err = await metaRes.json();
+        toast.error(err.error || 'Dataset not found on HuggingFace');
+        return;
+      }
+      const meta = await metaRes.json();
+      setHfMeta(meta);
+
+      // Auto-select first config and split
+      const defaultConfig = meta.configs?.[0] || 'default';
+      const defaultSplit = meta.splits?.[0] || 'train';
+      setHfConfig(defaultConfig);
+      setHfSplit(defaultSplit);
+
+      // Fetch preview rows to discover columns
+      const rowsParams = new URLSearchParams({
+        id: datasetId,
+        config: defaultConfig,
+        split: defaultSplit,
+        preview: 'true',
+      });
+      const rowsRes = await fetch(`/api/datasets/huggingface/rows?${rowsParams}`);
+      if (rowsRes.ok) {
+        const rowsData = await rowsRes.json();
+        setHfPreview(rowsData);
+        const cols = (rowsData.features || []).map((f: any) => f.name);
+        setHfColumns(cols);
+        setHfPreviewRows(rowsData.rows?.map((r: any) => r.row) || []);
+        // Auto-detect input column: prefer 'question', 'prompt', 'input', 'text', or first string column
+        const preferredInput = ['question', 'prompt', 'input', 'text', 'instruction', 'query'];
+        const autoInput = cols.find((c: string) => preferredInput.includes(c.toLowerCase())) || cols[0] || '';
+        setHfInputColumn(autoInput);
+        // Auto-detect expected column
+        const preferredExpected = ['answer', 'response', 'output', 'expected', 'completion', 'target', 'reference'];
+        const autoExpected = cols.find((c: string) => preferredExpected.includes(c.toLowerCase())) || '';
+        setHfExpectedColumn(autoExpected);
+      }
+    } catch {
+      toast.error('Failed to fetch HuggingFace dataset');
+    } finally {
+      setHfFetching(false);
+    }
+  };
+
+  // Refetch preview rows when config/split changes
+  const handleRefetchPreview = async (config: string, split: string) => {
+    if (!hfMeta?.id || !config || !split) return;
+    setHfFetching(true);
+    try {
+      const params = new URLSearchParams({
+        id: hfMeta.id,
+        config,
+        split,
+        preview: 'true',
+      });
+      const res = await fetch(`/api/datasets/huggingface/rows?${params}`);
+      if (res.ok) {
+        const data = await res.json();
+        setHfPreview(data);
+        const cols = (data.features || []).map((f: any) => f.name);
+        setHfColumns(cols);
+        setHfPreviewRows(data.rows?.map((r: any) => r.row) || []);
+      }
+    } catch {
+      toast.error('Failed to refresh preview');
+    } finally {
+      setHfFetching(false);
+    }
+  };
+
   const handleCreateEvaluation = async (
     runMode: 'create' | 'create_and_run'
   ) => {
@@ -254,38 +371,52 @@ export default function ProjectDetailPage() {
       if (textEvalFormat === 'respond' && !respondInputText.trim()) return;
       if (textEvalFormat === 'judge' && (!judgePromptText.trim() || !judgeResponseText.trim())) return;
     }
-    if (evalMode === 'dataset' && !selectedDatasetId) return;
+    if (evalMode === 'dataset' && datasetSource === 'local' && !selectedDatasetId) return;
+    if (evalMode === 'dataset' && datasetSource === 'remote' && (!hfMeta?.id || !hfConfig || !hfSplit || !hfInputColumn)) return;
 
     setSubmitMode(runMode);
     setSubmitting(true);
     try {
-      const payload =
-        evalMode === 'text'
-          ? {
-              mode: 'single',
-              evaluationMode: textEvalFormat,
-              runMode,
-              projectId,
-              title: evalTitle || undefined,
-              ...(textEvalFormat === 'respond'
-                ? {
-                    promptText: respondInputText,
-                  }
-                : {
-                    promptText: judgePromptText,
-                    responseText: judgeResponseText,
-                  }),
-              ...(selectedRubricVersionId && { rubricId: selectedRubricVersionId }),
-              modelConfigIds: selectedModelIds,
-            }
-          : {
-              mode: 'dataset',
-              runMode,
-              projectId,
-              datasetId: selectedDatasetId,
-              ...(selectedRubricVersionId && { rubricId: selectedRubricVersionId }),
-              modelConfigIds: selectedModelIds,
-            };
+      let payload: any;
+
+      if (evalMode === 'text') {
+        payload = {
+          mode: 'single',
+          evaluationMode: textEvalFormat,
+          runMode,
+          projectId,
+          title: evalTitle || undefined,
+          ...(textEvalFormat === 'respond'
+            ? { promptText: respondInputText }
+            : { promptText: judgePromptText, responseText: judgeResponseText }),
+          ...(selectedRubricVersionId && { rubricId: selectedRubricVersionId }),
+          modelConfigIds: selectedModelIds,
+        };
+      } else if (datasetSource === 'remote') {
+        payload = {
+          mode: 'remote-dataset',
+          runMode,
+          projectId,
+          huggingFaceId: hfMeta.id,
+          config: hfConfig,
+          split: hfSplit,
+          sampleCount: hfSampleCount,
+          inputColumn: hfInputColumn,
+          expectedColumn: hfExpectedColumn || undefined,
+          inputType: hfExpectedColumn ? 'query-response' : 'query',
+          ...(selectedRubricVersionId && { rubricId: selectedRubricVersionId }),
+          modelConfigIds: selectedModelIds,
+        };
+      } else {
+        payload = {
+          mode: 'dataset',
+          runMode,
+          projectId,
+          datasetId: selectedDatasetId,
+          ...(selectedRubricVersionId && { rubricId: selectedRubricVersionId }),
+          modelConfigIds: selectedModelIds,
+        };
+      }
 
       const res = await fetch('/api/evaluations', {
         method: 'POST',
@@ -303,6 +434,17 @@ export default function ProjectDetailPage() {
         setSelectedModelIds([]);
         setSelectedDatasetId('');
         setEvalMode('text');
+        setDatasetSource('local');
+        setHfIdInput('');
+        setHfMeta(null);
+        setHfPreview(null);
+        setHfColumns([]);
+        setHfPreviewRows([]);
+        setHfInputColumn('');
+        setHfExpectedColumn('');
+        setHfConfig('');
+        setHfSplit('');
+        setHfSampleCount(10);
 
         if (result.mode === 'dataset') {
           if (runMode === 'create_and_run') {
@@ -837,43 +979,301 @@ export default function ProjectDetailPage() {
                 </>
               )}
 
-              {/* ── Dataset-mode: dataset picker ── */}
+              {/* ── Dataset-mode: local vs remote sub-toggle + pickers ── */}
               {evalMode === 'dataset' && (
-                <div className="space-y-2">
-                  <Select
-                    label="Dataset"
-                    value={selectedDatasetId}
-                    onChange={(e) => setSelectedDatasetId(e.target.value)}
-                    options={[
-                      { value: '', label: 'Select a dataset...' },
-                      ...datasetPickerOptions.map((d: any) => ({
-                        value: d.id,
-                        label: `${d.name} (${d._count?.samples ?? d.sampleCount ?? '?'} samples)${d.version ? ` · v${d.version}` : ''}`,
-                      })),
-                    ]}
-                    hint="Each sample in the dataset will become a separate evaluation"
-                  />
-                  {selectedDatasetId && (() => {
-                    const ds = selectedDatasetForPicker;
-                    if (!ds) return null;
-                    const count = ds._count?.samples ?? ds.sampleCount ?? 0;
-                    return (
-                      <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
-                        <p className="font-medium mb-1">Dataset: {ds.name}{ds.version ? ` (v${ds.version})` : ''}</p>
-                        {ds.description && <p className="text-blue-700 mb-1">{ds.description}</p>}
-                        <p>
-                          This will create <span className="font-bold">{count} evaluation{count !== 1 ? 's' : ''}</span>
-                          {' '}— one per dataset sample. Each can be independently run through model + human evaluation.
+                <div className="space-y-3">
+                  {/* Sub-toggle: Local vs Remote */}
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-medium text-surface-700 dark:text-surface-300">Dataset Source</label>
+                    <div className="flex rounded-lg border border-surface-200 dark:border-surface-700 overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setDatasetSource('local')}
+                        className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+                          datasetSource === 'local'
+                            ? 'bg-brand-600 text-white'
+                            : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-700'
+                        }`}
+                      >
+                        <span className="flex items-center justify-center gap-1.5">
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                          </svg>
+                          Local Dataset
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDatasetSource('remote')}
+                        className={`flex-1 px-3 py-2 text-sm font-medium transition-colors border-l border-surface-200 dark:border-surface-700 ${
+                          datasetSource === 'remote'
+                            ? 'bg-brand-600 text-white'
+                            : 'bg-white dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:hover:bg-surface-700'
+                        }`}
+                      >
+                        <span className="flex items-center justify-center gap-1.5">
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                            <path d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" />
+                            <path d="M3.6 9h16.8" />
+                            <path d="M3.6 15h16.8" />
+                            <path d="M12 3a15.3 15.3 0 0 1 4 9 15.3 15.3 0 0 1-4 9 15.3 15.3 0 0 1-4-9 15.3 15.3 0 0 1 4-9z" />
+                          </svg>
+                          HuggingFace
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* ── Local dataset picker ── */}
+                  {datasetSource === 'local' && (
+                    <>
+                      <Select
+                        label="Dataset"
+                        value={selectedDatasetId}
+                        onChange={(e) => setSelectedDatasetId(e.target.value)}
+                        options={[
+                          { value: '', label: 'Select a dataset...' },
+                          ...datasetPickerOptions.map((d: any) => ({
+                            value: d.id,
+                            label: `${d.name} (${d._count?.samples ?? d.sampleCount ?? '?'} samples)${d.version ? ` · v${d.version}` : ''}`,
+                          })),
+                        ]}
+                        hint="Each sample in the dataset will become a separate evaluation"
+                      />
+                      {selectedDatasetId && (() => {
+                        const ds = selectedDatasetForPicker;
+                        if (!ds) return null;
+                        const count = ds._count?.samples ?? ds.sampleCount ?? 0;
+                        return (
+                          <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/30 px-3 py-2 text-xs text-blue-800 dark:text-blue-300">
+                            <p className="font-medium mb-1">Dataset: {ds.name}{ds.version ? ` (v${ds.version})` : ''}</p>
+                            {ds.description && <p className="text-blue-700 dark:text-blue-400 mb-1">{ds.description}</p>}
+                            <p>
+                              This will create <span className="font-bold">{count} evaluation{count !== 1 ? 's' : ''}</span>
+                              {' '}— one per dataset sample.
+                            </p>
+                          </div>
+                        );
+                      })()}
+                      {datasetPickerOptions.length === 0 && (
+                        <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/30 px-3 py-2.5 text-xs text-amber-800 dark:text-amber-300">
+                          No datasets with samples available.{' '}
+                          <a href="/datasets" className="underline font-medium hover:text-amber-900 dark:hover:text-amber-200">
+                            Create a dataset first
+                          </a>.
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {/* ── Remote (HuggingFace) dataset ── */}
+                  {datasetSource === 'remote' && (
+                    <div className="space-y-3">
+                      {/* HF Dataset ID input */}
+                      <div className="space-y-1.5">
+                        <label className="text-sm font-medium text-surface-700 dark:text-surface-300">
+                          HuggingFace Dataset
+                        </label>
+                        <div className="flex gap-2">
+                          <div className="flex-1">
+                            <Input
+                              value={hfIdInput}
+                              onChange={(e) => setHfIdInput(e.target.value)}
+                              placeholder="e.g. tatsu-lab/alpaca or https://huggingface.co/datasets/..."
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleFetchHfDataset();
+                                }
+                              }}
+                            />
+                          </div>
+                          <Button
+                            variant="secondary"
+                            onClick={handleFetchHfDataset}
+                            loading={hfFetching}
+                            disabled={!hfIdInput.trim() || hfFetching}
+                          >
+                            {hfFetching ? 'Fetching...' : 'Fetch'}
+                          </Button>
+                        </div>
+                        <p className="text-xs text-surface-500 dark:text-surface-400">
+                          Enter a HuggingFace dataset ID (org/name) or full URL
                         </p>
                       </div>
-                    );
-                  })()}
-                  {datasetPickerOptions.length === 0 && (
-                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
-                      No datasets with samples available.{' '}
-                      <a href="/datasets" className="underline font-medium hover:text-amber-900">
-                        Create a dataset first
-                      </a>.
+
+                      {/* Dataset metadata preview */}
+                      {hfMeta && (
+                        <div className="rounded-lg border border-purple-200 dark:border-purple-800 bg-purple-50 dark:bg-purple-900/20 p-3 space-y-3">
+                          <div>
+                            <p className="text-sm font-semibold text-purple-900 dark:text-purple-200">
+                              {hfMeta.id}
+                            </p>
+                            {hfMeta.description && (
+                              <p className="text-xs text-purple-700 dark:text-purple-400 mt-0.5 line-clamp-2">
+                                {hfMeta.description}
+                              </p>
+                            )}
+                            <div className="flex flex-wrap gap-1.5 mt-1.5">
+                              {hfMeta.sampleCount != null && (
+                                <span className="inline-flex items-center rounded-full bg-purple-100 dark:bg-purple-800/50 px-2 py-0.5 text-2xs font-medium text-purple-700 dark:text-purple-300">
+                                  {hfMeta.sampleCount.toLocaleString()} total samples
+                                </span>
+                              )}
+                              <span className="inline-flex items-center rounded-full bg-purple-100 dark:bg-purple-800/50 px-2 py-0.5 text-2xs font-medium text-purple-700 dark:text-purple-300">
+                                {hfMeta.downloads?.toLocaleString()} downloads
+                              </span>
+                              <span className="inline-flex items-center rounded-full bg-purple-100 dark:bg-purple-800/50 px-2 py-0.5 text-2xs font-medium text-purple-700 dark:text-purple-300">
+                                {hfMeta.likes?.toLocaleString()} likes
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Config + Split selectors */}
+                          <div className="grid grid-cols-2 gap-2">
+                            <Select
+                              label="Config"
+                              value={hfConfig}
+                              onChange={(e) => {
+                                setHfConfig(e.target.value);
+                                handleRefetchPreview(e.target.value, hfSplit);
+                              }}
+                              options={
+                                (hfMeta.configs || ['default']).map((c: string) => ({
+                                  value: c,
+                                  label: c,
+                                }))
+                              }
+                            />
+                            <Select
+                              label="Split"
+                              value={hfSplit}
+                              onChange={(e) => {
+                                setHfSplit(e.target.value);
+                                handleRefetchPreview(hfConfig, e.target.value);
+                              }}
+                              options={
+                                (hfMeta.splits || ['train']).map((s: string) => ({
+                                  value: s,
+                                  label: s,
+                                }))
+                              }
+                            />
+                          </div>
+
+                          {/* Sample count */}
+                          <div className="space-y-1.5">
+                            <label className="text-sm font-medium text-surface-700 dark:text-surface-300">
+                              Number of Samples
+                            </label>
+                            <div className="flex items-center gap-3">
+                              <input
+                                type="range"
+                                min={1}
+                                max={Math.min(hfMeta.sampleCount || 500, 500)}
+                                value={hfSampleCount}
+                                onChange={(e) => setHfSampleCount(parseInt(e.target.value, 10))}
+                                className="flex-1 h-2 rounded-lg appearance-none cursor-pointer bg-surface-200 dark:bg-surface-700 accent-brand-600"
+                              />
+                              <input
+                                type="number"
+                                min={1}
+                                max={Math.min(hfMeta.sampleCount || 500, 500)}
+                                value={hfSampleCount}
+                                onChange={(e) => {
+                                  const v = parseInt(e.target.value, 10);
+                                  if (!isNaN(v) && v >= 1 && v <= 500) setHfSampleCount(v);
+                                }}
+                                className="w-20 rounded-md border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 px-2 py-1 text-sm text-center text-surface-900 dark:text-surface-100"
+                              />
+                            </div>
+                            <p className="text-xs text-surface-500 dark:text-surface-400">
+                              {hfSampleCount} sample{hfSampleCount !== 1 ? 's' : ''} will be fetched and evaluated
+                              {hfMeta.sampleCount ? ` (out of ${hfMeta.sampleCount.toLocaleString()} available)` : ''}
+                            </p>
+                          </div>
+
+                          {/* Column mapping */}
+                          {hfColumns.length > 0 && (
+                            <div className="space-y-2">
+                              <label className="text-sm font-medium text-surface-700 dark:text-surface-300">
+                                Column Mapping
+                              </label>
+                              <div className="grid grid-cols-2 gap-2">
+                                <Select
+                                  label="Input Column"
+                                  value={hfInputColumn}
+                                  onChange={(e) => setHfInputColumn(e.target.value)}
+                                  options={hfColumns.map((c: string) => ({
+                                    value: c,
+                                    label: c,
+                                  }))}
+                                  hint="Column used as the evaluation input/prompt"
+                                />
+                                <Select
+                                  label="Expected Column (optional)"
+                                  value={hfExpectedColumn}
+                                  onChange={(e) => setHfExpectedColumn(e.target.value)}
+                                  options={[
+                                    { value: '', label: 'None (respond mode)' },
+                                    ...hfColumns.map((c: string) => ({
+                                      value: c,
+                                      label: c,
+                                    })),
+                                  ]}
+                                  hint="Reference answer for judge mode"
+                                />
+                              </div>
+                              <p className="text-xs text-surface-500 dark:text-surface-400">
+                                {hfExpectedColumn
+                                  ? 'Judge mode: models will score the expected output against the rubric.'
+                                  : 'Respond mode: models will generate responses, then humans pick the best one.'}
+                              </p>
+                            </div>
+                          )}
+
+                          {/* Preview table */}
+                          {hfPreviewRows.length > 0 && hfInputColumn && (
+                            <div className="space-y-1.5">
+                              <label className="text-sm font-medium text-surface-700 dark:text-surface-300">
+                                Sample Preview
+                              </label>
+                              <div className="max-h-36 overflow-auto rounded-md border border-surface-200 dark:border-surface-700">
+                                <table className="w-full text-xs">
+                                  <thead className="bg-surface-50 dark:bg-surface-800 sticky top-0">
+                                    <tr>
+                                      <th className="px-2 py-1.5 text-left font-medium text-surface-600 dark:text-surface-400">#</th>
+                                      <th className="px-2 py-1.5 text-left font-medium text-surface-600 dark:text-surface-400">
+                                        {hfInputColumn}
+                                      </th>
+                                      {hfExpectedColumn && (
+                                        <th className="px-2 py-1.5 text-left font-medium text-surface-600 dark:text-surface-400">
+                                          {hfExpectedColumn}
+                                        </th>
+                                      )}
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-surface-100 dark:divide-surface-700">
+                                    {hfPreviewRows.slice(0, 3).map((row: any, idx: number) => (
+                                      <tr key={idx} className="hover:bg-surface-50 dark:hover:bg-surface-700/50">
+                                        <td className="px-2 py-1 text-surface-400 whitespace-nowrap">{idx + 1}</td>
+                                        <td className="px-2 py-1 text-surface-800 dark:text-surface-200 max-w-xs truncate">
+                                          {String(row[hfInputColumn] ?? '').slice(0, 200)}
+                                        </td>
+                                        {hfExpectedColumn && (
+                                          <td className="px-2 py-1 text-surface-800 dark:text-surface-200 max-w-xs truncate">
+                                            {String(row[hfExpectedColumn] ?? '').slice(0, 200)}
+                                          </td>
+                                        )}
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1019,16 +1419,20 @@ export default function ProjectDetailPage() {
                   ? (textEvalFormat === 'respond'
                       ? !respondInputText.trim()
                       : !judgePromptText.trim() || !judgeResponseText.trim())
-                  : !selectedDatasetId)
+                  : datasetSource === 'remote'
+                    ? !hfMeta?.id || !hfConfig || !hfSplit || !hfInputColumn
+                    : !selectedDatasetId)
               }
             >
-              {evalMode === 'dataset'
-                ? `Create ${
-                    selectedDatasetId
-                      ? `${availableDatasets.find((d: any) => d.id === selectedDatasetId)?._count?.samples ?? availableDatasets.find((d: any) => d.id === selectedDatasetId)?.sampleCount ?? ''} `
-                      : ''
-                  }Evaluation${selectedDatasetId && (availableDatasets.find((d: any) => d.id === selectedDatasetId)?._count?.samples ?? 0) !== 1 ? 's' : ''}`
-                : 'Create'}
+              {evalMode === 'dataset' && datasetSource === 'remote'
+                ? `Create ${hfSampleCount} Evaluation${hfSampleCount !== 1 ? 's' : ''}`
+                : evalMode === 'dataset'
+                  ? `Create ${
+                      selectedDatasetId
+                        ? `${availableDatasets.find((d: any) => d.id === selectedDatasetId)?._count?.samples ?? availableDatasets.find((d: any) => d.id === selectedDatasetId)?.sampleCount ?? ''} `
+                        : ''
+                    }Evaluation${selectedDatasetId && (availableDatasets.find((d: any) => d.id === selectedDatasetId)?._count?.samples ?? 0) !== 1 ? 's' : ''}`
+                  : 'Create'}
             </Button>
             <Button
               variant="primary"
@@ -1040,16 +1444,20 @@ export default function ProjectDetailPage() {
                   ? (textEvalFormat === 'respond'
                       ? !respondInputText.trim()
                       : !judgePromptText.trim() || !judgeResponseText.trim())
-                  : !selectedDatasetId)
+                  : datasetSource === 'remote'
+                    ? !hfMeta?.id || !hfConfig || !hfSplit || !hfInputColumn
+                    : !selectedDatasetId)
               }
             >
-              {evalMode === 'dataset'
-                ? `Create & Run ${
-                    selectedDatasetId
-                      ? `${availableDatasets.find((d: any) => d.id === selectedDatasetId)?._count?.samples ?? availableDatasets.find((d: any) => d.id === selectedDatasetId)?.sampleCount ?? ''} `
-                      : ''
-                  }Evaluation${selectedDatasetId && (availableDatasets.find((d: any) => d.id === selectedDatasetId)?._count?.samples ?? 0) !== 1 ? 's' : ''}`
-                : 'Create & Run'}
+              {evalMode === 'dataset' && datasetSource === 'remote'
+                ? `Create & Run ${hfSampleCount} Evaluation${hfSampleCount !== 1 ? 's' : ''}`
+                : evalMode === 'dataset'
+                  ? `Create & Run ${
+                      selectedDatasetId
+                        ? `${availableDatasets.find((d: any) => d.id === selectedDatasetId)?._count?.samples ?? availableDatasets.find((d: any) => d.id === selectedDatasetId)?.sampleCount ?? ''} `
+                        : ''
+                    }Evaluation${selectedDatasetId && (availableDatasets.find((d: any) => d.id === selectedDatasetId)?._count?.samples ?? 0) !== 1 ? 's' : ''}`
+                  : 'Create & Run'}
             </Button>
           </DialogFooter>
         </DialogContent>
