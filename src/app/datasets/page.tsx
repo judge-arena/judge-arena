@@ -67,19 +67,6 @@ interface DatasetEvaluationSummaryView {
   averageHumanScore?: number | null;
 }
 
-interface HFPreview {
-  id: string;
-  name: string;
-  author: string;
-  description: string;
-  downloads: number;
-  likes: number;
-  tags: string[];
-  splits: string[];
-  sampleCount: number | null;
-  configs: string[];
-}
-
 interface LocalSamplePayload {
   input: string;
   expected?: string;
@@ -87,8 +74,6 @@ interface LocalSamplePayload {
 }
 
 type VisibilityFilter = 'all' | 'private' | 'public';
-type CreateStep = 'type' | 'remote-url' | 'remote-confirm' | 'local-form';
-type DatasetTab = 'remote' | 'local';
 
 function toList<T>(payload: unknown): T[] {
   if (Array.isArray(payload)) return payload as T[];
@@ -112,20 +97,10 @@ export default function DatasetsPage() {
     useState<VisibilityFilter>('all');
   const [search, setSearch] = useState('');
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
-  const [activeTab, setActiveTab] = useState<DatasetTab>('remote');
 
   // ─── Create dialog ───
   const [createOpen, setCreateOpen] = useState(false);
-  const [createStep, setCreateStep] = useState<CreateStep>('type');
   const [creating, setCreating] = useState(false);
-
-  // Remote creation
-  const [remoteUrl, setRemoteUrl] = useState('');
-  const [fetchingPreview, setFetchingPreview] = useState(false);
-  const [hfPreview, setHfPreview] = useState<HFPreview | null>(null);
-  const [remoteVisibility, setRemoteVisibility] = useState<'public' | 'private'>('public');
-  const [remoteTags, setRemoteTags] = useState<string[]>([]);
-  const [remoteTagInput, setRemoteTagInput] = useState('');
 
   // Local creation
   const [localName, setLocalName] = useState('');
@@ -156,12 +131,12 @@ export default function DatasetsPage() {
   const hasFocusedLocalNameRef = useRef(false);
 
   useEffect(() => {
-    if (!createOpen || createStep !== 'local-form') return;
+    if (!createOpen) return;
     if (hasFocusedLocalNameRef.current) return;
 
     localNameInputRef.current?.focus();
     hasFocusedLocalNameRef.current = true;
-  }, [createOpen, createStep]);
+  }, [createOpen]);
 
   /* ─── Data loading ─────────────────────────────────────────────────────── */
 
@@ -298,10 +273,6 @@ export default function DatasetsPage() {
     return matchesVisibility && matchesTags && matchesSearch;
   });
 
-  const localDatasets = filtered.filter((d) => d.source === 'local');
-  const remoteDatasets = filtered.filter((d) => d.source === 'remote');
-  const tabDatasets = activeTab === 'remote' ? remoteDatasets : localDatasets;
-  const activeTabLabel = activeTab === 'remote' ? 'Remote' : 'Local';
   const selectedTagValue = selectedTags[0] ?? 'all';
   const activeFilterCount =
     (visibilityFilter !== 'all' ? 1 : 0) + (selectedTags.length > 0 ? 1 : 0);
@@ -318,12 +289,6 @@ export default function DatasetsPage() {
 
   const resetCreate = () => {
     hasFocusedLocalNameRef.current = false;
-    setCreateStep('type');
-    setRemoteUrl('');
-    setHfPreview(null);
-    setRemoteVisibility('public');
-    setRemoteTags([]);
-    setRemoteTagInput('');
     setLocalName('');
     setLocalDescription('');
     setLocalFormat('json');
@@ -340,70 +305,11 @@ export default function DatasetsPage() {
     setIsDraggingFile(false);
     setLocalMode('inline');
     setCreating(false);
-    setFetchingPreview(false);
   };
 
   const openCreate = () => {
     resetCreate();
     setCreateOpen(true);
-  };
-
-  const handleFetchPreview = async () => {
-    if (!remoteUrl.trim()) return;
-    setFetchingPreview(true);
-    try {
-      const res = await fetch(
-        `/api/datasets/huggingface/preview?url=${encodeURIComponent(
-          remoteUrl.trim()
-        )}`
-      );
-      if (res.ok) {
-        const preview = await res.json();
-        setHfPreview(preview);
-        setRemoteTags(preview.tags ?? []);
-        setCreateStep('remote-confirm');
-      } else {
-        const data = await res.json();
-        toast.error(data.error || 'Could not fetch dataset metadata');
-      }
-    } catch {
-      toast.error('Failed to fetch dataset preview');
-    } finally {
-      setFetchingPreview(false);
-    }
-  };
-
-  const handleCreateRemote = async () => {
-    if (!hfPreview) return;
-    setCreating(true);
-    try {
-      const res = await fetch('/api/datasets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: hfPreview.name,
-          description: hfPreview.description,
-          source: 'remote',
-          visibility: remoteVisibility,
-          sourceUrl: remoteUrl.trim(),
-          huggingFaceId: hfPreview.id,
-          tags: remoteTags,
-        }),
-      });
-      if (res.ok) {
-        toast.success('Dataset added');
-        setCreateOpen(false);
-        resetCreate();
-        loadDatasets();
-      } else {
-        const data = await res.json();
-        toast.error(data.error || 'Failed to create dataset');
-      }
-    } catch {
-      toast.error('Failed to create dataset');
-    } finally {
-      setCreating(false);
-    }
   };
 
   const handleCreateLocal = async () => {
@@ -521,24 +427,11 @@ export default function DatasetsPage() {
     setSelectedTags([]);
   };
 
-  const addRemoteTag = () => {
-    const normalized = remoteTagInput.trim();
-    if (!normalized) return;
-    setRemoteTags((prev) =>
-      prev.includes(normalized) ? prev : [...prev, normalized]
-    );
-    setRemoteTagInput('');
-  };
-
   const addLocalTag = () => {
     const normalized = localTagInput.trim();
     if (!normalized) return;
     setLocalTags((prev) => (prev.includes(normalized) ? prev : [...prev, normalized]));
     setLocalTagInput('');
-  };
-
-  const removeRemoteTag = (tag: string) => {
-    setRemoteTags((prev) => prev.filter((t) => t !== tag));
   };
 
   const removeLocalTag = (tag: string) => {
@@ -749,22 +642,11 @@ export default function DatasetsPage() {
     await handleUploadFile(file);
   };
 
-  const handleAddDatasetForActiveTab = () => {
-    openCreate();
-    setCreateStep(activeTab === 'remote' ? 'remote-url' : 'local-form');
-  };
-
-  const handleSwapTab = () => {
-    setActiveTab((prev) => (prev === 'remote' ? 'local' : 'remote'));
-  };
-
   /* ─── Render ───────────────────────────────────────────────────────────── */
 
   const renderDatasetCard = (dataset: DatasetListItem) => {
     const tags = parseTags(dataset.tags);
-    const splits = parseTags(dataset.splits);
     const sampleCount = dataset.sampleCount ?? dataset._count.samples ?? 0;
-    const isRemote = dataset.source === 'remote';
     const parsedMeta = (() => {
       if (!dataset.remoteMetadata) return null;
       try {
@@ -788,11 +670,9 @@ export default function DatasetsPage() {
             <div className="flex items-start justify-between">
               <CardTitle className="truncate pr-2">{dataset.name}</CardTitle>
               <div className="flex items-center gap-1 shrink-0">
-                {!isRemote && (
-                  <Badge variant="outline" size="sm">
-                    Latest v{dataset.version}
-                  </Badge>
-                )}
+                <Badge variant="outline" size="sm">
+                  v{dataset.version}
+                </Badge>
                 <button
                   onClick={(e) => handleDelete(dataset.id, e)}
                   className="rounded p-1 text-surface-400 hover:text-red-500 hover:bg-red-50 transition-colors"
@@ -821,9 +701,6 @@ export default function DatasetsPage() {
           </CardHeader>
           <CardContent>
             <div className="flex flex-wrap items-center gap-1.5 mb-2">
-              <Badge variant={isRemote ? 'default' : 'outline'} size="sm">
-                {isRemote ? '🌐 Remote' : '💾 Local'}
-              </Badge>
               <Badge
                 variant={
                   dataset.visibility === 'public' ? 'success' : 'warning'
@@ -837,17 +714,12 @@ export default function DatasetsPage() {
                   {sampleCount.toLocaleString()} samples
                 </Badge>
               )}
-              {isRemote && splits.length > 0 && (
-                <Badge variant="outline" size="sm">
-                  {splits.length} splits
-                </Badge>
-              )}
-              {!isRemote && dataset.format && (
+              {dataset.format && (
                 <Badge variant="outline" size="sm">
                   Format: {dataset.format.toUpperCase()}
                 </Badge>
               )}
-              {!isRemote && dataset.inputType && (
+              {dataset.inputType && (
                 <Badge variant="outline" size="sm">
                   {dataset.inputType === 'query' ? '📝 Query' : '📝 Q+R'}
                 </Badge>
@@ -863,16 +735,6 @@ export default function DatasetsPage() {
                 </Badge>
               )}
             </div>
-
-            {isRemote ? (
-              <p className="text-2xs text-surface-500 dark:text-surface-400 mb-1">
-                HuggingFace ID: {dataset.huggingFaceId || 'Provided URL'}
-              </p>
-            ) : (
-              <p className="text-2xs text-surface-500 dark:text-surface-400 mb-1">
-                Local dataset managed independently from projects.
-              </p>
-            )}
 
             {tags.length > 0 && (
               <div className="flex flex-wrap gap-1 mb-2">
@@ -904,71 +766,23 @@ export default function DatasetsPage() {
   return (
     <div>
       <Header
-        title={`${activeTabLabel} Datasets`}
-        description="Manage datasets independently of projects — both local and remote sources."
+        title="Datasets"
+        description="Manage and curate your evaluation datasets."
         actions={
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 p-0.5">
-              <button
-                onClick={() => setActiveTab('remote')}
-                className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
-                  activeTab === 'remote'
-                    ? 'bg-brand-600 text-white'
-                    : 'text-surface-600 dark:text-surface-400 hover:bg-surface-100 dark:hover:bg-surface-700 dark:bg-surface-700'
-                }`}
-              >
-                Remote
-              </button>
-              <button
-                onClick={() => setActiveTab('local')}
-                className={`rounded-md px-3 py-1 text-xs font-medium transition-colors ${
-                  activeTab === 'local'
-                    ? 'bg-brand-600 text-white'
-                    : 'text-surface-600 dark:text-surface-400 hover:bg-surface-100 dark:hover:bg-surface-700 dark:bg-surface-700'
-                }`}
-              >
-                Local
-              </button>
-            </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={handleSwapTab}
-              aria-label={`Swap to ${activeTab === 'remote' ? 'Local' : 'Remote'}`}
-              title={`Swap to ${activeTab === 'remote' ? 'Local' : 'Remote'}`}
+          <Button variant="primary" size="sm" onClick={openCreate}>
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              aria-hidden="true"
             >
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M17 3l4 4-4 4" />
-                <path d="M3 7h18" />
-                <path d="M7 21l-4-4 4-4" />
-                <path d="M21 17H3" />
-              </svg>
-            </Button>
-            <Button variant="primary" size="sm" onClick={handleAddDatasetForActiveTab}>
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                aria-hidden="true"
-              >
-                <path d="M12 5v14M5 12h14" />
-              </svg>
-              New Dataset
-            </Button>
-          </div>
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            New Dataset
+          </Button>
         }
       />
 
@@ -1023,7 +837,7 @@ export default function DatasetsPage() {
               <h3 className="text-sm font-semibold text-surface-800 dark:text-surface-200">Datasets</h3>
               {!loading && (
                 <Badge variant="outline" size="sm">
-                  {tabDatasets.length}
+                  {filtered.length}
                 </Badge>
               )}
             </div>
@@ -1035,7 +849,7 @@ export default function DatasetsPage() {
                 <Skeleton key={i} className="h-44 w-full rounded-xl" />
               ))}
             </div>
-          ) : tabDatasets.length === 0 ? (
+          ) : filtered.length === 0 ? (
             <EmptyState
               icon={
                 <svg
@@ -1053,16 +867,12 @@ export default function DatasetsPage() {
                   <path d="M8 12h8M12 8v8" />
                 </svg>
               }
-              title={`No ${activeTabLabel.toLowerCase()} datasets yet`}
-              description={
-                activeTab === 'remote'
-                  ? 'Import HuggingFace or other remote datasets and we will track their metadata separately.'
-                  : 'Create or upload datasets that live independently of projects and evaluations.'
-              }
+              title="No datasets yet"
+              description="Create or upload datasets to use in your evaluations."
             />
           ) : (
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {tabDatasets.map(renderDatasetCard)}
+              {filtered.map(renderDatasetCard)}
             </div>
           )}
         </div>
@@ -1078,229 +888,10 @@ export default function DatasetsPage() {
       >
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>
-              {createStep === 'type' && 'New Dataset'}
-              {createStep === 'remote-url' && 'Add Remote Dataset'}
-              {createStep === 'remote-confirm' && 'Confirm Dataset'}
-              {createStep === 'local-form' && 'Create Local Dataset'}
-            </DialogTitle>
+            <DialogTitle>New Dataset</DialogTitle>
           </DialogHeader>
 
           <DialogBody>
-            {/* ─── Step: Choose type ─────────────────────── */}
-            {createStep === 'type' && (
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  onClick={() => setCreateStep('remote-url')}
-                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-surface-200 dark:border-surface-700 p-6 transition-all hover:border-brand-400 hover:bg-brand-50 dark:hover:bg-brand-950/30"
-                >
-                  <svg
-                    width="32"
-                    height="32"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    className="text-brand-600"
-                  >
-                    <circle cx="12" cy="12" r="10" />
-                    <line x1="2" y1="12" x2="22" y2="12" />
-                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-                  </svg>
-                  <div className="text-center">
-                    <p className="text-sm font-semibold text-surface-900 dark:text-surface-100">
-                      Remote Dataset
-                    </p>
-                    <p className="mt-1 text-xs text-surface-500 dark:text-surface-400">
-                      Import from HuggingFace or URL
-                    </p>
-                  </div>
-                </button>
-                <button
-                  onClick={() => setCreateStep('local-form')}
-                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-surface-200 dark:border-surface-700 p-6 transition-all hover:border-brand-400 hover:bg-brand-50 dark:hover:bg-brand-950/30"
-                >
-                  <svg
-                    width="32"
-                    height="32"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    className="text-brand-600"
-                  >
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                    <polyline points="14 2 14 8 20 8" />
-                    <line x1="12" y1="18" x2="12" y2="12" />
-                    <line x1="9" y1="15" x2="15" y2="15" />
-                  </svg>
-                  <div className="text-center">
-                    <p className="text-sm font-semibold text-surface-900 dark:text-surface-100">
-                      Local Dataset
-                    </p>
-                    <p className="mt-1 text-xs text-surface-500 dark:text-surface-400">
-                      Create inline or paste data
-                    </p>
-                  </div>
-                </button>
-              </div>
-            )}
-
-            {/* ─── Step: Remote URL ──────────────────────── */}
-            {createStep === 'remote-url' && (
-              <div className="space-y-4">
-                <div>
-                  <label className="text-sm font-medium text-surface-700 dark:text-surface-300 mb-1.5 block">
-                    HuggingFace Dataset URL
-                  </label>
-                  <Input
-                    value={remoteUrl}
-                    onChange={(e) => setRemoteUrl(e.target.value)}
-                    placeholder="https://huggingface.co/datasets/livecodebench/code_generation_lite"
-                    autoFocus
-                  />
-                  <p className="mt-1.5 text-xs text-surface-400">
-                    Paste a HuggingFace dataset URL and we&apos;ll fetch its
-                    metadata automatically.
-                  </p>
-                </div>
-                <div>
-                  <label className="text-sm font-medium text-surface-700 dark:text-surface-300 mb-1.5 block">
-                    Visibility
-                  </label>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => setRemoteVisibility('public')}
-                      className={`flex-1 rounded-lg border-2 px-3 py-2 text-sm font-medium transition-colors ${
-                        remoteVisibility === 'public'
-                          ? 'border-brand-500 dark:border-brand-700 bg-brand-50 dark:bg-brand-950/30 text-brand-700 dark:text-brand-300'
-                          : 'border-surface-200 dark:border-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700'
-                      }`}
-                    >
-                      🔓 Public
-                    </button>
-                    <button
-                      onClick={() => setRemoteVisibility('private')}
-                      className={`flex-1 rounded-lg border-2 px-3 py-2 text-sm font-medium transition-colors ${
-                        remoteVisibility === 'private'
-                          ? 'border-brand-500 dark:border-brand-700 bg-brand-50 dark:bg-brand-950/30 text-brand-700 dark:text-brand-300'
-                          : 'border-surface-200 dark:border-surface-700 text-surface-600 dark:text-surface-400 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700'
-                      }`}
-                    >
-                      🔒 Private
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* ─── Step: Remote Confirm ──────────────────── */}
-            {createStep === 'remote-confirm' && hfPreview && (
-              <div className="space-y-4">
-                <div className="rounded-xl border border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-800 p-4">
-                  <div className="flex items-start justify-between mb-2">
-                    <div>
-                      <h3 className="text-sm font-bold text-surface-900 dark:text-surface-100">
-                        {hfPreview.id}
-                      </h3>
-                      <p className="text-xs text-surface-500 dark:text-surface-400">
-                        by {hfPreview.author}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-2 text-xs text-surface-500 dark:text-surface-400">
-                      <span>⬇ {hfPreview.downloads?.toLocaleString() ?? 0}</span>
-                      <span>❤ {hfPreview.likes ?? 0}</span>
-                    </div>
-                  </div>
-                  <p className="text-xs text-surface-600 dark:text-surface-400 line-clamp-3 mb-3">
-                    {hfPreview.description}
-                  </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {hfPreview.splits.length > 0 && (
-                      <Badge variant="default" size="sm">
-                        {hfPreview.splits.length} split
-                        {hfPreview.splits.length !== 1 ? 's' : ''}
-                      </Badge>
-                    )}
-                    {hfPreview.sampleCount != null && (
-                      <Badge variant="default" size="sm">
-                        {hfPreview.sampleCount.toLocaleString()} samples
-                      </Badge>
-                    )}
-                    {hfPreview.configs.length > 1 && (
-                      <Badge variant="outline" size="sm">
-                        {hfPreview.configs.length} configs
-                      </Badge>
-                    )}
-                  </div>
-                  {hfPreview.tags.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-2">
-                      {hfPreview.tags.slice(0, 8).map((tag) => (
-                        <span
-                          key={tag}
-                          className="inline-block rounded-full bg-white dark:bg-surface-800 px-2 py-0.5 text-2xs text-surface-700 dark:text-surface-200 border border-surface-200 dark:border-blue-200"
-                        >
-                          {tag}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-surface-700 dark:text-surface-300 block">
-                    Tags (used for filtering)
-                  </label>
-                  <div className="flex gap-2">
-                    <Input
-                      value={remoteTagInput}
-                      onChange={(e) => setRemoteTagInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ',') {
-                          e.preventDefault();
-                          addRemoteTag();
-                        }
-                      }}
-                      placeholder="Add a tag and press Enter"
-                    />
-                    <Button variant="primary" onClick={addRemoteTag}>
-                      Add
-                    </Button>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {remoteTags.length === 0 && (
-                      <p className="text-2xs text-surface-400">No tags yet.</p>
-                    )}
-                    {remoteTags.map((tag) => (
-                      <span
-                        key={tag}
-                        className="inline-flex items-center gap-1 rounded-full bg-surface-100 dark:bg-surface-700 px-2 py-0.5 text-2xs text-surface-800 dark:text-surface-200 border border-surface-200 dark:border-blue-200"
-                      >
-                        {tag}
-                        <button
-                          type="button"
-                          onClick={() => removeRemoteTag(tag)}
-                          className="text-surface-400 hover:text-red-500"
-                          aria-label={`Remove tag ${tag}`}
-                        >
-                          ×
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                  <p className="text-2xs text-surface-400">
-                    Visibility stays separate; tags only affect search and filtering.
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {/* ─── Step: Local Form ──────────────────────── */}
-            {createStep === 'local-form' && (
               <div className="space-y-4">
                 <Input
                   ref={localNameInputRef}
@@ -1749,59 +1340,24 @@ export default function DatasetsPage() {
                   )}
                 </div>
               </div>
-            )}
+            }
           </DialogBody>
 
           <DialogFooter>
-            {createStep !== 'type' && (
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  if (createStep === 'remote-confirm')
-                    setCreateStep('remote-url');
-                  else setCreateStep('type');
-                }}
-              >
-                Back
-              </Button>
-            )}
-            {createStep === 'type' && (
-              <Button variant="secondary" onClick={() => setCreateOpen(false)}>
-                Cancel
-              </Button>
-            )}
-            {createStep === 'remote-url' && (
-              <Button
-                variant="primary"
-                onClick={handleFetchPreview}
-                loading={fetchingPreview}
-                disabled={!remoteUrl.trim()}
-              >
-                Fetch Metadata
-              </Button>
-            )}
-            {createStep === 'remote-confirm' && (
-              <Button
-                variant="primary"
-                onClick={handleCreateRemote}
-                loading={creating}
-              >
-                Add Dataset
-              </Button>
-            )}
-            {createStep === 'local-form' && (
-              <Button
-                variant="primary"
-                onClick={handleCreateLocal}
-                loading={creating}
-                disabled={
-                  !localName.trim() ||
-                  (localMode === 'upload' && localUploadedSamples.length === 0)
-                }
-              >
-                Create Dataset
-              </Button>
-            )}
+            <Button variant="secondary" onClick={() => setCreateOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              onClick={handleCreateLocal}
+              loading={creating}
+              disabled={
+                !localName.trim() ||
+                (localMode === 'upload' && localUploadedSamples.length === 0)
+              }
+            >
+              Create Dataset
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
