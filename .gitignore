@@ -23,6 +23,8 @@ yarn-debug.log*
 yarn-error.log*
 
 # Local env files
+.claude
+.github
 .env
 .env.local
 .env.development.local

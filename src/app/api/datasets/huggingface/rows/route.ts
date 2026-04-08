@@ -73,12 +73,14 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     console.error('Failed to fetch HF dataset rows:', error);
+    const message = error instanceof Error ? error.message : 'Failed to fetch dataset rows';
+    const normalizedMessage =
+      message.includes('404 {"error":"Not found."}')
+        ? 'HuggingFace row access is unavailable for this dataset/config/split. This usually means the dataset viewer is disabled or the dataset requires a custom loading script, so remote evaluation cannot read rows from it.'
+        : message;
     return NextResponse.json(
       {
-        error:
-          error instanceof Error
-            ? error.message
-            : 'Failed to fetch dataset rows',
+        error: normalizedMessage,
       },
       { status: 502 }
     );

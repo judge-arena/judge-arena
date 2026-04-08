@@ -37,6 +37,14 @@ export interface HuggingFaceFeature {
   type: string;
 }
 
+export interface HFDatasetServerCapabilities {
+  preview: boolean;
+  viewer: boolean;
+  search: boolean;
+  filter: boolean;
+  statistics: boolean;
+}
+
 export interface DatasetMetadata {
   id: string;
   name: string;
@@ -54,6 +62,8 @@ export interface DatasetMetadata {
   configs: string[];
   /** Maps each config name to its available split names */
   configSplits: Record<string, string[]>;
+  serverCapabilities: HFDatasetServerCapabilities | null;
+  hasDatasetScript: boolean;
 }
 
 const HF_API_BASE = 'https://huggingface.co/api';
@@ -101,6 +111,30 @@ async function fetchSplits(datasetId: string): Promise<HuggingFaceSplit[]> {
   }
 }
 
+async function fetchDatasetServerCapabilities(
+  datasetId: string
+): Promise<HFDatasetServerCapabilities | null> {
+  try {
+    const url = new URL(`${HF_DATASETS_SERVER}/is-valid`);
+    url.searchParams.set('dataset', datasetId);
+    const res = await fetch(url.toString(), {
+      headers: { Accept: 'application/json' },
+    });
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    return {
+      preview: Boolean(data?.preview),
+      viewer: Boolean(data?.viewer),
+      search: Boolean(data?.search),
+      filter: Boolean(data?.filter),
+      statistics: Boolean(data?.statistics),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Parse a HuggingFace dataset ID from a URL.
  * Supports: https://huggingface.co/datasets/org/name
@@ -122,9 +156,10 @@ export function parseHuggingFaceUrl(url: string): string | null {
 export async function fetchDatasetMetadata(
   datasetId: string
 ): Promise<DatasetMetadata> {
-  const [info, splitsData] = await Promise.all([
+  const [info, splitsData, serverCapabilities] = await Promise.all([
     fetchHuggingFaceDatasetInfo(datasetId),
     fetchSplits(datasetId),
+    fetchDatasetServerCapabilities(datasetId),
   ]);
 
   // Extract unique split names
@@ -158,6 +193,9 @@ export async function fetchDatasetMetadata(
     info.description ||
     (info.cardData?.description as string) ||
     `HuggingFace dataset: ${datasetId}`;
+  const hasDatasetScript = (info.siblings || []).some((file) =>
+    file.rfilename.toLowerCase().endsWith('.py')
+  );
 
   return {
     id: info.id,
@@ -175,6 +213,8 @@ export async function fetchDatasetMetadata(
     sampleCount,
     configs,
     configSplits,
+    serverCapabilities,
+    hasDatasetScript,
   };
 }
 

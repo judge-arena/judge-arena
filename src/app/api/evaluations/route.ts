@@ -294,6 +294,17 @@ export async function POST(request: Request) {
         );
       }
 
+      if (meta.serverCapabilities && !meta.serverCapabilities.viewer) {
+        return NextResponse.json(
+          {
+            error:
+              `HuggingFace dataset "${remoteData.huggingFaceId}" cannot be used for remote evaluation because row access is unavailable. ` +
+              'This usually means the dataset viewer is disabled or the dataset requires a custom loading script. Import it as a local dataset instead.',
+          },
+          { status: 422 }
+        );
+      }
+
       // Fetch the actual rows
       let hfRows: Record<string, unknown>[];
       try {

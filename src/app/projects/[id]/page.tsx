@@ -82,6 +82,13 @@ export default function ProjectDetailPage() {
   const [hfExpectedColumn, setHfExpectedColumn] = useState('');
   const [hfColumns, setHfColumns] = useState<string[]>([]);
   const [hfPreviewRows, setHfPreviewRows] = useState<any[]>([]);
+  const [hfFetchError, setHfFetchError] = useState('');
+  const [hfPreviewError, setHfPreviewError] = useState('');
+
+  const hfRemoteUnavailable =
+    datasetSource === 'remote' &&
+    Boolean(hfMeta?.serverCapabilities) &&
+    !hfMeta.serverCapabilities.viewer;
 
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const exportMenuRef = useRef<HTMLDivElement>(null);
@@ -108,6 +115,73 @@ export default function ProjectDetailPage() {
     document.body.removeChild(link);
     const scopeLabel = scope === 'all' ? 'all data' : scope;
     toast.success(`Exporting ${scopeLabel} as ${format.toUpperCase()}…`);
+  };
+
+  const getHfConfigOptions = (meta: any): string[] => {
+    const fromConfigs = Array.isArray(meta?.configs) ? meta.configs : [];
+    const fromMapping = meta?.configSplits ? Object.keys(meta.configSplits) : [];
+    const merged = [...fromConfigs, ...fromMapping]
+      .map((value) => String(value).trim())
+      .filter(Boolean);
+
+    return [...new Set(merged)];
+  };
+
+  const getHfSplitOptions = (meta: any, config: string): string[] => {
+    const fromConfig = Array.isArray(meta?.configSplits?.[config])
+      ? meta.configSplits[config]
+      : [];
+    const fallback = Array.isArray(meta?.splits) ? meta.splits : [];
+    const merged = [...(fromConfig.length ? fromConfig : []), ...fallback]
+      .map((value) => String(value).trim())
+      .filter(Boolean);
+
+    return [...new Set(merged)];
+  };
+
+  const applyHfPreviewData = (data: any) => {
+    setHfPreview(data);
+
+    const featureColumns = Array.isArray(data?.features)
+      ? data.features
+          .map((feature: any) => feature?.name)
+          .filter(
+            (value: unknown): value is string =>
+              typeof value === 'string' && value.trim().length > 0
+          )
+      : [];
+
+    const rowColumns = Array.isArray(data?.rows)
+      ? Array.from(
+          new Set(
+            data.rows.flatMap((item: any) =>
+              item?.row && typeof item.row === 'object' ? Object.keys(item.row) : []
+            )
+          )
+        )
+      : [];
+
+    const cols = [...new Set([...featureColumns, ...rowColumns])];
+
+    setHfColumns(cols);
+    setHfPreviewRows(Array.isArray(data?.rows) ? data.rows.map((r: any) => r.row) : []);
+
+    const preferredInput = ['question', 'prompt', 'input', 'text', 'instruction', 'query'];
+    const preferredExpected = ['answer', 'response', 'output', 'expected', 'completion', 'target', 'reference'];
+    const autoInput =
+      cols.find((column) => preferredInput.includes(column.toLowerCase())) ||
+      cols[0] ||
+      '';
+    const autoExpected =
+      cols.find((column) => preferredExpected.includes(column.toLowerCase())) || '';
+
+    setHfInputColumn((current) =>
+      current && cols.includes(current) ? current : autoInput
+    );
+    setHfExpectedColumn((current) => {
+      if (!current) return autoExpected;
+      return cols.includes(current) ? current : autoExpected;
+    });
   };
 
   const handleConfigExport = (format: 'yaml' | 'json', includeSamples: boolean = false) => {
@@ -268,6 +342,8 @@ export default function ProjectDetailPage() {
     if (!rawId) return;
 
     setHfFetching(true);
+    setHfFetchError('');
+    setHfPreviewError('');
     setHfMeta(null);
     setHfPreview(null);
     setHfColumns([]);
@@ -286,20 +362,28 @@ export default function ProjectDetailPage() {
       const metaRes = await fetch(`/api/datasets/huggingface/preview?${params}`);
       if (!metaRes.ok) {
         const err = await metaRes.json().catch(() => ({}));
-        toast.error(err.error || 'Dataset not found on HuggingFace');
+        const message = err.error || 'Dataset not found on HuggingFace';
+        setHfFetchError(message);
+        toast.error(message);
         return;
       }
       const meta = await metaRes.json();
       setHfMeta(meta);
 
+      if (meta.serverCapabilities && !meta.serverCapabilities.viewer) {
+        setHfPreviewError(
+          'This HuggingFace dataset cannot be used for remote evaluation because row access is unavailable. It likely has the dataset viewer disabled or requires a custom loading script. Import it as a local dataset instead.'
+        );
+        return;
+      }
+
       // Determine available configs and pick the first config
-      const configs: string[] = meta.configs?.length ? meta.configs : ['default'];
-      const defaultConfig = configs[0];
+      const configs = getHfConfigOptions(meta);
+      const defaultConfig = (configs.length ? configs : ['default'])[0];
       setHfConfig(defaultConfig);
 
       // Determine splits for the selected config
-      const configSplits: Record<string, string[]> = meta.configSplits || {};
-      const splitsForConfig = configSplits[defaultConfig] ?? meta.splits ?? [];
+      const splitsForConfig = getHfSplitOptions(meta, defaultConfig);
       const defaultSplit = splitsForConfig[0] || 'train';
       setHfSplit(defaultSplit);
 
@@ -313,23 +397,18 @@ export default function ProjectDetailPage() {
       const rowsRes = await fetch(`/api/datasets/huggingface/rows?${rowsParams}`);
       if (rowsRes.ok) {
         const rowsData = await rowsRes.json();
-        setHfPreview(rowsData);
-        const cols = (rowsData.features || []).map((f: any) => f.name);
-        setHfColumns(cols);
-        setHfPreviewRows(rowsData.rows?.map((r: any) => r.row) || []);
-        // Auto-detect input column
-        const preferredInput = ['question', 'prompt', 'input', 'text', 'instruction', 'query'];
-        const autoInput = cols.find((c: string) => preferredInput.includes(c.toLowerCase())) || cols[0] || '';
-        setHfInputColumn(autoInput);
-        // Auto-detect expected column
-        const preferredExpected = ['answer', 'response', 'output', 'expected', 'completion', 'target', 'reference'];
-        const autoExpected = cols.find((c: string) => preferredExpected.includes(c.toLowerCase())) || '';
-        setHfExpectedColumn(autoExpected);
+        applyHfPreviewData(rowsData);
       } else {
-        console.warn('Could not fetch preview rows — columns will not auto-populate');
+        const err = await rowsRes.json().catch(() => ({}));
+        setHfPreviewError(
+          err.error ||
+            'Could not fetch preview rows automatically. You can still provide config, split, and column names manually.'
+        );
       }
     } catch {
-      toast.error('Failed to fetch HuggingFace dataset');
+      const message = 'Failed to fetch HuggingFace dataset';
+      setHfFetchError(message);
+      toast.error(message);
     } finally {
       setHfFetching(false);
     }
@@ -338,7 +417,14 @@ export default function ProjectDetailPage() {
   // Refetch preview rows when config/split changes
   const handleRefetchPreview = async (config: string, split: string) => {
     if (!hfMeta?.id || !config || !split) return;
+    if (hfMeta?.serverCapabilities && !hfMeta.serverCapabilities.viewer) {
+      setHfPreviewError(
+        'Preview is unavailable because this dataset does not support HuggingFace row access.'
+      );
+      return;
+    }
     setHfFetching(true);
+    setHfPreviewError('');
     try {
       const params = new URLSearchParams({
         id: hfMeta.id,
@@ -349,13 +435,19 @@ export default function ProjectDetailPage() {
       const res = await fetch(`/api/datasets/huggingface/rows?${params}`);
       if (res.ok) {
         const data = await res.json();
-        setHfPreview(data);
-        const cols = (data.features || []).map((f: any) => f.name);
-        setHfColumns(cols);
-        setHfPreviewRows(data.rows?.map((r: any) => r.row) || []);
+        applyHfPreviewData(data);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        const message =
+          err.error ||
+          `Could not load preview rows for config "${config}" and split "${split}".`;
+        setHfPreviewError(message);
+        toast.error(message);
       }
     } catch {
-      toast.error('Failed to refresh preview');
+      const message = 'Failed to refresh preview';
+      setHfPreviewError(message);
+      toast.error(message);
     } finally {
       setHfFetching(false);
     }
@@ -370,6 +462,12 @@ export default function ProjectDetailPage() {
     }
     if (evalMode === 'dataset' && datasetSource === 'local' && !selectedDatasetId) return;
     if (evalMode === 'dataset' && datasetSource === 'remote' && (!hfMeta?.id || !hfConfig || !hfSplit || !hfInputColumn)) return;
+    if (evalMode === 'dataset' && datasetSource === 'remote' && hfRemoteUnavailable) {
+      toast.error(
+        'This HuggingFace dataset does not expose rows through the datasets server. Import it as a local dataset to evaluate it.'
+      );
+      return;
+    }
 
     setSubmitMode(runMode);
     setSubmitting(true);
@@ -1123,50 +1221,104 @@ export default function ProjectDetailPage() {
                               <span className="inline-flex items-center rounded-full bg-purple-100 dark:bg-purple-800/50 px-2 py-0.5 text-2xs font-medium text-purple-700 dark:text-purple-300">
                                 {hfMeta.likes?.toLocaleString()} likes
                               </span>
+                              {hfMeta.serverCapabilities && !hfMeta.serverCapabilities.viewer && (
+                                <span className="inline-flex items-center rounded-full bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 text-2xs font-medium text-amber-800 dark:text-amber-300">
+                                  Viewer disabled
+                                </span>
+                              )}
+                              {hfMeta.hasDatasetScript && (
+                                <span className="inline-flex items-center rounded-full bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 text-2xs font-medium text-amber-800 dark:text-amber-300">
+                                  Uses dataset script
+                                </span>
+                              )}
                             </div>
                           </div>
 
+                          {hfFetchError && (
+                            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">
+                              {hfFetchError}
+                            </div>
+                          )}
+
                           {/* Config + Split selectors */}
-                          <div className="grid grid-cols-2 gap-2">
-                            <Select
-                              label="Config"
-                              value={hfConfig}
-                              onChange={(e) => {
-                                const newConfig = e.target.value;
-                                setHfConfig(newConfig);
-                                // Update split to the first available for this config
-                                const configSplits: Record<string, string[]> = hfMeta.configSplits || {};
-                                const splitsForConfig = configSplits[newConfig] ?? hfMeta.splits ?? [];
-                                const newSplit = splitsForConfig[0] || 'train';
-                                setHfSplit(newSplit);
-                                handleRefetchPreview(newConfig, newSplit);
-                              }}
-                              options={
-                                (hfMeta.configs?.length ? hfMeta.configs : ['default']).map((c: string) => ({
+                          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                            {getHfConfigOptions(hfMeta).length > 0 ? (
+                              <Select
+                                label="Config"
+                                value={hfConfig}
+                                onChange={(e) => {
+                                  const newConfig = e.target.value;
+                                  const nextSplits = getHfSplitOptions(hfMeta, newConfig);
+                                  const newSplit = nextSplits.includes(hfSplit)
+                                    ? hfSplit
+                                    : nextSplits[0] || '';
+                                  setHfConfig(newConfig);
+                                  setHfSplit(newSplit);
+                                  if (newConfig && newSplit) {
+                                    handleRefetchPreview(newConfig, newSplit);
+                                  }
+                                }}
+                                options={getHfConfigOptions(hfMeta).map((c) => ({
                                   value: c,
                                   label: c,
-                                }))
-                              }
-                            />
-                            <Select
-                              label="Split"
-                              value={hfSplit}
-                              onChange={(e) => {
-                                setHfSplit(e.target.value);
-                                handleRefetchPreview(hfConfig, e.target.value);
-                              }}
-                              options={
-                                (() => {
-                                  const configSplits: Record<string, string[]> = hfMeta.configSplits || {};
-                                  const available = configSplits[hfConfig] ?? hfMeta.splits ?? [];
-                                  return (available.length ? available : ['train']).map((s: string) => ({
-                                    value: s,
-                                    label: s,
-                                  }));
-                                })()
-                              }
-                            />
+                                }))}
+                                hint="Auto-detected from HuggingFace"
+                              />
+                            ) : (
+                              <Input
+                                label="Config"
+                                value={hfConfig}
+                                onChange={(e) => setHfConfig(e.target.value)}
+                                placeholder="Enter config manually (for example: default)"
+                              />
+                            )}
+
+                            {getHfSplitOptions(hfMeta, hfConfig).length > 0 ? (
+                              <Select
+                                label="Split"
+                                value={hfSplit}
+                                onChange={(e) => {
+                                  const newSplit = e.target.value;
+                                  setHfSplit(newSplit);
+                                  if (hfConfig && newSplit) {
+                                    handleRefetchPreview(hfConfig, newSplit);
+                                  }
+                                }}
+                                options={getHfSplitOptions(hfMeta, hfConfig).map((s) => ({
+                                  value: s,
+                                  label: s,
+                                }))}
+                                hint="Filtered to the selected config when available"
+                              />
+                            ) : (
+                              <Input
+                                label="Split"
+                                value={hfSplit}
+                                onChange={(e) => setHfSplit(e.target.value)}
+                                placeholder="Enter split manually (for example: train)"
+                              />
+                            )}
                           </div>
+
+                          <div className="flex items-center justify-between gap-3 rounded-md border border-surface-200 bg-white/70 px-3 py-2 text-xs text-surface-600 dark:border-surface-700 dark:bg-surface-900/30 dark:text-surface-300">
+                            <span>
+                              If config or split detection is incomplete, enter them manually and refresh the preview.
+                            </span>
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => handleRefetchPreview(hfConfig, hfSplit)}
+                              disabled={!hfConfig || !hfSplit || hfFetching || hfRemoteUnavailable}
+                            >
+                              Refresh Preview
+                            </Button>
+                          </div>
+
+                          {hfPreviewError && (
+                            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300">
+                              {hfPreviewError}
+                            </div>
+                          )}
 
                           {/* Sample count */}
                           <div className="space-y-1.5">
@@ -1201,11 +1353,11 @@ export default function ProjectDetailPage() {
                           </div>
 
                           {/* Column mapping */}
-                          {hfColumns.length > 0 && (
-                            <div className="space-y-2">
-                              <label className="text-sm font-medium text-surface-700 dark:text-surface-300">
-                                Column Mapping
-                              </label>
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium text-surface-700 dark:text-surface-300">
+                              Column Mapping
+                            </label>
+                            {hfColumns.length > 0 ? (
                               <div className="grid grid-cols-2 gap-2">
                                 <Select
                                   label="Input Column"
@@ -1215,7 +1367,7 @@ export default function ProjectDetailPage() {
                                     value: c,
                                     label: c,
                                   }))}
-                                  hint="Column used as the evaluation input/prompt"
+                                  hint="Column used as the evaluation input or prompt"
                                 />
                                 <Select
                                   label="Expected Column (optional)"
@@ -1231,13 +1383,28 @@ export default function ProjectDetailPage() {
                                   hint="Reference answer for judge mode"
                                 />
                               </div>
-                              <p className="text-xs text-surface-500 dark:text-surface-400">
-                                {hfExpectedColumn
-                                  ? 'Judge mode: models will score the expected output against the rubric.'
-                                  : 'Respond mode: models will generate responses, then humans pick the best one.'}
-                              </p>
-                            </div>
-                          )}
+                            ) : (
+                              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                                <Input
+                                  label="Input Column"
+                                  value={hfInputColumn}
+                                  onChange={(e) => setHfInputColumn(e.target.value)}
+                                  placeholder="Enter the prompt/input column"
+                                />
+                                <Input
+                                  label="Expected Column (optional)"
+                                  value={hfExpectedColumn}
+                                  onChange={(e) => setHfExpectedColumn(e.target.value)}
+                                  placeholder="Enter the reference/expected column"
+                                />
+                              </div>
+                            )}
+                            <p className="text-xs text-surface-500 dark:text-surface-400">
+                              {hfExpectedColumn
+                                ? 'Judge mode: models will score the expected output against the rubric.'
+                                : 'Respond mode: models will generate responses, then humans pick the best one.'}
+                            </p>
+                          </div>
 
                           {/* Preview table */}
                           {hfPreviewRows.length > 0 && hfInputColumn && (
@@ -1427,7 +1594,7 @@ export default function ProjectDetailPage() {
                       ? !respondInputText.trim()
                       : !judgePromptText.trim() || !judgeResponseText.trim())
                   : datasetSource === 'remote'
-                    ? !hfMeta?.id || !hfConfig || !hfSplit || !hfInputColumn
+                    ? !hfMeta?.id || !hfConfig || !hfSplit || !hfInputColumn || hfRemoteUnavailable
                     : !selectedDatasetId)
               }
             >
@@ -1452,7 +1619,7 @@ export default function ProjectDetailPage() {
                       ? !respondInputText.trim()
                       : !judgePromptText.trim() || !judgeResponseText.trim())
                   : datasetSource === 'remote'
-                    ? !hfMeta?.id || !hfConfig || !hfSplit || !hfInputColumn
+                    ? !hfMeta?.id || !hfConfig || !hfSplit || !hfInputColumn || hfRemoteUnavailable
                     : !selectedDatasetId)
               }
             >
