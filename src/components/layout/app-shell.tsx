@@ -7,7 +7,7 @@ import { Sidebar } from '@/components/layout/sidebar';
 import { KeyboardShortcutsDialog } from '@/components/layout/keyboard-shortcuts-dialog';
 import { Toaster } from 'sonner';
 
-const publicPaths = ['/login', '/register', '/leaderboard'];
+const publicPaths = ['/', '/login', '/register'];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -95,7 +95,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       switch (sequenceKey) {
         case 'g d':
-          router.push('/');
+          router.push('/dashboard');
           clearChord();
           return;
         case 'g p':
@@ -119,7 +119,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           clearChord();
           return;
         case 'g l':
-          router.push('/leaderboard');
+          router.push('/');
           clearChord();
           return;
         default:
@@ -166,11 +166,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   );
 
   // Public pages render immediately — no auth required, no loading wait.
-  // Authenticated users still get the sidebar; unauthenticated users get a plain wrapper.
+  // The landing page (/) has its own nav bar, so it never gets the sidebar.
+  // Auth pages (login/register) also render standalone.
   if (isPublicPage) {
-    if (status === 'authenticated') {
-      return fullLayout;
-    }
     return <>{children}{toaster}</>;
   }
 

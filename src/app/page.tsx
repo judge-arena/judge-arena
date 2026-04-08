@@ -3,455 +3,444 @@
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
-import { Header } from '@/components/layout/header';
-import { Card, CardContent } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Skeleton } from '@/components/ui/skeleton';
-import type { AppStats } from '@/types';
+import { cn } from '@/lib/utils';
 
-function toList<T>(payload: unknown): T[] {
-  if (Array.isArray(payload)) return payload as T[];
-  if (
-    payload &&
-    typeof payload === 'object' &&
-    'data' in payload &&
-    Array.isArray((payload as { data: unknown }).data)
-  ) {
-    return (payload as { data: T[] }).data;
-  }
-  return [];
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+interface LeaderboardModel {
+  modelId: string;
+  modelName: string;
+  provider: string;
+  providerModelId: string;
+  avgScore: number;
+  medianScore: number;
+  minScore: number;
+  maxScore: number;
+  evaluationCount: number;
 }
 
-export default function DashboardPage() {
-  const { data: session } = useSession();
-  const [stats, setStats] = useState<AppStats | null>(null);
-  const [recentEvaluations, setRecentEvaluations] = useState<any[]>([]);
-  const [recentProject, setRecentProject] = useState<any | null>(null);
-  const [leaderboard, setLeaderboard] = useState<any | null>(null);
-  const [loading, setLoading] = useState(true);
+interface LeaderboardData {
+  project: { id: string; name: string; description: string | null } | null;
+  models: LeaderboardModel[];
+  totalEvaluations: number;
+  totalJudgments: number;
+  lastUpdated: string | null;
+}
 
-  const userName =
-    session?.user?.name ||
-    session?.user?.email?.split('@')[0] ||
-    'there';
+type SortKey = 'avgScore' | 'medianScore' | 'evaluationCount' | 'modelName';
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+const providerColors: Record<string, string> = {
+  anthropic: 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300',
+  openai: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300',
+  local: 'bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-300',
+};
+
+function scoreColor(score: number): string {
+  if (score >= 8) return 'text-emerald-600 dark:text-emerald-400';
+  if (score >= 6) return 'text-amber-600 dark:text-amber-400';
+  if (score >= 4) return 'text-orange-600 dark:text-orange-400';
+  return 'text-red-600 dark:text-red-400';
+}
+
+function scoreBar(score: number): string {
+  if (score >= 8) return 'bg-emerald-500';
+  if (score >= 6) return 'bg-amber-500';
+  if (score >= 4) return 'bg-orange-500';
+  return 'bg-red-500';
+}
+
+// ─── Page ────────────────────────────────────────────────────────────────────
+
+export default function LandingPage() {
+  const { status } = useSession();
+  const [data, setData] = useState<LeaderboardData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [sortKey, setSortKey] = useState<SortKey>('avgScore');
+  const [sortAsc, setSortAsc] = useState(false);
 
   useEffect(() => {
-    async function loadDashboard() {
-      try {
-        const [statsRes, evalsRes, projectsRes] = await Promise.all([
-          fetch('/api/stats'),
-          fetch('/api/evaluations'),
-          fetch('/api/projects'),
-        ]);
-        if (statsRes.ok) setStats(await statsRes.json());
-        if (evalsRes.ok) {
-          const evals = toList(await evalsRes.json());
-          setRecentEvaluations(evals.slice(0, 5));
-        }
-        if (projectsRes.ok) {
-          const projects = toList(await projectsRes.json());
-          // Find the Leaderboard (default) project
-          const lb = projects.find((p: any) => p.isDefault);
-          setLeaderboard(lb ?? null);
-          // Most recent non-default project
-          const userProject = projects.find((p: any) => !p.isDefault);
-          setRecentProject(userProject ?? null);
-        }
-      } catch (err) {
-        console.error('Failed to load dashboard:', err);
-      } finally {
-        setLoading(false);
-      }
-    }
-    loadDashboard();
+    fetch('/api/leaderboard')
+      .then((r) => r.json())
+      .then(setData)
+      .catch(() => setData(null))
+      .finally(() => setLoading(false));
   }, []);
 
-  const statCards = [
-    {
-      label: 'Projects',
-      value: stats?.totalProjects ?? 0,
-      href: '/projects',
-      icon: (
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) setSortAsc(!sortAsc);
+    else { setSortKey(key); setSortAsc(key === 'modelName'); }
+  };
+
+  const sorted = data?.models
+    ? [...data.models].sort((a, b) => {
+        let c = 0;
+        if (sortKey === 'avgScore') c = a.avgScore - b.avgScore;
+        else if (sortKey === 'medianScore') c = a.medianScore - b.medianScore;
+        else if (sortKey === 'evaluationCount') c = a.evaluationCount - b.evaluationCount;
+        else c = a.modelName.localeCompare(b.modelName);
+        return sortAsc ? c : -c;
+      })
+    : [];
+
+  const isAuth = status === 'authenticated';
+
+  const SortBtn = ({ label, id, className }: { label: string; id: SortKey; className?: string }) => (
+    <button onClick={() => handleSort(id)} className={cn(
+      'flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-surface-400 hover:text-surface-200 transition-colors',
+      className
+    )}>
+      {label}
+      {sortKey === id && (
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className={cn('transition-transform', sortAsc && 'rotate-180')}>
+          <path d="M6 9l6 6 6-6" />
         </svg>
-      ),
-      iconWrap: 'border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-950/30',
-      iconColor: 'text-blue-700 dark:text-blue-300',
-    },
-    {
-      label: 'Evaluations',
-      value: stats?.totalEvaluations ?? 0,
-      href: '/projects',
-      icon: (
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M9 11l3 3L22 4" />
-          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-        </svg>
-      ),
-      iconWrap: 'border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/30',
-      iconColor: 'text-emerald-700 dark:text-emerald-300',
-    },
-    {
-      label: 'Active Models',
-      value: stats?.activeModels ?? 0,
-      href: '/models',
-      icon: (
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M12 2L2 7l10 5 10-5-10-5z" />
-          <path d="M2 17l10 5 10-5" />
-          <path d="M2 12l10 5 10-5" />
-        </svg>
-      ),
-      iconWrap: 'border-purple-200 bg-purple-50 dark:border-purple-800 dark:bg-purple-950/30',
-      iconColor: 'text-purple-700 dark:text-purple-300',
-    },
-    {
-      label: 'Rubrics',
-      value: stats?.totalRubrics ?? 0,
-      href: '/rubrics',
-      icon: (
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <line x1="8" y1="6" x2="21" y2="6" />
-          <line x1="8" y1="12" x2="21" y2="12" />
-          <line x1="8" y1="18" x2="21" y2="18" />
-          <line x1="3" y1="6" x2="3.01" y2="6" />
-          <line x1="3" y1="12" x2="3.01" y2="12" />
-          <line x1="3" y1="18" x2="3.01" y2="18" />
-        </svg>
-      ),
-      iconWrap: 'border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/30',
-      iconColor: 'text-amber-700 dark:text-amber-300',
-    },
-    {
-      label: 'Datasets',
-      value: stats?.totalDatasets ?? 0,
-      href: '/datasets',
-      icon: (
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <ellipse cx="12" cy="5" rx="9" ry="3" />
-          <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
-          <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
-        </svg>
-      ),
-      iconWrap: 'border-cyan-200 bg-cyan-50 dark:border-cyan-800 dark:bg-cyan-950/30',
-      iconColor: 'text-cyan-700 dark:text-cyan-300',
-    },
-  ];
+      )}
+    </button>
+  );
 
   return (
-    <div>
-      <Header
-        title={`Welcome Back, ${userName}`}
-        description="Overview of your LLM evaluation workspace"
-        actions={
-          <div className="flex items-center gap-2">
-            <Link href="/projects">
-              <Button variant="primary" size="sm">
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  aria-hidden="true"
-                >
-                  <path d="M12 5v14M5 12h14" />
-                </svg>
-                Create Project
-              </Button>
-            </Link>
-            <Link href="/rubrics">
-              <Button variant="primary" size="sm">
-                Build Rubric
-              </Button>
-            </Link>
-            <Link href="/models">
-              <Button variant="primary" size="sm">
-                Configure Models
-              </Button>
-            </Link>
-          </div>
-        }
-      />
+    <div className="min-h-screen bg-surface-900 text-surface-100">
 
-      <div className="p-6 space-y-6">
-        {/* Stats Grid */}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
-          {statCards.map((stat) => (
-            <Link key={stat.label} href={stat.href}>
-              <Card interactive className="h-full">
-                <CardContent className="pt-5 h-full">
-                  <div className="flex h-full items-center justify-between gap-3">
-                    <div className="min-w-0 flex-1">
-                      <p className="text-xs font-medium text-surface-500 dark:text-surface-400 uppercase tracking-wider whitespace-nowrap">
-                        {stat.label}
-                      </p>
-                      {loading ? (
-                        <Skeleton className="h-8 w-16 mt-1" />
-                      ) : (
-                        <p className="text-2xl font-bold leading-none text-surface-900 dark:text-surface-100 mt-1">
-                          {stat.value}
-                        </p>
-                      )}
-                    </div>
-                    <div
-                      className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border ${stat.iconWrap} ${stat.iconColor}`}
-                      aria-hidden="true"
-                    >
-                      {stat.icon}
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </Link>
-          ))}
+      {/* ── Nav bar ─────────────────────────────────────────────────────── */}
+      <nav className="border-b border-surface-800 bg-surface-900/80 backdrop-blur-sm sticky top-0 z-50">
+        <div className="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
+          <Link href="/" className="flex items-center gap-2.5">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-600 text-white font-bold text-sm">
+              JA
+            </div>
+            <span className="font-bold text-surface-100 text-sm tracking-tight">Judge Arena</span>
+          </Link>
+          <div className="flex items-center gap-3">
+            {isAuth ? (
+              <Link
+                href="/dashboard"
+                className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 transition-colors"
+              >
+                Dashboard
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
+              </Link>
+            ) : (
+              <>
+                <Link
+                  href="/login"
+                  className="rounded-lg px-4 py-2 text-sm font-medium text-surface-300 hover:text-white transition-colors"
+                >
+                  Sign In
+                </Link>
+                <Link
+                  href="/register"
+                  className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 transition-colors"
+                >
+                  Get Started
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
+                </Link>
+              </>
+            )}
+          </div>
+        </div>
+      </nav>
+
+      {/* ── Hero section ────────────────────────────────────────────────── */}
+      <section className="relative overflow-hidden">
+        {/* Subtle gradient background */}
+        <div className="absolute inset-0 bg-gradient-to-b from-brand-600/5 via-transparent to-transparent pointer-events-none" />
+        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-brand-600/8 rounded-full blur-3xl pointer-events-none" />
+
+        <div className="relative max-w-6xl mx-auto px-6 pt-16 pb-12 text-center">
+          <div className="inline-flex items-center gap-2 rounded-full border border-surface-700 bg-surface-800/60 px-3 py-1 text-xs text-surface-400 mb-6">
+            <span className="flex h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse-subtle" />
+            Open-source LLM evaluation studio
+          </div>
+
+          <h1 className="text-4xl sm:text-5xl font-extrabold tracking-tight text-white max-w-3xl mx-auto leading-[1.1]">
+            Evaluate LLMs with
+            <span className="text-brand-500"> rubric-driven</span> precision
+          </h1>
+
+          <p className="mt-4 text-lg text-surface-400 max-w-2xl mx-auto leading-relaxed">
+            Multi-model judging, versioned rubrics, and human-in-the-loop verification.
+            Self-hosted, data-sovereign, and built for teams that need reproducible evaluations.
+          </p>
+
+          <div className="mt-8 flex items-center justify-center gap-3">
+            {isAuth ? (
+              <Link
+                href="/dashboard"
+                className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-brand-700 transition-colors shadow-lg shadow-brand-600/20"
+              >
+                Go to Dashboard
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
+              </Link>
+            ) : (
+              <>
+                <Link
+                  href="/register"
+                  className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-brand-700 transition-colors shadow-lg shadow-brand-600/20"
+                >
+                  Start Evaluating
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
+                </Link>
+                <Link
+                  href="/login"
+                  className="inline-flex items-center gap-2 rounded-lg border border-surface-700 bg-surface-800/60 px-6 py-2.5 text-sm font-medium text-surface-300 hover:text-white hover:border-surface-600 transition-colors"
+                >
+                  Sign In
+                </Link>
+              </>
+            )}
+          </div>
+
+          {/* Feature pills */}
+          <div className="mt-10 flex flex-wrap items-center justify-center gap-3">
+            {[
+              { icon: 'M9 12l2 2 4-4', label: 'LLM-as-a-Judge' },
+              { icon: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2', label: 'Human Verification' },
+              { icon: 'M12 2L2 7l10 5 10-5-10-5z', label: 'Multi-Model' },
+              { icon: 'M4 7V4h16v3M9 20h6M12 4v16', label: 'Versioned Rubrics' },
+            ].map((f) => (
+              <span key={f.label} className="inline-flex items-center gap-1.5 rounded-full border border-surface-700/60 bg-surface-800/40 px-3 py-1.5 text-xs text-surface-400">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-brand-500">
+                  <path d={f.icon} />
+                </svg>
+                {f.label}
+              </span>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ── Stats strip ─────────────────────────────────────────────────── */}
+      {data && sorted.length > 0 && (
+        <div className="border-y border-surface-800 bg-surface-800/30">
+          <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-8">
+              {[
+                { label: 'Models Ranked', value: data.models.length },
+                { label: 'Evaluations', value: data.totalEvaluations },
+                { label: 'Judgments', value: data.totalJudgments },
+              ].map((s) => (
+                <div key={s.label} className="text-sm">
+                  <span className="font-bold text-white tabular-nums">{s.value.toLocaleString()}</span>
+                  <span className="text-surface-500 ml-1.5">{s.label}</span>
+                </div>
+              ))}
+            </div>
+            {data.lastUpdated && (
+              <div className="text-xs text-surface-500">
+                Updated {new Date(data.lastUpdated).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Leaderboard table ───────────────────────────────────────────── */}
+      <section className="max-w-6xl mx-auto px-6 py-10">
+        <div className="flex items-end justify-between mb-6">
+          <div>
+            <h2 className="text-xl font-bold text-white">Model Rankings</h2>
+            <p className="text-sm text-surface-400 mt-1">
+              Aggregate scores from rubric-based LLM-as-a-Judge evaluations
+            </p>
+          </div>
         </div>
 
-        <div className="space-y-6">
-          {/* Leaderboard CTA */}
-          {!loading && leaderboard && (
-            <Link href={`/projects/${leaderboard.id}`}>
-              <Card
-                interactive
-                className="border-blue-200 dark:border-blue-800 bg-gradient-to-r from-blue-50 to-cyan-50 dark:from-blue-950/25 dark:to-cyan-950/20 hover:from-blue-100 hover:to-cyan-100 dark:hover:from-blue-950/35 dark:hover:to-cyan-950/30 transition-colors"
-              >
-                <CardContent className="pt-5 pb-5">
-                  <div className="flex items-center gap-4">
-                    <div className="rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-100 dark:bg-blue-900/40 p-3">
-                      <svg
-                        width="24"
-                        height="24"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        className="text-blue-600 dark:text-blue-300"
-                      >
-                        <path d="M8 21h8M12 17v4M7 4h10M4 8h16M5 4v4M19 4v4M9 8v3a3 3 0 0 0 6 0V8" />
-                      </svg>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <h2 className="text-base font-bold text-surface-900 dark:text-surface-100">
-                        Leaderboard
-                      </h2>
-                      <p className="text-sm text-surface-600 dark:text-surface-400 mt-0.5">
-                        Evaluate models against public datasets and benchmark performance
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <Badge variant="success" size="sm" className="font-semibold">
-                        Public
-                      </Badge>
-                      <Badge variant="default" size="sm" className="dark:bg-surface-700 dark:text-surface-200 dark:border-surface-600">
-                        {leaderboard._count?.evaluations ?? 0} evaluations
-                      </Badge>
-                      <svg
-                        width="16"
-                        height="16"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        className="text-surface-400 dark:text-surface-300"
-                      >
-                        <polyline points="9 18 15 12 9 6" />
-                      </svg>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </Link>
-          )}
-
-          <Card>
-            <CardContent className="pt-5">
-            <div className="flex items-center justify-between gap-3 mb-2.5">
-              <h2 className="text-sm font-semibold text-surface-700 dark:text-surface-300">
-                Jump back into a project
-              </h2>
+        {loading ? (
+          <div className="space-y-2">
+            {[...Array(5)].map((_, i) => (
+              <div key={i} className="h-14 rounded-lg bg-surface-800 animate-pulse" />
+            ))}
+          </div>
+        ) : sorted.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-surface-700 bg-surface-800/30 py-20 text-center">
+            <div className="text-surface-500 text-sm">No model evaluations yet.</div>
+            <p className="text-surface-600 text-xs mt-2 max-w-sm mx-auto">
+              Once evaluations are run against the public leaderboard project, model rankings will appear here.
+            </p>
+            {!isAuth && (
               <Link
-                href="/projects"
-                className="text-xs text-brand-600 hover:text-brand-700 font-medium"
+                href="/register"
+                className="inline-flex items-center gap-2 mt-6 rounded-lg bg-brand-600 px-5 py-2 text-sm font-medium text-white hover:bg-brand-700 transition-colors"
               >
-                View all projects →
-              </Link>
-            </div>
-
-            {loading ? (
-              <Skeleton className="h-36 w-full rounded-xl" />
-            ) : !recentProject ? (
-              <div className="rounded-xl border border-dashed border-surface-300 dark:border-surface-600 p-6 text-center">
-                <p className="text-sm text-surface-500 dark:text-surface-400 mb-3">
-                  No projects yet. Create your first project to start evaluating.
-                </p>
-                <Link href="/projects">
-                  <Button variant="primary" size="sm">
-                    Create Project
-                  </Button>
-                </Link>
-              </div>
-            ) : (
-              <Link
-                href={`/projects/${recentProject.id}`}
-                className="block rounded-xl border border-surface-200 dark:border-surface-700 p-5 hover:border-brand-300 dark:hover:border-brand-600 hover:bg-brand-50/30 dark:hover:bg-brand-950/20 transition-colors"
-              >
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0">
-                    <p className="text-base font-semibold text-surface-900 dark:text-surface-100 truncate">
-                      {recentProject.name}
-                    </p>
-                    {recentProject.description && (
-                      <p className="text-sm text-surface-500 dark:text-surface-400 mt-1 line-clamp-2">
-                        {recentProject.description}
-                      </p>
-                    )}
-                    <p className="text-xs text-surface-400 mt-2">
-                      Last edited {new Date(recentProject.updatedAt).toLocaleDateString()}
-                    </p>
-                  </div>
-                  <Badge variant="default" size="sm" className="dark:bg-surface-700 dark:text-surface-200 dark:border-surface-600">
-                    {recentProject._count?.evaluations ?? 0} evaluations
-                  </Badge>
-                </div>
-                <div className="mt-4">
-                  <Button variant="primary" size="sm">
-                    Jump back into project
-                  </Button>
-                </div>
+                Get Started
               </Link>
             )}
-            </CardContent>
-          </Card>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-surface-700 bg-surface-800/50 overflow-hidden">
+            {/* Header */}
+            <div className="grid grid-cols-[3rem_1fr_6.5rem_5.5rem_5rem_5rem] gap-3 px-4 py-2.5 border-b border-surface-700/60 bg-surface-800/80 text-surface-500">
+              <span className="text-[11px] font-semibold uppercase tracking-wider">#</span>
+              <SortBtn label="Model" id="modelName" />
+              <span className="text-[11px] font-semibold uppercase tracking-wider">Provider</span>
+              <SortBtn label="Avg Score" id="avgScore" />
+              <SortBtn label="Median" id="medianScore" />
+              <SortBtn label="Evals" id="evaluationCount" />
+            </div>
 
-          <Card>
-            <CardContent className="pt-5">
-              <div className="flex items-center justify-between mb-2.5">
-                <h2 className="text-sm font-semibold text-surface-700 dark:text-surface-300">
-                  Recent Evaluations
-                </h2>
-                <Link
-                  href="/projects"
-                  className="text-xs text-brand-600 hover:text-brand-700 font-medium"
+            {/* Rows */}
+            {sorted.map((model, i) => {
+              const rank = sortKey === 'avgScore' && !sortAsc ? i + 1 : i + 1;
+              const isTop = sortKey === 'avgScore' && !sortAsc && i === 0;
+              return (
+                <div
+                  key={model.modelId}
+                  className={cn(
+                    'grid grid-cols-[3rem_1fr_6.5rem_5.5rem_5rem_5rem] gap-3 px-4 py-3 items-center transition-colors',
+                    'hover:bg-surface-700/20',
+                    i > 0 && 'border-t border-surface-700/30',
+                    isTop && 'bg-brand-600/5 border-l-2 border-l-brand-500'
+                  )}
                 >
-                  View all →
-                </Link>
-              </div>
+                  {/* Rank */}
+                  <div className="flex justify-center">
+                    {rank <= 3 && sortKey === 'avgScore' && !sortAsc ? (
+                      <span className={cn(
+                        'inline-flex items-center justify-center w-7 h-7 rounded-full text-xs font-bold',
+                        rank === 1 && 'bg-amber-500/20 text-amber-400',
+                        rank === 2 && 'bg-surface-600/30 text-surface-300',
+                        rank === 3 && 'bg-orange-500/20 text-orange-400',
+                      )}>{rank}</span>
+                    ) : (
+                      <span className="text-sm text-surface-500 tabular-nums">{rank}</span>
+                    )}
+                  </div>
 
-              {loading ? (
-                <div className="space-y-3">
-                  {[1, 2, 3].map((i) => (
-                    <Skeleton key={i} className="h-14 w-full" />
-                  ))}
-                </div>
-              ) : recentEvaluations.length === 0 ? (
-                <p className="text-sm text-surface-400 py-6 text-center">
-                  No evaluations yet. Create a project and submit your first text
-                  for evaluation.
-                </p>
-              ) : (
-                <div className="divide-y divide-surface-100 dark:divide-surface-700">
-                  {recentEvaluations.map((evaluation: any) => (
-                    <Link
-                      key={evaluation.id}
-                      href={`/evaluate/${evaluation.id}`}
-                      className="flex items-center gap-3 py-3 hover:bg-surface-50 dark:bg-surface-800 dark:hover:bg-surface-700 -mx-2 px-2 rounded-lg transition-colors"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium text-surface-900 dark:text-surface-100 truncate">
-                          {evaluation.title || 'Untitled Evaluation'}
-                        </p>
-                        <p className="text-xs text-surface-400 truncate">
-                          {evaluation.project?.name} ·{' '}
-                          {new Date(evaluation.createdAt).toLocaleDateString()}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        {(() => {
-                          const latestRun = (evaluation.runs ?? [])[0];
-                          const runCount = (evaluation.runs ?? []).length;
-                          const statusVariant =
-                            latestRun?.status === 'completed' ? 'success'
-                            : latestRun?.status === 'error' ? 'error'
-                            : latestRun?.status === 'judging' ? 'info'
-                            : 'default';
-                          return (
-                            <>
-                              <Badge variant="default" size="sm" className="dark:bg-surface-700 dark:text-surface-200 dark:border-surface-600">
-                                {runCount} run{runCount === 1 ? '' : 's'}
-                              </Badge>
-                              {latestRun && (
-                                <Badge variant={statusVariant} size="sm">
-                                  {latestRun.status}
-                                </Badge>
-                              )}
-                            </>
-                          );
-                        })()}
-                      </div>
-                    </Link>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
+                  {/* Model */}
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-surface-100 truncate">{model.modelName}</div>
+                    <div className="text-[11px] text-surface-500 truncate font-mono">{model.providerModelId}</div>
+                  </div>
 
-        {/* Getting Started Guide */}
-        {!loading && stats && stats.totalEvaluations === 0 && (
-          <Card className="border-brand-200 dark:border-brand-700 bg-brand-50/50 dark:bg-brand-950/20">
-            <CardContent className="pt-5">
-              <h2 className="text-base font-semibold text-brand-900 mb-2">
-                Getting Started with Judge Arena
-              </h2>
-              <div className="space-y-3 text-sm text-brand-800">
-                <div className="flex items-start gap-3">
-                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-200 text-brand-800 text-xs font-bold">
-                    1
+                  {/* Provider */}
+                  <span className={cn(
+                    'inline-flex items-center justify-center px-2 py-0.5 rounded-md text-[11px] font-medium capitalize w-fit',
+                    providerColors[model.provider] || 'bg-surface-700 text-surface-300'
+                  )}>
+                    {model.provider}
                   </span>
-                  <div>
-                    <p className="font-medium">Configure your models</p>
-                    <p className="text-brand-600 text-xs">
-                      Set up API keys and select which LLM models will act as
-                      judges.
-                    </p>
+
+                  {/* Avg Score + bar */}
+                  <div className="space-y-1">
+                    <span className={cn('text-sm font-bold tabular-nums', scoreColor(model.avgScore))}>
+                      {model.avgScore.toFixed(2)}
+                    </span>
+                    <div className="h-1 w-full rounded-full bg-surface-700">
+                      <div
+                        className={cn('h-full rounded-full transition-all', scoreBar(model.avgScore))}
+                        style={{ width: `${(model.avgScore / 10) * 100}%` }}
+                      />
+                    </div>
                   </div>
-                </div>
-                <div className="flex items-start gap-3">
-                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-200 text-brand-800 text-xs font-bold">
-                    2
+
+                  {/* Median */}
+                  <span className={cn('text-sm tabular-nums', scoreColor(model.medianScore))}>
+                    {model.medianScore.toFixed(2)}
                   </span>
-                  <div>
-                    <p className="font-medium">Create a rubric</p>
-                    <p className="text-brand-600 text-xs">
-                      Define the criteria and scoring scales for your
-                      evaluations.
-                    </p>
-                  </div>
+
+                  {/* Evals */}
+                  <span className="text-sm tabular-nums text-surface-400">{model.evaluationCount}</span>
                 </div>
-                <div className="flex items-start gap-3">
-                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-200 text-brand-800 text-xs font-bold">
-                    3
-                  </span>
-                  <div>
-                    <p className="font-medium">Submit text for evaluation</p>
-                    <p className="text-brand-600 text-xs">
-                      Create a project, paste your text, and let models judge it
-                      alongside your human evaluation.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+              );
+            })}
+          </div>
         )}
-      </div>
+
+        {/* Legend */}
+        {sorted.length > 0 && (
+          <div className="flex items-center gap-5 mt-4 text-[11px] text-surface-500">
+            <span>Score scale: 0 &ndash; 10</span>
+            {[
+              { color: 'bg-emerald-500', label: '8-10 Excellent' },
+              { color: 'bg-amber-500', label: '6-8 Good' },
+              { color: 'bg-orange-500', label: '4-6 Fair' },
+              { color: 'bg-red-500', label: '0-4 Poor' },
+            ].map((l) => (
+              <span key={l.label} className="flex items-center gap-1">
+                <span className={cn('w-1.5 h-1.5 rounded-full', l.color)} />{l.label}
+              </span>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* ── How it works ────────────────────────────────────────────────── */}
+      <section className="border-t border-surface-800 bg-surface-800/20">
+        <div className="max-w-6xl mx-auto px-6 py-16">
+          <h2 className="text-xl font-bold text-white text-center mb-10">How It Works</h2>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {[
+              {
+                step: '1',
+                title: 'Define Rubrics',
+                desc: 'Create versioned evaluation criteria with weighted scoring. Pin rubric versions to evaluations for reproducibility.',
+                icon: 'M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2',
+              },
+              {
+                step: '2',
+                title: 'Run Multi-Model Judging',
+                desc: 'Submit text artifacts and have multiple LLMs evaluate them in parallel against your rubric criteria.',
+                icon: 'M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5',
+              },
+              {
+                step: '3',
+                title: 'Verify with Humans',
+                desc: 'Layer human judgment on top. Compare model disagreements, select the best judge, and build gold-standard evaluation datasets.',
+                icon: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 7a4 4 0 1 0 8 0 4 4 0 0 0-8 0M22 21v-2a4 4 0 0 0-3-3.87',
+              },
+            ].map((s) => (
+              <div key={s.step} className="rounded-xl border border-surface-700 bg-surface-800/40 p-6">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-600/15 border border-brand-600/30">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-brand-500">
+                      <path d={s.icon} />
+                    </svg>
+                  </div>
+                  <span className="text-xs font-bold text-surface-500 uppercase tracking-wider">Step {s.step}</span>
+                </div>
+                <h3 className="text-base font-semibold text-white mb-2">{s.title}</h3>
+                <p className="text-sm text-surface-400 leading-relaxed">{s.desc}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ── CTA footer ──────────────────────────────────────────────────── */}
+      {!isAuth && (
+        <section className="border-t border-surface-800">
+          <div className="max-w-6xl mx-auto px-6 py-16 text-center">
+            <h2 className="text-2xl font-bold text-white">Ready to evaluate your models?</h2>
+            <p className="mt-3 text-surface-400 max-w-lg mx-auto">
+              Set up your own rubrics, connect your LLM providers, and start producing high-quality evaluation data in minutes.
+            </p>
+            <div className="mt-6 flex items-center justify-center gap-3">
+              <Link
+                href="/register"
+                className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-brand-700 transition-colors shadow-lg shadow-brand-600/20"
+              >
+                Create Free Account
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
+              </Link>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* ── Footer ──────────────────────────────────────────────────────── */}
+      <footer className="border-t border-surface-800 bg-surface-900">
+        <div className="max-w-6xl mx-auto px-6 py-6 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-xs text-surface-500">
+            <div className="flex h-5 w-5 items-center justify-center rounded bg-brand-600 text-white font-bold text-[9px]">JA</div>
+            Judge Arena
+          </div>
+          <div className="text-xs text-surface-600">
+            Self-hosted LLM evaluation studio
+          </div>
+        </div>
+      </footer>
     </div>
   );
 }
