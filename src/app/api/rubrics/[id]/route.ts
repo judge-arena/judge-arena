@@ -78,33 +78,35 @@ export async function PATCH(
     const body = await request.json();
     const data = updateRubricSchema.parse(body);
 
-    // If criteria are provided, replace all criteria
-    if (data.criteria) {
-      await prisma.rubricCriterion.deleteMany({
-        where: { rubricId: params.id },
-      });
-    }
+    // Atomic: delete old criteria + update rubric with new criteria in one transaction
+    const rubric = await prisma.$transaction(async (tx) => {
+      if (data.criteria) {
+        await tx.rubricCriterion.deleteMany({
+          where: { rubricId: params.id },
+        });
+      }
 
-    const rubric = await prisma.rubric.update({
-      where: { id: params.id },
-      data: {
-        ...(data.name && { name: data.name }),
-        ...(data.description !== undefined && { description: data.description }),
-        ...(data.criteria && {
-          criteria: {
-            create: data.criteria.map((c, i) => ({
-              name: c.name,
-              description: c.description,
-              maxScore: c.maxScore,
-              weight: c.weight,
-              order: c.order ?? i,
-            })),
-          },
-        }),
-      },
-      include: {
-        criteria: { orderBy: { order: 'asc' } },
-      },
+      return tx.rubric.update({
+        where: { id: params.id },
+        data: {
+          ...(data.name && { name: data.name }),
+          ...(data.description !== undefined && { description: data.description }),
+          ...(data.criteria && {
+            criteria: {
+              create: data.criteria.map((c, i) => ({
+                name: c.name,
+                description: c.description,
+                maxScore: c.maxScore,
+                weight: c.weight,
+                order: c.order ?? i,
+              })),
+            },
+          }),
+        },
+        include: {
+          criteria: { orderBy: { order: 'asc' } },
+        },
+      });
     });
 
     return NextResponse.json(rubric);

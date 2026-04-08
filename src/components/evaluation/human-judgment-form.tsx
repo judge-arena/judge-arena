@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Slider } from '@/components/ui/slider';
@@ -54,6 +54,24 @@ export function HumanJudgmentForm({
   const [selectedBestModelId, setSelectedBestModelId] = useState<string | null>(
     existingJudgment?.selectedBestModelId ?? null
   );
+
+  // Re-sync form state when the underlying judgment changes (e.g., navigating between runs)
+  useEffect(() => {
+    setOverallScore(existingJudgment?.overallScore ?? 5);
+    setReasoning(existingJudgment?.reasoning ?? '');
+    setCriteriaScores(
+      existingJudgment?.criteriaScores ??
+        criteria.map((c) => ({
+          criterionId: c.id,
+          criterionName: c.name,
+          score: Math.round(c.maxScore / 2),
+          maxScore: c.maxScore,
+          weight: c.weight,
+          comment: '',
+        }))
+    );
+    setSelectedBestModelId(existingJudgment?.selectedBestModelId ?? null);
+  }, [existingJudgment, criteria]);
 
   const updateCriterionScore = (criterionId: string, score: number) => {
     setCriteriaScores((prev) =>

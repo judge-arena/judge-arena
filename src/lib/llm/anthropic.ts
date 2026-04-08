@@ -46,14 +46,16 @@ export class AnthropicProvider implements JudgmentProvider {
     const response = await client.messages.create({
       model: config.modelId,
       max_tokens: 4096,
+      temperature: 0.3,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
     });
 
     const latencyMs = Date.now() - startTime;
 
+    const firstBlock = response.content[0];
     const rawText =
-      response.content[0].type === 'text' ? response.content[0].text : '';
+      firstBlock && firstBlock.type === 'text' ? firstBlock.text : '';
     const tokenCount =
       (response.usage?.input_tokens || 0) +
       (response.usage?.output_tokens || 0);
@@ -85,13 +87,15 @@ export class AnthropicProvider implements JudgmentProvider {
     const response = await client.messages.create({
       model: config.modelId,
       max_tokens: 4096,
+      temperature: 0.4,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
     });
 
     const latencyMs = Date.now() - startTime;
+    const firstBlock = response.content[0];
     const rawText =
-      response.content[0].type === 'text' ? response.content[0].text : '';
+      firstBlock && firstBlock.type === 'text' ? firstBlock.text : '';
     const tokenCount =
       (response.usage?.input_tokens || 0) +
       (response.usage?.output_tokens || 0);

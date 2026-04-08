@@ -265,16 +265,16 @@ export async function PUT(
     const body = await request.json();
     const data = bulkReplaceSamplesSchema.parse(body);
 
-    // Delete all existing samples
-    await prisma.datasetSample.deleteMany({
-      where: { datasetId: params.id },
-    });
+    // Atomic: delete old + create new + update count in one transaction
+    const newSamples = await prisma.$transaction(async (tx) => {
+      await tx.datasetSample.deleteMany({
+        where: { datasetId: params.id },
+      });
 
-    // Create new samples
-    if (data.samples.length > 0) {
-      await prisma.$transaction(
-        data.samples.map((s, i) =>
-          prisma.datasetSample.create({
+      if (data.samples.length > 0) {
+        for (let i = 0; i < data.samples.length; i++) {
+          const s = data.samples[i];
+          await tx.datasetSample.create({
             data: {
               datasetId: params.id,
               index: i,
@@ -282,19 +282,19 @@ export async function PUT(
               expected: s.expected ?? undefined,
               metadata: s.metadata ? JSON.stringify(s.metadata) : undefined,
             },
-          })
-        )
-      );
-    }
+          });
+        }
+      }
 
-    await prisma.dataset.update({
-      where: { id: params.id },
-      data: { sampleCount: data.samples.length },
-    });
+      await tx.dataset.update({
+        where: { id: params.id },
+        data: { sampleCount: data.samples.length },
+      });
 
-    const newSamples = await prisma.datasetSample.findMany({
-      where: { datasetId: params.id },
-      orderBy: { index: 'asc' },
+      return tx.datasetSample.findMany({
+        where: { datasetId: params.id },
+        orderBy: { index: 'asc' },
+      });
     });
 
     return NextResponse.json({ replaced: newSamples.length, samples: newSamples });

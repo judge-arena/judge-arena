@@ -25,10 +25,10 @@ const providers: Record<string, JudgmentProvider> = {
 };
 
 /**
- * Get the provider for a given provider name
+ * Get the provider for a given provider name (case-insensitive)
  */
 export function getProvider(providerName: ModelProvider | string): JudgmentProvider {
-  const provider = providers[providerName];
+  const provider = providers[providerName.toLowerCase()];
   if (!provider) {
     throw new Error(`Unknown provider: ${providerName}. Available: ${Object.keys(providers).join(', ')}`);
   }

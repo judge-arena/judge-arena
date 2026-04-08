@@ -155,7 +155,9 @@ export function ModelJudgmentCard({
                   Criteria Scores
                 </h4>
                 <div className="space-y-1.5">
-                  {criteriaScores.map((cs) => (
+                  {criteriaScores.map((cs) => {
+                    const ratio = cs.maxScore > 0 ? cs.score / cs.maxScore : 0;
+                    return (
                     <div key={cs.criterionId} className="flex items-center gap-2">
                       <span className="text-xs text-surface-600 dark:text-surface-400 flex-1 truncate">
                         {cs.criterionName}
@@ -165,16 +167,16 @@ export function ModelJudgmentCard({
                           <div
                             className={cn(
                               'h-full rounded-full transition-all',
-                              cs.score / cs.maxScore >= 0.8
+                              ratio >= 0.8
                                 ? 'bg-emerald-500'
-                                : cs.score / cs.maxScore >= 0.6
+                                : ratio >= 0.6
                                   ? 'bg-blue-500'
-                                  : cs.score / cs.maxScore >= 0.4
+                                  : ratio >= 0.4
                                     ? 'bg-amber-500'
                                     : 'bg-red-500'
                             )}
                             style={{
-                              width: `${(cs.score / cs.maxScore) * 100}%`,
+                              width: `${ratio * 100}%`,
                             }}
                           />
                         </div>
@@ -183,7 +185,8 @@ export function ModelJudgmentCard({
                         </span>
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}

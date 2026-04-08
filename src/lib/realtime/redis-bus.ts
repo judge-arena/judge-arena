@@ -123,8 +123,9 @@ export class RedisRealtimeEventBus implements RealtimeEventBus {
 
   private async loadRedisModule(): Promise<RedisModule | null> {
     try {
-      const dynamicImporter = new Function('return import("redis")');
-      const imported = (await dynamicImporter()) as RedisModule;
+      // Dynamic import wrapped in try/catch to gracefully handle missing redis package.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const imported = (await import(/* webpackIgnore: true */ 'redis')) as unknown as RedisModule;
       return imported;
     } catch {
       return null;

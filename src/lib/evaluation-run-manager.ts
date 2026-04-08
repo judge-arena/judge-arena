@@ -65,6 +65,7 @@ class HttpError extends Error {
 }
 
 const queue: QueueItem[] = [];
+const activeIds = new Set<string>();
 let activeWorkers = 0;
 
 function chunkArray<T>(items: T[], chunkSize: number): T[][] {
@@ -263,6 +264,10 @@ async function processRun(runId: string) {
   await refreshDatasetEvaluationSummaryForEvaluation(run.evaluationId);
 }
 
+function queueItemKey(item: QueueItem): string {
+  return item.type === 'run' ? `run:${item.runId}` : `eval:${item.evaluationId}`;
+}
+
 async function processQueueItem(item: QueueItem) {
   if (item.type === 'run') {
     await processRun(item.runId);
@@ -282,12 +287,14 @@ function pumpQueue() {
     const next = queue.shift();
     if (!next) return;
 
+    const key = queueItemKey(next);
     activeWorkers += 1;
     void processQueueItem(next)
       .catch((error) => {
-        console.error('Failed queue item processing:', error);
+        console.error(`[pumpQueue] Failed processing ${key}:`, error);
       })
       .finally(() => {
+        activeIds.delete(key);
         activeWorkers -= 1;
         pumpQueue();
       });
@@ -295,12 +302,20 @@ function pumpQueue() {
 }
 
 export function enqueueRunProcessing(runId: string) {
-  queue.push({ type: 'run', runId });
+  const item: QueueItem = { type: 'run', runId };
+  const key = queueItemKey(item);
+  if (activeIds.has(key)) return; // already queued or in-flight
+  activeIds.add(key);
+  queue.push(item);
   pumpQueue();
 }
 
 export function enqueueEvaluationRunCreation(evaluationId: string, triggeredById: string) {
-  queue.push({ type: 'evaluation', evaluationId, triggeredById });
+  const item: QueueItem = { type: 'evaluation', evaluationId, triggeredById };
+  const key = queueItemKey(item);
+  if (activeIds.has(key)) return; // already queued or in-flight
+  activeIds.add(key);
+  queue.push(item);
   pumpQueue();
 }
 

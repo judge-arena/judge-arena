@@ -85,10 +85,11 @@ describe('rate-limit', () => {
         remaining: 0,
         resetAt: Date.now() + 30000,
         retryAfterMs: 30000,
-      });
+      }, 10);
 
       expect(headers['Retry-After']).toBe('30');
       expect(headers['X-RateLimit-Remaining']).toBe('0');
+      expect(headers['X-RateLimit-Limit']).toBe('10');
     });
 
     it('should not include Retry-After when allowed', () => {
@@ -97,10 +98,11 @@ describe('rate-limit', () => {
         remaining: 5,
         resetAt: Date.now() + 60000,
         retryAfterMs: 0,
-      });
+      }, 10);
 
       expect(headers['Retry-After']).toBeUndefined();
       expect(headers['X-RateLimit-Remaining']).toBe('5');
+      expect(headers['X-RateLimit-Limit']).toBe('10');
     });
   });
 });

@@ -101,6 +101,7 @@ const evaluationInclude = {
   runs: {
     include: runSummaryInclude,
     orderBy: { createdAt: 'desc' as const },
+    take: 10,
   },
 };
 

@@ -105,6 +105,7 @@ model ModelConfig {
   judgments            ModelJudgment[]
   evaluationSelections EvaluationModelSelection[]
   runModelSelections   RunModelSelection[]
+  bestModelSelections  HumanJudgment[] @relation("BestModelSelection")
 
   @@unique([userId, slug])
   @@index([userId])
@@ -227,6 +228,7 @@ model HumanJudgment {
   reasoning           String?
   criteriaScores      String?       // JSON: Array<{ criterionId, criterionName, score, maxScore, weight, comment? }>
   selectedBestModelId String?
+  selectedBestModel   ModelConfig? @relation("BestModelSelection", fields: [selectedBestModelId], references: [id], onDelete: SetNull)
   userId              String
   user                User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt           DateTime      @default(now())

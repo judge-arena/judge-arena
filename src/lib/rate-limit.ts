@@ -125,9 +125,9 @@ export const registrationLimiter = createRateLimiter({
 /**
  * Build rate limit headers for HTTP responses.
  */
-export function rateLimitHeaders(result: RateLimitResult): Record<string, string> {
+export function rateLimitHeaders(result: RateLimitResult, maxRequests: number): Record<string, string> {
   return {
-    'X-RateLimit-Limit': String(result.remaining + (result.allowed ? 0 : 1)),
+    'X-RateLimit-Limit': String(maxRequests),
     'X-RateLimit-Remaining': String(result.remaining),
     'X-RateLimit-Reset': String(Math.ceil(result.resetAt / 1000)),
     ...(result.retryAfterMs > 0

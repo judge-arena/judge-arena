@@ -196,13 +196,17 @@ export interface ResilientCallOptions extends RetryOptions, CircuitBreakerOption
  * Execute an LLM call with both circuit breaker protection and retry logic.
  * The circuit breaker wraps the entire retry sequence — if all retries fail,
  * it counts as a single circuit breaker failure.
+ * When the circuit is half-open, retries are disabled so only a single probe
+ * request is sent to the recovering service.
  */
 export async function resilientCall<T>(
   providerKey: string,
   fn: () => Promise<T>,
   opts: ResilientCallOptions = {}
 ): Promise<T> {
-  return withCircuitBreaker(providerKey, () => withRetry(fn, opts), opts);
+  const circuitState = getCircuitState(providerKey);
+  const retryOpts = circuitState === 'half-open' ? { ...opts, maxAttempts: 1 } : opts;
+  return withCircuitBreaker(providerKey, () => withRetry(fn, retryOpts), opts);
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
