@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { verifyModelConnection } from '@/lib/llm/verify';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { logger, serializeError } from '@/lib/logger';
 
 const DEFAULT_CLAUDE_MODEL_IDS = new Set([
   'claude-sonnet-4-5-20250514',
@@ -82,7 +83,7 @@ export async function POST(
       hasApiKey: !!updated.apiKey,
     });
   } catch (error) {
-    console.error('Failed to verify model:', error);
+    logger.error('Failed to verify model', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to verify model connection' },
       { status: 500 }

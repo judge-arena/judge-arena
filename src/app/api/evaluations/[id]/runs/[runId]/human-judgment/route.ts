@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { refreshDatasetEvaluationSummaryForEvaluation } from '@/lib/dataset-evaluation-summary';
+import { logger, serializeError } from '@/lib/logger';
 
 const humanJudgmentSchema = z.object({
   overallScore: z.number().min(0).max(10).optional(),
@@ -134,7 +135,7 @@ export async function POST(
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: 'Validation failed', details: error.errors }, { status: 400 });
     }
-    console.error('Failed to save human judgment:', error);
+    logger.error('Failed to save human judgment', { error: serializeError(error) });
     return NextResponse.json({ error: 'Failed to save human judgment' }, { status: 500 });
   }
 }

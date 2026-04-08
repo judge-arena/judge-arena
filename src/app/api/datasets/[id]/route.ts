@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { logger, serializeError } from '@/lib/logger';
 
 const updateDatasetSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -61,7 +62,7 @@ export async function GET(
 
     return NextResponse.json(dataset);
   } catch (error) {
-    console.error('Failed to fetch dataset:', error);
+    logger.error('Failed to fetch dataset', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to fetch dataset' },
       { status: 500 }
@@ -122,7 +123,7 @@ export async function PATCH(
         { status: 400 }
       );
     }
-    console.error('Failed to update dataset:', error);
+    logger.error('Failed to update dataset', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to update dataset' },
       { status: 500 }
@@ -158,7 +159,7 @@ export async function DELETE(
     await prisma.dataset.delete({ where: { id: params.id } });
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('Failed to delete dataset:', error);
+    logger.error('Failed to delete dataset', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to delete dataset' },
       { status: 500 }

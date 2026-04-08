@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { logger, serializeError } from '@/lib/logger';
 
 const runDetailInclude = {
   rubric: {
@@ -67,7 +68,7 @@ export async function GET(
 
     return NextResponse.json(run);
   } catch (error) {
-    console.error('Failed to fetch run:', error);
+    logger.error('Failed to fetch run', { error: serializeError(error) });
     return NextResponse.json({ error: 'Failed to fetch run' }, { status: 500 });
   }
 }

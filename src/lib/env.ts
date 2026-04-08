@@ -53,6 +53,11 @@ const envSchema = z.object({
   RATE_LIMIT_ENABLED: z.coerce.boolean().optional().default(true),
   RATE_LIMIT_AUTH_MAX: z.coerce.number().int().positive().optional().default(5),
   RATE_LIMIT_API_MAX: z.coerce.number().int().positive().optional().default(60),
+
+  // ─── Proxy / Deployment ──
+  TRUSTED_PROXY: z.enum(['true', 'false']).optional().default('false'),
+  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).optional().default('info'),
+  RAILWAY_PUBLIC_DOMAIN: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

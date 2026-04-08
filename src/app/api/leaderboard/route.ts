@@ -8,6 +8,7 @@
 
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { logger, serializeError } from '@/lib/logger';
 
 interface ModelLeaderboardEntry {
   modelId: string;
@@ -150,7 +151,7 @@ export async function GET() {
       lastUpdated: lastJudgment?.createdAt ?? null,
     });
   } catch (error) {
-    console.error('Leaderboard API error:', error);
+    logger.error('Leaderboard API error', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to load leaderboard data' },
       { status: 500 }

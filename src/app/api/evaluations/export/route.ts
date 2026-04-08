@@ -8,6 +8,7 @@ import {
   csvResponse,
   jsonlResponse,
 } from '@/lib/export';
+import { logger, serializeError } from '@/lib/logger';
 
 /**
  * Shared Prisma include for full evaluation + run + judgment data.
@@ -98,7 +99,7 @@ export async function GET(request: Request) {
     }
     return csvResponse(toCsv(rows), `${filename}.csv`);
   } catch (error) {
-    console.error('Evaluation export failed:', error);
+    logger.error('Evaluation export failed', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to export evaluations' },
       { status: 500 }

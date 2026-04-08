@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { generateSlug } from '@/lib/config';
+import { logger, serializeError } from '@/lib/logger';
 
 // POST /api/datasets/[id]/versions — create a new version from the current dataset
 export async function POST(
@@ -127,7 +128,7 @@ export async function POST(
 
     return NextResponse.json(newVersion, { status: 201 });
   } catch (error) {
-    console.error('Failed to create dataset version:', error);
+    logger.error('Failed to create dataset version', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to create dataset version' },
       { status: 500 }
@@ -187,7 +188,7 @@ export async function GET(
 
     return NextResponse.json(versions);
   } catch (error) {
-    console.error('Failed to list dataset versions:', error);
+    logger.error('Failed to list dataset versions', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to list versions' },
       { status: 500 }

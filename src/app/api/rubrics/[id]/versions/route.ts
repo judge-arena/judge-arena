@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { logger, serializeError } from '@/lib/logger';
 
 const criterionSchema = z.object({
   name: z.string().min(1),
@@ -45,7 +46,7 @@ export async function GET(
 
     return NextResponse.json(versions);
   } catch (error) {
-    console.error('Failed to fetch rubric versions:', error);
+    logger.error('Failed to fetch rubric versions', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to fetch rubric versions' },
       { status: 500 }
@@ -115,7 +116,7 @@ export async function POST(
         { status: 400 }
       );
     }
-    console.error('Failed to create rubric version:', error);
+    logger.error('Failed to create rubric version', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to create rubric version' },
       { status: 500 }

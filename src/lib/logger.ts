@@ -104,6 +104,21 @@ export function createLogger(bindings: Record<string, unknown> = {}): Logger {
 export const logger = createLogger({ service: 'judge-arena' });
 
 /**
+ * Serialize an error for structured logging.
+ * Strips stack traces in production to avoid log noise.
+ */
+export function serializeError(err: unknown): Record<string, unknown> {
+  if (err instanceof Error) {
+    return {
+      name: err.name,
+      message: err.message,
+      ...(!IS_PRODUCTION && err.stack ? { stack: err.stack } : {}),
+    };
+  }
+  return { raw: String(err) };
+}
+
+/**
  * Generate a unique request correlation ID.
  */
 export function generateRequestId(): string {

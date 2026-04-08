@@ -5,6 +5,7 @@ import {
   fetchRows,
   parseHuggingFaceUrl,
 } from '@/lib/huggingface';
+import { logger, serializeError } from '@/lib/logger';
 
 /**
  * GET /api/datasets/huggingface/rows
@@ -72,7 +73,7 @@ export async function GET(request: Request) {
       partial: data.partial,
     });
   } catch (error) {
-    console.error('Failed to fetch HF dataset rows:', error);
+    logger.error('Failed to fetch HF dataset rows', { error: serializeError(error) });
     const message = error instanceof Error ? error.message : 'Failed to fetch dataset rows';
     const normalizedMessage =
       message.includes('404 {"error":"Not found."}')

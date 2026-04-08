@@ -9,6 +9,7 @@ import {
   csvResponse,
   jsonlResponse,
 } from '@/lib/export';
+import { logger, serializeError } from '@/lib/logger';
 
 /**
  * Full include for evaluation export (same as evaluations/export)
@@ -169,7 +170,7 @@ export async function GET(
       { status: 400 }
     );
   } catch (error) {
-    console.error('Project export failed:', error);
+    logger.error('Project export failed', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to export project data' },
       { status: 500 }

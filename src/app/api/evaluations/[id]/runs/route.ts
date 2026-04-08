@@ -8,6 +8,7 @@ import {
   runDetailIncludeConfig,
   toHttpError,
 } from '@/lib/evaluation-run-manager';
+import { logger, serializeError } from '@/lib/logger';
 
 const createRunSchema = z.object({
   rubricId: z.string().optional(),        // override; defaults to evaluation.rubricId
@@ -44,7 +45,7 @@ export async function GET(
 
     return NextResponse.json(runs);
   } catch (error) {
-    console.error('Failed to fetch runs:', error);
+    logger.error('Failed to fetch runs', { error: serializeError(error) });
     return NextResponse.json({ error: 'Failed to fetch runs' }, { status: 500 });
   }
 }
@@ -88,7 +89,7 @@ export async function POST(
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: 'Validation failed', details: error.errors }, { status: 400 });
     }
-    console.error('Failed to create run:', error);
+    logger.error('Failed to create run', { error: serializeError(error) });
     return NextResponse.json({ error: 'Failed to create run' }, { status: 500 });
   }
 }

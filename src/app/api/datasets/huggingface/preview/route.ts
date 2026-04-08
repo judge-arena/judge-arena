@@ -4,6 +4,7 @@ import {
   fetchDatasetMetadata,
   parseHuggingFaceUrl,
 } from '@/lib/huggingface';
+import { logger, serializeError } from '@/lib/logger';
 
 // GET /api/datasets/huggingface/preview?url=...&id=...
 // Preview metadata for a HuggingFace dataset before creating it
@@ -37,7 +38,7 @@ export async function GET(request: Request) {
     const metadata = await fetchDatasetMetadata(datasetId);
     return NextResponse.json(metadata);
   } catch (error) {
-    console.error('Failed to fetch HF dataset preview:', error);
+    logger.error('Failed to fetch HF dataset preview', { error: serializeError(error) });
     return NextResponse.json(
       {
         error:

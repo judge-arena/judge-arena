@@ -9,7 +9,7 @@ import {
   parseHuggingFaceUrl,
 } from '@/lib/huggingface';
 import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib/pagination';
-import { logger } from '@/lib/logger';
+import { logger, serializeError } from '@/lib/logger';
 
 const createDatasetSchema = z.object({
   name: z.string().min(1, 'Name is required').max(200),
@@ -155,9 +155,9 @@ export async function POST(request: Request) {
             tags = JSON.stringify(meta.tags);
           }
         } catch (err) {
-          console.warn(
-            `Could not fetch HF metadata for ${huggingFaceId}:`,
-            err
+          logger.warn(
+            `Could not fetch HF metadata for ${huggingFaceId}`,
+            { error: serializeError(err) }
           );
           // Continue without metadata — user can retry later
         }

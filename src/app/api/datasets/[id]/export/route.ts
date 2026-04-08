@@ -8,6 +8,7 @@ import {
   csvResponse,
   jsonlResponse,
 } from '@/lib/export';
+import { logger, serializeError } from '@/lib/logger';
 
 /**
  * GET /api/datasets/[id]/export?format=csv|jsonl
@@ -88,7 +89,7 @@ export async function GET(
 
     return csvResponse(toCsv(rows), `${safeName}_samples_${timestamp}.csv`);
   } catch (error) {
-    console.error('Dataset export failed:', error);
+    logger.error('Dataset export failed', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to export dataset' },
       { status: 500 }

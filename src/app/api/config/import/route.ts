@@ -7,6 +7,7 @@ import {
   type ImportDiffReport,
   deserializeConfig,
 } from '@/lib/config';
+import { logger, serializeError } from '@/lib/logger';
 
 /**
  * POST /api/config/import
@@ -350,7 +351,7 @@ export async function POST(request: Request) {
         : `Imported: ${report.summary.create} created, ${report.summary.update} updated, ${report.summary.skip} unchanged`,
     });
   } catch (error) {
-    console.error('Config import failed:', error);
+    logger.error('Config import failed', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to import configuration' },
       { status: 500 }

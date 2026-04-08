@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { logger, serializeError } from '@/lib/logger';
 
 const updateEvaluationSchema = z.object({
   rubricId: z.string().nullable().optional(),
@@ -71,7 +72,7 @@ export async function GET(
 
     return NextResponse.json(evaluation);
   } catch (error) {
-    console.error('Failed to fetch evaluation:', error);
+    logger.error('Failed to fetch evaluation', { error: serializeError(error) });
     return NextResponse.json({ error: 'Failed to fetch evaluation' }, { status: 500 });
   }
 }
@@ -168,7 +169,7 @@ export async function PATCH(
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: 'Validation failed', details: error.errors }, { status: 400 });
     }
-    console.error('Failed to update evaluation:', error);
+    logger.error('Failed to update evaluation', { error: serializeError(error) });
     return NextResponse.json({ error: 'Failed to update evaluation' }, { status: 500 });
   }
 }
@@ -196,7 +197,7 @@ export async function DELETE(
     await prisma.evaluation.delete({ where: { id: params.id } });
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('Failed to delete evaluation:', error);
+    logger.error('Failed to delete evaluation', { error: serializeError(error) });
     return NextResponse.json({ error: 'Failed to delete evaluation' }, { status: 500 });
   }
 }

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { logger, serializeError } from '@/lib/logger';
 
 const addSamplesSchema = z.object({
   samples: z.array(z.object({
@@ -85,7 +86,7 @@ export async function POST(
         { status: 400 }
       );
     }
-    console.error('Failed to add samples:', error);
+    logger.error('Failed to add samples', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to add samples' },
       { status: 500 }
@@ -149,7 +150,7 @@ export async function PATCH(
         { status: 400 }
       );
     }
-    console.error('Failed to update sample:', error);
+    logger.error('Failed to update sample', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to update sample' },
       { status: 500 }
@@ -231,7 +232,7 @@ export async function DELETE(
         { status: 400 }
       );
     }
-    console.error('Failed to delete samples:', error);
+    logger.error('Failed to delete samples', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to delete samples' },
       { status: 500 }
@@ -305,7 +306,7 @@ export async function PUT(
         { status: 400 }
       );
     }
-    console.error('Failed to replace samples:', error);
+    logger.error('Failed to replace samples', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to replace samples' },
       { status: 500 }

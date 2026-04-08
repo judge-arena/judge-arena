@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { generateSlug } from '@/lib/config';
+import { logger, serializeError } from '@/lib/logger';
 
 const criterionSchema = z.object({
   name: z.string().min(1),
@@ -40,7 +41,7 @@ export async function GET() {
 
     return NextResponse.json(rubrics);
   } catch (error) {
-    console.error('Failed to fetch rubrics:', error);
+    logger.error('Failed to fetch rubrics', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to fetch rubrics' },
       { status: 500 }
@@ -95,7 +96,7 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-    console.error('Failed to create rubric:', error);
+    logger.error('Failed to create rubric', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to create rubric' },
       { status: 500 }

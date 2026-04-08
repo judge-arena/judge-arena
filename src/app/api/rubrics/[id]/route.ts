@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { logger, serializeError } from '@/lib/logger';
 
 const updateRubricSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -50,7 +51,7 @@ export async function GET(
 
     return NextResponse.json(rubric);
   } catch (error) {
-    console.error('Failed to fetch rubric:', error);
+    logger.error('Failed to fetch rubric', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to fetch rubric' },
       { status: 500 }
@@ -117,7 +118,7 @@ export async function PATCH(
         { status: 400 }
       );
     }
-    console.error('Failed to update rubric:', error);
+    logger.error('Failed to update rubric', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to update rubric' },
       { status: 500 }
@@ -145,7 +146,7 @@ export async function DELETE(
     await prisma.rubric.delete({ where: { id: params.id } });
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('Failed to delete rubric:', error);
+    logger.error('Failed to delete rubric', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to delete rubric' },
       { status: 500 }

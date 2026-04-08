@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { logger, serializeError } from '@/lib/logger';
 
 const updateProjectSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -120,7 +121,7 @@ export async function GET(
 
     return NextResponse.json(project);
   } catch (error) {
-    console.error('Failed to fetch project:', error);
+    logger.error('Failed to fetch project', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to fetch project' },
       { status: 500 }
@@ -164,7 +165,7 @@ export async function PATCH(
         { status: 400 }
       );
     }
-    console.error('Failed to update project:', error);
+    logger.error('Failed to update project', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to update project' },
       { status: 500 }
@@ -192,7 +193,7 @@ export async function DELETE(
     await prisma.project.delete({ where: { id: params.id } });
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('Failed to delete project:', error);
+    logger.error('Failed to delete project', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to delete project' },
       { status: 500 }

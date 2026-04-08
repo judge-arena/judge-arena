@@ -11,6 +11,7 @@ import {
   yamlResponse,
   generateSlug,
 } from '@/lib/config';
+import { logger, serializeError } from '@/lib/logger';
 
 /**
  * GET /api/config/export
@@ -191,7 +192,7 @@ export async function GET(request: Request) {
 
     return yamlResponse(serializeConfig(config), `${filename}.yaml`);
   } catch (error) {
-    console.error('Config export failed:', error);
+    logger.error('Config export failed', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to export configuration' },
       { status: 500 }

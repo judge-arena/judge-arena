@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { logger, serializeError } from '@/lib/logger';
 
 // GET /api/stats - Dashboard statistics
 export async function GET() {
@@ -55,7 +56,7 @@ export async function GET() {
       totalDatasets,
     });
   } catch (error) {
-    console.error('Failed to fetch stats:', error);
+    logger.error('Failed to fetch stats', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to fetch stats' },
       { status: 500 }

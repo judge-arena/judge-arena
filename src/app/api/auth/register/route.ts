@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { hash } from 'bcryptjs';
 import { z } from 'zod';
 import { registrationLimiter } from '@/lib/rate-limit';
+import { logger, serializeError } from '@/lib/logger';
 
 const registerSchema = z.object({
   email: z.string().email('Invalid email address'),
@@ -62,7 +63,7 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-    console.error('Registration failed:', error);
+    logger.error('Registration failed', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Registration failed' },
       { status: 500 }

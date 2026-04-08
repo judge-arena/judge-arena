@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { fetchDatasetMetadata } from '@/lib/huggingface';
+import { logger, serializeError } from '@/lib/logger';
 
 // POST /api/datasets/[id]/refresh - Refresh metadata from remote source
 export async function POST(
@@ -62,7 +63,7 @@ export async function POST(
 
     return NextResponse.json(updated);
   } catch (error) {
-    console.error('Failed to refresh dataset metadata:', error);
+    logger.error('Failed to refresh dataset metadata', { error: serializeError(error) });
     return NextResponse.json(
       {
         error:

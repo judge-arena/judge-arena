@@ -6,8 +6,13 @@ const prisma = new PrismaClient();
 async function main() {
   console.log('🌱 Seeding database...');
 
+  // Seed passwords are configurable via env vars for production deployments.
+  // Defaults are only suitable for local development.
+  const adminPw = process.env.SEED_ADMIN_PASSWORD || 'admin123';
+  const demoPw = process.env.SEED_DEMO_PASSWORD || 'demo1234';
+
   // Create admin user
-  const adminPassword = await bcrypt.hash('admin123', 12);
+  const adminPassword = await bcrypt.hash(adminPw, 12);
   const adminUser = await prisma.user.upsert({
     where: { email: 'admin@judgearena.local' },
     update: {},
@@ -18,10 +23,10 @@ async function main() {
       role: 'admin',
     },
   });
-  console.log(`  ✓ Created admin user: ${adminUser.email} (password: admin123)`);
+  console.log(`  ✓ Created admin user: ${adminUser.email}`);
 
   // Create demo user
-  const demoPassword = await bcrypt.hash('demo1234', 12);
+  const demoPassword = await bcrypt.hash(demoPw, 12);
   const demoUser = await prisma.user.upsert({
     where: { email: 'demo@judgearena.local' },
     update: {},
@@ -32,7 +37,7 @@ async function main() {
       role: 'user',
     },
   });
-  console.log(`  ✓ Created demo user: ${demoUser.email} (password: demo1234)`);
+  console.log(`  ✓ Created demo user: ${demoUser.email}`);
 
   // Create default rubric
   const rubric = await prisma.rubric.create({
