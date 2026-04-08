@@ -144,31 +144,24 @@ export default function LandingPage() {
 
       {/* ── Hero section ────────────────────────────────────────────────── */}
       <section className="relative overflow-hidden">
-        {/* Subtle gradient background */}
-        <div className="absolute inset-0 bg-gradient-to-b from-brand-600/5 via-transparent to-transparent pointer-events-none" />
-        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-brand-600/8 rounded-full blur-3xl pointer-events-none" />
+        <div className="absolute inset-0 bg-gradient-to-br from-brand-600/[0.07] via-transparent to-violet-600/[0.04] pointer-events-none" />
 
-        <div className="relative max-w-6xl mx-auto px-6 pt-16 pb-12 text-center">
-          <div className="inline-flex items-center gap-2 rounded-full border border-surface-700 bg-surface-800/60 px-3 py-1 text-xs text-surface-400 mb-6">
-            <span className="flex h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse-subtle" />
-            Open-source LLM evaluation studio
-          </div>
-
+        <div className="relative max-w-6xl mx-auto px-6 pt-20 pb-14 text-center">
           <h1 className="text-4xl sm:text-5xl font-extrabold tracking-tight text-white max-w-3xl mx-auto leading-[1.1]">
-            Evaluate LLMs with
-            <span className="text-brand-500"> rubric-driven</span> precision
+            Your data, your rubrics,
+            <span className="bg-gradient-to-r from-brand-400 to-violet-400 bg-clip-text text-transparent"> your insight</span>
           </h1>
 
-          <p className="mt-4 text-lg text-surface-400 max-w-2xl mx-auto leading-relaxed">
-            Multi-model judging, versioned rubrics, and human-in-the-loop verification.
-            Self-hosted, data-sovereign, and built for teams that need reproducible evaluations.
+          <p className="mt-5 text-lg text-surface-400 max-w-2xl mx-auto leading-relaxed">
+            Reproducible LLM evaluation that runs on your infrastructure.
+            Prompts, rubrics, and judgments stay under your roof &mdash; nothing hits the cloud.
           </p>
 
           <div className="mt-8 flex items-center justify-center gap-3">
             {isAuth ? (
               <Link
                 href="/dashboard"
-                className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-brand-700 transition-colors shadow-lg shadow-brand-600/20"
+                className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-brand-500 transition-colors shadow-lg shadow-brand-600/25"
               >
                 Go to Dashboard
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
@@ -177,14 +170,14 @@ export default function LandingPage() {
               <>
                 <Link
                   href="/register"
-                  className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-brand-700 transition-colors shadow-lg shadow-brand-600/20"
+                  className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-brand-500 transition-colors shadow-lg shadow-brand-600/25"
                 >
-                  Start Evaluating
+                  Deploy Your Instance
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
                 </Link>
                 <Link
                   href="/login"
-                  className="inline-flex items-center gap-2 rounded-lg border border-surface-700 bg-surface-800/60 px-6 py-2.5 text-sm font-medium text-surface-300 hover:text-white hover:border-surface-600 transition-colors"
+                  className="inline-flex items-center gap-2 rounded-lg border border-white/10 backdrop-blur-md bg-white/[0.04] px-6 py-2.5 text-sm font-medium text-surface-300 hover:text-white hover:bg-white/[0.08] transition-all"
                 >
                   Sign In
                 </Link>
@@ -192,20 +185,22 @@ export default function LandingPage() {
             )}
           </div>
 
-          {/* Feature pills */}
-          <div className="mt-10 flex flex-wrap items-center justify-center gap-3">
+          {/* Feature cards — glassmorphism */}
+          <div className="mt-12 grid grid-cols-2 sm:grid-cols-4 gap-3 max-w-3xl mx-auto">
             {[
-              { icon: 'M9 12l2 2 4-4', label: 'LLM-as-a-Judge' },
-              { icon: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2', label: 'Human Verification' },
-              { icon: 'M12 2L2 7l10 5 10-5-10-5z', label: 'Multi-Model' },
-              { icon: 'M4 7V4h16v3M9 20h6M12 4v16', label: 'Versioned Rubrics' },
+              { emoji: '\u{1F512}', title: 'Self-Hosted', desc: 'Your infra, your rules' },
+              { emoji: '\u{1F4CB}', title: 'Versioned Rubrics', desc: 'Pin criteria to each eval' },
+              { emoji: '\u{2696}\u{FE0F}', title: 'Multi-Model', desc: 'Side-by-side judging' },
+              { emoji: '\u{1F9D1}\u{200D}\u{1F4BB}', title: 'Human Review', desc: 'Layer expert oversight' },
             ].map((f) => (
-              <span key={f.label} className="inline-flex items-center gap-1.5 rounded-full border border-surface-700/60 bg-surface-800/40 px-3 py-1.5 text-xs text-surface-400">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-brand-500">
-                  <path d={f.icon} />
-                </svg>
-                {f.label}
-              </span>
+              <div
+                key={f.title}
+                className="rounded-xl border border-white/[0.08] backdrop-blur-md bg-white/[0.03] px-4 py-4 text-left hover:bg-white/[0.06] hover:border-white/[0.14] transition-all"
+              >
+                <span className="text-lg leading-none">{f.emoji}</span>
+                <p className="mt-2 text-[13px] font-semibold text-surface-200">{f.title}</p>
+                <p className="mt-0.5 text-[11px] text-surface-500 leading-snug">{f.desc}</p>
+              </div>
             ))}
           </div>
         </div>
@@ -242,7 +237,7 @@ export default function LandingPage() {
           <div>
             <h2 className="text-xl font-bold text-white">Model Rankings</h2>
             <p className="text-sm text-surface-400 mt-1">
-              Aggregate scores from rubric-based LLM-as-a-Judge evaluations
+              Aggregate scores from rubric-pinned evaluations on this instance
             </p>
           </div>
         </div>
@@ -367,38 +362,33 @@ export default function LandingPage() {
       </section>
 
       {/* ── How it works ────────────────────────────────────────────────── */}
-      <section className="border-t border-surface-800 bg-surface-800/20">
+      <section className="border-t border-white/[0.04]">
         <div className="max-w-6xl mx-auto px-6 py-16">
-          <h2 className="text-xl font-bold text-white text-center mb-10">How It Works</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <h2 className="text-xl font-bold text-white text-center mb-2">Reproducible by Design</h2>
+          <p className="text-sm text-surface-500 text-center mb-10 max-w-lg mx-auto">
+            Every evaluation is pinned to a rubric version, a prompt, and a model config. Re-run it next month &mdash; get the same setup.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {[
               {
                 step: '1',
-                title: 'Define Rubrics',
-                desc: 'Create versioned evaluation criteria with weighted scoring. Pin rubric versions to evaluations for reproducibility.',
-                icon: 'M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2',
+                title: 'Version Your Rubrics',
+                desc: 'Define weighted scoring criteria and lock them to a version. When your rubric evolves, past evaluations stay pinned to the original.',
               },
               {
                 step: '2',
-                title: 'Run Multi-Model Judging',
-                desc: 'Submit text artifacts and have multiple LLMs evaluate them in parallel against your rubric criteria.',
-                icon: 'M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5',
+                title: 'Run Models Side-by-Side',
+                desc: 'Send the same prompt to multiple LLMs in parallel. Compare scores, latency, and reasoning on your own hardware or cloud.',
               },
               {
                 step: '3',
-                title: 'Verify with Humans',
-                desc: 'Layer human judgment on top. Compare model disagreements, select the best judge, and build gold-standard evaluation datasets.',
-                icon: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 7a4 4 0 1 0 8 0 4 4 0 0 0-8 0M22 21v-2a4 4 0 0 0-3-3.87',
+                title: 'Layer Human Review',
+                desc: 'Optionally add expert judgment over model outputs. Spot disagreements, pick the best response, and build gold-standard datasets.',
               },
             ].map((s) => (
-              <div key={s.step} className="rounded-xl border border-surface-700 bg-surface-800/40 p-6">
+              <div key={s.step} className="rounded-xl border border-white/[0.06] backdrop-blur-md bg-white/[0.02] p-6 hover:bg-white/[0.04] transition-all">
                 <div className="flex items-center gap-3 mb-4">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-600/15 border border-brand-600/30">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-brand-500">
-                      <path d={s.icon} />
-                    </svg>
-                  </div>
-                  <span className="text-xs font-bold text-surface-500 uppercase tracking-wider">Step {s.step}</span>
+                  <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-600/20 text-brand-400 text-sm font-bold">{s.step}</span>
                 </div>
                 <h3 className="text-base font-semibold text-white mb-2">{s.title}</h3>
                 <p className="text-sm text-surface-400 leading-relaxed">{s.desc}</p>
@@ -410,18 +400,18 @@ export default function LandingPage() {
 
       {/* ── CTA footer ──────────────────────────────────────────────────── */}
       {!isAuth && (
-        <section className="border-t border-surface-800">
+        <section className="border-t border-white/[0.04]">
           <div className="max-w-6xl mx-auto px-6 py-16 text-center">
-            <h2 className="text-2xl font-bold text-white">Ready to evaluate your models?</h2>
+            <h2 className="text-2xl font-bold text-white">Ship evaluations that stay on your terms</h2>
             <p className="mt-3 text-surface-400 max-w-lg mx-auto">
-              Set up your own rubrics, connect your LLM providers, and start producing high-quality evaluation data in minutes.
+              Self-host on any VPS, connect your own API keys, and keep every prompt, rubric, and judgment under your roof.
             </p>
             <div className="mt-6 flex items-center justify-center gap-3">
               <Link
                 href="/register"
-                className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-brand-700 transition-colors shadow-lg shadow-brand-600/20"
+                className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-brand-500 transition-colors shadow-lg shadow-brand-600/25"
               >
-                Create Free Account
+                Get Started
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
               </Link>
             </div>
@@ -430,14 +420,14 @@ export default function LandingPage() {
       )}
 
       {/* ── Footer ──────────────────────────────────────────────────────── */}
-      <footer className="border-t border-surface-800 bg-surface-900">
+      <footer className="border-t border-white/[0.04] bg-surface-900">
         <div className="max-w-6xl mx-auto px-6 py-6 flex items-center justify-between">
           <div className="flex items-center gap-2 text-xs text-surface-500">
             <div className="flex h-5 w-5 items-center justify-center rounded bg-brand-600 text-white font-bold text-[9px]">JA</div>
             Judge Arena
           </div>
           <div className="text-xs text-surface-600">
-            Self-hosted LLM evaluation studio
+            Reproducible LLM evaluation &middot; Self-hosted
           </div>
         </div>
       </footer>

@@ -9,10 +9,10 @@ export default function LoginPage() {
   const router = useRouter();
   // Read callbackUrl client-side to avoid requiring a Suspense boundary
   // (Next.js 14 disallows useSearchParams() during SSR without Suspense)
-  const [callbackUrl, setCallbackUrl] = useState('/');
+  const [callbackUrl, setCallbackUrl] = useState('/dashboard');
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    setCallbackUrl(params.get('callbackUrl') || '/');
+    setCallbackUrl(params.get('callbackUrl') || '/dashboard');
   }, []);
 
   const [email, setEmail] = useState('');
