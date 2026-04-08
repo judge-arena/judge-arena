@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { hash } from 'bcryptjs';
 import { z } from 'zod';
+import { registrationLimiter } from '@/lib/rate-limit';
 
 const registerSchema = z.object({
   email: z.string().email('Invalid email address'),
@@ -11,38 +12,49 @@ const registerSchema = z.object({
 
 export async function POST(request: Request) {
   try {
+    // Apply dedicated registration rate limiter (3/hour per IP)
+    const clientIp = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
+      ?? request.headers.get('x-real-ip')
+      ?? 'unknown';
+    const rateResult = registrationLimiter.check(`register:${clientIp}`);
+    if (!rateResult.allowed) {
+      return NextResponse.json(
+        { error: 'Too many registration attempts. Please try again later.' },
+        { status: 429, headers: { 'Retry-After': String(Math.ceil(rateResult.retryAfterMs / 1000)) } }
+      );
+    }
+
     const body = await request.json();
     const data = registerSchema.parse(body);
 
     const email = data.email.toLowerCase().trim();
+    const passwordHash = await hash(data.password, 12);
 
+    // Use upsert-style logic to avoid leaking whether the email exists.
+    // If email already exists, we return a generic success-like response
+    // indistinguishable from a real registration.
     const existing = await prisma.user.findUnique({ where: { email } });
     if (existing) {
+      // Return same shape as a successful registration to prevent enumeration
       return NextResponse.json(
-        { error: 'An account with this email already exists' },
-        { status: 409 }
+        { message: 'Registration successful. Please log in.' },
+        { status: 201 }
       );
     }
 
-    const passwordHash = await hash(data.password, 12);
-
-    const user = await prisma.user.create({
+    await prisma.user.create({
       data: {
         email,
         name: data.name,
         passwordHash,
         role: 'user',
       },
-      select: {
-        id: true,
-        email: true,
-        name: true,
-        role: true,
-        createdAt: true,
-      },
     });
 
-    return NextResponse.json(user, { status: 201 });
+    return NextResponse.json(
+      { message: 'Registration successful. Please log in.' },
+      { status: 201 }
+    );
   } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json(

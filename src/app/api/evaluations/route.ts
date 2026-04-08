@@ -462,6 +462,9 @@ export async function POST(request: Request) {
       },
     });
     if (!dataset) return NextResponse.json({ error: 'Dataset not found' }, { status: 404 });
+    if (dataset.userId !== session.user.id && !isAdmin(session)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
     if (dataset.samples.length === 0) {
       return NextResponse.json({ error: 'Dataset has no samples' }, { status: 400 });
     }

@@ -128,126 +128,137 @@ async function processRun(runId: string) {
     data: { status: 'judging' },
   });
 
-  const judgmentsByModelId = new Map(
-    run.modelJudgments.map((judgment) => [judgment.modelConfigId, judgment.id])
-  );
+  try {
+    const judgmentsByModelId = new Map(
+      run.modelJudgments.map((judgment) => [judgment.modelConfigId, judgment.id])
+    );
 
-  let completedCount = 0;
-  let errorCount = 0;
+    let completedCount = 0;
+    let errorCount = 0;
 
-  const modelChunks = chunkArray(run.runModelSelections, Math.max(1, MODEL_CONCURRENCY_PER_RUN));
+    const modelChunks = chunkArray(run.runModelSelections, Math.max(1, MODEL_CONCURRENCY_PER_RUN));
 
-  for (const modelChunk of modelChunks) {
-    await Promise.all(
-      modelChunk.map(async (selection) => {
-        const model = selection.modelConfig;
-        const judgmentId = judgmentsByModelId.get(model.id);
-        if (!judgmentId) {
-          errorCount += 1;
-          return;
-        }
-
-        try {
-          await prisma.modelJudgment.update({
-            where: { id: judgmentId },
-            data: {
-              status: 'running',
-              error: null,
-            },
-          });
-
-          if (isJudgeMode) {
-            const result = await withTimeout(
-              () =>
-                executeJudgment(
-                  model.provider,
-                  {
-                    inputText: run.evaluation.inputText,
-                    promptText: run.evaluation.promptText ?? undefined,
-                    responseText: run.evaluation.responseText ?? undefined,
-                    rubricCriteria: run.rubric!.criteria,
-                    rubricName: run.rubric!.name,
-                    rubricDescription: run.rubric!.description || undefined,
-                  },
-                  {
-                    modelId: model.modelId,
-                    apiKey: model.apiKey ? decryptSafe(model.apiKey) : undefined,
-                    endpoint: model.endpoint || undefined,
-                  }
-                ),
-              MODEL_REQUEST_TIMEOUT_MS
-            );
-
-            await prisma.modelJudgment.update({
-              where: { id: judgmentId },
-              data: {
-                overallScore: result.overallScore,
-                reasoning: result.reasoning,
-                rawResponse: result.rawResponse,
-                criteriaScores: JSON.stringify(result.criteriaScores),
-                latencyMs: result.latencyMs,
-                tokenCount: result.tokenCount,
-                status: 'completed',
-              },
-            });
-          } else {
-            const result = await withTimeout(
-              () =>
-                executeRespond(
-                  model.provider,
-                  {
-                    promptText:
-                      run.evaluation.promptText?.trim() ||
-                      run.evaluation.inputText,
-                  },
-                  {
-                    modelId: model.modelId,
-                    apiKey: model.apiKey ? decryptSafe(model.apiKey) : undefined,
-                    endpoint: model.endpoint || undefined,
-                  }
-                ),
-              MODEL_REQUEST_TIMEOUT_MS
-            );
-
-            await prisma.modelJudgment.update({
-              where: { id: judgmentId },
-              data: {
-                overallScore: null,
-                reasoning: result.responseText,
-                rawResponse: result.rawResponse,
-                criteriaScores: null,
-                latencyMs: result.latencyMs,
-                tokenCount: result.tokenCount,
-                status: 'completed',
-              },
-            });
+    for (const modelChunk of modelChunks) {
+      await Promise.all(
+        modelChunk.map(async (selection) => {
+          const model = selection.modelConfig;
+          const judgmentId = judgmentsByModelId.get(model.id);
+          if (!judgmentId) {
+            errorCount += 1;
+            return;
           }
 
-          completedCount += 1;
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-          await prisma.modelJudgment.update({
-            where: { id: judgmentId },
-            data: {
-              status: 'error',
-              error: errorMessage,
-            },
-          });
-          errorCount += 1;
-        }
-      })
-    );
+          try {
+            await prisma.modelJudgment.update({
+              where: { id: judgmentId },
+              data: {
+                status: 'running',
+                error: null,
+              },
+            });
+
+            if (isJudgeMode) {
+              const result = await withTimeout(
+                () =>
+                  executeJudgment(
+                    model.provider,
+                    {
+                      inputText: run.evaluation.inputText,
+                      promptText: run.evaluation.promptText ?? undefined,
+                      responseText: run.evaluation.responseText ?? undefined,
+                      rubricCriteria: run.rubric!.criteria,
+                      rubricName: run.rubric!.name,
+                      rubricDescription: run.rubric!.description || undefined,
+                    },
+                    {
+                      modelId: model.modelId,
+                      apiKey: model.apiKey ? decryptSafe(model.apiKey) : undefined,
+                      endpoint: model.endpoint || undefined,
+                    }
+                  ),
+                MODEL_REQUEST_TIMEOUT_MS
+              );
+
+              await prisma.modelJudgment.update({
+                where: { id: judgmentId },
+                data: {
+                  overallScore: result.overallScore,
+                  reasoning: result.reasoning,
+                  rawResponse: result.rawResponse,
+                  criteriaScores: JSON.stringify(result.criteriaScores),
+                  latencyMs: result.latencyMs,
+                  tokenCount: result.tokenCount,
+                  status: 'completed',
+                },
+              });
+            } else {
+              const result = await withTimeout(
+                () =>
+                  executeRespond(
+                    model.provider,
+                    {
+                      promptText:
+                        run.evaluation.promptText?.trim() ||
+                        run.evaluation.inputText,
+                    },
+                    {
+                      modelId: model.modelId,
+                      apiKey: model.apiKey ? decryptSafe(model.apiKey) : undefined,
+                      endpoint: model.endpoint || undefined,
+                    }
+                  ),
+                MODEL_REQUEST_TIMEOUT_MS
+              );
+
+              await prisma.modelJudgment.update({
+                where: { id: judgmentId },
+                data: {
+                  overallScore: null,
+                  reasoning: result.responseText,
+                  rawResponse: result.rawResponse,
+                  criteriaScores: null,
+                  latencyMs: result.latencyMs,
+                  tokenCount: result.tokenCount,
+                  status: 'completed',
+                },
+              });
+            }
+
+            completedCount += 1;
+          } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            await prisma.modelJudgment.update({
+              where: { id: judgmentId },
+              data: {
+                status: 'error',
+                error: errorMessage,
+              },
+            });
+            errorCount += 1;
+          }
+        })
+      );
+    }
+
+    const finalStatus =
+      completedCount === 0 && errorCount > 0
+        ? 'error'
+        : 'needs_human';
+
+    await prisma.evaluationRun.update({
+      where: { id: run.id },
+      data: { status: finalStatus },
+    });
+  } catch (unexpectedError) {
+    // Catch-all: ensure the run never stays stuck in 'judging' status
+    console.error(`[processRun] Unexpected error for run ${runId}:`, unexpectedError);
+    await prisma.evaluationRun.update({
+      where: { id: run.id },
+      data: { status: 'error' },
+    }).catch((dbError) => {
+      console.error(`[processRun] Failed to set error status for run ${runId}:`, dbError);
+    });
   }
-
-  const finalStatus =
-    completedCount === 0 && errorCount > 0
-      ? 'error'
-      : 'needs_human';
-
-  await prisma.evaluationRun.update({
-    where: { id: run.id },
-    data: { status: finalStatus },
-  });
 
   await refreshDatasetEvaluationSummaryForEvaluation(run.evaluationId);
 }

@@ -74,6 +74,7 @@ export class RedisRealtimeEventBus implements RealtimeEventBus {
         const redisModule = await this.loadRedisModule();
         if (!redisModule) {
           console.warn('Redis module not available. Realtime bus will use local fallback.');
+          this.initialized = true; // Permanent fallback — no Redis available
           return;
         }
 
@@ -98,8 +99,12 @@ export class RedisRealtimeEventBus implements RealtimeEventBus {
             console.error('Failed to parse Redis realtime event message:', error);
           }
         });
-      } finally {
-        this.initialized = true;
+
+        this.initialized = true; // Only mark initialized on success
+      } catch (error) {
+        // Connection failed — allow retry on next call
+        console.error('Redis realtime initialization failed, will retry:', error);
+        this.initPromise = null;
       }
     })();
 

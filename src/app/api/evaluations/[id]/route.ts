@@ -100,8 +100,11 @@ export async function PATCH(
     const data = updateEvaluationSchema.parse(body);
 
     if (data.rubricId) {
-      const rubric = await prisma.rubric.findUnique({ where: { id: data.rubricId }, select: { id: true } });
+      const rubric = await prisma.rubric.findUnique({ where: { id: data.rubricId }, select: { id: true, userId: true } });
       if (!rubric) return NextResponse.json({ error: 'Rubric not found' }, { status: 404 });
+      if (rubric.userId !== session.user.id && !isAdmin(session)) {
+        return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      }
     }
 
     if (data.modelConfigIds !== undefined && data.modelConfigIds.length > 0) {

@@ -7,7 +7,7 @@ import { Sidebar } from '@/components/layout/sidebar';
 import { KeyboardShortcutsDialog } from '@/components/layout/keyboard-shortcuts-dialog';
 import { Toaster } from 'sonner';
 
-const publicPaths = ['/login', '/register'];
+const publicPaths = ['/login', '/register', '/leaderboard'];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -118,6 +118,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           router.push('/evaluations');
           clearChord();
           return;
+        case 'g l':
+          router.push('/leaderboard');
+          clearChord();
+          return;
         default:
           clearChord();
           return;
@@ -134,37 +138,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, [handleKeyDown, clearChord]);
 
-  // Show loading state while checking auth
-  if (status === 'loading') {
-    return (
-      <div className="flex h-screen items-center justify-center bg-surface-50 dark:bg-surface-900">
-        <div className="text-surface-400 text-sm">Loading...</div>
-      </div>
-    );
-  }
+  const toaster = (
+    <Toaster
+      position="bottom-right"
+      toastOptions={{
+        className:
+          'bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 text-surface-900 dark:text-surface-100 shadow-lg',
+      }}
+    />
+  );
 
-  // Public pages (login, register) render without sidebar
-  if (isPublicPage) {
-    return (
-      <>
-        {children}
-        <Toaster
-          position="bottom-right"
-          toastOptions={{
-            className:
-              'bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 text-surface-900 dark:text-surface-100 shadow-lg',
-          }}
-        />
-      </>
-    );
-  }
-
-  // Don't render protected content until authenticated
-  if (status !== 'authenticated') {
-    return null;
-  }
-
-  return (
+  const fullLayout = (
     <div className="flex h-screen overflow-hidden">
       <Sidebar
         collapsed={sidebarCollapsed}
@@ -173,19 +157,36 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <main className="flex-1 overflow-y-auto bg-surface-50 dark:bg-surface-900">
         {children}
       </main>
-
       <KeyboardShortcutsDialog
         open={shortcutsOpen}
         onOpenChange={setShortcutsOpen}
       />
-
-      <Toaster
-        position="bottom-right"
-        toastOptions={{
-          className:
-            'bg-white border border-surface-200 text-surface-900 shadow-lg dark:bg-surface-800 dark:border-surface-700 dark:text-surface-100',
-        }}
-      />
+      {toaster}
     </div>
   );
+
+  // Public pages render immediately — no auth required, no loading wait.
+  // Authenticated users still get the sidebar; unauthenticated users get a plain wrapper.
+  if (isPublicPage) {
+    if (status === 'authenticated') {
+      return fullLayout;
+    }
+    return <>{children}{toaster}</>;
+  }
+
+  // Protected pages: wait for auth status
+  if (status === 'loading') {
+    return (
+      <div className="flex h-screen items-center justify-center bg-surface-50 dark:bg-surface-900">
+        <div className="text-surface-400 text-sm">Loading...</div>
+      </div>
+    );
+  }
+
+  // Don't render protected content until authenticated
+  if (status !== 'authenticated') {
+    return null;
+  }
+
+  return fullLayout;
 }

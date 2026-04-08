@@ -46,12 +46,26 @@ function cleanupRateLimits() {
   }
 }
 
+/**
+ * Extract client IP safely.
+ * Only trusts X-Forwarded-For / X-Real-IP when TRUSTED_PROXY is set,
+ * indicating the app runs behind a reverse proxy that overwrites these headers.
+ * Without a trusted proxy, uses Next.js's built-in IP (from the socket) to
+ * prevent clients from spoofing their IP to bypass rate limits.
+ */
 function getClientIp(request: NextRequest): string {
-  return (
-    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
-    request.headers.get('x-real-ip') ??
-    '127.0.0.1'
-  );
+  const trustProxy = process.env.TRUSTED_PROXY === 'true';
+
+  if (trustProxy) {
+    const forwarded = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
+    if (forwarded) return forwarded;
+
+    const realIp = request.headers.get('x-real-ip');
+    if (realIp) return realIp;
+  }
+
+  // Next.js provides the socket IP via request.ip in Edge runtime
+  return request.ip ?? '127.0.0.1';
 }
 
 /**

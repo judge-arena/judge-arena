@@ -36,6 +36,16 @@ export function getProvider(providerName: ModelProvider | string): JudgmentProvi
 }
 
 /**
+ * Build a circuit breaker key that distinguishes different endpoints
+ * within the same provider. Without this, a failing local Ollama instance
+ * would open the circuit for all OpenAI-compatible endpoints including
+ * the real OpenAI API.
+ */
+function circuitKey(providerName: string, config: ProviderConfig): string {
+  return config.endpoint ? `${providerName}:${config.endpoint}` : providerName;
+}
+
+/**
  * Execute a judgment using the appropriate provider.
  * Wraps the call with retry + circuit breaker for resilience.
  */
@@ -45,7 +55,7 @@ export async function executeJudgment(
   config: ProviderConfig
 ): Promise<JudgmentResponse> {
   const provider = getProvider(providerName);
-  return resilientCall(providerName, () => provider.judge(request, config));
+  return resilientCall(circuitKey(providerName, config), () => provider.judge(request, config));
 }
 
 /**
@@ -58,7 +68,7 @@ export async function executeRespond(
   config: ProviderConfig
 ): Promise<RespondResponse> {
   const provider = getProvider(providerName);
-  return resilientCall(providerName, () => provider.respond(request, config));
+  return resilientCall(circuitKey(providerName, config), () => provider.respond(request, config));
 }
 
 /**
