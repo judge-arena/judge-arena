@@ -37,7 +37,8 @@ describe('utils', () => {
     });
 
     it('should format a date string', () => {
-      const result = formatDate('2025-01-01T00:00:00Z');
+      // Use midday UTC to avoid timezone-dependent date shifts
+      const result = formatDate('2025-06-15T12:00:00Z');
       expect(result).toContain('2025');
     });
   });
