@@ -3,7 +3,6 @@
  * Replaces the old "JA" text mark throughout the app.
  */
 export function BrandIcon({ size = 32, className }: { size?: number; className?: string }) {
-  const r = size / 32; // scale factor
   return (
     <svg
       width={size}
