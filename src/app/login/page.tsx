@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { signIn } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
+import { BrandIcon } from '@/components/ui/brand-icon';
 import Link from 'next/link';
 
 export default function LoginPage() {
@@ -49,9 +50,7 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-surface-50 dark:bg-surface-900 px-4">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <div className="inline-flex h-12 w-12 items-center justify-center rounded-xl bg-brand-600 text-white font-bold text-lg mb-3">
-            JA
-          </div>
+          <BrandIcon size={48} className="mb-3" />
           <h1 className="text-xl font-bold text-surface-900 dark:text-surface-100">
             Sign in to Judge Arena
           </h1>

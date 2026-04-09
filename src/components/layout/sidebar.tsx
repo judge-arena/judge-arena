@@ -3,6 +3,7 @@
 import React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { BrandIcon } from '@/components/ui/brand-icon';
 import { useSession, signOut } from 'next-auth/react';
 import { cn } from '@/lib/utils';
 import { Kbd } from '@/components/ui/kbd';
@@ -129,9 +130,7 @@ export function Sidebar({ collapsed = false, onToggle }: SidebarProps) {
           className="flex items-center gap-2.5 overflow-hidden"
           aria-label="Judge Arena Home"
         >
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-600 text-white font-bold text-sm">
-            JA
-          </div>
+          <BrandIcon size={32} className="shrink-0" />
           {!collapsed && (
             <div className="flex flex-col overflow-hidden">
               <span className="text-sm font-bold text-surface-900 dark:text-surface-100 truncate">

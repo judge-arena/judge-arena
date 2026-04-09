@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { cn } from '@/lib/utils';
+import { BrandIcon } from '@/components/ui/brand-icon';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -107,9 +108,7 @@ export default function LandingPage() {
       <nav className="border-b border-surface-800 bg-surface-900/80 backdrop-blur-sm sticky top-0 z-50">
         <div className="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
           <Link href="/" className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-600 text-white font-bold text-sm">
-              JA
-            </div>
+            <BrandIcon size={32} />
             <span className="font-bold text-surface-100 text-sm tracking-tight">Judge Arena</span>
           </Link>
           <div className="flex items-center gap-3">
@@ -423,7 +422,7 @@ export default function LandingPage() {
       <footer className="border-t border-white/[0.04] bg-surface-900">
         <div className="max-w-6xl mx-auto px-6 py-6 flex items-center justify-between">
           <div className="flex items-center gap-2 text-xs text-surface-500">
-            <div className="flex h-5 w-5 items-center justify-center rounded bg-brand-600 text-white font-bold text-[9px]">JA</div>
+            <BrandIcon size={20} />
             Judge Arena
           </div>
           <div className="text-xs text-surface-600">

@@ -73,7 +73,7 @@ export default function ProjectDetailPage() {
   // ── Remote (HuggingFace) dataset state ──
   const [hfIdInput, setHfIdInput] = useState('');
   const [hfMeta, setHfMeta] = useState<any>(null);
-  const [hfPreview, setHfPreview] = useState<any>(null);
+  const [, setHfPreview] = useState<any>(null);
   const [hfFetching, setHfFetching] = useState(false);
   const [hfConfig, setHfConfig] = useState('');
   const [hfSplit, setHfSplit] = useState('');
