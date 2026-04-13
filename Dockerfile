@@ -21,6 +21,7 @@ WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+COPY public ./public  
 
 # Set build-time environment
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -46,7 +47,7 @@ ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
 # Copy necessary files from builder
-COPY --from=builder /app/public ./public
+COPY --from=builder /app/public ./public/
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/prisma ./prisma
 
