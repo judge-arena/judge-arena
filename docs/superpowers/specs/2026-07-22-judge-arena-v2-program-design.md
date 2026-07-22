@@ -55,7 +55,7 @@ deployed from GitHub org repo `judge-arena/judge-arena` via GH Actions.
 | D1 | Audience | **Community tool** | Trijeet + invited collaborators; real multi-user isolation and quotas; public read-only leaderboard. Not an open product; not single-user. |
 | D2 | Judge classes | **API + local open-weight** | Full research surface: frontier APIs *and* self-hosted generative judges / reward models / classifiers served from the GPU host (gharial, RTX 4000 SFF Ada, 20 GB) via vLLM/Ollama over a network seam. |
 | D3 | Identity | **Hybrid** | Authentik OIDC (id.asethi.com) for humans, invite-gated via groups; NextAuth credentials provider retained as fallback/dev login. Open registration disabled. |
-| D4 | Data migration | **Selective export** | Keep rubrics, model configs, datasets, evaluation runs, leaderboard via the app's own export routes; drop users/accounts; identity restarts on Authentik. |
+| D4 | Data migration | **Selective export** | Keep rubrics, model configs, datasets via the existing slug-based config export/import; keep evaluation runs / judgments / leaderboard history via a **new v1→v2 importer** (Phase 1 deliverable — the app exports runs as denormalized JSONL but has *no* import path for them today). Drop users/accounts; identity restarts on Authentik. |
 | D5 | Repo & CI | **Gitea canonical, GitHub mirror** | Canonical dev moves to `tea.asethi.com/trij/judge-arena`; standard Gitea Actions → Kaniko → Harbor → Flux (StablePin) pipeline; push-mirror to the public GitHub org keeps the MIT-public presence. GitLab copy retired. |
 | D6 | Judge testing | **In-product meta-eval harness** | Calibration is a product feature, not a notebook: golden sets, per-judge agreement (Cohen's κ + correlation), bias probes, judge-quality leaderboard dimension. |
 | D7 | Sequencing | **Research → architecture → migrate** | Taxonomy/schema grounded in SOTA first; critique + schema fold into one v2 spec; the database migrates **once**, onto the corrected schema. Meta-eval harness ships as the first post-migration feature on tables that already exist. |
@@ -95,8 +95,10 @@ the input contract for the Phase 1 schema.
 - **Full design critique** of the current codebase — multi-agent review across
   correctness, security follow-ups (remaining LOW items), and specifically
   **horizontal-scale blockers** already identified: in-process run queue
-  (`evaluation-run-manager`), in-memory rate limiting, in-memory SSE bus
-  default, Prisma/global singletons — everything that breaks at >1 replica.
+  (`evaluation-run-manager`), in-memory rate limiting, in-process
+  circuit-breaker state (`resilience.ts` — one replica trips while others keep
+  hammering a dead endpoint), in-memory SSE bus default, and CNPG
+  connection-pool budget (N replicas × Prisma pool size vs pooler limits).
 - **Schema v2**, grounded in Phase R taxonomy:
   - `JudgeModel` with architecture metadata and **immutable version pinning**
     (weights revision, quantization, serving backend, endpoint class);
@@ -106,12 +108,28 @@ the input contract for the Phase 1 schema.
   - meta-eval entities (GoldenSet, GoldenLabel, CalibrationRun,
     AgreementMetric) included now so the database migrates once (D7).
 - **Scale-out design:** stateless web tier (HPA-ready) split from queue-backed
-  judge workers; Redis for realtime bus and rate limiting; job queue selection
-  (BullMQ vs pg-boss) decided in-spec.
+  judge workers; the existing Redis realtime-bus adapter becomes the mandatory
+  default (load-tested, not redesigned); rate limiting and circuit-breaker
+  state move to Redis; job queue selection (BullMQ vs pg-boss) decided in-spec.
+  Prerequisite: rework `docker-compose.yml` for `--scale app=N` (drop fixed
+  `container_name`/host-port publish, add a dev LB) so the S4 demo is runnable.
+- **v1→v2 import tooling** *(named deliverable, gates Phase 2)*: importer
+  mapping the denormalized v1 evaluation export (JSONL, one row per judgment)
+  into the v2 provenance schema; config import already exists for
+  projects/rubrics/models/datasets.
 - **Provider layer v2:** OpenRouter aggregator + local vLLM/Ollama seam to
-  gharial; model verification captures an architecture fingerprint.
+  gharial; model verification captures an architecture fingerprint. The GPU
+  seam's transport and auth (mTLS vs token, DNS name) are **decided in this
+  spec**, before the seam client is built.
 - **Auth v2:** Authentik OIDC + credentials fallback, invite-gated (D3).
+  Presumed shape: **app-level OIDC** (NextAuth as OIDC client to Authentik),
+  *not* ingress-level oauth2-proxy — dev API keys and the public read-only
+  leaderboard must bypass any ingress gate; the spec confirms the shape and
+  enumerates the public carve-outs. Retire or admin-gate `/api/auth/register`.
 - README rewrite to match reality lands with this spec's implementation.
+- Scope valve: if the spec grows unwieldy, split into **1a** (critique +
+  schema + import tooling) and **1b** (scale-out + providers + auth) with
+  separate review checkpoints.
 
 **Exit gate:** Sonnet independent review of the spec, then Trijeet approval;
 v2 implemented (schema, workers, providers, auth) with S2 + S4 demonstrable
@@ -129,10 +147,17 @@ locally via docker-compose before Phase 2 begins.
 - Standing footgun checklist applied: `.svc.cozy.local` FQDNs, tenant-public
   ingress class, `proxy-buffer-size: 16k` on auth-url ingresses, SOPS
   `grep ENC\[` before commit, chart-version bump on template change.
-- Data: selective export from Railway via the app's own config / dataset /
-  evaluation export routes → import into CNPG (D4).
-- Cutover: judgearena.com DNS at Cloudflare repointed to the tunnel; Railway
-  decommissioned after soak.
+- Data: selective export from Railway (config / dataset / evaluation export
+  routes) → import into CNPG via the Phase 1 importer (D4). Post-import steps:
+  re-enter and re-verify model API keys (exports carry no secrets), and
+  pre-provision existing collaborators' Authentik accounts/groups **before**
+  cutover so no live user loses access.
+- Cutover runbook: write-freeze on Railway → final delta export → import →
+  verify (row counts + provenance spot-checks) → repoint judgearena.com DNS at
+  Cloudflare to the tunnel. **Soak: 14 days** with Railway kept deployed and
+  warm; rollback = repoint DNS back to Railway. Railway decommissioned only
+  after soak passes; weekly export snapshots throughout the program so a
+  forced Railway exit is never data-lossy.
 
 **Exit gate:** success criteria S1 + S4 verified (below); Railway closeable.
 
@@ -167,6 +192,8 @@ locally via docker-compose before Phase 2 begins.
 | Hybrid auth doubles the attack surface | Credentials provider is fallback-only: no open registration, admin-created accounts only, rate-limited; OIDC is the paved road. |
 | In-product meta-eval scope creep | Phase 3 is gated to the metrics named in D6; anything further is a new spec. |
 | Dormant deps (Next 14, Prisma 6, NextAuth 4) accrue CVEs during the program | Phase 1 critique includes a dependency audit; upgrades land with the v2 implementation, not ad hoc. |
+| Coupled cutover: schema v2 + platform migration land in one step (accepted per D7) | Abort criteria are explicit: full production export must import and verify locally (row counts, provenance spot-checks) before cutover is scheduled; Railway stays warm through the 14-day soak; rollback is a DNS repoint. If local verification fails, cutover is blocked — not patched live. |
+| Railway continuity risk over an unbounded program (billing/plan changes, forced migration) | Weekly export snapshots from day one; Phases R+1 time-boxed to ~8 weeks to cutover-ready; any forced Railway exit falls back to serving the snapshot-restored app from the cluster early, accepting feature-freeze. |
 
 ## 7. Open questions (deferred to phase specs)
 
@@ -174,7 +201,6 @@ locally via docker-compose before Phase 2 begins.
   quantifies queue semantics needed.
 - Prompt-template versioning granularity (per-protocol? per-judge-family?) —
   Phase 1, informed by Phase R.
-- Whether the GPU seam gets its own auth (mTLS vs token) and DNS name — Phase 2.
 - Leaderboard anonymity/read-path caching once behind the tunnel — Phase 2.
 - Which meta-eval benchmark items seed the first golden set — Phase 3,
   candidates from Phase R.
