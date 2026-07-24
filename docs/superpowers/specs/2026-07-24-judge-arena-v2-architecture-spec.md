@@ -3,7 +3,7 @@
 **Date:** 2026-07-24 · **Status:** Draft for review (Sonnet gate → Trijeet approval)
 **Inputs:** program design (`2026-07-22-judge-arena-v2-program-design.md`, D1–D7 +
 2026-07-24 decisions) · judge-model inventory §7 (schema contract) ·
-v1 critique (`2026-07-24-judge-arena-v1-critique.md`, 143 verified findings)
+v1 critique (`docs/research/2026-07-judge-arena-v1-critique.md`, 143 verified findings)
 **Exit criteria:** S2 (full judgment provenance) + S4 (≥2-replica correctness)
 demonstrable via docker-compose before Phase 2.
 
@@ -28,13 +28,13 @@ protocol UI (schema supports it; UI ships pairwise+pointwise only).
 
 | # | Decision | Choice | Why |
 |---|---|---|---|
-| P1.1 | Framework/auth upgrade | **Next 15 + Auth.js v5, Node 22 LTS** | Next 14.2 EOL with unpatched 2026 CVEs; node:20 past EOL; Auth.js v5 is where OIDC work belongs (deps-build findings). Prisma stays 6 (defer 7). SDK majors used by rewritten code upgraded (openai, @anthropic-ai/sdk, redis). |
+| P1.1 | Framework/auth upgrade | **Next 15 + Node 22 LTS; next-auth stays v4** | Next 14.2 EOL with unpatched 2026 CVEs; node:20 past EOL. Auth stays on next-auth v4 (Next-15-compatible) per the deps-build finding's own recommendation — the Authentik OIDC provider works on v4, and coupling an Auth.js v5 migration to the auth rewrite doubles 1b risk; revisit v5 at GA as a standalone upgrade. Prisma stays 6 (defer 7). SDK majors used by rewritten code upgraded (openai, @anthropic-ai/sdk, redis). |
 | P1.2 | Queue granularity | **Two message types: `run.create` + `judgment.execute` (one per run × judge-version × pair-order)** | Whole-run messages create long unacked windows and coarse redelivery blast radius (queue-readiness). Per-judgment messages make redelivery idempotent at the judgment unique key. |
 | P1.3 | Queue tech shape | **RabbitMQ quorum queues, manual ack, prefetch-bounded, TTL-based delayed retry (bounded attempts) → DLQ** | Program decision (RabbitMQ); topology per §5. |
 | P1.4 | GPU-seam transport | **Static bearer token (vLLM `--api-key`) over TLS from the internal CA (`lab-internal-ca`), internal DNS name, CCNP-scoped egress** | Single-tenant seam; mTLS adds cert-rotation machinery without a present threat model. Revisit if the seam ever serves >1 consumer. Token in SOPS-encrypted secret. |
 | P1.5 | Importer source | **v1 Postgres snapshot (pg_dump), not the JSONL/config exports** | Export-import findings: JSONL lacks owner identity, judgment ids, dedup keys; criterion cuids dangle after config import. D4's *intent* (keep research artifacts, drop accounts) is preserved — the mechanism reads v1 tables directly. **Flagged for Trijeet sign-off as a D4 mechanism amendment.** |
 | P1.6 | Judge identity model | **Three-level: `JudgeModel` (catalog) → `JudgeModelVersion` (immutable pin) → `ModelEndpoint` (user credentials/endpoint)** | §7 requires immutable versions; users still need mutable connection config (key rotation ≠ new judge version). Judgments FK the *version*, `onDelete: Restrict`. |
-| P1.7 | Deletion semantics | **Provenance entities never hard-delete: `retiredAt` soft-delete on catalog entities; user deletion anonymizes (`triggeredById` → SetNull) instead of cascading** | schema-fit: v1 user-deletion cascade wipes all runs/judgments; rubric SetNull severs provenance. |
+| P1.7 | Deletion semantics | **Provenance entities never hard-delete: `retiredAt` soft-delete on catalog entities *and* rubrics; user deletion is split — fully-private artifacts Cascade (real purge, per privacy posture), public/leaderboard-visible artifacts anonymize (owner → SetNull)** | schema-fit: v1 user-deletion cascade wipes all runs/judgments; rubric SetNull severs provenance. Blanket anonymize would deny users a true private-data purge — the split honors both provenance and privacy-minimization. |
 | P1.8 | Structured output | **Per-provider capability flag; guided/JSON-schema decoding where supported (vLLM guided_choice, OpenAI/OpenRouter json_schema, Anthropic tool-use); lenient parser retained only as explicit fallback, recorded per judgment** | provider-layer: free-JSON + zero-fill parse hides failures; §8.3 of inventory: unconstrained compliance ≤72%. |
 | P1.9 | Redis posture | **Mandatory in production; `noeviction`; fail-fast at startup if absent; silent in-memory fallbacks removed** | replica-safety: silent memory fallback on bus; deps-build: allkeys-lru would evict breaker/limiter state. |
 | P1.10 | Scope valve | **Exercised: implementation splits 1a (schema + importer + correctness core) / 1b (queue + providers + auth + build)** — single spec, two implementation plans | 143 findings say this is too big for one review cycle. |
@@ -65,8 +65,11 @@ PromptTemplate        — versioned judge prompt (protocol, body, version, creat
   (Restrict), `samplingParams` JSONB (effective, as-sent), `reasoningEnabled`,
   `pairOrder` (`AB`|`BA`|null), `inputTokens`/`outputTokens` (split),
   `servedModelId`, `finishReason`, `parseMode` (structured|fallback),
-  `criteriaScores` → **JSONB**, `updatedAt`; **unique (runId,
-  judgeModelVersionId, pairOrder)** — the queue idempotency key.
+  `criteriaScores` → **JSONB**, `updatedAt`, `startedAt`, `attemptCount`;
+  **unique (runId, judgeModelVersionId, pairOrder)** — the queue idempotency
+  key. *(Listwise, when its UI ships, extends this key with a permutation
+  column via a cheap additive migration — acceptable because listwise is
+  explicitly out of Phase 1 UI scope.)*
 - **EvaluationRun v2:** + `protocol` (pointwise default; pairwise via
   `RunCandidate` rows), `rubricVersionId` Restrict (not SetNull), typed
   status enum, `deadlineAt` (reaper input), `finalizedAt`.
@@ -86,7 +89,10 @@ CalibrationRun (judgeModelVersionId, goldenSetId, kappa, rawAgreement,
 
 `trustState` transitions only via CalibrationRun results; version supersession
 allowed, never silent (schema-fit finding: v1's only trust flag is
-connectivity).
+connectivity). **In Phase 1, `trustState` is informational only** (badge in
+UI) — ordinary judging remains fully usable while every version sits at
+`untrusted`; gating behavior arrives with the Phase 3 harness, opt-in per
+project. D6's "earns trust before use" applies from Phase 3 onward.
 
 ### 3.3 Access model fields
 
@@ -100,7 +106,11 @@ Adopt `prisma migrate` with a **baseline migration** (none exists today —
 deps-build BLOCKER); Postgres enums for status/class fields; migrations run as
 a **one-shot Job/compose service**, never in container CMD (deps-build
 BLOCKER); leaderboard composite indexes + latest-run-per-evaluation semantics
-(correctness: double-counted re-runs).
+(correctness: double-counted re-runs). Transition note: existing
+`db push`-managed dev/CI databases are **wiped** (volumes recreated) rather
+than baselined with `migrate resolve` — nothing durable lives in them; the
+Railway production DB is never migrated in place (it is only ever *read* via
+the §8 importer, and the cluster DB starts fresh from migrations).
 
 ## 4. Runtime topology
 
@@ -121,10 +131,20 @@ BLOCKER); leaderboard composite indexes + latest-run-per-evaluation semantics
   limiter — the middleware's second in-memory limiter is deleted), circuit
   breaker (Lua transitions, single half-open probe lock).
 - **Idempotency:** `judgment.execute` redelivery hits the unique key + status
-  guard (`pending→running` claim via conditional update); completed judgments
-  ack-and-skip. Run finalization recomputed from DB aggregate — never
-  in-memory counters (queue-readiness MAJOR); `completed → needs_human`
-  regression race fixed with guarded transitions.
+  guard — claim is a conditional update (`pending→running`, sets `startedAt`,
+  increments `attemptCount`); completed judgments ack-and-skip. **Stale-claim
+  reclaim:** a judgment in `running` whose `updatedAt` is older than the
+  judgment lease threshold (provider timeout + grace) is reclaimable by the
+  same conditional-update path — covering consumer crash *after* claim but
+  before persist. `run.create` expansion is on-conflict-safe (`createMany
+  skipDuplicates` / P2002 → ack-and-skip), so its redelivery is also
+  idempotent. **Run finalization is transactional and race-proof:** the
+  finishing worker takes `SELECT … FOR UPDATE` on the run row, recomputes the
+  judgment aggregate inside the transaction, and applies a guarded status
+  transition — two concurrently-finishing judgments serialize on the row lock,
+  exactly one finalizes (dual-completion race test in §10);
+  `completed → needs_human` regression fixed by the same guards. The reaper
+  covers both levels: run `deadlineAt` and judgment-lease staleness.
 - **Retry/DLQ:** typed error taxonomy (retryable / non-retryable /
   rate-limited) from status codes, not message substrings; retryable → TTL
   delay queue (capped attempts); non-retryable (bad rubric, invalid config,
@@ -137,12 +157,18 @@ BLOCKER); leaderboard composite indexes + latest-run-per-evaluation semantics
   `Last-Event-ID` resume window via Redis stream (replica-safety MINOR).
 - **Prisma pool:** explicit `connection_limit` per replica sized against CNPG
   pooler budget (formula in implementation plan).
-- **Correctness roster** (folded from critique, each a work item): NaN score
-  normalization; human overallScore null-vs-0; dataset summary lost-update
-  (move to transactional update or recompute-on-read); dataset refresh
+- **Correctness roster** (folded from critique; 1a/1b assignment explicit to
+  prevent double-work): **1a** — human overallScore null-vs-0; dataset refresh
   clobber; rubric version numbering under transaction + unique constraint;
-  swallowed batch-run failures surfaced in response; leaderboard latest-run
-  aggregation.
+  leaderboard latest-run-per-evaluation aggregation (+ indexes). **1b**
+  (entangled with the queue/provider rewrite) — NaN score normalization
+  (provider parse path); dataset summary lost-update (recomputed
+  transactionally on run finalization); swallowed batch-run failures
+  (surfaced by `run.create` expansion, each failure marks its run `error`).
+- **Health/readiness:** `/api/health` (web) and the worker health probe extend
+  to Redis and RabbitMQ liveness — an ongoing bus/queue failure fails
+  *readiness* (k8s stops routing), not just boot (per the critique's
+  Redis-bus fix direction).
 
 ## 5. RabbitMQ topology
 
@@ -201,7 +227,10 @@ BLOCKER); leaderboard composite indexes + latest-run-per-evaluation semantics
 ## 8. v1 → v2 importer (gates Phase 2)
 
 Reads a **v1 pg_dump restored to a scratch database** (P1.5); writes v2 via
-Prisma. Mapping highlights (full field table in implementation plan):
+Prisma. The v1 side is read through a **frozen `prisma/schema.v1.prisma` with
+its own generated client** (separate output dir) — the app's v2 client never
+touches the scratch DB. Mapping highlights (full field table in
+implementation plan):
 
 - **Judge synthesis:** distinct v1 `(provider, modelId, endpoint)` triples →
   JudgeModel + JudgeModelVersion (`weightsRevision: 'v1-unknown'`,
@@ -241,8 +270,12 @@ Prisma. Mapping highlights (full field table in implementation plan):
   transitions, template rendering, importer mappers, serializer PII-stripping.
 - **Integration (compose services in CI):** judgment lifecycle
   (publish→claim→persist→finalize), redelivery idempotency (duplicate +
-  mid-run kill), reaper, SSE ownership scoping + resume, rate-limit atomicity
-  across two app replicas, access matrix (anonymous/authed/owner × route).
+  mid-run kill + stale-claim reclaim), **concurrent dual-completion
+  finalization race** (two judgments finish simultaneously → exactly one
+  finalizer wins the row lock, run reaches a terminal state), reaper (both
+  run-deadline and judgment-lease levels), SSE ownership scoping + resume,
+  rate-limit atomicity across two app replicas, access matrix
+  (anonymous/authed/owner × route).
 - **S4 demo (exit gate):** compose at `app=2, worker=2`; kill a worker
   mid-run → run completes via redelivery, no duplicate judgments (unique-key
   proof); rolling-restart app → SSE clients on both replicas receive events;
@@ -260,9 +293,10 @@ in-memory SSE default → §4/P1.9; per-process rate limiting → §4; breaker �
 §4/§6; ModelConfig mutability + judgment cascade → §3.1/P1.6/P1.7;
 processRun idempotency + queue-items-as-only-record → §4/P1.2; compose
 container_name/ports/migrations-in-CMD/no-baseline → §9/§3.4; export owner
-identity → §8/P1.5. All 72 MAJORs map to §3–§9 work items (traceability table
-generated into the implementation plan; deferred-with-reason allowed only for
-MINOR/INFO). Remaining LOW items from v1: 30 (client reuse — §6 registry),
+identity → §8/P1.5. All 72 MAJORs map to §3–§9 work items. The implementation
+plan carries a **literal 1:1 finding→disposition table** (one row per
+BLOCKER/MAJOR, independently auditable — not prose buckets);
+deferred-with-reason allowed only for MINOR/INFO. Remaining LOW items from v1: 30 (client reuse — §6 registry),
 32/36 (dashboard refresh — implementation), 33 (updatedAt — §3.1), 35 (JWT —
 §7); 31/34 closed as intended/stale.
 
@@ -270,7 +304,7 @@ MINOR/INFO). Remaining LOW items from v1: 30 (client reuse — §6 registry),
 
 | Risk | Mitigation |
 |---|---|
-| Next 15 + Auth.js v5 upgrade tangles with the auth rewrite | 1b sequences upgrade first on v1 behavior (tests green), then OIDC work. |
+| Next 15 upgrade tangles with the auth/OIDC work | 1b sequences the framework upgrade first on existing behavior (tests green), then the OIDC provider work on next-auth v4 (P1.1 — v5 explicitly deferred). |
 | Per-judgment messages amplify RabbitMQ ops for huge dataset runs | Prefetch bounds + run-level `run.create` expansion throttle; quorum queues sized in Phase 2; compose rig load-tested with a 1k-judgment run. |
 | Importer meets dirty v1 data (dangling cuids, duplicate judgments) | Importer runs in report-only mode first; reconciliation report is a gate artifact. |
 | Scope: 143 findings | P1.10 split; MINOR/INFO triaged into implementation-plan backlog with explicit deferrals. |
