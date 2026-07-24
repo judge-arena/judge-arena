@@ -212,6 +212,19 @@ the §8 importer, and the cluster DB starts fresh from migrations).
   admin invite flow documented in the runbook. Account linking by OIDC `sub`
   only — the email-fallback session resolution is removed (linking hazard
   finding). JWT sessions: 24h with rolling refresh (closes LOW-35).
+- **Non-destructive v5 upgrade path (Trijeet condition, 2026-07-24):** the
+  auth design must make the eventual next-auth v4 → Auth.js v5 migration a
+  zero-data-loss, re-login-at-worst event, retaining all test and real user
+  accounts and their artifacts. Concretely: (a) OIDC identity persisted in
+  **our schema** as `(issuer, sub)` on the User record — re-linking under any
+  auth library is deterministic, never inferred from adapter internals or
+  email; (b) JWT session strategy only — no session rows exist to migrate
+  (v5's cookie rename forces re-login, nothing more); (c) `auth-guard`
+  resolves users exclusively through our User table (token carries only the
+  user id claim) — no v4-internal token-shape coupling in app code;
+  (d) credentials users are untouched (`passwordHash` is app-owned).
+  Acceptance check in §10: a v5 spike branch logs in as an existing OIDC user
+  *and* an existing credentials user with zero schema/data migration.
 - **Access matrix** (the D3/2026-07-24 principle, route-by-route in the
   implementation plan): anonymous GET — leaderboard, `visibility: public`
   rubrics/datasets/projects/golden-sets (PII-stripped serializers);
