@@ -110,7 +110,11 @@ the input contract for the Phase 1 schema.
 - **Scale-out design:** stateless web tier (HPA-ready) split from queue-backed
   judge workers; the existing Redis realtime-bus adapter becomes the mandatory
   default (load-tested, not redesigned); rate limiting and circuit-breaker
-  state move to Redis; job queue selection (BullMQ vs pg-boss) decided in-spec.
+  state move to Redis; **job queue = RabbitMQ (AMQP)** — reusing the cluster's
+  existing rabbitmq-cluster-operator `bus` pattern rather than an app-private
+  queue (BullMQ/pg-boss rejected in favor of cluster-reusable infra; decided
+  2026-07-24). Phase 1 codes against AMQP; instance placement (dedicated
+  public-tier RabbitMQ CR vs CCNP to an existing bus) is a Phase 2 detail.
   Prerequisite: rework `docker-compose.yml` for `--scale app=N` (drop fixed
   `container_name`/host-port publish, add a dev LB) so the S4 demo is runnable.
 - **v1→v2 import tooling** *(named deliverable, gates Phase 2)*: importer
@@ -122,10 +126,14 @@ the input contract for the Phase 1 schema.
   seam's transport and auth (mTLS vs token, DNS name) are **decided in this
   spec**, before the seam client is built.
 - **Auth v2:** Authentik OIDC + credentials fallback, invite-gated (D3).
-  Presumed shape: **app-level OIDC** (NextAuth as OIDC client to Authentik),
-  *not* ingress-level oauth2-proxy — dev API keys and the public read-only
-  leaderboard must bypass any ingress gate; the spec confirms the shape and
-  enumerates the public carve-outs. Retire or admin-gate `/api/auth/register`.
+  Shape **confirmed 2026-07-24**: **app-level OIDC** (NextAuth as OIDC client
+  to Authentik), *not* ingress-level oauth2-proxy — dev API keys and the
+  public read-only leaderboard must bypass any ingress gate. Access model
+  principle: this is largely **public research data — default to open reads**
+  (leaderboard, published datasets/rubrics); **writes and user-created or
+  user-uploaded data are gated completely** (ownership + auth on every
+  mutation and on private artifacts). The spec enumerates the public
+  carve-outs from this principle. Retire or admin-gate `/api/auth/register`.
 - README rewrite to match reality lands with this spec's implementation.
 - Scope valve: if the spec grows unwieldy, split into **1a** (critique +
   schema + import tooling) and **1b** (scale-out + providers + auth) with
@@ -154,10 +162,12 @@ locally via docker-compose before Phase 2 begins.
   cutover so no live user loses access.
 - Cutover runbook: write-freeze on Railway → final delta export → import →
   verify (row counts + provenance spot-checks) → repoint judgearena.com DNS at
-  Cloudflare to the tunnel. **Soak: 14 days** with Railway kept deployed and
-  warm; rollback = repoint DNS back to Railway. Railway decommissioned only
-  after soak passes; weekly export snapshots throughout the program so a
-  forced Railway exit is never data-lossy.
+  Cloudflare to the tunnel. **Soak: 7 days** (lowered from 14, 2026-07-24)
+  with Railway kept deployed and warm; rollback = repoint DNS back to Railway.
+  Railway decommissioned only after soak passes. Snapshot posture is **light**
+  (little user data exists today): one export snapshot up front, then at
+  program milestones and before any risky Railway-side change — not a fixed
+  weekly cadence.
 
 **Exit gate:** success criteria S1 + S4 verified (below); Railway closeable.
 
@@ -193,12 +203,13 @@ locally via docker-compose before Phase 2 begins.
 | In-product meta-eval scope creep | Phase 3 is gated to the metrics named in D6; anything further is a new spec. |
 | Dormant deps (Next 14, Prisma 6, NextAuth 4) accrue CVEs during the program | Phase 1 critique includes a dependency audit; upgrades land with the v2 implementation, not ad hoc. |
 | Coupled cutover: schema v2 + platform migration land in one step (accepted per D7) | Abort criteria are explicit: full production export must import and verify locally (row counts, provenance spot-checks) before cutover is scheduled; Railway stays warm through the 14-day soak; rollback is a DNS repoint. If local verification fails, cutover is blocked — not patched live. |
-| Railway continuity risk over an unbounded program (billing/plan changes, forced migration) | Weekly export snapshots from day one; Phases R+1 time-boxed to ~8 weeks to cutover-ready; any forced Railway exit falls back to serving the snapshot-restored app from the cluster early, accepting feature-freeze. |
+| Railway continuity risk over an unbounded program (billing/plan changes, forced migration) | Light snapshot posture (up-front + milestone exports — little user data today); Phases R+1 time-boxed to ~8 weeks to cutover-ready; any forced Railway exit falls back to serving the snapshot-restored app from the cluster early, accepting feature-freeze. |
 
 ## 7. Open questions (deferred to phase specs)
 
-- Job queue: BullMQ (Redis) vs pg-boss (CNPG) — Phase 1, after critique
-  quantifies queue semantics needed.
+- RabbitMQ topology (queues/exchanges, retry/DLQ semantics for judge runs) —
+  Phase 1 spec; instance placement (public-tier CR vs CCNP to existing bus) —
+  Phase 2.
 - Prompt-template versioning granularity (per-protocol? per-judge-family?) —
   Phase 1, informed by Phase R.
 - Leaderboard anonymity/read-path caching once behind the tunnel — Phase 2.
