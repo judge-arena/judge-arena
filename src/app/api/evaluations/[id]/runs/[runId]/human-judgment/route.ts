@@ -5,9 +5,9 @@ import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { refreshDatasetEvaluationSummaryForEvaluation } from '@/lib/dataset-evaluation-summary';
 import { logger, serializeError } from '@/lib/logger';
-import { resolveHumanOverallScore } from '@/lib/utils';
+import { resolveHumanJudgmentScore } from '@/lib/utils';
 
-const humanJudgmentSchema = z.object({
+export const humanJudgmentSchema = z.object({
   overallScore: z.number().min(0).max(10).optional(),
   reasoning: z.string().max(5000).optional(),
   criteriaScores: z
@@ -16,7 +16,7 @@ const humanJudgmentSchema = z.object({
         criterionId: z.string(),
         criterionName: z.string(),
         score: z.number().min(0),
-        maxScore: z.number(),
+        maxScore: z.number().min(1),
         weight: z.number(),
         comment: z.string().optional(),
       })
@@ -99,11 +99,17 @@ export async function POST(
       );
     }
 
-    // Resolve overallScore: use explicit value, compute from criteria, or reject if both missing
+    // Resolve overallScore per mode: judge mode uses explicit value, computes
+    // from criteria, or rejects if both missing; respond mode has no scoring
+    // concept and always resolves to the 0 placeholder (see resolveHumanJudgmentScore).
     let normalizedOverallScore: number;
     try {
-      normalizedOverallScore = resolveHumanOverallScore(data.overallScore, data.criteriaScores);
-    } catch (error) {
+      normalizedOverallScore = resolveHumanJudgmentScore({
+        mode,
+        overallScore: data.overallScore,
+        criteriaScores: data.criteriaScores,
+      });
+    } catch {
       return NextResponse.json(
         { error: 'overallScore or criteriaScores required' },
         { status: 400 }

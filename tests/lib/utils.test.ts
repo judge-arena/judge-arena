@@ -5,7 +5,7 @@ import {
   formatLatency,
   truncate,
   computeWeightedScore,
-  resolveHumanOverallScore,
+  resolveHumanJudgmentScore,
   getStatusColor,
   getScoreColor,
   getProviderInfo,
@@ -93,53 +93,99 @@ describe('utils', () => {
     });
   });
 
-  describe('resolveHumanOverallScore', () => {
-    it('should use explicit overallScore when provided', () => {
-      const result = resolveHumanOverallScore(8.5, undefined);
-      expect(result).toBe(8.5);
+  describe('resolveHumanJudgmentScore', () => {
+    describe('judge mode', () => {
+      it('should use explicit overallScore when provided', () => {
+        const result = resolveHumanJudgmentScore({
+          mode: 'judge',
+          overallScore: 8.5,
+          criteriaScores: undefined,
+        });
+        expect(result).toBe(8.5);
+      });
+
+      it('should use explicit overallScore even when criteriaScores is also provided', () => {
+        const criteriaScores = [
+          { score: 8, weight: 2, maxScore: 10 },
+          { score: 6, weight: 1, maxScore: 10 },
+        ];
+        const result = resolveHumanJudgmentScore({
+          mode: 'judge',
+          overallScore: 9.5,
+          criteriaScores,
+        });
+        // Should return the explicit value, not the computed one
+        expect(result).toBe(9.5);
+      });
+
+      it('should compute overallScore from criteriaScores when overallScore is missing', () => {
+        const criteriaScores = [
+          { score: 8, weight: 2, maxScore: 10 },
+          { score: 6, weight: 1, maxScore: 10 },
+        ];
+        const result = resolveHumanJudgmentScore({
+          mode: 'judge',
+          overallScore: undefined,
+          criteriaScores,
+        });
+        // (0.8*2 + 0.6*1) / 3 * 10 = 7.333...
+        expect(result).toBeCloseTo(7.333, 2);
+      });
+
+      it('should throw error when both overallScore and criteriaScores are missing', () => {
+        expect(() =>
+          resolveHumanJudgmentScore({ mode: 'judge', overallScore: undefined, criteriaScores: undefined })
+        ).toThrow('overallScore or criteriaScores required');
+      });
+
+      it('should throw error when both overallScore and criteriaScores are null', () => {
+        expect(() =>
+          resolveHumanJudgmentScore({ mode: 'judge', overallScore: undefined, criteriaScores: null })
+        ).toThrow('overallScore or criteriaScores required');
+      });
+
+      it('should throw error when criteriaScores is empty array', () => {
+        expect(() =>
+          resolveHumanJudgmentScore({ mode: 'judge', overallScore: undefined, criteriaScores: [] })
+        ).toThrow('overallScore or criteriaScores required');
+      });
+
+      it('should handle 0 as valid explicit overallScore', () => {
+        const result = resolveHumanJudgmentScore({
+          mode: 'judge',
+          overallScore: 0,
+          criteriaScores: undefined,
+        });
+        expect(result).toBe(0);
+      });
     });
 
-    it('should use explicit overallScore even when criteriaScores is also provided', () => {
-      const criteriaScores = [
-        { score: 8, weight: 2, maxScore: 10 },
-        { score: 6, weight: 1, maxScore: 10 },
-      ];
-      const result = resolveHumanOverallScore(9.5, criteriaScores);
-      // Should return the explicit value, not the computed one
-      expect(result).toBe(9.5);
-    });
+    describe('respond mode', () => {
+      it('should return the 0 placeholder when overallScore and criteriaScores are both absent', () => {
+        const result = resolveHumanJudgmentScore({
+          mode: 'respond',
+          overallScore: undefined,
+          criteriaScores: [],
+        });
+        expect(result).toBe(0);
+      });
 
-    it('should compute overallScore from criteriaScores when overallScore is missing', () => {
-      const criteriaScores = [
-        { score: 8, weight: 2, maxScore: 10 },
-        { score: 6, weight: 1, maxScore: 10 },
-      ];
-      const result = resolveHumanOverallScore(undefined, criteriaScores);
-      // (0.8*2 + 0.6*1) / 3 * 10 = 7.333...
-      expect(result).toBeCloseTo(7.333, 2);
-    });
+      it('should never throw, even though judge mode would reject the same empty payload', () => {
+        expect(() =>
+          resolveHumanJudgmentScore({ mode: 'respond', overallScore: undefined, criteriaScores: undefined })
+        ).not.toThrow();
+      });
 
-    it('should throw error when both overallScore and criteriaScores are missing', () => {
-      expect(() => resolveHumanOverallScore(undefined, undefined)).toThrow(
-        'overallScore or criteriaScores required'
-      );
-    });
-
-    it('should throw error when both overallScore and criteriaScores are null', () => {
-      expect(() => resolveHumanOverallScore(undefined, null)).toThrow(
-        'overallScore or criteriaScores required'
-      );
-    });
-
-    it('should throw error when criteriaScores is empty array', () => {
-      expect(() => resolveHumanOverallScore(undefined, [])).toThrow(
-        'overallScore or criteriaScores required'
-      );
-    });
-
-    it('should handle 0 as valid explicit overallScore', () => {
-      const result = resolveHumanOverallScore(0, undefined);
-      expect(result).toBe(0);
+      it('should ignore overallScore/criteriaScores if present and still return 0', () => {
+        // Respond mode never receives these from the form, but resolution
+        // must not depend on the caller withholding them correctly.
+        const result = resolveHumanJudgmentScore({
+          mode: 'respond',
+          overallScore: 9,
+          criteriaScores: [{ score: 8, weight: 2, maxScore: 10 }],
+        });
+        expect(result).toBe(0);
+      });
     });
   });
 

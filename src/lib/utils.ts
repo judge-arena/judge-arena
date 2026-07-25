@@ -59,31 +59,43 @@ export function computeWeightedScore(
 /**
  * Resolve the overallScore for a human judgment submission.
  *
- * Rules:
- * - If overallScore is provided, use it (takes precedence over criteriaScores)
- * - If overallScore is missing but criteriaScores exists, compute via weighted average
- * - If both are missing, throw an error (caller should return 400)
+ * The route serves two distinct modes and they are NOT resolved the same way:
+ * - 'judge' mode: the user scores an existing response against a rubric.
+ *   - If overallScore is provided, use it (takes precedence over criteriaScores)
+ *   - If overallScore is missing but criteriaScores exists, compute via weighted average
+ *   - If both are missing, throw an error (caller should return 400)
+ * - 'respond' mode: the user picks the best of several model responses; there
+ *   is no scoring concept at all (the form never sends overallScore or
+ *   criteriaScores). Resolution is skipped entirely and a placeholder is
+ *   returned since the column is non-nullable.
  *
- * @param overallScore - The explicit overall score (0-10), if provided
- * @param criteriaScores - Array of criteria scores with weight info
- * @returns The resolved overallScore to persist
- * @throws Error if both overallScore and criteriaScores are missing/empty
+ * @throws Error in 'judge' mode if both overallScore and criteriaScores are missing/empty
  */
-export function resolveHumanOverallScore(
-  overallScore: number | undefined,
-  criteriaScores: Array<{ score: number; weight: number; maxScore: number }> | undefined | null
-): number {
-  // If explicit overallScore provided, use it
+export function resolveHumanJudgmentScore({
+  mode,
+  overallScore,
+  criteriaScores,
+}: {
+  mode: 'judge' | 'respond';
+  overallScore: number | undefined;
+  criteriaScores: Array<{ score: number; weight: number; maxScore: number }> | undefined | null;
+}): number {
+  if (mode === 'respond') {
+    // respond mode has no scoring concept; 0 is a placeholder, excluded from averages by mode
+    return 0;
+  }
+
+  // judge mode: if explicit overallScore provided, use it
   if (typeof overallScore === 'number') {
     return overallScore;
   }
 
-  // If criteriaScores provided, compute from weights
+  // judge mode: if criteriaScores provided, compute from weights
   if (criteriaScores && Array.isArray(criteriaScores) && criteriaScores.length > 0) {
     return computeWeightedScore(criteriaScores);
   }
 
-  // Both missing: error
+  // judge mode, both missing: error
   throw new Error('overallScore or criteriaScores required');
 }
 
