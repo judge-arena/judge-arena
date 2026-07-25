@@ -105,6 +105,7 @@ model User {
   datasets          Dataset[]
   developerApiKeys  DeveloperApiKey[]
   auditLogs         AuditLog[]
+  modelEndpoints    ModelEndpoint[]
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
@@ -194,6 +195,95 @@ model ModelConfig {
 
   @@unique([userId, slug])
   @@index([userId])
+}
+
+// ─── Judge Identity ─────────────────────────────────────────────────────────
+// A JudgeModel is the stable identity of a judge (e.g. "GPT-4o judge"); each
+// JudgeModelVersion is an immutable, independently-calibratable snapshot of
+// that judge (weights/quantization/serving backend pinned at that ordinal).
+// ModelEndpoint is a user's configured way of reaching a given version.
+
+model JudgeModel {
+  id               String              @id @default(cuid())
+  name             String
+  slug             String              @unique
+  judgeClass       JudgeClass
+  scoringMechanism ScoringMechanism
+  baseModel        String?
+  paramsB          Float?
+  contextLength    Int?
+  trainingRecipe   String? // prompted|sft|dpo|rlvr|mixed
+  license          String?
+  licenseNote      String?
+  modality         String              @default("text")
+  taxonomyMode     String? // fixed | policy_conditioned
+  streamingCapable Boolean             @default(false)
+  retiredAt        DateTime?
+  versions         JudgeModelVersion[]
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+}
+
+model JudgeModelVersion {
+  id                     String              @id @default(cuid())
+  judgeModelId           String
+  judgeModel             JudgeModel          @relation(fields: [judgeModelId], references: [id], onDelete: Restrict)
+  ordinal                Int
+  weightsRevision        String?
+  quantization           Quantization        @default(none)
+  quantMethod            String?
+  servingBackend         ServingBackend
+  endpointClass          String?
+  trainingDataVintage    DateTime?
+  parentVersionId        String?
+  parentVersion          JudgeModelVersion?  @relation("VersionLineage", fields: [parentVersionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  successors             JudgeModelVersion[] @relation("VersionLineage")
+  reasoningMode          ReasoningMode       @default(none)
+  samplingDefaults       Json?
+  protocolSupport        Json // {"pointwise":["score"],"pairwise":["selection"],...}
+  supportsRubricAnchored Boolean             @default(true)
+  trustState             TrustState          @default(untrusted)
+  retiredAt              DateTime?
+  createdAt              DateTime            @default(now())
+  endpoints              ModelEndpoint[]
+  // judgments relation added in Task 4 (ModelJudgment.judgeModelVersionId doesn't exist yet)
+  // calibrationRuns relation added in Task 5 (CalibrationRun model doesn't exist yet)
+
+  @@unique([judgeModelId, ordinal])
+}
+
+model ModelEndpoint {
+  id                  String            @id @default(cuid())
+  userId              String
+  user                User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  judgeModelVersionId String
+  judgeModelVersion   JudgeModelVersion @relation(fields: [judgeModelVersionId], references: [id], onDelete: Restrict)
+  endpoint            String?
+  apiKeyEnc           String?
+  isActive            Boolean           @default(true)
+  verifiedAt          DateTime?
+  archFingerprint     Json?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  @@index([userId])
+  @@index([judgeModelVersionId])
+}
+
+// ─── Prompt Templates ───────────────────────────────────────────────────────
+// Versioned judge system-prompt templates. `(name, version)` is the stable
+// identity later tasks/importers pin judgments to.
+
+model PromptTemplate {
+  id        String      @id @default(cuid())
+  name      String
+  protocol  RunProtocol
+  version   Int
+  body      String
+  createdAt DateTime    @default(now())
+  // judgments relation added in Task 4 (ModelJudgment.promptTemplateId doesn't exist yet)
+
+  @@unique([name, version])
 }
 
 // ─── Evaluation Template ─────────────────────────────────────────────────────
