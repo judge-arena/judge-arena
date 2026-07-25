@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { publishRealtimeEvent } from '@/lib/realtime/events';
 
-interface DatasetEvaluationSummary {
+export interface DatasetEvaluationSummary {
   updatedAt: string;
   sampleCount: number;
   samplesWithModelScores: number;

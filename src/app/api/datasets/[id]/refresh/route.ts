@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { fetchDatasetMetadata } from '@/lib/huggingface';
+import { buildRefreshUpdate } from '@/lib/dataset-refresh-update';
 import { logger, serializeError } from '@/lib/logger';
 
 // POST /api/datasets/[id]/refresh - Refresh metadata from remote source
@@ -17,12 +18,8 @@ export async function POST(
   try {
     const dataset = await prisma.dataset.findUnique({
       where: { id: params.id },
-      select: {
-        id: true,
-        userId: true,
-        source: true,
-        huggingFaceId: true,
-        sourceUrl: true,
+      include: {
+        _count: { select: { samples: true } },
       },
     });
 
@@ -43,13 +40,18 @@ export async function POST(
     }
 
     const meta = await fetchDatasetMetadata(dataset.huggingFaceId);
+    const refreshUpdate = buildRefreshUpdate(
+      dataset.remoteMetadata,
+      meta,
+      dataset._count.samples
+    );
 
     const updated = await prisma.dataset.update({
       where: { id: params.id },
       data: {
         description: meta.description,
-        remoteMetadata: JSON.stringify(meta),
-        sampleCount: meta.sampleCount,
+        remoteMetadata: refreshUpdate.remoteMetadata,
+        sampleCount: refreshUpdate.sampleCount,
         splits: JSON.stringify(meta.splits),
         features: JSON.stringify(meta.features),
         tags: JSON.stringify(meta.tags),
