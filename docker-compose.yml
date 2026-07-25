@@ -57,6 +57,7 @@ services:
       POSTGRES_DB: judgearena
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./deploy/pg-init-test-db.sh:/docker-entrypoint-initdb.d/pg-init-test-db.sh:ro
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     networks:

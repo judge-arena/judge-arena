@@ -41,3 +41,4 @@ next-env.d.ts
 # Database
 prisma/dev.db
 prisma/dev.db-journal
+.superpowers/

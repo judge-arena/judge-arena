@@ -6,7 +6,10 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'tests/**/*.test.ts'],
-    exclude: ['node_modules', '.next', 'prisma'],
+    // tests/db/** requires a live Postgres connection and is run separately
+    // via `npm run test:db` (see vitest.db.config.ts) so plain `npm test`
+    // stays green in environments without a database.
+    exclude: ['node_modules', '.next', 'prisma', 'tests/db/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'text-summary', 'lcov', 'html'],
