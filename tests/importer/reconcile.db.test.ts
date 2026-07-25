@@ -263,6 +263,53 @@ describe('reconcile (DB)', () => {
     }
   });
 
+  it('leaderboard-explainable: a model whose ENTIRE v1 judgment population vanished still appears in spot-check detail (v2 count 0)', async () => {
+    const f = await buildFixture();
+    const run = await mkV1EvaluationRun(f.evaluation.id, f.userA.id, { status: 'completed' });
+    await mkV1ModelJudgment(run.id, f.configA.id, { status: 'completed', overallScore: 8 });
+
+    // configC ('local'/'llama-3') is referenced ONLY by a judgment under
+    // droppedEvaluation, which cascades away entirely (its project is
+    // dropped) — so v1 has a completed+scored judgment for this model but v2
+    // has NONE. Before the fix, the detail line was built by iterating only
+    // v2's aggregate keys, so a model with zero v2 rows never got a line at
+    // all — it silently vanished from the report instead of showing up as
+    // "v1=1, v2=0".
+    const droppedRun = await mkV1EvaluationRun(f.droppedEvaluation.id, f.userB.id, { status: 'completed' });
+    await mkV1ModelJudgment(droppedRun.id, f.configC.id, { status: 'completed', overallScore: 9 });
+
+    const { ctx, ids } = await runFullPipeline(f.ownerMap);
+    const result = await reconcile(ctx, ids);
+
+    const leaderboardCheck = result.spotChecks.find((s) => s.name === 'leaderboard-explainable')!;
+    expect(leaderboardCheck.ok).toBe(true);
+    expect(leaderboardCheck.detail).toMatch(/local\/llama-3: v1\(n=1,avg=9\.00\) v2\(n=0,avg=-\)/);
+    expect(leaderboardCheck.detail).toMatch(/local\/llama-3:.*drop-explained=true/);
+  });
+
+  it('malformed criteriaScores: a non-gating WARNING appears in reconcile.warnings without affecting ok', async () => {
+    const f = await buildFixture();
+    const run = await mkV1EvaluationRun(f.evaluation.id, f.userA.id, { status: 'completed' });
+    // Malformed v1 JSON — ./runs.ts's remapCriteriaScores degrades this to
+    // [] and tallies it under ModelJudgmentCriteriaScoresMalformed/dropped,
+    // but the row itself is still created (not dropped), so no
+    // rowCount/spotCheck reflects it — this is exactly why it needs its own
+    // non-gating surfacing mechanism.
+    await mkV1ModelJudgment(run.id, f.configA.id, {
+      status: 'completed',
+      overallScore: 5,
+      criteriaScores: '{not json',
+    });
+
+    const { ctx, ids } = await runFullPipeline(f.ownerMap);
+    const result = await reconcile(ctx, ids);
+
+    expect(result.ok).toBe(true);
+    expect(result.warnings).toContain(
+      'WARNING: 1 ModelJudgment rows imported with malformed criteriaScores degraded to []'
+    );
+  });
+
   it('dropped-user leakage: a clean fixture with a dropped user reconciles ok; manually inserting a v2 User with the dropped email flips ok:false', async () => {
     const f = await buildFixture();
     const run = await mkV1EvaluationRun(f.evaluation.id, f.userA.id, { status: 'completed' });
@@ -279,6 +326,46 @@ describe('reconcile (DB)', () => {
     // the leak spot check 4 exists to catch (it must never let a dropped
     // user's identity re-materialize under its own email).
     await db.user.create({ data: { email: f.userB.email, passwordHash: 'leaked-in' } });
+
+    const tampered = await reconcile(ctx, ids);
+    expect(tampered.ok).toBe(false);
+    const leakCheck = tampered.spotChecks.find((s) => s.name === 'no-v1-owner-leakage')!;
+    expect(leakCheck.ok).toBe(false);
+    expect(leakCheck.detail).toMatch(/1 dropped-user email/);
+  });
+
+  it('dropped-BY-ABSENCE leakage (reviewer probe): a v1 user with NO ownerMap entry at all is a dropped identity too — renaming a kept v2 user onto its email (no new row, same v2 User count) still flips ok:false', async () => {
+    // Self-contained fixture (not buildFixture()) so this doesn't entangle
+    // with buildFixture's row-count-sensitive assertions elsewhere: the real
+    // cutover ownerMap is a small "kept" allowlist (see architecture spec
+    // §8) — most v1 users are dropped by simply never appearing as a key,
+    // NOT via an explicit 'drop' entry. A check that only ever looked at
+    // explicit 'drop' entries (the pre-fix behavior) would never even
+    // consider absentUser a "dropped identity" to guard.
+    const keptUser = await mkV1User();
+    const absentUser = await mkV1User(); // deliberately NOT a key in ownerMap
+
+    const ownerMap: OwnerMap = {
+      [keptUser.id]: { email: 'kept@v2.example', oidcIssuer: 'https://idp.test.local', oidcSubject: 'sub-kept' },
+    };
+
+    const { ctx, ids } = await runFullPipeline(ownerMap);
+
+    const clean = await reconcile(ctx, ids);
+    expect(clean.ok).toBe(true);
+    const cleanLeakCheck = clean.spotChecks.find((s) => s.name === 'no-v1-owner-leakage')!;
+    expect(cleanLeakCheck.ok).toBe(true);
+
+    // In-place rename of the KEPT v2 user's own row onto the dropped-by-
+    // absence identity's v1 email — total v2 User row count is UNCHANGED
+    // (still 1), so a row-count-delta check would never catch this; only an
+    // email-existence check does.
+    const keptV2User = await db.user.findUniqueOrThrow({
+      where: { oidcIssuer_oidcSubject: { oidcIssuer: 'https://idp.test.local', oidcSubject: 'sub-kept' } },
+    });
+    const v2UserCountBefore = await db.user.count();
+    await db.user.update({ where: { id: keptV2User.id }, data: { email: absentUser.email } });
+    expect(await db.user.count()).toBe(v2UserCountBefore);
 
     const tampered = await reconcile(ctx, ids);
     expect(tampered.ok).toBe(false);
@@ -324,6 +411,29 @@ describe('reconcile (DB)', () => {
 
     try {
       const result = await runImport(['--mode=apply', `--owner-map=${ownerMapPath}`]);
+      expect(result).toEqual({ exitCode: 1 });
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('runImport (apply mode, real DB): --force bypasses ONLY the pre-existing-data guard, never the reconcile gate', async () => {
+    const f = await buildFixture();
+    const run = await mkV1EvaluationRun(f.evaluation.id, f.userA.id, { status: 'completed' });
+    await mkV1ModelJudgment(run.id, f.configA.id, { status: 'completed', overallScore: 8 });
+
+    // Same pre-existing owner-email leak as the test above (assertApplyAllowed
+    // never even fires here — it only guards on existing Project rows) but
+    // this time ALSO passing --force. If --force had any effect on reconcile
+    // itself, this would flip to exitCode 0; it must not.
+    await db.user.create({ data: { email: f.userB.email, passwordHash: 'pre-existing-leak' } });
+
+    const tmpDir = mkdtempSync(join(tmpdir(), 'judge-arena-owner-map-'));
+    const ownerMapPath = join(tmpDir, 'owners.json');
+    writeFileSync(ownerMapPath, JSON.stringify(f.ownerMap));
+
+    try {
+      const result = await runImport(['--mode=apply', `--owner-map=${ownerMapPath}`, '--force']);
       expect(result).toEqual({ exitCode: 1 });
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });

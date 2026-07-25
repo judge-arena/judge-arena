@@ -122,6 +122,9 @@ export interface ReconcileResult {
   rowCounts: RowCount[];
   spotChecks: SpotCheck[];
   ok: boolean;
+  /** Non-gating tallies worth surfacing at the go/no-go decision point (e.g.
+   * malformed-criteriaScores degradations) — never affects `ok`. */
+  warnings: string[];
 }
 
 type MappedOwner = Extract<OwnerMap[string], { email: string }>;
@@ -366,7 +369,13 @@ function aggregateByProviderModel(
  * dropped judgment regardless of its own v1 status/score, a strict superset
  * of "completed judgments that dropped out of this aggregate"). Both v1 and
  * v2 numbers are reported in `detail` per model, exactly as the brief asks
- * ("report both numbers"). */
+ * ("report both numbers") — iterating the UNION of v1's and v2's aggregate
+ * keys (not just v2's) so a model whose ENTIRE v1 judgment population
+ * vanished (v2 count 0) still gets its own detail line instead of silently
+ * disappearing from the report; each line also carries a per-model
+ * `drop-explained` flag (that model's own shortfall checked against the
+ * same total `dropped` tally used for `totalOk`) so a fully-vanished model
+ * reads as accounted-for rather than as an unexplained gap. */
 async function spotCheckLeaderboardExplainable(ctx: ImportCtx): Promise<SpotCheck> {
   const where = { status: 'completed' as const, overallScore: { not: null } };
   const select = { overallScore: true, modelConfig: { select: { provider: true, modelId: true } } } as const;
@@ -378,21 +387,27 @@ async function spotCheckLeaderboardExplainable(ctx: ImportCtx): Promise<SpotChec
 
   const v1Agg = aggregateByProviderModel(v1Rows);
   const v2Agg = aggregateByProviderModel(v2Rows);
+  const droppedJudgments = droppedTally(ctx, 'ModelJudgment');
 
   let perModelOk = true;
   const lines: string[] = [];
-  for (const [key, v2Stat] of v2Agg) {
+  const allKeys = new Set<string>([...v1Agg.keys(), ...v2Agg.keys()]);
+  for (const key of allKeys) {
     const v1Stat = v1Agg.get(key);
+    const v2Stat = v2Agg.get(key);
     const v1Count = v1Stat?.count ?? 0;
-    if (v2Stat.count > v1Count) perModelOk = false;
+    const v2Count = v2Stat?.count ?? 0;
+    if (v2Count > v1Count) perModelOk = false;
+
+    const shortfall = v1Count - v2Count;
+    const shortfallNote = shortfall > 0 ? ` shortfall=${shortfall} drop-explained=${shortfall <= droppedJudgments}` : '';
     lines.push(
-      `${key}: v1(n=${v1Count},avg=${v1Stat?.avg?.toFixed(2) ?? '-'}) v2(n=${v2Stat.count},avg=${v2Stat.avg?.toFixed(2) ?? '-'})`
+      `${key}: v1(n=${v1Count},avg=${v1Stat?.avg?.toFixed(2) ?? '-'}) v2(n=${v2Count},avg=${v2Stat?.avg?.toFixed(2) ?? '-'})${shortfallNote}`
     );
   }
 
   const totalV1 = v1Rows.length;
   const totalV2 = v2Rows.length;
-  const droppedJudgments = droppedTally(ctx, 'ModelJudgment');
   const totalOk = totalV1 - totalV2 <= droppedJudgments;
 
   const modelSummary = lines.length > 0 ? `${lines.join('; ')}; ` : '';
@@ -408,9 +423,21 @@ async function spotCheckLeaderboardExplainable(ctx: ImportCtx): Promise<SpotChec
 const OWNED_TABLES = ['Project', 'Rubric', 'Dataset', 'Evaluation', 'HumanJudgment', 'ModelConfig', 'ModelEndpoint'] as const;
 
 /** Two guards in one check, per the task's binding semantics:
- *   (a) no v2 User row exists with the same email as a v1 user explicitly
- *       mapped to `'drop'` — a dropped user's identity must never resurface
- *       under its own email (which would silently un-drop it).
+ *   (a) no v2 User row exists with the same email as a "dropped" v1 user —
+ *       where dropped means EITHER an explicit `'drop'` ownerMap entry OR a
+ *       v1 user simply ABSENT from ownerMap entirely. Both are treated
+ *       identically by every downstream import phase (see ./owners.ts: a
+ *       missing key is "drop this user's private data / archive their
+ *       public data", same as an explicit `'drop'`), and the real cutover
+ *       ownerMap is a small, pre-provisioned "kept" allowlist — most v1
+ *       users are dropped by absence, not by an explicit entry — so
+ *       checking only explicit `'drop'` entries would miss the vast
+ *       majority of dropped identities. A dropped user's identity must
+ *       never resurface under its own email (which would silently un-drop
+ *       it, including via an in-place rename of an unrelated kept v2 row —
+ *       this checks by email existence, not by a row-count delta, so a
+ *       rename that leaves the total v2 User count unchanged is still
+ *       caught).
  *   (b) no row in any user-owned v2 table references a userId outside the
  *       set of {v2 users resolved from a mapped ownerMap entry} ∪ {the
  *       archive user, if it exists} — the only two ways this importer ever
@@ -419,18 +446,28 @@ const OWNED_TABLES = ['Project', 'Rubric', 'Dataset', 'Evaluation', 'HumanJudgme
  *       User row; this check additionally verifies that row is one of the
  *       importer's own legitimate targets, not an unexpected one. */
 async function spotCheckNoOwnerLeakage(ctx: ImportCtx): Promise<SpotCheck> {
-  const droppedV1UserIds = Object.entries(ctx.ownerMap)
-    .filter(([, mapping]) => mapping === 'drop')
-    .map(([v1UserId]) => v1UserId);
+  // "Kept" = has a mapped (object) ownerMap entry; "archived" = mapped to
+  // 'archive' (collapses onto the shared archive user, a legitimate
+  // identity of its own, not a dropped one). Everything else — explicit
+  // 'drop' AND absence from ownerMap altogether — is "dropped" for (a).
+  const keptV1UserIds = new Set<string>();
+  const archivedV1UserIds = new Set<string>();
+  for (const [v1UserId, mapping] of Object.entries(ctx.ownerMap)) {
+    if (mapping === 'archive') {
+      archivedV1UserIds.add(v1UserId);
+    } else if (mapping !== 'drop') {
+      keptV1UserIds.add(v1UserId);
+    }
+  }
 
   const mappedOidcPairs = Object.values(ctx.ownerMap).filter(
     (m): m is MappedOwner => typeof m === 'object'
   );
 
-  const [droppedV1Users, mappedV2Users, archiveUser] = await Promise.all([
-    droppedV1UserIds.length > 0
-      ? ctx.v1.user.findMany({ where: { id: { in: droppedV1UserIds } }, select: { email: true } })
-      : Promise.resolve([]),
+  // Absence can only be detected against the FULL v1 user table — ownerMap
+  // alone can never tell you who it left out.
+  const [allV1Users, mappedV2Users, archiveUser] = await Promise.all([
+    ctx.v1.user.findMany({ select: { id: true, email: true } }),
     mappedOidcPairs.length > 0
       ? ctx.v2.user.findMany({
           where: { OR: mappedOidcPairs.map((m) => ({ oidcIssuer: m.oidcIssuer, oidcSubject: m.oidcSubject })) },
@@ -440,7 +477,9 @@ async function spotCheckNoOwnerLeakage(ctx: ImportCtx): Promise<SpotCheck> {
     ctx.v2.user.findUnique({ where: { email: ARCHIVE_USER_EMAIL } }),
   ]);
 
-  const droppedEmails = droppedV1Users.map((u) => u.email);
+  const droppedEmails = allV1Users
+    .filter((u) => !keptV1UserIds.has(u.id) && !archivedV1UserIds.has(u.id))
+    .map((u) => u.email);
   const leakedDroppedUsers =
     droppedEmails.length > 0 ? await ctx.v2.user.count({ where: { email: { in: droppedEmails } } }) : 0;
 
@@ -472,6 +511,32 @@ async function spotCheckNoOwnerLeakage(ctx: ImportCtx): Promise<SpotCheck> {
   };
 }
 
+// ─── Warnings: non-gating tallies worth surfacing at go/no-go ──────────────
+
+/** `./runs.ts`'s `remapCriteriaScores` tallies a malformed (non-JSON, or
+ * JSON-but-not-an-array) v1 `criteriaScores` payload under
+ * `${entity}CriteriaScoresMalformed`/`dropped` (e.g.
+ * `ModelJudgmentCriteriaScoresMalformed`, `HumanJudgmentCriteriaScoresMalformed`)
+ * — the row itself is still imported (never dropped), only its
+ * `criteriaScores` field is degraded to `[]`/`null`. That's a deliberately
+ * NON-gating outcome (the row survives, so no rowCount/spotCheck reflects
+ * it), but it's still worth surfacing at the go/no-go decision point rather
+ * than only in a `console.warn` line buried in mid-run output — an operator
+ * deciding whether to proceed should see it without having to scroll back
+ * through the whole import log. */
+function computeWarnings(ctx: ImportCtx): string[] {
+  const warnings: string[] = [];
+  for (const [key, tally] of Object.entries(ctx.report.counts())) {
+    const match = key.match(/^(.*)CriteriaScoresMalformed$/);
+    if (!match) continue;
+    const n = tally.dropped ?? 0;
+    if (n > 0) {
+      warnings.push(`WARNING: ${n} ${match[1]} rows imported with malformed criteriaScores degraded to []`);
+    }
+  }
+  return warnings;
+}
+
 // ─── Entry point ────────────────────────────────────────────────────────────
 
 export async function reconcile(ctx: ImportCtx, ids: IdMaps): Promise<ReconcileResult> {
@@ -486,7 +551,8 @@ export async function reconcile(ctx: ImportCtx, ids: IdMaps): Promise<ReconcileR
   ]);
 
   const ok = rowCounts.every((r) => r.ok) && spotChecks.every((s) => s.ok);
-  return { rowCounts, spotChecks, ok };
+  const warnings = computeWarnings(ctx);
+  return { rowCounts, spotChecks, ok, warnings };
 }
 
 // ─── Human-readable report table ────────────────────────────────────────────
@@ -521,6 +587,13 @@ export function formatReconcileReport(result: ReconcileResult): string {
   const nameWidth = Math.max(4, ...result.spotChecks.map((s) => s.name.length));
   for (const s of result.spotChecks) {
     lines.push(`  [${s.ok ? 'OK  ' : 'FAIL'}] ${pad(s.name, nameWidth)}   ${s.detail}`);
+  }
+
+  if (result.warnings.length > 0) {
+    lines.push('', 'Warnings:');
+    for (const w of result.warnings) {
+      lines.push(`  ${w}`);
+    }
   }
 
   lines.push('', `Overall: ${result.ok ? 'OK' : 'FAILED'}`);

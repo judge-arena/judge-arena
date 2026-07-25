@@ -185,8 +185,22 @@ export async function runImport(argv: string[]): Promise<RunImportResult> {
     console.error('Import failed:', e instanceof Error ? e.message : e);
     return { exitCode: 1 };
   } finally {
-    await ctx.v1.$disconnect();
-    await ctx.v2.$disconnect();
+    // Each disconnect is isolated in its own try/catch: a throw from either
+    // client (e.g. a network blip mid-teardown) must never reject this
+    // finally block itself — that would turn an already-decided
+    // exitCode/thrown-error above into an unhandled rejection instead,
+    // masking the real outcome. Best-effort cleanup, never load-bearing for
+    // the returned result.
+    try {
+      await ctx.v1.$disconnect();
+    } catch (e) {
+      console.error('Failed to disconnect v1 client:', e instanceof Error ? e.message : e);
+    }
+    try {
+      await ctx.v2.$disconnect();
+    } catch (e) {
+      console.error('Failed to disconnect v2 client:', e instanceof Error ? e.message : e);
+    }
   }
 }
 
