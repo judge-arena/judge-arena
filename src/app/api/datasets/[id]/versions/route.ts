@@ -60,10 +60,18 @@ export async function POST(
 
     // Optionally accept modified samples with the new version
     let newSamples = existing.samples;
-    const body = await request.json();
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      // No body, empty body, or invalid JSON — fall back to copying prior samples.
+      body = {};
+    }
 
-    // Only validate and use samples if the key is present in the request body
-    if ('samples' in body) {
+    // Only validate and use samples if the key is present in a request body
+    // that is actually an object (guards against `null`, arrays, strings,
+    // numbers, etc. which would throw on the `in` check below).
+    if (body && typeof body === 'object' && !Array.isArray(body) && 'samples' in body) {
       const data = createVersionSchema.parse(body);
       if (data.samples) {
         newSamples = data.samples.map((s, i) => ({

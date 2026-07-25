@@ -1,15 +1,47 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
+import { getServerSession } from 'next-auth';
 import { db, truncateAll, mkUser } from './helpers';
+import { POST } from '@/app/api/datasets/[id]/versions/route';
 
-describe('Dataset version: samples validation and persistence', () => {
+// Mock next-auth's getServerSession so requireAuth() resolves a real session
+// for a fixture user created in the test DB — this lets us call the exported
+// POST handler directly instead of re-implementing its logic in the test.
+vi.mock('next-auth', () => ({
+  getServerSession: vi.fn(),
+}));
+
+// requireAuth() checks for a Bearer API key via next/headers before falling
+// back to the session. Mock it to report no auth header so the session path
+// is exercised.
+vi.mock('next/headers', () => ({
+  headers: vi.fn(async () => new Headers()),
+}));
+
+function mockSessionFor(user: { id: string; email: string }) {
+  (getServerSession as unknown as Mock).mockResolvedValue({
+    user: { id: user.id, email: user.email },
+  });
+}
+
+function postRequest(body?: unknown) {
+  const init: RequestInit = { method: 'POST' };
+  if (body !== undefined) {
+    init.body = JSON.stringify(body);
+    init.headers = { 'content-type': 'application/json' };
+  }
+  return new Request('http://localhost/api/datasets/fixture/versions', init);
+}
+
+describe('Dataset version: samples validation and persistence (real POST route)', () => {
   beforeEach(async () => {
     await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
   });
 
-  it('creates a new version with explicit samples; the new version carries the new samples, not duplicates of the old ones', async () => {
+  it('valid samples → 201 + new version carries only the new samples', async () => {
     const user = await mkUser();
+    mockSessionFor(user);
 
-    // Create a dataset with initial samples
     const dataset = await db.dataset.create({
       data: {
         name: 'Test Dataset',
@@ -23,86 +55,50 @@ describe('Dataset version: samples validation and persistence', () => {
       },
     });
 
-    // Add initial samples to the dataset
-    const initialSample1 = await db.datasetSample.create({
-      data: {
-        datasetId: dataset.id,
-        index: 0,
-        input: 'original sample 1',
-        expected: 'expected 1',
-      },
+    await db.datasetSample.create({
+      data: { datasetId: dataset.id, index: 0, input: 'original sample 1', expected: 'expected 1' },
+    });
+    await db.datasetSample.create({
+      data: { datasetId: dataset.id, index: 1, input: 'original sample 2', expected: 'expected 2' },
     });
 
-    const initialSample2 = await db.datasetSample.create({
-      data: {
-        datasetId: dataset.id,
-        index: 1,
-        input: 'original sample 2',
-        expected: 'expected 2',
-      },
-    });
+    const response = await POST(
+      postRequest({
+        samples: [
+          { input: 'new sample 1', expected: 'new expected 1', metadata: { key: 'value1' } },
+          { input: 'new sample 2', expected: 'new expected 2', metadata: { key: 'value2' } },
+          { input: 'new sample 3', expected: null },
+        ],
+      }),
+      { params: { id: dataset.id } }
+    );
 
-    // Create a new version with new samples (simulating what the POST route does)
-    const newSamplesData = [
-      { input: 'new sample 1', expected: 'new expected 1', metadata: { key: 'value1' } },
-      { input: 'new sample 2', expected: 'new expected 2', metadata: { key: 'value2' } },
-      { input: 'new sample 3', expected: null, metadata: null },
-    ];
+    expect(response.status).toBe(201);
+    const newVersion = await response.json();
 
-    const newVersion = await db.dataset.create({
-      data: {
-        name: dataset.name,
-        userId: user.id,
-        parentId: dataset.id,
-        version: 2,
-        slug: `${dataset.slug}-v2`,
-        source: dataset.source,
-        description: dataset.description,
-        sampleCount: newSamplesData.length,
-        splits: dataset.splits,
-        features: dataset.features,
-        tags: dataset.tags,
-        samples: {
-          create: newSamplesData.map((s, i) => ({
-            index: i,
-            input: s.input,
-            expected: s.expected,
-            metadata: s.metadata ? JSON.stringify(s.metadata) : null,
-          })),
-        },
-      },
-      include: {
-        samples: { orderBy: { index: 'asc' } },
-      },
-    });
-
-    // Verify the new version has the new samples, not duplicates of the old ones
     expect(newVersion.samples).toHaveLength(3);
     expect(newVersion.samples[0].input).toBe('new sample 1');
     expect(newVersion.samples[0].expected).toBe('new expected 1');
     expect(newVersion.samples[0].metadata).toBe(JSON.stringify({ key: 'value1' }));
     expect(newVersion.samples[1].input).toBe('new sample 2');
-    expect(newVersion.samples[1].expected).toBe('new expected 2');
-    expect(newVersion.samples[1].metadata).toBe(JSON.stringify({ key: 'value2' }));
     expect(newVersion.samples[2].input).toBe('new sample 3');
     expect(newVersion.samples[2].expected).toBeNull();
     expect(newVersion.samples[2].metadata).toBeNull();
 
-    // Verify the original dataset samples are unchanged
+    // Original dataset samples are unchanged
     const originalDataset = await db.dataset.findUnique({
       where: { id: dataset.id },
       include: { samples: { orderBy: { index: 'asc' } } },
     });
-
     expect(originalDataset?.samples).toHaveLength(2);
     expect(originalDataset?.samples[0].input).toBe('original sample 1');
     expect(originalDataset?.samples[1].input).toBe('original sample 2');
   });
 
-  it('creates a new version with fallback samples when samples key is absent from request; copies prior samples', async () => {
+  it('`{}` body → 201 + prior samples copied (samples key absent)', async () => {
     const user = await mkUser();
+    mockSessionFor(user);
 
-    // Create a dataset with initial samples
     const dataset = await db.dataset.create({
       data: {
         name: 'Test Dataset',
@@ -116,62 +112,18 @@ describe('Dataset version: samples validation and persistence', () => {
       },
     });
 
-    // Add initial samples
     await db.datasetSample.create({
-      data: {
-        datasetId: dataset.id,
-        index: 0,
-        input: 'sample to copy 1',
-        expected: 'expected 1',
-      },
+      data: { datasetId: dataset.id, index: 0, input: 'sample to copy 1', expected: 'expected 1' },
     });
-
     await db.datasetSample.create({
-      data: {
-        datasetId: dataset.id,
-        index: 1,
-        input: 'sample to copy 2',
-        expected: 'expected 2',
-      },
+      data: { datasetId: dataset.id, index: 1, input: 'sample to copy 2', expected: 'expected 2' },
     });
 
-    // Get the existing samples (simulating what the route does when key is absent)
-    const existingDataset = await db.dataset.findUnique({
-      where: { id: dataset.id },
-      include: { samples: { orderBy: { index: 'asc' } } },
-    });
+    const response = await POST(postRequest({}), { params: { id: dataset.id } });
 
-    if (!existingDataset) throw new Error('Dataset not found');
+    expect(response.status).toBe(201);
+    const newVersion = await response.json();
 
-    // Create a new version using copied samples (no samples key in request)
-    const newVersion = await db.dataset.create({
-      data: {
-        name: existingDataset.name,
-        userId: user.id,
-        parentId: dataset.id,
-        version: 2,
-        slug: `${dataset.slug}-v2`,
-        source: existingDataset.source,
-        description: existingDataset.description,
-        sampleCount: existingDataset.samples.length,
-        splits: existingDataset.splits,
-        features: existingDataset.features,
-        tags: existingDataset.tags,
-        samples: {
-          create: existingDataset.samples.map((s, i) => ({
-            index: i,
-            input: s.input,
-            expected: s.expected,
-            metadata: s.metadata,
-          })),
-        },
-      },
-      include: {
-        samples: { orderBy: { index: 'asc' } },
-      },
-    });
-
-    // Verify the new version copied the prior samples
     expect(newVersion.samples).toHaveLength(2);
     expect(newVersion.samples[0].input).toBe('sample to copy 1');
     expect(newVersion.samples[0].expected).toBe('expected 1');
@@ -179,8 +131,9 @@ describe('Dataset version: samples validation and persistence', () => {
     expect(newVersion.samples[1].expected).toBe('expected 2');
   });
 
-  it('handles metadata as JSON objects correctly', async () => {
+  it('NO body (regression) → 201 + fallback to prior samples, no throw', async () => {
     const user = await mkUser();
+    mockSessionFor(user);
 
     const dataset = await db.dataset.create({
       data: {
@@ -193,6 +146,107 @@ describe('Dataset version: samples validation and persistence', () => {
         features: JSON.stringify([]),
         tags: JSON.stringify([]),
       },
+    });
+
+    await db.datasetSample.create({
+      data: { datasetId: dataset.id, index: 0, input: 'no-body sample', expected: 'expected' },
+    });
+
+    // No body at all — request.json() throws (empty stream) unless the
+    // route catches it and falls back gracefully.
+    const response = await POST(postRequest(undefined), { params: { id: dataset.id } });
+
+    expect(response.status).toBe(201);
+    const newVersion = await response.json();
+    expect(newVersion.samples).toHaveLength(1);
+    expect(newVersion.samples[0].input).toBe('no-body sample');
+  });
+
+  it('`null` body (regression) → 201 + fallback to prior samples, no throw', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+
+    const dataset = await db.dataset.create({
+      data: {
+        name: 'Test Dataset',
+        userId: user.id,
+        source: 'local',
+        description: 'Test description',
+        sampleCount: 1,
+        splits: JSON.stringify(['train']),
+        features: JSON.stringify([]),
+        tags: JSON.stringify([]),
+      },
+    });
+
+    await db.datasetSample.create({
+      data: { datasetId: dataset.id, index: 0, input: 'null-body sample', expected: 'expected' },
+    });
+
+    // Body parses to JS `null` — `'samples' in body` throws unless guarded.
+    const response = await POST(postRequest(null), { params: { id: dataset.id } });
+
+    expect(response.status).toBe(201);
+    const newVersion = await response.json();
+    expect(newVersion.samples).toHaveLength(1);
+    expect(newVersion.samples[0].input).toBe('null-body sample');
+  });
+
+  it('invalid samples (string, not array) → 400 + no new version row created', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+
+    const dataset = await db.dataset.create({
+      data: {
+        name: 'Test Dataset',
+        userId: user.id,
+        source: 'local',
+        description: 'Test description',
+        sampleCount: 1,
+        splits: JSON.stringify(['train']),
+        features: JSON.stringify([]),
+        tags: JSON.stringify([]),
+      },
+    });
+
+    await db.datasetSample.create({
+      data: { datasetId: dataset.id, index: 0, input: 'sample', expected: 'expected' },
+    });
+
+    const countBefore = await db.dataset.count();
+
+    const response = await POST(
+      postRequest({ samples: 'not-an-array' }),
+      { params: { id: dataset.id } }
+    );
+
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toBe('Validation failed');
+
+    const countAfter = await db.dataset.count();
+    expect(countAfter).toBe(countBefore);
+  });
+
+  it('handles metadata as JSON objects correctly', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+
+    const dataset = await db.dataset.create({
+      data: {
+        name: 'Test Dataset',
+        userId: user.id,
+        source: 'local',
+        description: 'Test description',
+        sampleCount: 1,
+        splits: JSON.stringify(['train']),
+        features: JSON.stringify([]),
+        tags: JSON.stringify([]),
+      },
+    });
+
+    await db.datasetSample.create({
+      data: { datasetId: dataset.id, index: 0, input: 'seed sample', expected: 'expected' },
     });
 
     const complexMetadata = {
@@ -202,40 +256,17 @@ describe('Dataset version: samples validation and persistence', () => {
       nested: { key: 'value', count: 42 },
     };
 
-    const newVersion = await db.dataset.create({
-      data: {
-        name: dataset.name,
-        userId: user.id,
-        parentId: dataset.id,
-        version: 2,
-        slug: `${dataset.slug}-v2`,
-        source: dataset.source,
-        description: dataset.description,
-        sampleCount: 1,
-        splits: dataset.splits,
-        features: dataset.features,
-        tags: dataset.tags,
-        samples: {
-          create: [
-            {
-              index: 0,
-              input: 'test input',
-              expected: 'test expected',
-              metadata: JSON.stringify(complexMetadata),
-            },
-          ],
-        },
-      },
-      include: {
-        samples: { orderBy: { index: 'asc' } },
-      },
-    });
+    const response = await POST(
+      postRequest({ samples: [{ input: 'test input', expected: 'test expected', metadata: complexMetadata }] }),
+      { params: { id: dataset.id } }
+    );
 
-    // Verify metadata is stored correctly
+    expect(response.status).toBe(201);
+    const newVersion = await response.json();
+
     expect(newVersion.samples).toHaveLength(1);
     expect(newVersion.samples[0].metadata).toBe(JSON.stringify(complexMetadata));
 
-    // Verify it can be parsed back
     const parsedMetadata = JSON.parse(newVersion.samples[0].metadata || '{}');
     expect(parsedMetadata).toEqual(complexMetadata);
   });
