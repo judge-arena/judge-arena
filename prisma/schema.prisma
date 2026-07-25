@@ -7,18 +7,95 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ─── Enums (v2) ─────────────────────────────────────────────────────────────
+// Landed ahead of the model columns that will consume most of them (Tasks
+// 3-5); only Visibility is used by a model in this task. Names are verbatim
+// per the v2 architecture spec so later tasks reference stable identifiers.
+
+enum JudgeClass {
+  prompted_api
+  prompted_open_weight
+  finetuned_judge_lm
+  sequence_classifier_rm
+  generative_rm
+  specialized_safety
+  specialized_factuality
+}
+
+enum ScoringMechanism {
+  reward_head_scalar
+  token_probability
+  critique_generative
+}
+
+enum ServingBackend {
+  anthropic
+  openai
+  openrouter
+  vllm
+  ollama
+}
+
+enum Quantization {
+  none
+  fp8
+  int8
+  int4
+}
+
+enum ReasoningMode {
+  none
+  optional
+  always
+}
+
+enum TrustState {
+  untrusted
+  calibrating
+  trusted
+  rejected
+}
+
+enum RunProtocol {
+  pointwise
+  pairwise
+  listwise
+}
+
+enum RunStatus {
+  pending
+  judging
+  needs_human
+  completed
+  error
+}
+
+enum JudgmentStatus {
+  pending
+  running
+  completed
+  error
+}
+
+enum Visibility {
+  private
+  public
+}
+
 // ─── Auth ───────────────────────────────────────────────────────────────────
 
 model User {
-  id                String          @id @default(cuid())
-  email             String          @unique
+  id                String            @id @default(cuid())
+  email             String            @unique
   name              String?
   passwordHash      String
-  role              String          @default("user") // "user" | "admin"
-  emailVerified     Boolean         @default(false)
-  verificationToken String?         @unique
-  resetToken        String?         @unique
+  role              String            @default("user") // "user" | "admin"
+  emailVerified     Boolean           @default(false)
+  verificationToken String?           @unique
+  resetToken        String?           @unique
   resetTokenExpiry  DateTime?
+  oidcIssuer        String?
+  oidcSubject       String?
   projects          Project[]
   rubrics           Rubric[]
   modelConfigs      ModelConfig[]
@@ -28,8 +105,10 @@ model User {
   datasets          Dataset[]
   developerApiKeys  DeveloperApiKey[]
   auditLogs         AuditLog[]
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@unique([oidcIssuer, oidcSubject])
 }
 
 // ─── Domain ─────────────────────────────────────────────────────────────────
@@ -37,9 +116,11 @@ model User {
 model Project {
   id          String       @id @default(cuid())
   name        String
-  slug        String?      // portable identifier for config export/import
+  slug        String? // portable identifier for config export/import
   description String?
   isDefault   Boolean      @default(false) // true for system-wide projects like Leaderboard
+  visibility  Visibility   @default(private)
+  publishedAt DateTime?
   userId      String
   user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   evaluations Evaluation[]
@@ -54,12 +135,15 @@ model Project {
 model Rubric {
   id             String            @id @default(cuid())
   name           String
-  slug           String?           // portable identifier for config export/import
+  slug           String? // portable identifier for config export/import
   description    String?
   version        Int               @default(1)
-  parentId       String?           // null for v1; root rubric id for later versions
+  parentId       String? // null for v1; root rubric id for later versions
   parent         Rubric?           @relation("RubricVersions", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
   versions       Rubric[]          @relation("RubricVersions")
+  visibility     Visibility        @default(private)
+  publishedAt    DateTime?
+  retiredAt      DateTime?
   criteria       RubricCriterion[]
   evaluations    Evaluation[]
   evaluationRuns EvaluationRun[]
@@ -69,6 +153,7 @@ model Rubric {
   updatedAt      DateTime          @updatedAt
 
   @@unique([userId, slug])
+  @@unique([parentId, version])
   @@index([parentId])
   @@index([userId])
 }
@@ -89,11 +174,11 @@ model RubricCriterion {
 model ModelConfig {
   id                   String                     @id @default(cuid())
   name                 String
-  slug                 String?                    // portable identifier for config export/import
-  provider             String                     // 'anthropic' | 'openai' | 'local'
-  modelId              String                     // e.g. 'claude-sonnet-4-5-20250514'
-  endpoint             String?                    // custom endpoint for local/self-hosted models
-  apiKey               String?                    // stored per-model (optional, falls back to env)
+  slug                 String? // portable identifier for config export/import
+  provider             String // 'anthropic' | 'openai' | 'local'
+  modelId              String // e.g. 'claude-sonnet-4-5-20250514'
+  endpoint             String? // custom endpoint for local/self-hosted models
+  apiKey               String? // stored per-model (optional, falls back to env)
   isActive             Boolean                    @default(true)
   isVerified           Boolean                    @default(false)
   verifiedAt           DateTime?
@@ -105,7 +190,7 @@ model ModelConfig {
   judgments            ModelJudgment[]
   evaluationSelections EvaluationModelSelection[]
   runModelSelections   RunModelSelection[]
-  bestModelSelections  HumanJudgment[] @relation("BestModelSelection")
+  bestModelSelections  HumanJudgment[]            @relation("BestModelSelection")
 
   @@unique([userId, slug])
   @@index([userId])
@@ -119,11 +204,11 @@ model Evaluation {
   id              String                     @id @default(cuid())
   projectId       String
   project         Project                    @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  rubricId        String?                    // default rubric for new runs
+  rubricId        String? // default rubric for new runs
   rubric          Rubric?                    @relation(fields: [rubricId], references: [id], onDelete: SetNull)
-  inputText       String                     // legacy single-text artifact (or fallback display text)
-  promptText      String?                    // optional prompt (input) for prompt-response judging
-  responseText    String?                    // optional response/output to evaluate against rubric
+  inputText       String // legacy single-text artifact (or fallback display text)
+  promptText      String? // optional prompt (input) for prompt-response judging
+  responseText    String? // optional response/output to evaluate against rubric
   title           String?
   userId          String
   user            User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -132,12 +217,12 @@ model Evaluation {
 
   // ── Dataset link (populated when evaluation was created from a dataset) ──
   datasetId       String?
-  dataset         Dataset?                   @relation(fields: [datasetId], references: [id], onDelete: SetNull)
+  dataset         Dataset?       @relation(fields: [datasetId], references: [id], onDelete: SetNull)
   datasetSampleId String?
-  datasetSample   DatasetSample?             @relation(fields: [datasetSampleId], references: [id], onDelete: SetNull)
+  datasetSample   DatasetSample? @relation(fields: [datasetSampleId], references: [id], onDelete: SetNull)
 
-  createdAt       DateTime                   @default(now())
-  updatedAt       DateTime                   @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([projectId])
   @@index([rubricId])
@@ -167,7 +252,7 @@ model EvaluationRun {
   id                 String              @id @default(uuid())
   evaluationId       String
   evaluation         Evaluation          @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
-  rubricId           String?             // rubric version pinned at run time
+  rubricId           String? // rubric version pinned at run time
   rubric             Rubric?             @relation(fields: [rubricId], references: [id], onDelete: SetNull)
   status             String              @default("pending") // pending | judging | needs_human | completed | error
   triggeredById      String
@@ -208,8 +293,8 @@ model ModelJudgment {
   modelConfig    ModelConfig   @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
   overallScore   Float?
   reasoning      String?
-  rawResponse    String?       // full LLM response, never truncated
-  criteriaScores String?       // JSON: Array<{ criterionId, criterionName, score, maxScore, weight, comment? }>
+  rawResponse    String? // full LLM response, never truncated
+  criteriaScores String? // JSON: Array<{ criterionId, criterionName, score, maxScore, weight, comment? }>
   latencyMs      Int?
   tokenCount     Int?
   status         String        @default("pending") // pending | running | completed | error
@@ -226,9 +311,9 @@ model HumanJudgment {
   run                 EvaluationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
   overallScore        Float
   reasoning           String?
-  criteriaScores      String?       // JSON: Array<{ criterionId, criterionName, score, maxScore, weight, comment? }>
+  criteriaScores      String? // JSON: Array<{ criterionId, criterionName, score, maxScore, weight, comment? }>
   selectedBestModelId String?
-  selectedBestModel   ModelConfig? @relation("BestModelSelection", fields: [selectedBestModelId], references: [id], onDelete: SetNull)
+  selectedBestModel   ModelConfig?  @relation("BestModelSelection", fields: [selectedBestModelId], references: [id], onDelete: SetNull)
   userId              String
   user                User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt           DateTime      @default(now())
@@ -250,18 +335,18 @@ model ApiKeyStore {
 // Each key is scoped to a user and carries a set of permission scopes.
 
 model DeveloperApiKey {
-  id          String    @id @default(cuid())
-  name        String                        // human-readable label, e.g. "CI Pipeline Key"
-  prefix      String                        // first 8 chars of raw key for identification (e.g. "vgk_abc1")
-  keyHash     String    @unique             // SHA-256 hash of the full key
-  scopes      String                        // JSON array of permission scope strings
-  isActive    Boolean   @default(true)
-  expiresAt   DateTime?                     // null = never expires
-  lastUsedAt  DateTime?
-  userId      String
-  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  id         String    @id @default(cuid())
+  name       String // human-readable label, e.g. "CI Pipeline Key"
+  prefix     String // first 8 chars of raw key for identification (e.g. "vgk_abc1")
+  keyHash    String    @unique // SHA-256 hash of the full key
+  scopes     String // JSON array of permission scope strings
+  isActive   Boolean   @default(true)
+  expiresAt  DateTime? // null = never expires
+  lastUsedAt DateTime?
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 
   @@index([userId])
   @@index([keyHash])
@@ -274,47 +359,47 @@ model DeveloperApiKey {
 // Can be private (user-only) or public (visible to all).
 
 model Dataset {
-  id          String          @id @default(cuid())
+  id          String  @id @default(cuid())
   name        String
-  slug        String?         // portable identifier for config export/import
+  slug        String? // portable identifier for config export/import
   description String?
-  source      String          @default("local")  // 'local' | 'remote'
-  visibility  String          @default("private") // 'private' | 'public'
-  inputType   String          @default("query-response") // 'query' | 'query-response'
+  source      String  @default("local") // 'local' | 'remote'
+  visibility  String  @default("private") // 'private' | 'public'
+  inputType   String  @default("query-response") // 'query' | 'query-response'
 
   // ── Versioning ──
-  version    Int              @default(1)
-  parentId   String?
-  parent     Dataset?         @relation("DatasetVersions", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  versions   Dataset[]        @relation("DatasetVersions")
+  version  Int       @default(1)
+  parentId String?
+  parent   Dataset?  @relation("DatasetVersions", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  versions Dataset[] @relation("DatasetVersions")
 
   // ── Remote source fields ──
-  sourceUrl      String?      // e.g. https://huggingface.co/datasets/livecodebench/code_generation_lite
-  huggingFaceId  String?      // e.g. livecodebench/code_generation_lite
-  remoteMetadata String?      // JSON: { description, cardData, splits, features, downloadSize, ... }
+  sourceUrl      String? // e.g. https://huggingface.co/datasets/livecodebench/code_generation_lite
+  huggingFaceId  String? // e.g. livecodebench/code_generation_lite
+  remoteMetadata String? // JSON: { description, cardData, splits, features, downloadSize, ... }
 
   // ── Local / inline data fields ──
-  format     String?          // 'json' | 'csv' | 'jsonl' | 'text'
-  localData  String?          // JSON string of inline sample data
-  filePath   String?          // path to uploaded file (if file upload)
+  format    String? // 'json' | 'csv' | 'jsonl' | 'text'
+  localData String? // JSON string of inline sample data
+  filePath  String? // path to uploaded file (if file upload)
 
   // ── Dataset statistics (populated after fetch or upload) ──
-  sampleCount  Int?           // total number of samples
-  splits       String?        // JSON: e.g. ["train", "test"]
-  features     String?        // JSON: column/field schema from HF or inferred
-  tags         String?        // JSON: array of tag strings
+  sampleCount Int? // total number of samples
+  splits      String? // JSON: e.g. ["train", "test"]
+  features    String? // JSON: column/field schema from HF or inferred
+  tags        String? // JSON: array of tag strings
 
   // ── Relations ──
   projectId String?
-  project   Project?         @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
   userId    String
-  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   samples     DatasetSample[]
   evaluations Evaluation[]
 
-  createdAt DateTime         @default(now())
-  updatedAt DateTime         @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([userId, slug])
   @@index([userId])
@@ -328,16 +413,16 @@ model DatasetSample {
   id        String  @id @default(cuid())
   datasetId String
   dataset   Dataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
-  index     Int     // ordering within dataset
-  input     String  // the prompt / question / code to evaluate
+  index     Int // ordering within dataset
+  input     String // the prompt / question / code to evaluate
   expected  String? // expected output / reference answer (optional)
   metadata  String? // JSON: any extra fields from the source
 
   evaluations Evaluation[]
-  createdAt   DateTime @default(now())
+  createdAt   DateTime     @default(now())
 
-  @@index([datasetId])
   @@unique([datasetId, index])
+  @@index([datasetId])
 }
 
 // ─── Audit Log ──────────────────────────────────────────────────────────────
@@ -347,12 +432,12 @@ model AuditLog {
   id         String   @id @default(cuid())
   userId     String?
   user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
-  action     String   // e.g. 'user.login', 'apikey.create', 'evaluation.run', 'config.import'
-  resource   String?  // e.g. 'project', 'evaluation', 'apikey'
-  resourceId String?  // ID of the affected resource
-  metadata   String?  // JSON: additional context (old values, new values, etc.)
-  ip         String?  // client IP address
-  userAgent  String?  // client user agent
+  action     String // e.g. 'user.login', 'apikey.create', 'evaluation.run', 'config.import'
+  resource   String? // e.g. 'project', 'evaluation', 'apikey'
+  resourceId String? // ID of the affected resource
+  metadata   String? // JSON: additional context (old values, new values, etc.)
+  ip         String? // client IP address
+  userAgent  String? // client user agent
   createdAt  DateTime @default(now())
 
   @@index([userId])

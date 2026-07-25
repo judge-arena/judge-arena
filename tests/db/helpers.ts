@@ -1,8 +1,42 @@
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 
 export const db = new PrismaClient({
   datasources: { db: { url: process.env.TEST_DATABASE_URL } },
 });
+
+// ─── Fixture helpers ────────────────────────────────────────────────────────
+// Plain db.create wrappers used across tests/db/**. Each keeps its own
+// counter so repeated calls within a single test (or across tests sharing a
+// truncated DB) never collide on a unique column (User.email, Rubric slug).
+
+let userCounter = 0;
+
+export async function mkUser(overrides: Partial<Prisma.UserUncheckedCreateInput> = {}) {
+  userCounter += 1;
+  return db.user.create({
+    data: {
+      email: `fixture-user-${userCounter}@test.local`,
+      passwordHash: 'fixture-hash',
+      ...overrides,
+    },
+  });
+}
+
+let rubricCounter = 0;
+
+export async function mkRubric(
+  userId: string,
+  overrides: Partial<Omit<Prisma.RubricUncheckedCreateInput, 'userId'>> = {}
+) {
+  rubricCounter += 1;
+  return db.rubric.create({
+    data: {
+      name: `fixture-rubric-${rubricCounter}`,
+      userId,
+      ...overrides,
+    },
+  });
+}
 
 /**
  * Truncates every table in the `public` schema (except Prisma's own
