@@ -427,7 +427,7 @@ model ModelJudgment {
   startedAt      DateTime?
   attemptCount   Int            @default(0)
   createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
+  updatedAt      DateTime       @default(now()) @updatedAt
 
   @@unique([runId, judgeModelVersionId, pairOrder])
   @@index([runId])
@@ -586,6 +586,8 @@ model GoldenSet {
   calibrationRuns CalibrationRun[]
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
+
+  @@index([ownerId])
 }
 
 model GoldenItem {
@@ -616,6 +618,7 @@ model GoldenLabel {
   updatedAt      DateTime   @updatedAt
 
   @@unique([goldenItemId, annotatorId])
+  @@index([annotatorId])
 }
 
 model CalibrationRun {
@@ -634,4 +637,7 @@ model CalibrationRun {
   passed              Boolean?
   startedAt           DateTime          @default(now())
   finishedAt          DateTime?
+
+  @@index([judgeModelVersionId])
+  @@index([goldenSetId])
 }
