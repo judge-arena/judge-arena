@@ -363,6 +363,7 @@ model EvaluationRun {
   @@index([rubricId])
   @@index([triggeredById])
   @@index([status])
+  @@index([evaluationId, createdAt])
 }
 
 // Discrete candidates (pairwise/listwise) generated/scored under a run.
@@ -434,6 +435,7 @@ model ModelJudgment {
   @@index([modelConfigId])
   @@index([judgeModelVersionId])
   @@index([promptTemplateId])
+  @@index([modelConfigId, status])
 }
 
 model HumanJudgment {

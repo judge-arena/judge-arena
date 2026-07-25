@@ -7,6 +7,7 @@
  */
 
 import { NextResponse } from 'next/server';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { logger, serializeError } from '@/lib/logger';
 
@@ -22,6 +23,25 @@ interface ModelLeaderboardEntry {
   evaluationCount: number;
   completedRuns: number;
 }
+
+// Run statuses whose ModelJudgment rows are eligible to count toward the
+// leaderboard aggregate. A run's judgments only become "final" once its
+// automatic judging pass has finished:
+//   - 'needs_human': every model judgment has been attempted (see
+//     processRun in evaluation-run-manager.ts, which sets this once the
+//     per-model loop completes with at least one 'completed' judgment) —
+//     the run may still be awaiting a human judgment, but its ModelJudgment
+//     rows are already final and won't change.
+//   - 'completed': the same, plus a human judgment has since been recorded
+//     on top (needs_human -> completed transition in the human-judgment
+//     route) — ModelJudgment rows are unchanged by that transition.
+//   - 'pending' / 'judging' are pre-finalization (no judgments yet, or the
+//     automatic pass is still in flight) — correctly excluded.
+//   - 'error' is set ONLY when the automatic pass completed zero model
+//     judgments (`completedCount === 0 && errorCount > 0` in processRun),
+//     so admitting it here would add nothing to the aggregate anyway;
+//     excluded for clarity rather than relied upon as a no-op.
+const FINALIZED_RUN_STATUSES = ['completed', 'needs_human'] as const;
 
 export async function GET() {
   try {
@@ -40,30 +60,48 @@ export async function GET() {
       });
     }
 
-    // Fetch all completed model judgments from this project's evaluations
-    const judgments = await prisma.modelJudgment.findMany({
-      where: {
-        status: 'completed',
-        overallScore: { not: null },
-        run: {
-          evaluation: {
-            projectId: leaderboardProject.id,
+    // Per evaluation, only the LATEST finalized run's judgments count — a
+    // re-run must not double-count the earlier run's judgments alongside
+    // the new one (same rule the importer's reconciliation spot-check
+    // documents). "Latest" = max(createdAt) per evaluationId; "finalized"
+    // = FINALIZED_RUN_STATUSES above. Raw SQL for DISTINCT ON: there's no
+    // direct Prisma query-builder equivalent for "latest row per group".
+    // `status` is a Postgres enum column — cast to text before comparing
+    // against string literals to avoid any literal/enum inference surprises.
+    const latestFinalizedRuns = await prisma.$queryRaw<Array<{ id: string }>>`
+      SELECT DISTINCT ON (er."evaluationId") er.id
+      FROM "EvaluationRun" er
+      JOIN "Evaluation" e ON e.id = er."evaluationId"
+      WHERE e."projectId" = ${leaderboardProject.id}
+        AND er.status::text IN (${Prisma.join(FINALIZED_RUN_STATUSES)})
+      ORDER BY er."evaluationId", er."createdAt" DESC
+    `;
+    const finalizedRunIds = latestFinalizedRuns.map((run) => run.id);
+
+    // Fetch all completed model judgments, scoped to only those
+    // latest-finalized runs (population change — same shape as before).
+    const judgments = finalizedRunIds.length === 0
+      ? []
+      : await prisma.modelJudgment.findMany({
+          where: {
+            status: 'completed',
+            overallScore: { not: null },
+            runId: { in: finalizedRunIds },
           },
-        },
-      },
-      select: {
-        overallScore: true,
-        latencyMs: true,
-        modelConfig: {
           select: {
-            id: true,
-            name: true,
-            provider: true,
-            modelId: true,
+            overallScore: true,
+            latencyMs: true,
+            createdAt: true,
+            modelConfig: {
+              select: {
+                id: true,
+                name: true,
+                provider: true,
+                modelId: true,
+              },
+            },
           },
-        },
-      },
-    });
+        });
 
     // Aggregate by model
     const modelMap = new Map<string, {
@@ -122,17 +160,14 @@ export async function GET() {
     // Sort by avg score descending
     models.sort((a, b) => b.avgScore - a.avgScore);
 
-    // Get the most recent judgment timestamp for "last updated"
-    const lastJudgment = judgments.length > 0
-      ? await prisma.modelJudgment.findFirst({
-          where: {
-            status: 'completed',
-            run: { evaluation: { projectId: leaderboardProject.id } },
-          },
-          orderBy: { createdAt: 'desc' },
-          select: { createdAt: true },
-        })
-      : null;
+    // Get the most recent judgment timestamp for "last updated" — derived
+    // from the exact same population already fetched above (the latest
+    // finalized run per evaluation), never a separately-scoped query that
+    // could disagree with what's actually being aggregated.
+    let lastUpdated: Date | null = null;
+    for (const j of judgments) {
+      if (!lastUpdated || j.createdAt > lastUpdated) lastUpdated = j.createdAt;
+    }
 
     // Count total evaluations in the leaderboard project
     const totalEvaluations = await prisma.evaluation.count({
@@ -148,7 +183,7 @@ export async function GET() {
       models,
       totalEvaluations,
       totalJudgments: judgments.length,
-      lastUpdated: lastJudgment?.createdAt ?? null,
+      lastUpdated,
     });
   } catch (error) {
     logger.error('Leaderboard API error', { error: serializeError(error) });

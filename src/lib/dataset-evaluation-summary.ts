@@ -74,7 +74,22 @@ export async function refreshDatasetEvaluationSummary(datasetId: string): Promis
       modelAveragesBySample.push(modelAverage);
     }
 
-    if (latestRun.humanJudgment?.overallScore !== null && latestRun.humanJudgment?.overallScore !== undefined) {
+    // Mode is derived from the evaluation itself (already joined in via the
+    // query above), matching the server derivation in
+    // src/app/api/evaluations/[id]/runs/[runId]/human-judgment/route.ts:
+    // `responseText?.trim() ? 'judge' : 'respond'`. Respond mode has no
+    // scoring concept — its HumanJudgment.overallScore is always the 0
+    // placeholder (see resolveHumanJudgmentScore in src/lib/utils.ts) and
+    // must be excluded here so it doesn't drag averageHumanScore toward 0.
+    // (selectedBestModelId — respond mode's actual signal — lives on the
+    // same row; this only affects the score average, not any best-model
+    // count, since no such aggregation exists in this module.)
+    const isJudgeMode = Boolean(evaluation.responseText?.trim());
+    if (
+      isJudgeMode &&
+      latestRun.humanJudgment?.overallScore !== null &&
+      latestRun.humanJudgment?.overallScore !== undefined
+    ) {
       humanScoresBySample.push(latestRun.humanJudgment.overallScore);
     }
   });

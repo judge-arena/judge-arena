@@ -1,0 +1,259 @@
+import { describe, it, expect, beforeEach } from 'vitest';
+import { Prisma } from '@prisma/client';
+import { db, truncateAll, mkUser } from './helpers';
+import { GET } from '@/app/api/leaderboard/route';
+import { refreshDatasetEvaluationSummary } from '@/lib/dataset-evaluation-summary';
+
+// ─── Local fixture helpers ──────────────────────────────────────────────────
+// Project/Evaluation/EvaluationRun/ModelJudgment/HumanJudgment/Dataset chain
+// needed for both the leaderboard aggregation tests and the
+// dataset-evaluation-summary respond-mode tests. Kept file-local per the
+// established "shared only once actually shared" convention (see e.g.
+// human-judgment-score.test.ts, meta-eval.test.ts).
+
+async function mkProject(
+  userId: string,
+  overrides: Partial<Omit<Prisma.ProjectUncheckedCreateInput, 'userId'>> = {}
+) {
+  return db.project.create({
+    data: { name: 'fixture-leaderboard-project', userId, ...overrides },
+  });
+}
+
+async function mkModelConfig(
+  userId: string,
+  overrides: Partial<Omit<Prisma.ModelConfigUncheckedCreateInput, 'userId'>> = {}
+) {
+  return db.modelConfig.create({
+    data: { name: 'fixture-model', provider: 'openai', modelId: 'gpt-4', userId, ...overrides },
+  });
+}
+
+async function mkEvaluation(
+  projectId: string,
+  userId: string,
+  overrides: Partial<Omit<Prisma.EvaluationUncheckedCreateInput, 'projectId' | 'userId'>> = {}
+) {
+  return db.evaluation.create({
+    data: { projectId, userId, inputText: 'fixture input', ...overrides },
+  });
+}
+
+async function mkEvaluationRun(
+  evaluationId: string,
+  overrides: Partial<Omit<Prisma.EvaluationRunUncheckedCreateInput, 'evaluationId'>> = {}
+) {
+  return db.evaluationRun.create({
+    data: { evaluationId, ...overrides },
+  });
+}
+
+async function mkModelJudgment(
+  runId: string,
+  modelConfigId: string,
+  overrides: Partial<Omit<Prisma.ModelJudgmentUncheckedCreateInput, 'runId' | 'modelConfigId'>> = {}
+) {
+  return db.modelJudgment.create({
+    data: { runId, modelConfigId, status: 'completed', ...overrides },
+  });
+}
+
+async function mkHumanJudgment(
+  runId: string,
+  userId: string,
+  overrides: Partial<Omit<Prisma.HumanJudgmentUncheckedCreateInput, 'runId' | 'userId'>> = {}
+) {
+  return db.humanJudgment.create({
+    data: { runId, userId, overallScore: 0, ...overrides },
+  });
+}
+
+async function mkDataset(
+  userId: string,
+  overrides: Partial<Omit<Prisma.DatasetUncheckedCreateInput, 'userId'>> = {}
+) {
+  return db.dataset.create({ data: { name: 'fixture-dataset', userId, ...overrides } });
+}
+
+const OLDER = new Date('2026-01-01T00:00:00.000Z');
+const NEWER = new Date('2026-02-01T00:00:00.000Z');
+
+describe('Leaderboard API: latest-finalized-run aggregation', () => {
+  beforeEach(async () => {
+    await truncateAll();
+  });
+
+  it('re-run: older completed run is excluded, only the newer completed run\'s judgment counts', async () => {
+    const user = await mkUser();
+    const project = await mkProject(user.id, { isDefault: true });
+    const model = await mkModelConfig(user.id, { name: 'Model A' });
+    const evaluation = await mkEvaluation(project.id, user.id, { responseText: 'some response' });
+
+    const oldRun = await mkEvaluationRun(evaluation.id, { status: 'completed', createdAt: OLDER });
+    await mkModelJudgment(oldRun.id, model.id, { overallScore: 3 });
+
+    const newRun = await mkEvaluationRun(evaluation.id, { status: 'completed', createdAt: NEWER });
+    await mkModelJudgment(newRun.id, model.id, { overallScore: 9 });
+
+    const response = await GET();
+    const data = await response.json();
+
+    expect(data.models).toHaveLength(1);
+    expect(data.models[0].avgScore).toBe(9); // NOT the average of 3 and 9
+    expect(data.models[0].evaluationCount).toBe(1);
+    expect(data.totalJudgments).toBe(1);
+  });
+
+  it('needs_human counts as finalized: a newer needs_human run wins over an older completed run', async () => {
+    const user = await mkUser();
+    const project = await mkProject(user.id, { isDefault: true });
+    const model = await mkModelConfig(user.id, { name: 'Model B' });
+    const evaluation = await mkEvaluation(project.id, user.id, { responseText: 'some response' });
+
+    const oldRun = await mkEvaluationRun(evaluation.id, { status: 'completed', createdAt: OLDER });
+    await mkModelJudgment(oldRun.id, model.id, { overallScore: 3 });
+
+    const newRun = await mkEvaluationRun(evaluation.id, { status: 'needs_human', createdAt: NEWER });
+    await mkModelJudgment(newRun.id, model.id, { overallScore: 8 });
+
+    const response = await GET();
+    const data = await response.json();
+
+    expect(data.models).toHaveLength(1);
+    expect(data.models[0].avgScore).toBe(8);
+    expect(data.models[0].evaluationCount).toBe(1);
+  });
+
+  it('a non-finalized latest run (error) is skipped entirely — the older completed run still counts', async () => {
+    const user = await mkUser();
+    const project = await mkProject(user.id, { isDefault: true });
+    const model = await mkModelConfig(user.id, { name: 'Model C' });
+    const evaluation = await mkEvaluation(project.id, user.id, { responseText: 'some response' });
+
+    const oldRun = await mkEvaluationRun(evaluation.id, { status: 'completed', createdAt: OLDER });
+    await mkModelJudgment(oldRun.id, model.id, { overallScore: 6 });
+
+    // Chronologically the latest run, but never reached a finalized status
+    // (all its judgments errored) — the WHERE-status-first query must skip
+    // it entirely and fall back to the older completed run, rather than
+    // "latest run wins, then filter its judgments" (which would produce an
+    // empty result for this evaluation instead).
+    const newRun = await mkEvaluationRun(evaluation.id, { status: 'error', createdAt: NEWER });
+    await mkModelJudgment(newRun.id, model.id, { status: 'error', overallScore: null });
+
+    const response = await GET();
+    const data = await response.json();
+
+    expect(data.models).toHaveLength(1);
+    expect(data.models[0].avgScore).toBe(6);
+    expect(data.models[0].evaluationCount).toBe(1);
+  });
+
+  it('pending/judging runs (no judgments yet) contribute nothing and do not error', async () => {
+    const user = await mkUser();
+    const project = await mkProject(user.id, { isDefault: true });
+    const evaluation = await mkEvaluation(project.id, user.id, { responseText: 'some response' });
+    await mkEvaluationRun(evaluation.id, { status: 'pending', createdAt: NEWER });
+
+    const response = await GET();
+    const data = await response.json();
+
+    expect(data.models).toHaveLength(0);
+    expect(data.totalJudgments).toBe(0);
+    expect(data.lastUpdated).toBeNull();
+  });
+});
+
+describe('Dataset evaluation summary: averageHumanScore excludes respond-mode placeholder zeros', () => {
+  beforeEach(async () => {
+    await truncateAll();
+  });
+
+  it('respond-mode judgment (placeholder 0 + selectedBestModelId) is excluded from averageHumanScore; the row itself is untouched', async () => {
+    const user = await mkUser();
+    const project = await mkProject(user.id);
+    const dataset = await mkDataset(user.id);
+    const bestModel = await mkModelConfig(user.id, { name: 'Best Model' });
+
+    // responseText left unset → respond mode, matching the human-judgment
+    // route's own derivation (`responseText?.trim() ? 'judge' : 'respond'`).
+    const evaluation = await mkEvaluation(project.id, user.id, {
+      responseText: null,
+      datasetId: dataset.id,
+    });
+    const run = await mkEvaluationRun(evaluation.id, { status: 'completed' });
+    await mkHumanJudgment(run.id, user.id, {
+      overallScore: 0,
+      selectedBestModelId: bestModel.id,
+    });
+
+    await refreshDatasetEvaluationSummary(dataset.id);
+
+    const updated = await db.dataset.findUnique({ where: { id: dataset.id } });
+    const summary = JSON.parse(updated!.remoteMetadata!).evaluationSummary;
+
+    expect(summary.sampleCount).toBe(1);
+    expect(summary.samplesWithHumanScores).toBe(0);
+    expect(summary.averageHumanScore).toBeNull();
+
+    // Excluded from the AVERAGE only — the judgment row (and its
+    // selectedBestModelId, respond mode's actual signal) is untouched.
+    const persisted = await db.humanJudgment.findUnique({ where: { runId: run.id } });
+    expect(persisted?.overallScore).toBe(0);
+    expect(persisted?.selectedBestModelId).toBe(bestModel.id);
+  });
+
+  it('judge-mode judgment is included in averageHumanScore', async () => {
+    const user = await mkUser();
+    const project = await mkProject(user.id);
+    const dataset = await mkDataset(user.id);
+
+    const evaluation = await mkEvaluation(project.id, user.id, {
+      responseText: 'an actual response',
+      datasetId: dataset.id,
+    });
+    const run = await mkEvaluationRun(evaluation.id, { status: 'completed' });
+    await mkHumanJudgment(run.id, user.id, { overallScore: 7.5 });
+
+    await refreshDatasetEvaluationSummary(dataset.id);
+
+    const updated = await db.dataset.findUnique({ where: { id: dataset.id } });
+    const summary = JSON.parse(updated!.remoteMetadata!).evaluationSummary;
+
+    expect(summary.samplesWithHumanScores).toBe(1);
+    expect(summary.averageHumanScore).toBe(7.5);
+  });
+
+  it('mixed dataset: one judge-mode + one respond-mode sample → average reflects only the judge-mode sample', async () => {
+    const user = await mkUser();
+    const project = await mkProject(user.id);
+    const dataset = await mkDataset(user.id);
+    const bestModel = await mkModelConfig(user.id, { name: 'Best Model 2' });
+
+    const judgeEval = await mkEvaluation(project.id, user.id, {
+      responseText: 'an actual response',
+      datasetId: dataset.id,
+    });
+    const judgeRun = await mkEvaluationRun(judgeEval.id, { status: 'completed' });
+    await mkHumanJudgment(judgeRun.id, user.id, { overallScore: 4 });
+
+    const respondEval = await mkEvaluation(project.id, user.id, {
+      responseText: null,
+      datasetId: dataset.id,
+    });
+    const respondRun = await mkEvaluationRun(respondEval.id, { status: 'completed' });
+    await mkHumanJudgment(respondRun.id, user.id, {
+      overallScore: 0,
+      selectedBestModelId: bestModel.id,
+    });
+
+    await refreshDatasetEvaluationSummary(dataset.id);
+
+    const updated = await db.dataset.findUnique({ where: { id: dataset.id } });
+    const summary = JSON.parse(updated!.remoteMetadata!).evaluationSummary;
+
+    expect(summary.sampleCount).toBe(2);
+    expect(summary.samplesWithHumanScores).toBe(1);
+    expect(summary.averageHumanScore).toBe(4);
+  });
+});
