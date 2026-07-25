@@ -270,6 +270,46 @@ describe('importArtifacts (DB)', () => {
     expect(v2Evaluation!.userId).toBe(archiveUser!.id);
   });
 
+  it('an isDefault project is always visibility public, regardless of ownership path (kept owner or archive-dispositioned owner)', async () => {
+    const userKept = await mkV1User(); // stays mapped to a live v2 user
+    const userArchived = await mkV1User(); // ownerMap disposition is literally 'archive'
+    const ownerMap: OwnerMap = {
+      [userKept.id]: { email: 'kept@v2.example', oidcIssuer: 'https://idp.test.local', oidcSubject: 'sub-kept' },
+      [userArchived.id]: 'archive',
+    };
+    const ctx = createImportCtx({ mode: 'apply', ownerMap });
+    const owners = await resolveOwners(ctx);
+
+    const keptDefaultProject = await mkV1Project(userKept.id, { name: 'Leaderboard (kept)', isDefault: true });
+    const archivedDefaultProject = await mkV1Project(userArchived.id, {
+      name: 'Leaderboard (archived)',
+      isDefault: true,
+    });
+
+    const ids = await importArtifacts(ctx, owners);
+
+    const archiveUser = await db.user.findUnique({ where: { email: ARCHIVE_USER_EMAIL } });
+
+    // isDefault + KEPT owner: public, and still attributed to the live mapped user (not archive).
+    const v2KeptDefault = await db.project.findUnique({ where: { id: ids.project.get(keptDefaultProject.id)! } });
+    expect(v2KeptDefault).toMatchObject({
+      isDefault: true,
+      visibility: 'public',
+      userId: owners.get(userKept.id),
+    });
+    expect(v2KeptDefault!.userId).not.toBe(archiveUser!.id);
+
+    // isDefault + 'archive'-dispositioned owner: public, and archive-owned.
+    const v2ArchivedDefault = await db.project.findUnique({
+      where: { id: ids.project.get(archivedDefaultProject.id)! },
+    });
+    expect(v2ArchivedDefault).toMatchObject({
+      isDefault: true,
+      visibility: 'public',
+      userId: archiveUser!.id,
+    });
+  });
+
   it('a public dataset with a dropped owner is attributed to archive; a private one with a dropped owner is dropped', async () => {
     const userB = await mkV1User(); // dropped, no ownerMap entry at all
     const ctx = createImportCtx({ mode: 'apply', ownerMap: {} });

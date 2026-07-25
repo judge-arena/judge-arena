@@ -152,6 +152,12 @@ describe('importRuns (DB)', () => {
       expect(v2Judgment1a).toBeTruthy();
       expect(v2Judgment1a!.status).toBe('completed');
       expect(v2Judgment1a!.tokenCount).toBe(judgment1a.tokenCount);
+      // v1 ModelJudgment has no updatedAt of its own — v2's explicit
+      // `updatedAt: v1.createdAt` override must stick despite the column's
+      // own `@default(now()) @updatedAt`, not silently reset to import
+      // wall-clock time.
+      expect(v2Judgment1a!.createdAt.getTime()).toBe(judgment1a.createdAt.getTime());
+      expect(v2Judgment1a!.updatedAt.getTime()).toBe(judgment1a.createdAt.getTime());
       expect(v2Judgment1a!.samplingParams).toMatchObject({
         temperature: 0.3,
         max_tokens: 4096,
@@ -300,5 +306,110 @@ describe('importRuns (DB)', () => {
     const ids = await importArtifacts(ctx, owners);
 
     await expect(importRuns(ctx, owners, ids, judges)).rejects.toThrow(/v1-legacy/);
+  });
+
+  it(
+    'two v1 ModelConfigs that synthesize to the SAME JudgeModelVersion, both referenced by judgments ' +
+      'on ONE run, both survive as distinct ModelJudgment rows on first apply and stay stable on re-run ' +
+      '(the reviewer-flagged idempotency-collapse scenario)',
+    async () => {
+      const userA = await mkV1User();
+      const ownerMap: OwnerMap = {
+        [userA.id]: {
+          email: 'collision@v2.example',
+          oidcIssuer: 'https://idp.test.local',
+          oidcSubject: 'sub-collision',
+        },
+      };
+
+      // Two DISTINCT v1 ModelConfigs, SAME owner, SAME (provider, modelId,
+      // endpoint) triple -> synthesizeJudges (see ./judges.ts) groups them
+      // onto the exact same v2 JudgeModelVersion.
+      const configC = await mkV1ModelConfig(userA.id, { provider: 'anthropic', modelId: 'claude-3-opus' });
+      const configD = await mkV1ModelConfig(userA.id, { provider: 'anthropic', modelId: 'claude-3-opus' });
+
+      const project = await mkV1Project(userA.id);
+      const evaluation = await mkV1Evaluation(project.id, userA.id);
+      const run = await mkV1EvaluationRun(evaluation.id, userA.id, { status: 'completed' });
+
+      await mkV1ModelJudgment(run.id, configC.id, {
+        status: 'completed',
+        overallScore: 9,
+        reasoning: 'first judgment, high score',
+      });
+      await mkV1ModelJudgment(run.id, configD.id, {
+        status: 'completed',
+        overallScore: 2,
+        reasoning: 'second judgment, low score',
+      });
+
+      const ctx1 = createImportCtx({ mode: 'apply', ownerMap });
+      const owners1 = await resolveOwners(ctx1);
+      const judges1 = await synthesizeJudges(ctx1, owners1);
+
+      // Confirm the collision precondition actually holds — otherwise this
+      // test wouldn't be exercising the bug at all.
+      expect(judges1.get(configC.id)!.versionId).toBe(judges1.get(configD.id)!.versionId);
+
+      const ids1 = await importArtifacts(ctx1, owners1);
+      await importRuns(ctx1, owners1, ids1, judges1);
+
+      const v2RunId = (
+        await db.evaluationRun.findFirst({ where: { evaluationId: ids1.evaluation.get(evaluation.id) } })
+      )!.id;
+
+      // ── First apply: BOTH judgments created, both scores present ──
+      const afterFirstApply = await db.modelJudgment.findMany({ where: { runId: v2RunId } });
+      expect(afterFirstApply).toHaveLength(2);
+      expect(afterFirstApply.map((j) => j.overallScore).sort()).toEqual([2, 9]);
+      expect(ctx1.report.counts().ModelJudgment).toMatchObject({ created: 2, skipped: 0 });
+
+      // ── Re-run against the SAME v1 data: still exactly two rows (no
+      // duplication), and the second run's tally is skipped:2 (each
+      // incoming judgment matches its own now-existing row by its distinct
+      // overallScore), never a P2002 from the (runId, judgeModelVersionId,
+      // pairOrder) unique constraint (pairOrder is NULLS-DISTINCT). ──
+      const ctx2 = createImportCtx({ mode: 'apply', ownerMap });
+      const owners2 = await resolveOwners(ctx2);
+      const judges2 = await synthesizeJudges(ctx2, owners2);
+      const ids2 = await importArtifacts(ctx2, owners2);
+      await importRuns(ctx2, owners2, ids2, judges2);
+
+      const afterSecondApply = await db.modelJudgment.findMany({ where: { runId: v2RunId } });
+      expect(afterSecondApply).toHaveLength(2);
+      expect(afterSecondApply.map((j) => j.overallScore).sort()).toEqual([2, 9]);
+      expect(ctx2.report.counts().ModelJudgment).toMatchObject({ created: 0, skipped: 2 });
+    }
+  );
+
+  it('a malformed criteriaScores JSON payload is tallied and logged, not silently dropped — the judgment row is still created', async () => {
+    const f = await buildFixture();
+    const run1 = await mkV1EvaluationRun(f.evalA.id, f.userA.id, { status: 'completed' });
+    const malformedJudgment = await mkV1ModelJudgment(run1.id, f.modelConfigA.id, {
+      status: 'completed',
+      overallScore: 5,
+      criteriaScores: '{not json',
+    });
+
+    const ctx = createImportCtx({ mode: 'apply', ownerMap: f.ownerMap });
+    const owners = await resolveOwners(ctx);
+    const judges = await synthesizeJudges(ctx, owners);
+    const ids = await importArtifacts(ctx, owners);
+    await importRuns(ctx, owners, ids, judges);
+
+    const v2Run1 = await db.evaluationRun.findFirst({ where: { evaluationId: ids.evaluation.get(f.evalA.id) } });
+    const v2Judgment = await db.modelJudgment.findFirst({ where: { runId: v2Run1!.id } });
+
+    // Import succeeds; the row is still created rather than the whole
+    // import throwing over one malformed payload.
+    expect(v2Judgment).toBeTruthy();
+    expect(v2Judgment!.overallScore).toBe(5);
+    expect(v2Judgment!.criteriaScores).toEqual([]);
+
+    // The drop is tallied, not silent.
+    expect(ctx.report.counts().ModelJudgmentCriteriaScoresMalformed).toMatchObject({ dropped: 1 });
+
+    // Sanity: the malformed row really is the one fixture judgment created.
+    expect(malformedJudgment.criteriaScores).toBe('{not json');
   });
 });

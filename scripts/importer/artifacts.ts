@@ -38,7 +38,14 @@
  *   - Project:  v1 has NO visibility column. Only `isDefault: true` (the
  *     seeded default/leaderboard project) counts as "public" for this
  *     purpose — every other project with an unmapped owner is private and
- *     dropped.
+ *     dropped. Unlike Dataset's per-row `visibility` column, `isDefault` is
+ *     a property of the PROJECT itself, independent of who currently owns
+ *     it — so an `isDefault` project is visibility `'public'` no matter
+ *     which of the three ownership paths landed it here (kept/mapped
+ *     owner, an owner whose ownerMap disposition is literally `'archive'`,
+ *     or a dropped/unmentioned owner falling back to archive via the
+ *     isDefault escape hatch above). It never becomes `'private'` just
+ *     because its owner happens to still be a live mapped user.
  *   - Rubric:   v1 has neither a visibility column NOR an isDefault-style
  *     escape hatch. A rubric with an unmapped owner is ALWAYS dropped —
  *     there is no archive path for rubrics.
@@ -55,13 +62,16 @@
  * v2's new `visibility` enum columns (Project, Rubric) aren't populated
  * from any v1 source column — there isn't one — but leaving them all at
  * the schema default ('private') for the one case that IS semantically
- * public (the archived default/leaderboard project) would silently regress
- * the exact signal the archive attribution exists to preserve. So: a
- * Project that lands on the archive user via the isDefault escape hatch is
- * created with `visibility: 'public'`; every other imported Project and
- * every imported Rubric gets the default `'private'`. Dataset's own
- * `visibility` column is untouched legacy `String` (never promoted to the
- * enum), so it is carried verbatim from v1 either way.
+ * public (the default/leaderboard project) would silently regress the
+ * exact signal the visibility column exists to carry. So: every Project
+ * with `isDefault: true` is created with `visibility: 'public'`
+ * UNCONDITIONALLY — not just when it happened to fall through to the
+ * archive user, but on all three ownership paths above (a project doesn't
+ * stop being the public leaderboard just because its owner is a live,
+ * still-mapped user). Every non-default Project and every imported Rubric
+ * gets the default `'private'`. Dataset's own `visibility` column is
+ * untouched legacy `String` (never promoted to the enum), so it is carried
+ * verbatim from v1 either way.
  *
  * ── Idempotency (apply-mode re-run safety) ──────────────────────────────
  * Every entity here lacks a v1-id-shaped natural key (no schema changes are
@@ -87,6 +97,26 @@
  *     from v1 (see below), so it is a stable, deterministic disambiguator
  *     across re-runs against the same v1 data — the same pattern the task
  *     brief calls for on EvaluationRun in runs.ts.
+ *
+ * KNOWN LIMITATION — content-match key collisions on the null-slug rows:
+ * the Rubric-root, Project (no slug), and Dataset content-match keys above
+ * all key on a NULL-safe tuple of `name`/`version`/`parentId` (etc.), never
+ * on the v1 row's own id (no v1-id-shaped natural key exists on any of
+ * these tables, and adding one would be a schema change outside this
+ * task's scope). If two DISTINCT v1 rows of the same entity happen to
+ * share an IDENTICAL tuple — e.g. one user creates two root Rubrics both
+ * named "Correctness" at version 1, or two slug-less Projects both named
+ * "Scratch" — the second row's `findFirst` matches the first row's
+ * already-created v2 counterpart and silently MERGES onto it instead of
+ * creating a second row; this importer has no way to tell those two v1
+ * rows apart after the fact. This is the same collision class
+ * ModelJudgment's multiset matching (./runs.ts) exists to rule out for
+ * that one entity specifically — it is NOT independently closed here for
+ * Rubric/Project/Dataset (doing so would need the same per-parent multiset
+ * restructuring, which wasn't in scope for this fix). Net effect: this
+ * entity's v1 row count can exceed its v2 row count by the number of such
+ * collisions after import; Task 10's row-count reconciliation phase is
+ * what is meant to surface that class of gap, not a per-row tally here.
  *
  * ── Timestamps ───────────────────────────────────────────────────────────
  * v1 `createdAt`/`updatedAt` are passed through explicitly on every create.
@@ -323,15 +353,22 @@ async function importProjects(
   const rows = await ctx.v1.project.findMany();
 
   for (const project of rows) {
-    const isPublic = project.isDefault;
+    const isDefault = project.isDefault;
     const mapped = owners.get(project.userId);
-    const v2UserId = mapped ?? (isPublic ? await getArchiveUserId() : null);
+    const v2UserId = mapped ?? (isDefault ? await getArchiveUserId() : null);
     if (!v2UserId) {
       ctx.report.add('Project', 'dropped');
       continue;
     }
 
-    const visibility = !mapped && isPublic ? 'public' : 'private';
+    // isDefault (the seeded default/leaderboard project) is ALWAYS public,
+    // regardless of which of the three ownership paths got it here (a
+    // still-mapped/kept owner, an owner whose ownerMap disposition is
+    // literally 'archive', or a dropped/unmentioned owner falling back to
+    // archive just above) — it doesn't stop being the public leaderboard
+    // project just because its owner happens to still be a live user. See
+    // module doc.
+    const visibility = isDefault ? 'public' : 'private';
     const v2ProjectId = await findOrCreateProject(ctx, project, v2UserId, visibility);
     projectIds.set(project.id, v2ProjectId);
   }

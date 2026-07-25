@@ -53,15 +53,45 @@
  *     pairOrder])` CANNOT be relied on for idempotency here — every
  *     v1-imported judgment has `pairOrder: null`, and Postgres unique
  *     indexes treat NULL as distinct from NULL, so the DB would happily
- *     insert duplicates. Matched in code instead via `findFirst` on
- *     `(runId, judgeModelVersionId, pairOrder: null)` before every create.
- *     KNOWN LIMITATION: if a single v1 run had judgments from two distinct
- *     v1 ModelConfigs that synthesize to the SAME JudgeModelVersion (e.g.
- *     two users' identical `(provider, modelId, endpoint)` configs both
- *     selected on one run — unusual but not impossible), the second
- *     collapses onto the first under this key instead of creating a
- *     second row. Flagged in the importer report doc, not silently
- *     swallowed.
+ *     insert duplicates AND a naive single-row `findFirst` on `(runId,
+ *     judgeModelVersionId, pairOrder: null)` would falsely collapse two
+ *     genuinely distinct judgments onto each other (see below). Matched
+ *     instead via MULTISET content-matching, scoped per `(runId,
+ *     judgeModelVersionId)`:
+ *       1. All of a run's v1 ModelJudgments are processed in deterministic
+ *          v1-id order (sorted once when `judgmentsByRun` is built).
+ *       2. For each distinct `(v2RunId, judgeModelVersionId)` pair actually
+ *          needed, ALL existing v2 ModelJudgment rows for that pair are
+ *          loaded ONCE into a mutable "pool" (`makeJudgmentPoolLoader`),
+ *          cached for the rest of this `importRuns` call.
+ *       3. Each incoming v1 judgment is matched against the REMAINING pool
+ *          entries by exact `(createdAt.getTime(), overallScore,
+ *          latencyMs)` — all three fields are carried straight across from
+ *          v1 with no transformation, so an existing v2 row with an
+ *          identical triple is, for idempotency purposes, "the same
+ *          judgment" a prior apply already created. On a match, that pool
+ *          row is CONSUMED (spliced out, so it can't match a second
+ *          incoming judgment) and tallied `skipped`; no match creates a
+ *          new row and tallies `created`.
+ *     Why this matters: two distinct v1 ModelConfigs (even across
+ *     different owners, or the same owner) that share `(provider, modelId,
+ *     endpoint)` synthesize to the SAME JudgeModelVersion (see
+ *     ./judges.ts). If both are referenced by judgments on ONE run, the
+ *     old single-row `findFirst` would treat the second judgment as
+ *     already-imported and silently drop it on the FIRST apply. The
+ *     multiset match instead creates BOTH rows on first apply (the pool is
+ *     empty, so neither judgment matches anything) and, on every
+ *     subsequent re-run, each incoming judgment matches exactly one of the
+ *     two now-existing rows by its own distinct `(createdAt, overallScore,
+ *     latencyMs)` — stable, not collapsing, and the DB's NULLS-DISTINCT
+ *     `pairOrder` uniqueness never rejects the second insert (no P2002).
+ *     Residual limitation (not fully closed, and out of scope beyond what
+ *     the two-judgment collision case above requires): if two DISTINCT v1
+ *     judgments in the same `(runId, judgeModelVersionId)` pool happen to
+ *     share an IDENTICAL `(createdAt, overallScore, latencyMs)` triple,
+ *     only one pool row exists to match both, so a re-run would still
+ *     create a duplicate for the second — the same content-match-collision
+ *     class documented for Rubric/Project/Dataset in ./artifacts.ts.
  *   - HumanJudgment:  real `@@unique` on `runId` — `findUnique` is exact.
  *
  * ── criteriaScores ───────────────────────────────────────────────────────
@@ -77,6 +107,19 @@
  * literal report key; `HumanJudgmentCriteriaUnmapped` mirrors it for
  * HumanJudgment, which the brief doesn't name explicitly but calls for
  * "same parse+remap treatment").
+ *
+ * A malformed PAYLOAD (as opposed to a malformed individual entry, handled
+ * above) is a separate failure mode: v1 `criteriaScores` that isn't valid
+ * JSON at all, or that parses to something other than a JSON array, can't
+ * be remapped entry-by-entry — the whole value is unusable. Both cases
+ * still create the judgment row (with `criteriaScores` degraded to `[]` or
+ * `DbNull` respectively, never throwing the whole import over one bad
+ * row), but neither is silent: each is tallied under
+ * `<Entity>CriteriaScoresMalformed`/`dropped` (e.g.
+ * `ModelJudgmentCriteriaScoresMalformed`) AND logged via `console.warn`
+ * with the v1 row's id, so a reconciliation pass can find exactly which
+ * v1 judgments/human judgments lost their scores instead of only seeing an
+ * aggregate count.
  *
  * ── Stranded runs ────────────────────────────────────────────────────────
  * A v1 EvaluationRun whose `status` is still `pending`/`judging` and whose
@@ -115,7 +158,7 @@
  * actually changed).
  */
 import { Prisma } from '@prisma/client';
-import type { JudgmentStatus, RunStatus } from '@prisma/client';
+import type { JudgmentStatus, RunStatus, ModelJudgment as V2ModelJudgment } from '@prisma/client';
 import type {
   EvaluationRun as V1EvaluationRun,
   ModelJudgment as V1ModelJudgment,
@@ -153,12 +196,17 @@ function isStranded(run: V1EvaluationRun, now: Date): boolean {
 /** Parses a v1 criteriaScores JSON string and remaps every entry's
  * criterionId through `criterionIds`. Never drops an entry: an unmapped
  * criterionId is kept with `criterionId: null` and `_unmappedV1CriterionId`
- * set to the original value, tallied under `${entity}CriteriaUnmapped`. */
+ * set to the original value, tallied under `${entity}CriteriaUnmapped`. A
+ * malformed payload (invalid JSON, or JSON that isn't an array) can't be
+ * remapped entry-by-entry at all — tallied under
+ * `${entity}CriteriaScoresMalformed`/`dropped` and logged with `v1Id` so a
+ * reconciliation pass can find the exact row, never silently swallowed. */
 function remapCriteriaScores(
   raw: string | null,
   criterionIds: Map<string, string>,
   ctx: ImportCtx,
-  entity: 'ModelJudgment' | 'HumanJudgment'
+  entity: 'ModelJudgment' | 'HumanJudgment',
+  v1Id: string
 ): Prisma.InputJsonValue | typeof Prisma.DbNull {
   if (raw == null) return Prisma.DbNull;
 
@@ -169,9 +217,17 @@ function remapCriteriaScores(
     // Malformed v1 JSON: preserve nothing to remap against, but never
     // throw the whole import over one bad row — surface it as an empty
     // array rather than fabricating scores.
+    ctx.report.add(`${entity}CriteriaScoresMalformed`, 'dropped');
+    console.warn(`importRuns: malformed criteriaScores JSON on v1 ${entity} ${v1Id} — dropping to []`);
     return [];
   }
-  if (!Array.isArray(parsed)) return Prisma.DbNull;
+  if (!Array.isArray(parsed)) {
+    ctx.report.add(`${entity}CriteriaScoresMalformed`, 'dropped');
+    console.warn(
+      `importRuns: v1 ${entity} ${v1Id} criteriaScores parsed to a non-array (${typeof parsed}) — dropping to null`
+    );
+    return Prisma.DbNull;
+  }
 
   return parsed.map((entry) => {
     if (!entry || typeof entry !== 'object' || !('criterionId' in entry)) return entry;
@@ -302,6 +358,45 @@ async function findOrCreateRun(
 
 // ─── ModelJudgment ──────────────────────────────────────────────────────────
 
+/** Loads (once per distinct `(runId, judgeModelVersionId)` pair, per
+ * `importRuns` call) the full set of existing v2 ModelJudgment rows for
+ * that pair into a mutable "pool" array that `consumeMatchingJudgment`
+ * splices entries out of as they're matched — see the module doc's
+ * ModelJudgment idempotency section for why a per-pair multiset, not a
+ * single `findFirst`, is required here. */
+function makeJudgmentPoolLoader(ctx: ImportCtx) {
+  const cache = new Map<string, V2ModelJudgment[]>();
+
+  return async function loadJudgmentPool(runId: string, judgeModelVersionId: string): Promise<V2ModelJudgment[]> {
+    const key = `${runId}:${judgeModelVersionId}`;
+    let pool = cache.get(key);
+    if (!pool) {
+      pool = await ctx.v2.modelJudgment.findMany({ where: { runId, judgeModelVersionId } });
+      cache.set(key, pool);
+    }
+    return pool;
+  };
+}
+
+/** Finds the first `pool` entry whose `(createdAt, overallScore,
+ * latencyMs)` exactly matches `v1` and, if found, CONSUMES it (splices it
+ * out of `pool` so it can't match a second incoming judgment) and returns
+ * true. All three fields are carried straight across from v1 with no
+ * transformation, so an identical triple on an existing v2 row is, for
+ * idempotency purposes, "the same judgment" a prior apply already
+ * created. */
+function consumeMatchingJudgment(pool: V2ModelJudgment[], v1: V1ModelJudgment): boolean {
+  const idx = pool.findIndex(
+    (row) =>
+      row.createdAt.getTime() === v1.createdAt.getTime() &&
+      row.overallScore === v1.overallScore &&
+      row.latencyMs === v1.latencyMs
+  );
+  if (idx === -1) return false;
+  pool.splice(idx, 1);
+  return true;
+}
+
 async function findOrCreateModelJudgment(
   ctx: ImportCtx,
   v1: V1ModelJudgment,
@@ -310,12 +405,10 @@ async function findOrCreateModelJudgment(
   promptTemplateId: string,
   v2ModelConfigId: string,
   criterionIds: Map<string, string>,
-  runIsStranded: boolean
+  runIsStranded: boolean,
+  pool: V2ModelJudgment[]
 ): Promise<void> {
-  const existing = await ctx.v2.modelJudgment.findFirst({
-    where: { runId: v2RunId, judgeModelVersionId, pairOrder: null },
-  });
-  if (existing) {
+  if (consumeMatchingJudgment(pool, v1)) {
     ctx.report.add('ModelJudgment', 'skipped');
     return;
   }
@@ -339,7 +432,7 @@ async function findOrCreateModelJudgment(
       overallScore: v1.overallScore,
       reasoning: v1.reasoning,
       rawResponse: v1.rawResponse,
-      criteriaScores: remapCriteriaScores(v1.criteriaScores, criterionIds, ctx, 'ModelJudgment'),
+      criteriaScores: remapCriteriaScores(v1.criteriaScores, criterionIds, ctx, 'ModelJudgment', v1.id),
       latencyMs: v1.latencyMs,
       tokenCount: v1.tokenCount,
       inputTokens: null,
@@ -380,7 +473,7 @@ async function findOrCreateHumanJudgment(
       runId: v2RunId,
       overallScore: v1.overallScore,
       reasoning: v1.reasoning,
-      criteriaScores: remapCriteriaScores(v1.criteriaScores, criterionIds, ctx, 'HumanJudgment'),
+      criteriaScores: remapCriteriaScores(v1.criteriaScores, criterionIds, ctx, 'HumanJudgment', v1.id),
       selectedBestModelId: v2SelectedBestModelId,
       userId: v2UserId,
       createdAt: v1.createdAt,
@@ -413,6 +506,7 @@ export async function importRuns(
     return archiveUserId;
   };
   const ensureModelConfig = makeModelConfigEnsurer(ctx, owners, getArchiveUserId);
+  const loadJudgmentPool = makeJudgmentPoolLoader(ctx);
 
   const now = new Date();
 
@@ -424,6 +518,12 @@ export async function importRuns(
         const list = byRun.get(row.runId) ?? [];
         list.push(row);
         byRun.set(row.runId, list);
+      }
+      // Deterministic per-run processing order (v1 id) so the multiset
+      // ModelJudgment match below consumes pool entries consistently
+      // across repeated runs against the same v1 data.
+      for (const list of byRun.values()) {
+        list.sort((a, b) => a.id.localeCompare(b.id));
       }
       return byRun;
     }),
@@ -460,6 +560,7 @@ export async function importRuns(
         );
       }
       const v2ModelConfigId = await ensureModelConfig(judgment.modelConfigId);
+      const pool = await loadJudgmentPool(v2RunId, judge.versionId);
       await findOrCreateModelJudgment(
         ctx,
         judgment,
@@ -468,7 +569,8 @@ export async function importRuns(
         legacyTemplate.id,
         v2ModelConfigId,
         ids.criterion,
-        runIsStranded
+        runIsStranded,
+        pool
       );
     }
 
