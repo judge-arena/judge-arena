@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
+import { createRubricVersion, RubricVersionConflictError } from '@/lib/rubric-versions';
 
 const criterionSchema = z.object({
   name: z.string().min(1),
@@ -79,33 +80,12 @@ export async function POST(
 
     const rootId = rubric.parentId ?? rubric.id;
 
-    const familyVersions = await prisma.rubric.findMany({
-      where: { OR: [{ id: rootId }, { parentId: rootId }] },
-      select: { version: true },
-      orderBy: { version: 'desc' },
-    });
-
-    const nextVersion = (familyVersions[0]?.version ?? 0) + 1;
-
-    const newRubric = await prisma.rubric.create({
-      data: {
-        name: data.name ?? rubric.name,
-        description:
-          data.description !== undefined ? data.description : rubric.description,
-        version: nextVersion,
-        parentId: rootId,
-        userId: session.user.id,
-        criteria: {
-          create: data.criteria.map((c, i) => ({
-            name: c.name,
-            description: c.description,
-            maxScore: c.maxScore,
-            weight: c.weight,
-            order: c.order ?? i,
-          })),
-        },
-      },
-      include: { criteria: { orderBy: { order: 'asc' } } },
+    const newRubric = await createRubricVersion(prisma, {
+      rootRubricId: rootId,
+      userId: session.user.id,
+      name: data.name ?? rubric.name,
+      description: data.description !== undefined ? data.description : rubric.description,
+      criteria: data.criteria,
     });
 
     return NextResponse.json(newRubric, { status: 201 });
@@ -114,6 +94,18 @@ export async function POST(
       return NextResponse.json(
         { error: 'Validation failed', details: error.errors },
         { status: 400 }
+      );
+    }
+    if (error instanceof RubricVersionConflictError) {
+      logger.error('Rubric version conflict exhausted retries', {
+        error: serializeError(error),
+      });
+      return NextResponse.json(
+        {
+          error:
+            'Failed to create rubric version due to concurrent updates. Please try again.',
+        },
+        { status: 500 }
       );
     }
     logger.error('Failed to create rubric version', { error: serializeError(error) });
