@@ -8,8 +8,13 @@ export default defineConfig({
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'tests/**/*.test.ts'],
     // tests/db/** requires a live Postgres connection and is run separately
     // via `npm run test:db` (see vitest.db.config.ts) so plain `npm test`
-    // stays green in environments without a database.
-    exclude: ['node_modules', '.next', 'prisma', 'tests/db/**'],
+    // stays green in environments without a database. Same reasoning for
+    // tests/importer/**/*.db.test.ts (needs BOTH the v1 scratch DB and the
+    // v2 test DB reachable) — note this exclude is necessary in addition to
+    // the `.db.test.ts` naming convention: `tests/**/*.test.ts` above still
+    // matches those filenames (they end in `.test.ts`), so without this
+    // exclude they'd be picked up here too.
+    exclude: ['node_modules', '.next', 'prisma', 'tests/db/**', 'tests/importer/**/*.db.test.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'text-summary', 'lcov', 'html'],

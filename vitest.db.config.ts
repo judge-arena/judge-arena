@@ -10,7 +10,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    include: ['tests/db/**/*.test.ts'],
+    include: ['tests/db/**/*.test.ts', 'tests/importer/**/*.db.test.ts'],
     // DB test files all share one live Postgres instance and each file's
     // `beforeEach(truncateAll)` truncates every table. Running test *files*
     // in parallel (Vitest's default) lets one file's truncate race another
