@@ -4,6 +4,7 @@ import {
   toCsv,
   toJsonl,
   flattenDatasetSample,
+  flattenEvaluationForExport,
 } from '@/lib/export';
 
 describe('export', () => {
@@ -109,6 +110,91 @@ describe('export', () => {
 
       expect(result.expected).toBe('');
       expect(result.metadata).toBe('');
+    });
+  });
+
+  describe('flattenEvaluationForExport', () => {
+    const criteriaScoresArray = [{ criterionId: 'x', score: 4 }];
+
+    // Minimal evaluation-shaped fixture the function actually reads.
+    function buildEvaluation(
+      modelCriteriaScores: unknown,
+      humanCriteriaScores?: unknown
+    ) {
+      return {
+        id: 'eval-1',
+        title: 'Test Evaluation',
+        inputText: 'input',
+        runs: [
+          {
+            id: 'run-1',
+            status: 'completed',
+            createdAt: '2026-07-24T00:00:00.000Z',
+            humanJudgment:
+              humanCriteriaScores === undefined
+                ? undefined
+                : {
+                    overallScore: 9,
+                    reasoning: 'human take',
+                    criteriaScores: humanCriteriaScores,
+                  },
+            modelJudgments: [
+              {
+                status: 'completed',
+                overallScore: 8,
+                reasoning: 'looks good',
+                rawResponse: '{}',
+                criteriaScores: modelCriteriaScores,
+                latencyMs: 120,
+                tokenCount: 42,
+                modelConfig: { name: 'GPT-4', provider: 'openai', modelId: 'gpt-4' },
+              },
+            ],
+          },
+        ],
+      };
+    }
+
+    it('serializes an object-array criteriaScores exactly once (no double-stringify)', () => {
+      const evaluation = buildEvaluation(criteriaScoresArray, criteriaScoresArray);
+      const rows = flattenEvaluationForExport(evaluation);
+      const expectedJson = JSON.stringify(criteriaScoresArray);
+
+      expect(rows).toHaveLength(1);
+      // CSV cell: already a plain JSON string, not re-escaped/re-encoded.
+      expect(rows[0].model_criteria_scores).toBe(expectedJson);
+      expect(rows[0].human_criteria_scores).toBe(expectedJson);
+
+      const csv = toCsv(rows as unknown as Array<Record<string, unknown>>);
+      expect(csv).toContain(expectedJson.replace(/"/g, '""'));
+
+      // JSONL: the line must parse back to an object whose criteria_scores
+      // fields are STRINGS containing valid JSON — i.e. stringified exactly
+      // once (matches v1's export format). A double-stringify bug would
+      // instead show up as a JSON string containing escaped quotes
+      // (`"[{\"criterionId\"...`) rather than parsing cleanly.
+      const jsonl = toJsonl(rows as unknown as Array<Record<string, unknown>>);
+      const parsedLine = JSON.parse(jsonl.trim().split('\n')[0]);
+
+      expect(typeof parsedLine.model_criteria_scores).toBe('string');
+      expect(JSON.parse(parsedLine.model_criteria_scores)).toEqual(criteriaScoresArray);
+
+      expect(typeof parsedLine.human_criteria_scores).toBe('string');
+      expect(JSON.parse(parsedLine.human_criteria_scores)).toEqual(criteriaScoresArray);
+    });
+
+    it('emits an empty field for null criteriaScores (model and human)', () => {
+      const evaluation = buildEvaluation(null, null);
+      const rows = flattenEvaluationForExport(evaluation);
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].model_criteria_scores).toBe('');
+      expect(rows[0].human_criteria_scores).toBe('');
+
+      const jsonl = toJsonl(rows as unknown as Array<Record<string, unknown>>);
+      const parsedLine = JSON.parse(jsonl.trim().split('\n')[0]);
+      expect(parsedLine.model_criteria_scores).toBe('');
+      expect(parsedLine.human_criteria_scores).toBe('');
     });
   });
 });

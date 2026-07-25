@@ -14,8 +14,9 @@ Thanks for your interest! This guide covers the repo layout, conventions, and co
 6. [Adding a New API Route](#adding-a-new-api-route)
 7. [Adding a New Page](#adding-a-new-page)
 8. [Extending the Database Schema](#extending-the-database-schema)
-9. [Modifying the Rubric / Evaluation Flow](#modifying-the-rubric--evaluation-flow)
-10. [Adding a Keyboard Shortcut](#adding-a-keyboard-shortcut)
+9. [API wire-format changes (v2, 1a)](#api-wire-format-changes-v2-1a)
+10. [Modifying the Rubric / Evaluation Flow](#modifying-the-rubric--evaluation-flow)
+11. [Adding a Keyboard Shortcut](#adding-a-keyboard-shortcut)
 
 ---
 
@@ -370,7 +371,38 @@ All pages live in `src/app/` and use the Next.js App Router.
 - Add `createdAt DateTime @default(now())` and `updatedAt DateTime @updatedAt` to every model.
 - Add `@@index` on foreign key columns.
 - Use `onDelete: Cascade` for owned relations (e.g., criteria belong to rubric).
-- Store JSON data as `String` with a comment noting the expected shape (e.g., `criteriaScores`).
+- JSON payloads use Prisma `Json` (JSONB) columns (criteriaScores et al. migrated in v2); document expected shape in a comment beside the field.
+
+---
+
+## API wire-format changes (v2, 1a)
+
+The v2 schema migration (`20260725004838_v2_judgment_run_provenance` and the
+`HumanJudgment`/`ModelJudgment` column conversions alongside it) changed
+`criteriaScores` from a `String` column holding a JSON-encoded string to a
+Prisma `Json` (JSONB) column holding the value directly.
+
+This is an intentional, **undocumented-until-now** wire-format change for API
+consumers:
+
+- **Before (v1):** `criteriaScores` in API responses was a JSON-encoded
+  *string* — clients had to `JSON.parse()` it a second time to get the array
+  of `{ criterionId, score, ... }` objects.
+- **After (v2):** `criteriaScores` is emitted as a JSON *array* (or `null`)
+  directly on the response body — no double-decoding needed.
+
+**Affected routes:** any route returning `ModelJudgment` or `HumanJudgment`
+records, notably `GET /api/evaluations/[id]/runs` and
+`GET /api/evaluations/[id]/runs/[runId]` (`evaluations:read` scope).
+
+**Who's affected:** `DeveloperApiKey` consumers of the `evaluations:read`
+routes that were written against the v1 shape and still call `JSON.parse()`
+on `criteriaScores` will now throw (parsing an already-decoded array/object).
+They should drop the extra parse step.
+
+Export endpoints (`src/lib/export.ts`) are unaffected by this — they
+JSON-stringify `criteriaScores` exactly once when flattening to CSV/JSONL, so
+the export file format is unchanged from v1.
 
 ---
 

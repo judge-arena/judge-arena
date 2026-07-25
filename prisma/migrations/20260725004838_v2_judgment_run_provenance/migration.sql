@@ -38,7 +38,7 @@ ADD COLUMN     "reasoningEnabled" BOOLEAN,
 ADD COLUMN     "samplingParams" JSONB,
 ADD COLUMN     "servedModelId" TEXT,
 ADD COLUMN     "startedAt" TIMESTAMP(3),
-ADD COLUMN     "updatedAt" TIMESTAMP(3) NOT NULL;
+ADD COLUMN     "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;
 
 -- Hand-edited (spec §3.4): TYPE ... USING casts instead of DROP/ADD swaps.
 ALTER TABLE "ModelJudgment" ALTER COLUMN "criteriaScores" TYPE JSONB USING "criteriaScores"::jsonb;
