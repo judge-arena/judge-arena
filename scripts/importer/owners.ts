@@ -70,7 +70,16 @@ async function resolveMappedUser(ctx: ImportCtx, mapping: MappedOwner): Promise<
   return created.id;
 }
 
-async function resolveArchiveUser(ctx: ImportCtx): Promise<string> {
+/**
+ * Find-or-creates the shared archive user (see module doc above). Exported
+ * so later import phases (artifacts.ts, runs.ts) can attribute a public
+ * artifact or an ensured-ModelConfig to the archive account without
+ * duplicating this find-or-create logic — every caller converges on the
+ * SAME row (by the `email` unique constraint), so calling this from
+ * multiple phases within one importer run is safe and still creates at
+ * most one archive User.
+ */
+export async function resolveArchiveUser(ctx: ImportCtx): Promise<string> {
   const existing = await ctx.v2.user.findUnique({ where: { email: ARCHIVE_USER_EMAIL } });
   if (existing) {
     ctx.report.add('User', 'skipped');

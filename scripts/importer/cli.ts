@@ -109,10 +109,14 @@ export async function main(): Promise<void> {
   try {
     await assertApplyAllowed(ctx, args.force);
 
-    // PHASES (Tasks 8-10) run here:
-    //   Task 8  - users + projects
-    //   Task 9  - rubrics + model configs + datasets
-    //   Task 10 - evaluations + runs + judgments
+    // PHASES (Tasks 8-10) run here — wired up in Task 10 along with
+    // ./reconcile.ts's post-import verification gate:
+    //   Task 8  - resolveOwners (./owners) + synthesizeJudges (./judges)
+    //   Task 9  - importArtifacts (./artifacts: projects, rubrics+criteria,
+    //             datasets+samples, evaluations) + importRuns (./runs:
+    //             EvaluationRun, ModelJudgment, HumanJudgment)
+    //   Task 10 - reconcile (./reconcile): row-count + provenance spot
+    //             checks; apply mode exits non-zero on failure
     // Each phase reads through ctx.v1, writes through ctx.v2 when
     // ctx.mode === 'apply', and records outcomes via ctx.report.add(...).
 

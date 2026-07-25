@@ -42,6 +42,111 @@ export async function mkV1ModelConfig(
   });
 }
 
+// ─── Task 9 fixture helpers (artifacts + runs/judgments) ───────────────────
+// Same counter-per-entity, sensible-defaults-plus-overrides shape as above.
+
+let v1ProjectCounter = 0;
+
+export async function mkV1Project(
+  userId: string,
+  overrides: Partial<Omit<Prisma.ProjectUncheckedCreateInput, 'userId'>> = {}
+) {
+  v1ProjectCounter += 1;
+  return v1db.project.create({
+    data: { name: `v1-fixture-project-${v1ProjectCounter}`, userId, ...overrides },
+  });
+}
+
+let v1RubricCounter = 0;
+
+export async function mkV1Rubric(
+  userId: string,
+  overrides: Partial<Omit<Prisma.RubricUncheckedCreateInput, 'userId'>> = {}
+) {
+  v1RubricCounter += 1;
+  return v1db.rubric.create({
+    data: { name: `v1-fixture-rubric-${v1RubricCounter}`, userId, ...overrides },
+  });
+}
+
+let v1RubricCriterionCounter = 0;
+
+export async function mkV1RubricCriterion(
+  rubricId: string,
+  overrides: Partial<Omit<Prisma.RubricCriterionUncheckedCreateInput, 'rubricId'>> = {}
+) {
+  v1RubricCriterionCounter += 1;
+  return v1db.rubricCriterion.create({
+    data: {
+      rubricId,
+      name: `v1-fixture-criterion-${v1RubricCriterionCounter}`,
+      description: 'fixture criterion',
+      ...overrides,
+    },
+  });
+}
+
+let v1DatasetCounter = 0;
+
+export async function mkV1Dataset(
+  userId: string,
+  overrides: Partial<Omit<Prisma.DatasetUncheckedCreateInput, 'userId'>> = {}
+) {
+  v1DatasetCounter += 1;
+  return v1db.dataset.create({
+    data: { name: `v1-fixture-dataset-${v1DatasetCounter}`, userId, ...overrides },
+  });
+}
+
+export async function mkV1DatasetSample(
+  datasetId: string,
+  index: number,
+  overrides: Partial<Omit<Prisma.DatasetSampleUncheckedCreateInput, 'datasetId' | 'index'>> = {}
+) {
+  return v1db.datasetSample.create({
+    data: { datasetId, index, input: `v1-fixture-sample-input-${index}`, ...overrides },
+  });
+}
+
+let v1EvaluationCounter = 0;
+
+export async function mkV1Evaluation(
+  projectId: string,
+  userId: string,
+  overrides: Partial<Omit<Prisma.EvaluationUncheckedCreateInput, 'projectId' | 'userId'>> = {}
+) {
+  v1EvaluationCounter += 1;
+  return v1db.evaluation.create({
+    data: { projectId, userId, inputText: `v1-fixture-eval-input-${v1EvaluationCounter}`, ...overrides },
+  });
+}
+
+export async function mkV1EvaluationRun(
+  evaluationId: string,
+  triggeredById: string,
+  overrides: Partial<Omit<Prisma.EvaluationRunUncheckedCreateInput, 'evaluationId' | 'triggeredById'>> = {}
+) {
+  return v1db.evaluationRun.create({ data: { evaluationId, triggeredById, ...overrides } });
+}
+
+export async function mkV1ModelJudgment(
+  runId: string,
+  modelConfigId: string,
+  overrides: Partial<Omit<Prisma.ModelJudgmentUncheckedCreateInput, 'runId' | 'modelConfigId'>> = {}
+) {
+  return v1db.modelJudgment.create({ data: { runId, modelConfigId, ...overrides } });
+}
+
+export async function mkV1HumanJudgment(
+  runId: string,
+  userId: string,
+  overrides: Partial<Omit<Prisma.HumanJudgmentUncheckedCreateInput, 'runId' | 'userId'>> = {}
+) {
+  return v1db.humanJudgment.create({
+    data: { runId, userId, overallScore: 8, ...overrides },
+  });
+}
+
 /**
  * Truncates every table in the v1 scratch database's `public` schema
  * (except Prisma's own migrations bookkeeping table) and restarts identity
