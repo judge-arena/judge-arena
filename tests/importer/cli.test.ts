@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseArgs, assertApplyAllowed } from '../../scripts/importer/cli';
+import { parseArgs, assertApplyAllowed, runImport } from '../../scripts/importer/cli';
 import { ImportReport, type ImportCtx } from '../../scripts/importer/context';
 
 describe('importer cli', () => {
@@ -132,6 +132,36 @@ describe('importer cli', () => {
     it('rejects in apply mode when v2 already has Project rows and --force is absent', async () => {
       const count = vi.fn().mockResolvedValue(3);
       await expect(assertApplyAllowed(ctxWith('apply', count), false)).rejects.toThrow(/--force/);
+    });
+  });
+
+  // These runImport tests are deliberately restricted to argv-parsing-level
+  // failures (never-touch-a-database paths) — DB-backed exit-code behavior
+  // (a real apply run whose reconcile() fails forcing exitCode: 1) is
+  // covered by tests/importer/reconcile.db.test.ts, which needs the v1
+  // scratch DB + v2 test DB this file's plain `npm test` run never has.
+  describe('runImport (argv-level, DB-free)', () => {
+    it('returns exitCode 1 (never throws) when argv is invalid, without ever creating a database context', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await expect(runImport(['--mode=bogus'])).resolves.toEqual({ exitCode: 1 });
+      expect(errorSpy).toHaveBeenCalledWith('Import failed:', expect.stringMatching(/Invalid --mode/));
+      errorSpy.mockRestore();
+    });
+
+    it('returns exitCode 1 when --mode=apply is given without --owner-map', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await expect(runImport(['--mode=apply'])).resolves.toEqual({ exitCode: 1 });
+      expect(errorSpy).toHaveBeenCalledWith('Import failed:', expect.stringMatching(/--owner-map/));
+      errorSpy.mockRestore();
+    });
+
+    it('returns exitCode 1 (never throws) when --owner-map points at a nonexistent file', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await expect(
+        runImport(['--mode=apply', '--owner-map=/nonexistent/owners.json'])
+      ).resolves.toEqual({ exitCode: 1 });
+      expect(errorSpy).toHaveBeenCalledWith('Import failed:', expect.any(String));
+      errorSpy.mockRestore();
     });
   });
 });

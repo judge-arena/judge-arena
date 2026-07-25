@@ -28,6 +28,11 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createImportCtx, type ImportCtx, type ImportMode, type OwnerMap } from './context';
+import { resolveOwners } from './owners';
+import { synthesizeJudges } from './judges';
+import { importArtifacts } from './artifacts';
+import { importRuns } from './runs';
+import { reconcile, formatReconcileReport } from './reconcile';
 
 const VALID_MODES: readonly ImportMode[] = ['report', 'apply'];
 
@@ -100,31 +105,94 @@ export async function assertApplyAllowed(ctx: ImportCtx, force: boolean): Promis
   }
 }
 
-export async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
-  const ownerMap: OwnerMap = args.ownerMapPath ? loadOwnerMap(args.ownerMapPath) : {};
+export interface RunImportResult {
+  exitCode: number;
+}
+
+/**
+ * The importer's full body of work, factored out of `main()` so tests can
+ * drive it (and inspect its returned exit code) without `main()`'s own
+ * `process.exit(...)` call tearing down the test process. `main()` below is
+ * a thin wrapper: parse real argv, call this, exit with whatever it returns.
+ *
+ * Phase order (owners -> judges -> artifacts -> runs) matches the
+ * dependency chain each phase's own module doc describes: resolveOwners's
+ * map feeds every later phase; synthesizeJudges's map feeds importRuns;
+ * importArtifacts's IdMaps feed both importRuns and reconcile.
+ *
+ * Mode semantics:
+ *   - `report`: every phase runs (each no-ops its v2 writes internally per
+ *     its own `ctx.mode !== 'apply'` guard — see owners.ts/judges.ts/
+ *     artifacts.ts/runs.ts) so the printed tallies show what an apply run
+ *     WOULD do. `reconcile` is deliberately NOT called — there is nothing
+ *     to reconcile against yet (v2 stays untouched), so its row counts
+ *     would trivially "fail" against an empty database.
+ *   - `apply`: after all four phases actually write, `reconcile` runs and
+ *     its `ok` flag is the program-doc abort criterion made real: `ok:false`
+ *     forces `exitCode: 1` unconditionally. `--force` (see
+ *     `assertApplyAllowed`) only bypasses the pre-existing-data guard
+ *     before any phase runs — it has no effect on this check.
+ */
+export async function runImport(argv: string[]): Promise<RunImportResult> {
+  // parseArgs/loadOwnerMap both throw synchronously — caught here, before
+  // createImportCtx, so a bad argv or a missing/invalid owner-map file never
+  // needs a ctx (and its Prisma clients) to be created just to be torn back
+  // down again in a finally block.
+  let args: ParsedArgs;
+  let ownerMap: OwnerMap;
+  try {
+    args = parseArgs(argv);
+    ownerMap = args.ownerMapPath ? loadOwnerMap(args.ownerMapPath) : {};
+  } catch (e) {
+    console.error('Import failed:', e instanceof Error ? e.message : e);
+    return { exitCode: 1 };
+  }
 
   const ctx = createImportCtx({ mode: args.mode, ownerMap });
 
   try {
     await assertApplyAllowed(ctx, args.force);
 
-    // PHASES (Tasks 8-10) run here — wired up in Task 10 along with
-    // ./reconcile.ts's post-import verification gate:
-    //   Task 8  - resolveOwners (./owners) + synthesizeJudges (./judges)
-    //   Task 9  - importArtifacts (./artifacts: projects, rubrics+criteria,
-    //             datasets+samples, evaluations) + importRuns (./runs:
-    //             EvaluationRun, ModelJudgment, HumanJudgment)
-    //   Task 10 - reconcile (./reconcile): row-count + provenance spot
-    //             checks; apply mode exits non-zero on failure
-    // Each phase reads through ctx.v1, writes through ctx.v2 when
-    // ctx.mode === 'apply', and records outcomes via ctx.report.add(...).
+    const owners = await resolveOwners(ctx);
+    const judges = await synthesizeJudges(ctx, owners);
+    const ids = await importArtifacts(ctx, owners);
+    await importRuns(ctx, owners, ids, judges);
 
     console.log(JSON.stringify({ mode: ctx.mode, counts: ctx.report.counts() }, null, 2));
+
+    if (ctx.mode !== 'apply') {
+      console.log(
+        '\nreport mode: reconciliation skipped (nothing written to v2 yet) — ' +
+          'the counts above show what an apply run would do.'
+      );
+      return { exitCode: 0 };
+    }
+
+    const result = await reconcile(ctx, ids);
+    console.log('\n' + formatReconcileReport(result));
+
+    if (!result.ok) {
+      console.error(
+        '\nReconciliation FAILED — aborting per the program-doc abort criterion ' +
+          '(architecture spec §8). See the failing row(s)/check(s) above; --force does ' +
+          'not bypass this gate.'
+      );
+      return { exitCode: 1 };
+    }
+
+    return { exitCode: 0 };
+  } catch (e) {
+    console.error('Import failed:', e instanceof Error ? e.message : e);
+    return { exitCode: 1 };
   } finally {
     await ctx.v1.$disconnect();
     await ctx.v2.$disconnect();
   }
+}
+
+export async function main(): Promise<void> {
+  const { exitCode } = await runImport(process.argv.slice(2));
+  process.exit(exitCode);
 }
 
 // Only run when invoked directly (`tsx scripts/importer/cli.ts` / `npm run
