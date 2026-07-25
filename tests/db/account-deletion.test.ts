@@ -241,6 +241,54 @@ describe('deleteUserAccount (P1.7 account deletion)', () => {
     expect(result.purged.modelConfigs).toBe(1);
   });
 
+  it(
+    'reassigns a ModelConfig referenced only via a surviving Evaluation\'s ' +
+      'EvaluationModelSelection (default model list, no run ever created)',
+    async () => {
+      const archiveUser = await mkUser();
+      const owner = await mkUser();
+
+      const config = await mkModelConfig(owner.id);
+
+      const publicProject = await mkProject(owner.id, { visibility: 'public' });
+      const publicEvaluation = await mkEvaluation(publicProject.id, owner.id);
+      await db.evaluationModelSelection.create({
+        data: { evaluationId: publicEvaluation.id, modelConfigId: config.id },
+      });
+
+      const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
+
+      // the selection row survives (not cascaded away)
+      const survivedSelection = await db.evaluationModelSelection.findFirst({
+        where: { evaluationId: publicEvaluation.id, modelConfigId: config.id },
+      });
+      expect(survivedSelection).not.toBeNull();
+
+      // the config it points at is reassigned, not hard-deleted
+      const survivedConfig = await db.modelConfig.findUnique({ where: { id: config.id } });
+      expect(survivedConfig).not.toBeNull();
+      expect(survivedConfig?.userId).toBe(archiveUser.id);
+
+      expect(result.reassigned.modelConfigs).toBe(1);
+      expect(result.purged.modelConfigs ?? 0).toBe(0);
+    }
+  );
+
+  it('reassigns a public Rubric not pinned by any run', async () => {
+    const archiveUser = await mkUser();
+    const owner = await mkUser();
+    const rubric = await mkRubric(owner.id, { visibility: 'public' });
+
+    const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
+
+    const survivedRubric = await db.rubric.findUnique({ where: { id: rubric.id } });
+    expect(survivedRubric).not.toBeNull();
+    expect(survivedRubric?.userId).toBe(archiveUser.id);
+    expect(survivedRubric?.visibility).toBe('public');
+
+    expect(result.reassigned.rubrics).toBe(1);
+  });
+
   it('deletes a private Dataset but reassigns a public one', async () => {
     const archiveUser = await mkUser();
     const owner = await mkUser();

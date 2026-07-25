@@ -15,9 +15,12 @@
  *     or an evaluation/config reassigned above), are explicitly reassigned
  *     to archiveUserId first so the final delete doesn't erase them:
  *     Evaluation.userId, HumanJudgment.userId, and any of the user's
- *     ModelConfig rows still referenced by a surviving ModelJudgment
- *     (ModelJudgment -> ModelConfig is `onDelete: Restrict`, so a config
- *     still in use can't be deleted at all).
+ *     ModelConfig rows still referenced by a surviving ModelJudgment or
+ *     EvaluationModelSelection (ModelJudgment -> ModelConfig is `onDelete:
+ *     Restrict`, so a config still in use can't be deleted at all; either
+ *     relation counts, since EvaluationModelSelection is written as soon as
+ *     an Evaluation template's default model list is saved, before any run
+ *     — and therefore any ModelJudgment — exists).
  *   - A private Rubric that a *surviving* run still pins (`onDelete:
  *     Restrict` on EvaluationRun.rubricId), or that still has child
  *     versions (`onDelete: NoAction` on Rubric.parentId), can't be
@@ -179,6 +182,18 @@ export async function deleteUserAccount(
     // ModelJudgment.modelConfigId is `onDelete: Restrict` — a config still
     // referenced by a surviving judgment can't be deleted at all, so
     // reassign it instead; unreferenced configs delete cleanly.
+    //
+    // EvaluationModelSelection.modelConfigId is `onDelete: Cascade` (not
+    // Restrict), and is written independently of any run — an Evaluation
+    // template's default model list is saved as soon as it's configured,
+    // before any run (and therefore any ModelJudgment) exists. A config
+    // referenced only there, by a surviving (public, or reassigned-above)
+    // Evaluation, would pass the ModelJudgment-only check as "unreferenced"
+    // and hard-delete, cascading away the surviving Evaluation's model
+    // selection out from under it. So a config counts as referenced if
+    // EITHER relation still points at it. (RunModelSelection needs no
+    // separate check: it's always created atomically alongside a
+    // ModelJudgment, so the ModelJudgment check already covers it.)
     const userConfigs = await tx.modelConfig.findMany({
       where: { userId },
       select: { id: true },
@@ -188,12 +203,22 @@ export async function deleteUserAccount(
     let purgedConfigCount = 0;
     let reassignedConfigCount = 0;
     if (userConfigIds.length > 0) {
-      const referencedRows = await tx.modelJudgment.findMany({
-        where: { modelConfigId: { in: userConfigIds } },
-        select: { modelConfigId: true },
-        distinct: ['modelConfigId'],
-      });
-      const referencedIds = new Set(referencedRows.map((r) => r.modelConfigId));
+      const [judgmentRows, selectionRows] = await Promise.all([
+        tx.modelJudgment.findMany({
+          where: { modelConfigId: { in: userConfigIds } },
+          select: { modelConfigId: true },
+          distinct: ['modelConfigId'],
+        }),
+        tx.evaluationModelSelection.findMany({
+          where: { modelConfigId: { in: userConfigIds } },
+          select: { modelConfigId: true },
+          distinct: ['modelConfigId'],
+        }),
+      ]);
+      const referencedIds = new Set([
+        ...judgmentRows.map((r) => r.modelConfigId),
+        ...selectionRows.map((r) => r.modelConfigId),
+      ]);
       const toReassign = userConfigIds.filter((id) => referencedIds.has(id));
       const toDelete = userConfigIds.filter((id) => !referencedIds.has(id));
 
