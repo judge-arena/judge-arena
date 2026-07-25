@@ -35,7 +35,7 @@ export async function refreshDatasetEvaluationSummary(datasetId: string): Promis
       evaluations: {
         include: {
           runs: {
-            orderBy: { createdAt: 'desc' },
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
             take: 1,
             include: {
               modelJudgments: {

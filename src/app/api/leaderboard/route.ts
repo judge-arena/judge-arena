@@ -37,10 +37,15 @@ interface ModelLeaderboardEntry {
 //     route) — ModelJudgment rows are unchanged by that transition.
 //   - 'pending' / 'judging' are pre-finalization (no judgments yet, or the
 //     automatic pass is still in flight) — correctly excluded.
-//   - 'error' is set ONLY when the automatic pass completed zero model
-//     judgments (`completedCount === 0 && errorCount > 0` in processRun),
-//     so admitting it here would add nothing to the aggregate anyway;
-//     excluded for clarity rather than relied upon as a no-op.
+//   - 'error' is set via two paths in processRun (evaluation-run-manager.ts):
+//     Primary: `completedCount === 0 && errorCount > 0` (no judgments attempted
+//     successfully). Secondary (crash window): outer catch after completed
+//     judgments already persisted — if the final status update fails, we retry
+//     with 'error' while judgments remain. This is excluded here as a deliberate
+//     conservative choice — 1b's reaper/finalization rework closes the crash
+//     window. The primary-path invariant (mixed results → needs_human, pure error
+//     → error) is what we rely on; excluding 'error' avoids accidentally counting
+//     crash-window runs with partial results.
 const FINALIZED_RUN_STATUSES = ['completed', 'needs_human'] as const;
 
 export async function GET() {
@@ -74,7 +79,7 @@ export async function GET() {
       JOIN "Evaluation" e ON e.id = er."evaluationId"
       WHERE e."projectId" = ${leaderboardProject.id}
         AND er.status::text IN (${Prisma.join(FINALIZED_RUN_STATUSES)})
-      ORDER BY er."evaluationId", er."createdAt" DESC
+      ORDER BY er."evaluationId", er."createdAt" DESC, er."id" DESC
     `;
     const finalizedRunIds = latestFinalizedRuns.map((run) => run.id);
 

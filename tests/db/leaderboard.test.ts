@@ -162,6 +162,40 @@ describe('Leaderboard API: latest-finalized-run aggregation', () => {
     expect(data.totalJudgments).toBe(0);
     expect(data.lastUpdated).toBeNull();
   });
+
+  it('deterministic tie-break: identical createdAt on two runs picks the same (higher-id) run consistently', async () => {
+    const user = await mkUser();
+    const project = await mkProject(user.id, { isDefault: true });
+    const model = await mkModelConfig(user.id, { name: 'Model TieBreak' });
+    const evaluation = await mkEvaluation(project.id, user.id, { responseText: 'some response' });
+
+    // Two runs with IDENTICAL createdAt — DISTINCT ON needs a secondary
+    // deterministic key (id DESC) to ensure the same run is picked consistently
+    const identical = new Date('2026-03-15T12:00:00.000Z');
+    const run1 = await mkEvaluationRun(evaluation.id, { status: 'completed', createdAt: identical });
+    await mkModelJudgment(run1.id, model.id, { overallScore: 5 });
+
+    const run2 = await mkEvaluationRun(evaluation.id, { status: 'completed', createdAt: identical });
+    await mkModelJudgment(run2.id, model.id, { overallScore: 9 });
+
+    // Determine which run has the higher ID — that's the one the query should pick
+    const higherIdRun = run1.id > run2.id ? run1 : run2;
+    const expectedScore = higherIdRun.id === run1.id ? 5 : 9;
+
+    // Run the query 5 times to confirm consistency
+    const results: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      const response = await GET();
+      const data = await response.json();
+      expect(data.models).toHaveLength(1);
+      results.push(data.models[0].avgScore);
+    }
+
+    // All 5 queries should return the same score (deterministic)
+    expect(new Set(results).size).toBe(1);
+    // The score should be from the run with the higher ID
+    expect(results[0]).toBe(expectedScore);
+  });
 });
 
 describe('Dataset evaluation summary: averageHumanScore excludes respond-mode placeholder zeros', () => {
