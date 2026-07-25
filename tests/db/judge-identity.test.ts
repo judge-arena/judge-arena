@@ -104,7 +104,7 @@ describe('judge identity tables + versioned prompt templates', () => {
   it('seed creates the v1-legacy prompt template idempotently', async () => {
     // Import lazily so this file can still fail cleanly before the seed
     // module exists / compiles against the new PromptTemplate model.
-    const { seedPromptTemplates } = await import('../../prisma/seed');
+    const { seedPromptTemplates } = await import('../../prisma/seed-prompt-templates');
     await seedPromptTemplates(db);
     await seedPromptTemplates(db); // idempotent — re-running must not throw or duplicate
 
