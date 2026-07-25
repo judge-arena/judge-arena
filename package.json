@@ -12,7 +12,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:db": "sh -c 'set -a; . ./.env.test; set +a; PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION=approved-plan-2026-07-24-1a-testdb-only npx prisma migrate reset --force --skip-seed && npx vitest run --config vitest.db.config.ts'",
-    "lint": "eslint src/ prisma/",
+    "lint": "eslint src/ prisma/ scripts/ tests/",
     "ctrl": "node scripts/controller.mjs",
     "ctrl:generate": "node scripts/controller.mjs generate",
     "ctrl:seed": "node scripts/controller.mjs seed",

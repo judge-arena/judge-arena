@@ -216,7 +216,7 @@ export async function synthesizeJudges(
 
   const groups = new Map<string, ConfigGroup>();
   for (const config of configs) {
-    const key = `${config.provider} ${config.modelId} ${config.endpoint ?? ''}`;
+    const key = JSON.stringify([config.provider, config.modelId, config.endpoint ?? '']);
     let group = groups.get(key);
     if (!group) {
       group = {
