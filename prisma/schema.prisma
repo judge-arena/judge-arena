@@ -106,6 +106,8 @@ model User {
   developerApiKeys  DeveloperApiKey[]
   auditLogs         AuditLog[]
   modelEndpoints    ModelEndpoint[]
+  goldenSets        GoldenSet[]
+  goldenLabels      GoldenLabel[]
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
@@ -247,7 +249,7 @@ model JudgeModelVersion {
   createdAt              DateTime            @default(now())
   endpoints              ModelEndpoint[]
   judgments              ModelJudgment[]
-  // calibrationRuns relation added in Task 5 (CalibrationRun model doesn't exist yet)
+  calibrationRuns        CalibrationRun[]
 
   @@unique([judgeModelId, ordinal])
 }
@@ -565,4 +567,71 @@ model AuditLog {
   @@index([action])
   @@index([resource, resourceId])
   @@index([createdAt])
+}
+
+// ─── Meta-eval (golden sets, calibration) ──────────────────────────────────
+// GoldenSet/GoldenItem/GoldenLabel hold expert-labeled ground truth; a
+// CalibrationRun measures how well a JudgeModelVersion agrees with those
+// labels on a given GoldenSet (kappa/agreement/bias metrics feed the
+// TrustState transitions on JudgeModelVersion).
+
+model GoldenSet {
+  id              String           @id @default(cuid())
+  name            String
+  description     String?
+  visibility      Visibility       @default(private)
+  ownerId         String?
+  owner           User?            @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  items           GoldenItem[]
+  calibrationRuns CalibrationRun[]
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+}
+
+model GoldenItem {
+  id           String        @id @default(cuid())
+  goldenSetId  String
+  goldenSet    GoldenSet     @relation(fields: [goldenSetId], references: [id], onDelete: Cascade)
+  index        Int
+  inputText    String
+  promptText   String?
+  responseText String?
+  protocol     RunProtocol   @default(pointwise)
+  expected     String?
+  labels       GoldenLabel[]
+
+  @@unique([goldenSetId, index])
+}
+
+model GoldenLabel {
+  id             String     @id @default(cuid())
+  goldenItemId   String
+  goldenItem     GoldenItem @relation(fields: [goldenItemId], references: [id], onDelete: Cascade)
+  annotatorId    String?
+  annotator      User?      @relation(fields: [annotatorId], references: [id], onDelete: SetNull)
+  overallScore   Float
+  criteriaScores Json?
+  reasoning      String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  @@unique([goldenItemId, annotatorId])
+}
+
+model CalibrationRun {
+  id                  String            @id @default(cuid())
+  judgeModelVersionId String
+  judgeModelVersion   JudgeModelVersion @relation(fields: [judgeModelVersionId], references: [id], onDelete: Restrict)
+  goldenSetId         String
+  goldenSet           GoldenSet         @relation(fields: [goldenSetId], references: [id], onDelete: Restrict)
+  kappa               Float?
+  rawAgreement        Float?
+  testRetest          Float?
+  positionBias        Float?
+  biasSensitivityRate Float?
+  flipRateVsParent    Float?
+  verdictCount        Int               @default(0)
+  passed              Boolean?
+  startedAt           DateTime          @default(now())
+  finishedAt          DateTime?
 }
