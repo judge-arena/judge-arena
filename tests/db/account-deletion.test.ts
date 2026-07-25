@@ -1,0 +1,285 @@
+import { describe, it, expect, beforeEach } from 'vitest';
+import { Prisma } from '@prisma/client';
+import { db, truncateAll, mkUser, mkRubric } from './helpers';
+import { deleteUserAccount } from '@/lib/account-deletion';
+
+// ─── Local fixture helpers ──────────────────────────────────────────────────
+// Project/Evaluation/EvaluationRun/ModelConfig chain-builders mirror
+// tests/db/judgment-provenance.test.ts (kept file-local per the established
+// "shared only once actually shared" convention — this file needs its own
+// `visibility` override on mkProject that the provenance file doesn't).
+
+async function mkProject(
+  userId: string,
+  overrides: Partial<Omit<Prisma.ProjectUncheckedCreateInput, 'userId'>> = {}
+) {
+  return db.project.create({ data: { name: 'fixture-project', userId, ...overrides } });
+}
+
+async function mkEvaluation(
+  projectId: string,
+  userId: string,
+  overrides: Partial<{ rubricId: string }> = {}
+) {
+  return db.evaluation.create({
+    data: { projectId, userId, inputText: 'fixture input', ...overrides },
+  });
+}
+
+async function mkEvaluationRun(
+  evaluationId: string,
+  triggeredById: string | null,
+  overrides: Partial<{ rubricId: string }> = {}
+) {
+  return db.evaluationRun.create({
+    data: { evaluationId, triggeredById, ...overrides },
+  });
+}
+
+let modelConfigCounter = 0;
+
+async function mkModelConfig(userId: string) {
+  modelConfigCounter += 1;
+  return db.modelConfig.create({
+    data: {
+      name: `fixture-model-${modelConfigCounter}`,
+      provider: 'openai',
+      modelId: 'gpt-4',
+      userId,
+    },
+  });
+}
+
+describe('deleteUserAccount (P1.7 account deletion)', () => {
+  beforeEach(async () => {
+    await truncateAll();
+  });
+
+  it('throws if userId === archiveUserId', async () => {
+    const user = await mkUser();
+
+    await expect(deleteUserAccount(user.id, { archiveUserId: user.id })).rejects.toThrow();
+
+    // nothing should have happened
+    expect(await db.user.findUnique({ where: { id: user.id } })).not.toBeNull();
+  });
+
+  it('throws if the archive user does not exist, and rolls back / does nothing', async () => {
+    const user = await mkUser();
+
+    await expect(
+      deleteUserAccount(user.id, { archiveUserId: 'does-not-exist' })
+    ).rejects.toThrow();
+
+    expect(await db.user.findUnique({ where: { id: user.id } })).not.toBeNull();
+  });
+
+  it(
+    'purges the private project (+ its evaluation/run), reassigns the public project ' +
+      "(+ its evaluation), nulls the surviving run's triggeredById, and removes the user row",
+    async () => {
+      const archiveUser = await mkUser();
+      const owner = await mkUser();
+
+      const privateProject = await mkProject(owner.id); // visibility defaults to private
+      const publicProject = await mkProject(owner.id, { visibility: 'public' });
+
+      const privateEvaluation = await mkEvaluation(privateProject.id, owner.id);
+      const privateRun = await mkEvaluationRun(privateEvaluation.id, owner.id);
+
+      const publicEvaluation = await mkEvaluation(publicProject.id, owner.id);
+      const publicRun = await mkEvaluationRun(publicEvaluation.id, owner.id);
+
+      const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
+
+      // private project + its evaluation + its run are gone (cascade)
+      expect(await db.project.findUnique({ where: { id: privateProject.id } })).toBeNull();
+      expect(await db.evaluation.findUnique({ where: { id: privateEvaluation.id } })).toBeNull();
+      expect(await db.evaluationRun.findUnique({ where: { id: privateRun.id } })).toBeNull();
+
+      // public project survives, reassigned to the archive user
+      const survivedProject = await db.project.findUnique({ where: { id: publicProject.id } });
+      expect(survivedProject).not.toBeNull();
+      expect(survivedProject?.userId).toBe(archiveUser.id);
+
+      // its evaluation survives too (reassigned — else Evaluation.userId's
+      // own Cascade FK would have erased it out from under the surviving
+      // project when the user row is deleted)
+      const survivedEvaluation = await db.evaluation.findUnique({
+        where: { id: publicEvaluation.id },
+      });
+      expect(survivedEvaluation).not.toBeNull();
+      expect(survivedEvaluation?.userId).toBe(archiveUser.id);
+
+      // the run survives, triggeredById nulled via FK (not reassigned)
+      const survivedRun = await db.evaluationRun.findUnique({ where: { id: publicRun.id } });
+      expect(survivedRun).not.toBeNull();
+      expect(survivedRun?.triggeredById).toBeNull();
+
+      // user row is gone
+      expect(await db.user.findUnique({ where: { id: owner.id } })).toBeNull();
+
+      expect(result.purged.projects).toBe(1);
+      expect(result.reassigned.projects).toBe(1);
+      expect(result.reassigned.evaluations).toBe(1);
+      expect(result.purged.user).toBe(1);
+    }
+  );
+
+  it('soft-retires (sets retiredAt, keeps the row) a private rubric still pinned by a surviving run', async () => {
+    const archiveUser = await mkUser();
+    const owner = await mkUser();
+    const rubric = await mkRubric(owner.id); // visibility defaults to private
+
+    const publicProject = await mkProject(owner.id, { visibility: 'public' });
+    const evaluation = await mkEvaluation(publicProject.id, owner.id);
+    const run = await mkEvaluationRun(evaluation.id, owner.id, { rubricId: rubric.id });
+
+    const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
+
+    const survivedRubric = await db.rubric.findUnique({ where: { id: rubric.id } });
+    expect(survivedRubric).not.toBeNull();
+    expect(survivedRubric?.retiredAt).not.toBeNull();
+    expect(survivedRubric?.visibility).toBe('private');
+    // ownership must also transfer — Rubric.userId is `onDelete: Cascade`,
+    // so a retired-but-still-owned-by-the-deleted-user row would vanish
+    // (and abort the transaction on its own pinning-run Restrict FK) the
+    // moment the user row is deleted.
+    expect(survivedRubric?.userId).toBe(archiveUser.id);
+
+    // the pinning run is untouched — rubricId still points at the retired rubric
+    const survivedRun = await db.evaluationRun.findUnique({ where: { id: run.id } });
+    expect(survivedRun?.rubricId).toBe(rubric.id);
+
+    expect(result.retired.rubrics).toBe(1);
+    expect(result.purged.rubrics ?? 0).toBe(0);
+  });
+
+  it('hard-deletes a private rubric with no surviving pinning run', async () => {
+    const archiveUser = await mkUser();
+    const owner = await mkUser();
+    const rubric = await mkRubric(owner.id);
+
+    const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
+
+    expect(await db.rubric.findUnique({ where: { id: rubric.id } })).toBeNull();
+    expect(result.purged.rubrics).toBe(1);
+    expect(result.retired.rubrics ?? 0).toBe(0);
+  });
+
+  it('reassigns a HumanJudgment on a surviving public run, but lets one on a purged private run cascade away', async () => {
+    const archiveUser = await mkUser();
+    const owner = await mkUser();
+
+    const privateProject = await mkProject(owner.id);
+    const privateEvaluation = await mkEvaluation(privateProject.id, owner.id);
+    const privateRun = await mkEvaluationRun(privateEvaluation.id, owner.id);
+    const privateHumanJudgment = await db.humanJudgment.create({
+      data: { runId: privateRun.id, userId: owner.id, overallScore: 5 },
+    });
+
+    const publicProject = await mkProject(owner.id, { visibility: 'public' });
+    const publicEvaluation = await mkEvaluation(publicProject.id, owner.id);
+    const publicRun = await mkEvaluationRun(publicEvaluation.id, owner.id);
+    const publicHumanJudgment = await db.humanJudgment.create({
+      data: { runId: publicRun.id, userId: owner.id, overallScore: 8 },
+    });
+
+    const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
+
+    // private run's human judgment is gone (cascade with the private project)
+    expect(
+      await db.humanJudgment.findUnique({ where: { id: privateHumanJudgment.id } })
+    ).toBeNull();
+
+    // public run's human judgment survives, reassigned — NOT cascade-deleted,
+    // even though HumanJudgment.userId is `onDelete: Cascade` in this schema
+    const survivedJudgment = await db.humanJudgment.findUnique({
+      where: { id: publicHumanJudgment.id },
+    });
+    expect(survivedJudgment).not.toBeNull();
+    expect(survivedJudgment?.userId).toBe(archiveUser.id);
+
+    expect(result.reassigned.humanJudgments).toBe(1);
+  });
+
+  it('reassigns a ModelConfig still referenced by a surviving judgment, but deletes an unreferenced one', async () => {
+    const archiveUser = await mkUser();
+    const owner = await mkUser();
+
+    const referencedConfig = await mkModelConfig(owner.id);
+    const unreferencedConfig = await mkModelConfig(owner.id);
+
+    const publicProject = await mkProject(owner.id, { visibility: 'public' });
+    const publicEvaluation = await mkEvaluation(publicProject.id, owner.id);
+    const publicRun = await mkEvaluationRun(publicEvaluation.id, owner.id);
+    await db.modelJudgment.create({
+      data: { runId: publicRun.id, modelConfigId: referencedConfig.id },
+    });
+
+    // this judgment (and its run) is purged along with the private project,
+    // so by the time ModelConfig cleanup runs, unreferencedConfig really is
+    // unreferenced
+    const privateProject = await mkProject(owner.id);
+    const privateEvaluation = await mkEvaluation(privateProject.id, owner.id);
+    const privateRun = await mkEvaluationRun(privateEvaluation.id, owner.id);
+    await db.modelJudgment.create({
+      data: { runId: privateRun.id, modelConfigId: unreferencedConfig.id },
+    });
+
+    const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
+
+    const survivedConfig = await db.modelConfig.findUnique({
+      where: { id: referencedConfig.id },
+    });
+    expect(survivedConfig).not.toBeNull();
+    expect(survivedConfig?.userId).toBe(archiveUser.id);
+
+    expect(await db.modelConfig.findUnique({ where: { id: unreferencedConfig.id } })).toBeNull();
+
+    expect(result.reassigned.modelConfigs).toBe(1);
+    expect(result.purged.modelConfigs).toBe(1);
+  });
+
+  it('deletes a private Dataset but reassigns a public one', async () => {
+    const archiveUser = await mkUser();
+    const owner = await mkUser();
+    const privateDataset = await db.dataset.create({
+      data: { name: 'fixture-private-ds', userId: owner.id },
+    });
+    const publicDataset = await db.dataset.create({
+      data: { name: 'fixture-public-ds', userId: owner.id, visibility: 'public' },
+    });
+
+    const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
+
+    expect(await db.dataset.findUnique({ where: { id: privateDataset.id } })).toBeNull();
+    const survived = await db.dataset.findUnique({ where: { id: publicDataset.id } });
+    expect(survived).not.toBeNull();
+    expect(survived?.userId).toBe(archiveUser.id);
+
+    expect(result.purged.datasets).toBe(1);
+    expect(result.reassigned.datasets).toBe(1);
+  });
+
+  it('deletes a private GoldenSet but reassigns a public one', async () => {
+    const archiveUser = await mkUser();
+    const owner = await mkUser();
+    const privateGoldenSet = await db.goldenSet.create({
+      data: { name: 'fixture-private-gs', ownerId: owner.id },
+    });
+    const publicGoldenSet = await db.goldenSet.create({
+      data: { name: 'fixture-public-gs', ownerId: owner.id, visibility: 'public' },
+    });
+
+    const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
+
+    expect(await db.goldenSet.findUnique({ where: { id: privateGoldenSet.id } })).toBeNull();
+    const survived = await db.goldenSet.findUnique({ where: { id: publicGoldenSet.id } });
+    expect(survived).not.toBeNull();
+    expect(survived?.ownerId).toBe(archiveUser.id);
+
+    expect(result.purged.goldenSets).toBe(1);
+    expect(result.reassigned.goldenSets).toBe(1);
+  });
+});
