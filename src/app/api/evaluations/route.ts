@@ -415,7 +415,7 @@ export async function POST(request: Request) {
               promptText: sample.input,
               responseText:
                 inputType === 'query-response'
-                  ? sample.expected || undefined
+                  ? sample.expected?.trim() || undefined
                   : undefined,
               userId: session.user.id,
               datasetId: dataset.id,
@@ -497,7 +497,7 @@ export async function POST(request: Request) {
             promptText: sample.input,
             responseText:
               dataset.inputType === 'query-response'
-                ? sample.expected || undefined
+                ? sample.expected?.trim() || undefined
                 : undefined,
             userId: session.user.id,
             datasetId: dataset.id,

@@ -117,7 +117,7 @@ export default function EvaluateTemplatePage() {
   };
 
   const launchRun = async () => {
-    const mode: 'respond' | 'judge' = evaluation?.responseText ? 'judge' : 'respond';
+    const mode: 'respond' | 'judge' = evaluation?.responseText?.trim() ? 'judge' : 'respond';
 
     if (mode === 'judge' && !runRubricId) {
       toast.error('Please select a rubric for this run');
@@ -192,7 +192,7 @@ export default function EvaluateTemplatePage() {
 
   const rubric = evaluation.rubric;
   const runs: any[] = evaluation.runs ?? [];
-  const evaluationMode: 'respond' | 'judge' = evaluation?.responseText ? 'judge' : 'respond';
+  const evaluationMode: 'respond' | 'judge' = evaluation?.responseText?.trim() ? 'judge' : 'respond';
   const needsHumanLabel =
     evaluationMode === 'respond' ? 'Select Best Response' : 'Needs Human Feedback';
 

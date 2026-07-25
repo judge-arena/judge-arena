@@ -110,7 +110,7 @@ export default function RunDetailPage() {
   if (!run) return null;
 
   const evaluation = run.evaluation;
-  const evaluationMode: 'respond' | 'judge' = evaluation?.responseText ? 'judge' : 'respond';
+  const evaluationMode: 'respond' | 'judge' = evaluation?.responseText?.trim() ? 'judge' : 'respond';
   const rubric = run.rubric ?? null;
   const criteria = rubric?.criteria ?? [];
   const modelJudgments: any[] = run.modelJudgments ?? [];
