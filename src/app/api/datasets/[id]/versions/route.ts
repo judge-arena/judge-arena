@@ -5,6 +5,14 @@ import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { generateSlug } from '@/lib/config';
 import { logger, serializeError } from '@/lib/logger';
 
+export const createVersionSchema = z.object({
+  samples: z.array(z.object({
+    input: z.string().min(1),
+    expected: z.string().optional().nullable(),
+    metadata: z.record(z.unknown()).optional(),
+  })).optional(),
+});
+
 // POST /api/datasets/[id]/versions — create a new version from the current dataset
 export async function POST(
   request: Request,
@@ -52,16 +60,11 @@ export async function POST(
 
     // Optionally accept modified samples with the new version
     let newSamples = existing.samples;
-    try {
-      const body = await request.json();
-      const schema = z.object({
-        samples: z.array(z.object({
-          input: z.string().min(1),
-          expected: z.string().optional().nullable(),
-          metadata: z.string().optional().nullable(),
-        })).optional(),
-      });
-      const data = schema.parse(body);
+    const body = await request.json();
+
+    // Only validate and use samples if the key is present in the request body
+    if ('samples' in body) {
+      const data = createVersionSchema.parse(body);
       if (data.samples) {
         newSamples = data.samples.map((s, i) => ({
           id: '',
@@ -69,12 +72,10 @@ export async function POST(
           index: i,
           input: s.input,
           expected: s.expected ?? null,
-          metadata: s.metadata ?? null,
+          metadata: s.metadata ? JSON.stringify(s.metadata) : null,
           createdAt: new Date(),
         }));
       }
-    } catch {
-      // No body or invalid body — duplicate existing samples as-is
     }
 
     // Generate a unique slug for version
@@ -128,6 +129,12 @@ export async function POST(
 
     return NextResponse.json(newVersion, { status: 201 });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return NextResponse.json(
+        { error: 'Validation failed', details: error.errors },
+        { status: 400 }
+      );
+    }
     logger.error('Failed to create dataset version', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to create dataset version' },
