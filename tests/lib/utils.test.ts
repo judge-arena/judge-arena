@@ -5,6 +5,7 @@ import {
   formatLatency,
   truncate,
   computeWeightedScore,
+  resolveHumanOverallScore,
   getStatusColor,
   getScoreColor,
   getProviderInfo,
@@ -89,6 +90,56 @@ describe('utils', () => {
     it('should handle zero total weight', () => {
       const scores = [{ score: 5, weight: 0, maxScore: 10 }];
       expect(computeWeightedScore(scores)).toBe(0);
+    });
+  });
+
+  describe('resolveHumanOverallScore', () => {
+    it('should use explicit overallScore when provided', () => {
+      const result = resolveHumanOverallScore(8.5, undefined);
+      expect(result).toBe(8.5);
+    });
+
+    it('should use explicit overallScore even when criteriaScores is also provided', () => {
+      const criteriaScores = [
+        { score: 8, weight: 2, maxScore: 10 },
+        { score: 6, weight: 1, maxScore: 10 },
+      ];
+      const result = resolveHumanOverallScore(9.5, criteriaScores);
+      // Should return the explicit value, not the computed one
+      expect(result).toBe(9.5);
+    });
+
+    it('should compute overallScore from criteriaScores when overallScore is missing', () => {
+      const criteriaScores = [
+        { score: 8, weight: 2, maxScore: 10 },
+        { score: 6, weight: 1, maxScore: 10 },
+      ];
+      const result = resolveHumanOverallScore(undefined, criteriaScores);
+      // (0.8*2 + 0.6*1) / 3 * 10 = 7.333...
+      expect(result).toBeCloseTo(7.333, 2);
+    });
+
+    it('should throw error when both overallScore and criteriaScores are missing', () => {
+      expect(() => resolveHumanOverallScore(undefined, undefined)).toThrow(
+        'overallScore or criteriaScores required'
+      );
+    });
+
+    it('should throw error when both overallScore and criteriaScores are null', () => {
+      expect(() => resolveHumanOverallScore(undefined, null)).toThrow(
+        'overallScore or criteriaScores required'
+      );
+    });
+
+    it('should throw error when criteriaScores is empty array', () => {
+      expect(() => resolveHumanOverallScore(undefined, [])).toThrow(
+        'overallScore or criteriaScores required'
+      );
+    });
+
+    it('should handle 0 as valid explicit overallScore', () => {
+      const result = resolveHumanOverallScore(0, undefined);
+      expect(result).toBe(0);
     });
   });
 

@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { refreshDatasetEvaluationSummaryForEvaluation } from '@/lib/dataset-evaluation-summary';
 import { logger, serializeError } from '@/lib/logger';
+import { resolveHumanOverallScore } from '@/lib/utils';
 
 const humanJudgmentSchema = z.object({
   overallScore: z.number().min(0).max(10).optional(),
@@ -98,8 +99,16 @@ export async function POST(
       );
     }
 
-    const normalizedOverallScore =
-      typeof data.overallScore === 'number' ? data.overallScore : 0;
+    // Resolve overallScore: use explicit value, compute from criteria, or reject if both missing
+    let normalizedOverallScore: number;
+    try {
+      normalizedOverallScore = resolveHumanOverallScore(data.overallScore, data.criteriaScores);
+    } catch (error) {
+      return NextResponse.json(
+        { error: 'overallScore or criteriaScores required' },
+        { status: 400 }
+      );
+    }
 
     // Upsert human judgment for this run
     const judgment = await prisma.humanJudgment.upsert({

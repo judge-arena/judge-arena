@@ -56,6 +56,37 @@ export function computeWeightedScore(
   return (weightedSum / totalWeight) * 10; // Normalize to 0-10 scale
 }
 
+/**
+ * Resolve the overallScore for a human judgment submission.
+ *
+ * Rules:
+ * - If overallScore is provided, use it (takes precedence over criteriaScores)
+ * - If overallScore is missing but criteriaScores exists, compute via weighted average
+ * - If both are missing, throw an error (caller should return 400)
+ *
+ * @param overallScore - The explicit overall score (0-10), if provided
+ * @param criteriaScores - Array of criteria scores with weight info
+ * @returns The resolved overallScore to persist
+ * @throws Error if both overallScore and criteriaScores are missing/empty
+ */
+export function resolveHumanOverallScore(
+  overallScore: number | undefined,
+  criteriaScores: Array<{ score: number; weight: number; maxScore: number }> | undefined | null
+): number {
+  // If explicit overallScore provided, use it
+  if (typeof overallScore === 'number') {
+    return overallScore;
+  }
+
+  // If criteriaScores provided, compute from weights
+  if (criteriaScores && Array.isArray(criteriaScores) && criteriaScores.length > 0) {
+    return computeWeightedScore(criteriaScores);
+  }
+
+  // Both missing: error
+  throw new Error('overallScore or criteriaScores required');
+}
+
 /** Status badge color mapping */
 export function getStatusColor(status: string): string {
   switch (status) {
