@@ -68,6 +68,32 @@ services:
       timeout: 5s
       retries: 5
 
+  # ─── PostgreSQL (v1 scratch — importer dev/test only) ──
+  # Disposable target for the v1 -> v2 importer (scripts/importer/**) to
+  # restore a copy of the legacy Railway v1 dump into, so `import:v1` can
+  # read from it via V1_DATABASE_URL without touching production. Not part
+  # of the default `docker compose up` — only starts with the `importer`
+  # profile: `docker compose --profile importer up -d postgres-v1-scratch`.
+  postgres-v1-scratch:
+    image: postgres:16-alpine
+    container_name: judge-arena-postgres-v1-scratch
+    restart: unless-stopped
+    profiles:
+      - importer
+    environment:
+      POSTGRES_USER: judge_arena
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: judge_arena_v1
+    ports:
+      - "5433:5432"
+    networks:
+      - judge-arena-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U judge_arena -d judge_arena_v1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # ─── Redis ──
   redis:
     image: redis:7-alpine

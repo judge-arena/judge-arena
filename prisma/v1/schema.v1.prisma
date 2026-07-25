@@ -1,0 +1,382 @@
+// ═════════════════════════════════════════════════════════════════════════
+// FROZEN v1 schema — for the importer ONLY. Never edit.
+//
+// Exact copy of prisma/schema.prisma as of the v1 baseline (commit e3180f6,
+// the last commit before any v2 schema change) — the shape of the database
+// running in Railway production. It exists solely so the importer
+// (scripts/importer/**) can generate a second, independent Prisma Client
+// (`@prisma/v1-client`) that reads the legacy v1 database, while
+// prisma/schema.prisma evolves independently for v2.
+//
+// Regenerate nothing here on v2 schema changes — this file does not track
+// v2. The only two lines that differ from the historical v1 schema.prisma
+// are the generator `output` and the datasource `url`, both changed so this
+// schema can generate and connect alongside the v2 client without
+// colliding with it. Everything else below is byte-for-byte the v1 baseline.
+//
+// Regenerate with: npm run db:generate:v1
+// ═════════════════════════════════════════════════════════════════════════
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../../node_modules/@prisma/v1-client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("V1_DATABASE_URL")
+}
+
+// ─── Auth ───────────────────────────────────────────────────────────────────
+
+model User {
+  id                String          @id @default(cuid())
+  email             String          @unique
+  name              String?
+  passwordHash      String
+  role              String          @default("user") // "user" | "admin"
+  emailVerified     Boolean         @default(false)
+  verificationToken String?         @unique
+  resetToken        String?         @unique
+  resetTokenExpiry  DateTime?
+  projects          Project[]
+  rubrics           Rubric[]
+  modelConfigs      ModelConfig[]
+  evaluations       Evaluation[]
+  evaluationRuns    EvaluationRun[]
+  humanJudgments    HumanJudgment[]
+  datasets          Dataset[]
+  developerApiKeys  DeveloperApiKey[]
+  auditLogs         AuditLog[]
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+}
+
+// ─── Domain ─────────────────────────────────────────────────────────────────
+
+model Project {
+  id          String       @id @default(cuid())
+  name        String
+  slug        String?      // portable identifier for config export/import
+  description String?
+  isDefault   Boolean      @default(false) // true for system-wide projects like Leaderboard
+  userId      String
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  evaluations Evaluation[]
+  datasets    Dataset[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@unique([userId, slug])
+  @@index([userId])
+}
+
+model Rubric {
+  id             String            @id @default(cuid())
+  name           String
+  slug           String?           // portable identifier for config export/import
+  description    String?
+  version        Int               @default(1)
+  parentId       String?           // null for v1; root rubric id for later versions
+  parent         Rubric?           @relation("RubricVersions", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  versions       Rubric[]          @relation("RubricVersions")
+  criteria       RubricCriterion[]
+  evaluations    Evaluation[]
+  evaluationRuns EvaluationRun[]
+  userId         String
+  user           User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  @@unique([userId, slug])
+  @@index([parentId])
+  @@index([userId])
+}
+
+model RubricCriterion {
+  id          String @id @default(cuid())
+  rubricId    String
+  rubric      Rubric @relation(fields: [rubricId], references: [id], onDelete: Cascade)
+  name        String
+  description String
+  maxScore    Int    @default(10)
+  weight      Float  @default(1.0)
+  order       Int    @default(0)
+
+  @@index([rubricId])
+}
+
+model ModelConfig {
+  id                   String                     @id @default(cuid())
+  name                 String
+  slug                 String?                    // portable identifier for config export/import
+  provider             String                     // 'anthropic' | 'openai' | 'local'
+  modelId              String                     // e.g. 'claude-sonnet-4-5-20250514'
+  endpoint             String?                    // custom endpoint for local/self-hosted models
+  apiKey               String?                    // stored per-model (optional, falls back to env)
+  isActive             Boolean                    @default(true)
+  isVerified           Boolean                    @default(false)
+  verifiedAt           DateTime?
+  verificationError    String?
+  userId               String
+  user                 User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+  judgments            ModelJudgment[]
+  evaluationSelections EvaluationModelSelection[]
+  runModelSelections   RunModelSelection[]
+  bestModelSelections  HumanJudgment[] @relation("BestModelSelection")
+
+  @@unique([userId, slug])
+  @@index([userId])
+}
+
+// ─── Evaluation Template ─────────────────────────────────────────────────────
+// Stores the immutable input text, title, and default configuration.
+// Runs are executed against this template and are tracked separately.
+
+model Evaluation {
+  id              String                     @id @default(cuid())
+  projectId       String
+  project         Project                    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  rubricId        String?                    // default rubric for new runs
+  rubric          Rubric?                    @relation(fields: [rubricId], references: [id], onDelete: SetNull)
+  inputText       String                     // legacy single-text artifact (or fallback display text)
+  promptText      String?                    // optional prompt (input) for prompt-response judging
+  responseText    String?                    // optional response/output to evaluate against rubric
+  title           String?
+  userId          String
+  user            User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  modelSelections EvaluationModelSelection[] // default model list for new runs
+  runs            EvaluationRun[]
+
+  // ── Dataset link (populated when evaluation was created from a dataset) ──
+  datasetId       String?
+  dataset         Dataset?                   @relation(fields: [datasetId], references: [id], onDelete: SetNull)
+  datasetSampleId String?
+  datasetSample   DatasetSample?             @relation(fields: [datasetSampleId], references: [id], onDelete: SetNull)
+
+  createdAt       DateTime                   @default(now())
+  updatedAt       DateTime                   @updatedAt
+
+  @@index([projectId])
+  @@index([rubricId])
+  @@index([userId])
+  @@index([datasetId])
+  @@index([datasetSampleId])
+}
+
+model EvaluationModelSelection {
+  id            String      @id @default(cuid())
+  evaluationId  String
+  evaluation    Evaluation  @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+  modelConfigId String
+  modelConfig   ModelConfig @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
+  createdAt     DateTime    @default(now())
+
+  @@unique([evaluationId, modelConfigId])
+  @@index([evaluationId])
+  @@index([modelConfigId])
+}
+
+// ─── Evaluation Run ───────────────────────────────────────────────────────────
+// One discrete execution of an Evaluation template.
+// Each press of "Run Models" (or a human-only session) creates one Run.
+
+model EvaluationRun {
+  id                 String              @id @default(uuid())
+  evaluationId       String
+  evaluation         Evaluation          @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+  rubricId           String?             // rubric version pinned at run time
+  rubric             Rubric?             @relation(fields: [rubricId], references: [id], onDelete: SetNull)
+  status             String              @default("pending") // pending | judging | needs_human | completed | error
+  triggeredById      String
+  triggeredBy        User                @relation(fields: [triggeredById], references: [id], onDelete: Cascade)
+  runModelSelections RunModelSelection[]
+  modelJudgments     ModelJudgment[]
+  humanJudgment      HumanJudgment?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  @@index([evaluationId])
+  @@index([rubricId])
+  @@index([triggeredById])
+  @@index([status])
+}
+
+// Models selected for a specific run (snapshot at run creation time)
+model RunModelSelection {
+  id            String        @id @default(cuid())
+  runId         String
+  run           EvaluationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  modelConfigId String
+  modelConfig   ModelConfig   @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
+  createdAt     DateTime      @default(now())
+
+  @@unique([runId, modelConfigId])
+  @@index([runId])
+  @@index([modelConfigId])
+}
+
+// ─── Judgments ───────────────────────────────────────────────────────────────
+
+model ModelJudgment {
+  id             String        @id @default(cuid())
+  runId          String
+  run            EvaluationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  modelConfigId  String
+  modelConfig    ModelConfig   @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
+  overallScore   Float?
+  reasoning      String?
+  rawResponse    String?       // full LLM response, never truncated
+  criteriaScores String?       // JSON: Array<{ criterionId, criterionName, score, maxScore, weight, comment? }>
+  latencyMs      Int?
+  tokenCount     Int?
+  status         String        @default("pending") // pending | running | completed | error
+  error          String?
+  createdAt      DateTime      @default(now())
+
+  @@index([runId])
+  @@index([modelConfigId])
+}
+
+model HumanJudgment {
+  id                  String        @id @default(cuid())
+  runId               String        @unique
+  run                 EvaluationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  overallScore        Float
+  reasoning           String?
+  criteriaScores      String?       // JSON: Array<{ criterionId, criterionName, score, maxScore, weight, comment? }>
+  selectedBestModelId String?
+  selectedBestModel   ModelConfig? @relation("BestModelSelection", fields: [selectedBestModelId], references: [id], onDelete: SetNull)
+  userId              String
+  user                User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  @@index([userId])
+}
+
+model ApiKeyStore {
+  id        String   @id @default(cuid())
+  provider  String   @unique // 'anthropic' | 'openai'
+  apiKey    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ─── Developer API Keys ──────────────────────────────────────────────────────
+// Fine-grained API keys for programmatic access to the platform.
+// Each key is scoped to a user and carries a set of permission scopes.
+
+model DeveloperApiKey {
+  id          String    @id @default(cuid())
+  name        String                        // human-readable label, e.g. "CI Pipeline Key"
+  prefix      String                        // first 8 chars of raw key for identification (e.g. "vgk_abc1")
+  keyHash     String    @unique             // SHA-256 hash of the full key
+  scopes      String                        // JSON array of permission scope strings
+  isActive    Boolean   @default(true)
+  expiresAt   DateTime?                     // null = never expires
+  lastUsedAt  DateTime?
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([userId])
+  @@index([keyHash])
+  @@index([prefix])
+}
+
+// ─── Datasets ─────────────────────────────────────────────────────────────────
+// A dataset is a collection of evaluation samples.
+// Can be local (uploaded/inline) or remote (fetched from e.g. HuggingFace).
+// Can be private (user-only) or public (visible to all).
+
+model Dataset {
+  id          String          @id @default(cuid())
+  name        String
+  slug        String?         // portable identifier for config export/import
+  description String?
+  source      String          @default("local")  // 'local' | 'remote'
+  visibility  String          @default("private") // 'private' | 'public'
+  inputType   String          @default("query-response") // 'query' | 'query-response'
+
+  // ── Versioning ──
+  version    Int              @default(1)
+  parentId   String?
+  parent     Dataset?         @relation("DatasetVersions", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  versions   Dataset[]        @relation("DatasetVersions")
+
+  // ── Remote source fields ──
+  sourceUrl      String?      // e.g. https://huggingface.co/datasets/livecodebench/code_generation_lite
+  huggingFaceId  String?      // e.g. livecodebench/code_generation_lite
+  remoteMetadata String?      // JSON: { description, cardData, splits, features, downloadSize, ... }
+
+  // ── Local / inline data fields ──
+  format     String?          // 'json' | 'csv' | 'jsonl' | 'text'
+  localData  String?          // JSON string of inline sample data
+  filePath   String?          // path to uploaded file (if file upload)
+
+  // ── Dataset statistics (populated after fetch or upload) ──
+  sampleCount  Int?           // total number of samples
+  splits       String?        // JSON: e.g. ["train", "test"]
+  features     String?        // JSON: column/field schema from HF or inferred
+  tags         String?        // JSON: array of tag strings
+
+  // ── Relations ──
+  projectId String?
+  project   Project?         @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  samples     DatasetSample[]
+  evaluations Evaluation[]
+
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  @@unique([userId, slug])
+  @@index([userId])
+  @@index([projectId])
+  @@index([parentId])
+  @@index([visibility])
+  @@index([source])
+}
+
+model DatasetSample {
+  id        String  @id @default(cuid())
+  datasetId String
+  dataset   Dataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  index     Int     // ordering within dataset
+  input     String  // the prompt / question / code to evaluate
+  expected  String? // expected output / reference answer (optional)
+  metadata  String? // JSON: any extra fields from the source
+
+  evaluations Evaluation[]
+  createdAt   DateTime @default(now())
+
+  @@index([datasetId])
+  @@unique([datasetId, index])
+}
+
+// ─── Audit Log ──────────────────────────────────────────────────────────────
+// Tracks security-critical operations for compliance and debugging.
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String   // e.g. 'user.login', 'apikey.create', 'evaluation.run', 'config.import'
+  resource   String?  // e.g. 'project', 'evaluation', 'apikey'
+  resourceId String?  // ID of the affected resource
+  metadata   String?  // JSON: additional context (old values, new values, etc.)
+  ip         String?  // client IP address
+  userAgent  String?  // client user agent
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([resource, resourceId])
+  @@index([createdAt])
+}
