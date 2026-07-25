@@ -146,7 +146,8 @@ export function flattenEvaluationForExport(evaluation: {
       overallScore: number | null;
       reasoning: string | null;
       rawResponse: string | null;
-      criteriaScores: string | null;
+      // Prisma Json column — an object/array (or null), not a JSON string.
+      criteriaScores: unknown;
       latencyMs: number | null;
       tokenCount: number | null;
       modelConfig: { name: string; provider: string; modelId?: string };
@@ -154,7 +155,8 @@ export function flattenEvaluationForExport(evaluation: {
     humanJudgment?: {
       overallScore: number;
       reasoning?: string | null;
-      criteriaScores?: string | null;
+      // Prisma Json column — an object/array (or null), not a JSON string.
+      criteriaScores?: unknown;
       selectedBestModelId?: string | null;
     } | null;
   }>;
@@ -203,7 +205,8 @@ export function flattenEvaluationForExport(evaluation: {
       triggered_by: triggeredBy,
       human_overall_score: human?.overallScore != null ? String(human.overallScore) : '',
       human_reasoning: human?.reasoning ?? '',
-      human_criteria_scores: human?.criteriaScores ?? '',
+      human_criteria_scores:
+        human?.criteriaScores != null ? JSON.stringify(human.criteriaScores) : '',
       human_selected_best_model: human?.selectedBestModelId ?? '',
     };
 
@@ -234,7 +237,8 @@ export function flattenEvaluationForExport(evaluation: {
             judgment.overallScore != null ? String(judgment.overallScore) : '',
           model_reasoning: judgment.reasoning ?? '',
           model_raw_response: judgment.rawResponse ?? '',
-          model_criteria_scores: judgment.criteriaScores ?? '',
+          model_criteria_scores:
+            judgment.criteriaScores != null ? JSON.stringify(judgment.criteriaScores) : '',
           model_latency_ms:
             judgment.latencyMs != null ? String(judgment.latencyMs) : '',
           model_token_count:

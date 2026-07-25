@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
@@ -106,7 +107,7 @@ export async function POST(
       update: {
         overallScore: normalizedOverallScore,
         reasoning: data.reasoning,
-        criteriaScores: data.criteriaScores ? JSON.stringify(data.criteriaScores) : null,
+        criteriaScores: data.criteriaScores ?? Prisma.DbNull,
         selectedBestModelId: mode === 'respond' ? data.selectedBestModelId : null,
       },
       create: {
@@ -114,7 +115,7 @@ export async function POST(
         userId: session.user.id,
         overallScore: normalizedOverallScore,
         reasoning: data.reasoning,
-        criteriaScores: data.criteriaScores ? JSON.stringify(data.criteriaScores) : null,
+        criteriaScores: data.criteriaScores ?? Prisma.DbNull,
         selectedBestModelId: mode === 'respond' ? data.selectedBestModelId : null,
       },
     });

@@ -8,7 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { ModelJudgmentCard } from '@/components/evaluation/model-judgment-card';
 import { HumanJudgmentForm } from '@/components/evaluation/human-judgment-form';
-import { safeParseJSON, getScoreColor, cn, formatDateTime } from '@/lib/utils';
+import { getScoreColor, cn, formatDateTime } from '@/lib/utils';
 import { toast } from 'sonner';
 import type { CriteriaScore } from '@/types';
 
@@ -372,7 +372,7 @@ export default function RunDetailPage() {
                                 {criterion.name}
                               </td>
                               {completedJudgments.map((j: any) => {
-                                const scores = safeParseJSON<CriteriaScore[]>(j.criteriaScores, []);
+                                const scores = (j.criteriaScores as CriteriaScore[] | null) ?? [];
                                 const cs = scores.find(
                                   (s) => s.criterionId === criterion.id || s.criterionName === criterion.name
                                 );
@@ -430,10 +430,8 @@ export default function RunDetailPage() {
                         ? {
                             overallScore: humanJudgment.overallScore,
                             reasoning: humanJudgment.reasoning,
-                            criteriaScores: safeParseJSON<CriteriaScore[]>(
-                              humanJudgment.criteriaScores,
-                              []
-                            ),
+                            criteriaScores:
+                              (humanJudgment.criteriaScores as CriteriaScore[] | null) ?? [],
                             selectedBestModelId: humanJudgment.selectedBestModelId,
                           }
                         : undefined

@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { cn, getScoreColor, formatLatency, safeParseJSON, getProviderInfo } from '@/lib/utils';
+import { cn, getScoreColor, formatLatency, getProviderInfo } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import type { CriteriaScore } from '@/types';
 
@@ -11,7 +11,7 @@ interface ModelJudgmentCardProps {
   provider: string;
   overallScore: number | null;
   reasoning: string | null;
-  criteriaScores: string | null;
+  criteriaScores: CriteriaScore[] | null;
   latencyMs: number | null;
   tokenCount: number | null;
   status: string;
@@ -28,7 +28,7 @@ export function ModelJudgmentCard({
   provider,
   overallScore,
   reasoning,
-  criteriaScores: criteriaScoresJson,
+  criteriaScores: criteriaScoresValue,
   latencyMs,
   tokenCount,
   status,
@@ -37,7 +37,7 @@ export function ModelJudgmentCard({
   onSelect,
   expandedReasoning = false,
 }: ModelJudgmentCardProps) {
-  const criteriaScores = safeParseJSON<CriteriaScore[]>(criteriaScoresJson, []);
+  const criteriaScores = criteriaScoresValue ?? [];
   const providerInfo = getProviderInfo(provider);
 
   const statusVariant =

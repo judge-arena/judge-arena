@@ -246,7 +246,7 @@ model JudgeModelVersion {
   retiredAt              DateTime?
   createdAt              DateTime            @default(now())
   endpoints              ModelEndpoint[]
-  // judgments relation added in Task 4 (ModelJudgment.judgeModelVersionId doesn't exist yet)
+  judgments              ModelJudgment[]
   // calibrationRuns relation added in Task 5 (CalibrationRun model doesn't exist yet)
 
   @@unique([judgeModelId, ordinal])
@@ -275,13 +275,13 @@ model ModelEndpoint {
 // identity later tasks/importers pin judgments to.
 
 model PromptTemplate {
-  id        String      @id @default(cuid())
+  id        String          @id @default(cuid())
   name      String
   protocol  RunProtocol
   version   Int
   body      String
-  createdAt DateTime    @default(now())
-  // judgments relation added in Task 4 (ModelJudgment.promptTemplateId doesn't exist yet)
+  createdAt DateTime        @default(now())
+  judgments ModelJudgment[]
 
   @@unique([name, version])
 }
@@ -343,11 +343,15 @@ model EvaluationRun {
   evaluationId       String
   evaluation         Evaluation          @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
   rubricId           String? // rubric version pinned at run time
-  rubric             Rubric?             @relation(fields: [rubricId], references: [id], onDelete: SetNull)
-  status             String              @default("pending") // pending | judging | needs_human | completed | error
-  triggeredById      String
-  triggeredBy        User                @relation(fields: [triggeredById], references: [id], onDelete: Cascade)
+  rubric             Rubric?             @relation(fields: [rubricId], references: [id], onDelete: Restrict)
+  protocol           RunProtocol         @default(pointwise)
+  status             RunStatus           @default(pending)
+  deadlineAt         DateTime?
+  finalizedAt        DateTime?
+  triggeredById      String?
+  triggeredBy        User?               @relation(fields: [triggeredById], references: [id], onDelete: SetNull)
   runModelSelections RunModelSelection[]
+  runCandidates      RunCandidate[]
   modelJudgments     ModelJudgment[]
   humanJudgment      HumanJudgment?
   createdAt          DateTime            @default(now())
@@ -357,6 +361,20 @@ model EvaluationRun {
   @@index([rubricId])
   @@index([triggeredById])
   @@index([status])
+}
+
+// Discrete candidates (pairwise/listwise) generated/scored under a run.
+// One row per position in the comparison set (e.g. response A vs B).
+model RunCandidate {
+  id           String        @id @default(cuid())
+  runId        String
+  run          EvaluationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  position     Int
+  promptText   String?
+  responseText String?
+  label        String?
+
+  @@unique([runId, position])
 }
 
 // Models selected for a specific run (snapshot at run creation time)
@@ -376,23 +394,44 @@ model RunModelSelection {
 // ─── Judgments ───────────────────────────────────────────────────────────────
 
 model ModelJudgment {
-  id             String        @id @default(cuid())
-  runId          String
-  run            EvaluationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
-  modelConfigId  String
-  modelConfig    ModelConfig   @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
+  id            String        @id @default(cuid())
+  runId         String
+  run           EvaluationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  modelConfigId String
+  modelConfig   ModelConfig   @relation(fields: [modelConfigId], references: [id], onDelete: Restrict)
+
+  // ── Provenance (which judge, which prompt, pinned at judgment time) ──
+  judgeModelVersionId String?
+  judgeModelVersion   JudgeModelVersion? @relation(fields: [judgeModelVersionId], references: [id], onDelete: Restrict)
+  promptTemplateId    String?
+  promptTemplate      PromptTemplate?    @relation(fields: [promptTemplateId], references: [id], onDelete: Restrict)
+  samplingParams      Json?
+  reasoningEnabled    Boolean?
+  pairOrder           String? // e.g. "AB" | "BA" for pairwise position-bias tracking
+
   overallScore   Float?
   reasoning      String?
   rawResponse    String? // full LLM response, never truncated
-  criteriaScores String? // JSON: Array<{ criterionId, criterionName, score, maxScore, weight, comment? }>
+  criteriaScores Json? // Array<{ criterionId, criterionName, score, maxScore, weight, comment? }>
   latencyMs      Int?
   tokenCount     Int?
-  status         String        @default("pending") // pending | running | completed | error
+  inputTokens    Int?
+  outputTokens   Int?
+  servedModelId  String? // model id actually reported by the serving backend
+  finishReason   String?
+  parseMode      String? // how the raw response was parsed into structured scores
+  status         JudgmentStatus @default(pending)
   error          String?
-  createdAt      DateTime      @default(now())
+  startedAt      DateTime?
+  attemptCount   Int            @default(0)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
 
+  @@unique([runId, judgeModelVersionId, pairOrder])
   @@index([runId])
   @@index([modelConfigId])
+  @@index([judgeModelVersionId])
+  @@index([promptTemplateId])
 }
 
 model HumanJudgment {
@@ -401,7 +440,7 @@ model HumanJudgment {
   run                 EvaluationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
   overallScore        Float
   reasoning           String?
-  criteriaScores      String? // JSON: Array<{ criterionId, criterionName, score, maxScore, weight, comment? }>
+  criteriaScores      Json? // Array<{ criterionId, criterionName, score, maxScore, weight, comment? }>
   selectedBestModelId String?
   selectedBestModel   ModelConfig?  @relation("BestModelSelection", fields: [selectedBestModelId], references: [id], onDelete: SetNull)
   userId              String
@@ -410,14 +449,6 @@ model HumanJudgment {
   updatedAt           DateTime      @updatedAt
 
   @@index([userId])
-}
-
-model ApiKeyStore {
-  id        String   @id @default(cuid())
-  provider  String   @unique // 'anthropic' | 'openai'
-  apiKey    String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
 }
 
 // ─── Developer API Keys ──────────────────────────────────────────────────────
