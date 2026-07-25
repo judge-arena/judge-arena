@@ -73,7 +73,7 @@ describe('synthesizeJudges (DB)', () => {
       servingBackend: 'anthropic',
       endpointClass: null,
       protocolSupport: { pointwise: ['score'] },
-      samplingDefaults: { temperature: 0.3, max_tokens: 2048 },
+      samplingDefaults: { temperature: 0.3, max_tokens: 4096 },
       trustState: 'untrusted',
     });
 
@@ -125,7 +125,7 @@ describe('synthesizeJudges (DB)', () => {
     const entry = result.get(config.id)!;
     expect(entry.versionId).toBeTruthy();
     expect(entry.endpointIdByUser.size).toBe(0);
-    expect(ctx.report.counts().ModelEndpoint).toMatchObject({ created: 0, skipped: 1 });
+    expect(ctx.report.counts().ModelEndpoint).toMatchObject({ created: 0, dropped: 1 });
   });
 
   it('slug collisions across distinct groups sharing (provider, modelId) get suffixed -2, -3, ...', async () => {
@@ -229,5 +229,57 @@ describe('synthesizeJudges (DB)', () => {
     expect(result.has(sharedB.id)).toBe(true);
     expect(result.has(distinct.id)).toBe(true);
     expect(result.get(sharedA.id)!.versionId).toBe(result.get(sharedB.id)!.versionId);
+  });
+
+  it('slug collision: two v1 ModelConfigs with identical (provider,modelId) but different endpoints -> X and X-2 (idempotent across runs)', async () => {
+    const user = await mkV1User();
+
+    // Two configs with same (provider, modelId) but different endpoints:
+    // both will slugify to 'anthropic-claude-3-sonnet', creating a collision.
+    const cfg1 = await mkV1ModelConfig(user.id, {
+      provider: 'anthropic',
+      modelId: 'claude-3-sonnet',
+      endpoint: 'https://endpoint-a.example.com',
+    });
+    const cfg2 = await mkV1ModelConfig(user.id, {
+      provider: 'anthropic',
+      modelId: 'claude-3-sonnet',
+      endpoint: 'https://endpoint-b.example.com',
+    });
+
+    const ownerMap: OwnerMap = {
+      [user.id]: { email: 'h@v2.example', oidcIssuer: 'https://idp.test.local', oidcSubject: 'sub-h' },
+    };
+
+    // Run 1: apply mode, capture JudgeModel ids
+    const ctx1 = createImportCtx({ mode: 'apply', ownerMap });
+    const owners1 = await resolveOwners(ctx1);
+    const result1 = await synthesizeJudges(ctx1, owners1);
+
+    const version1a = await db.judgeModelVersion.findUnique({ where: { id: result1.get(cfg1.id)!.versionId } });
+    const version1b = await db.judgeModelVersion.findUnique({ where: { id: result1.get(cfg2.id)!.versionId } });
+    const jm1a = await db.judgeModel.findUnique({ where: { id: version1a!.judgeModelId } });
+    const jm1b = await db.judgeModel.findUnique({ where: { id: version1b!.judgeModelId } });
+
+    expect([jm1a?.slug, jm1b?.slug].sort()).toEqual(['anthropic-claude-3-sonnet', 'anthropic-claude-3-sonnet-2']);
+    const jm1aId = jm1a!.id;
+    const jm1bId = jm1b!.id;
+
+    // Run 2: same v1 data, re-run the importer against v2 DB
+    const ctx2 = createImportCtx({ mode: 'apply', ownerMap });
+    const owners2 = await resolveOwners(ctx2);
+    const result2 = await synthesizeJudges(ctx2, owners2);
+
+    // Should find the same JudgeModel rows (idempotent).
+    const version2a = await db.judgeModelVersion.findUnique({ where: { id: result2.get(cfg1.id)!.versionId } });
+    const version2b = await db.judgeModelVersion.findUnique({ where: { id: result2.get(cfg2.id)!.versionId } });
+    const jm2a = await db.judgeModel.findUnique({ where: { id: version2a!.judgeModelId } });
+    const jm2b = await db.judgeModel.findUnique({ where: { id: version2b!.judgeModelId } });
+
+    expect(jm2a!.id).toBe(jm1aId);
+    expect(jm2b!.id).toBe(jm1bId);
+
+    // Second run should skip both JudgeModels (no new creates).
+    expect(ctx2.report.counts().JudgeModel).toMatchObject({ created: 0, skipped: 2 });
   });
 });

@@ -101,7 +101,10 @@ export async function resolveOwners(ctx: ImportCtx): Promise<Map<string, string>
   let archiveUserId: string | undefined;
 
   for (const [v1UserId, mapping] of Object.entries(ctx.ownerMap)) {
-    if (mapping === 'drop') continue;
+    if (mapping === 'drop') {
+      ctx.report.add('User', 'dropped');
+      continue;
+    }
 
     if (mapping === 'archive') {
       if (!archiveUserId) {

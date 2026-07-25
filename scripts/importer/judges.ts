@@ -35,14 +35,9 @@
  * v1 data recomputes the same slugs (see `uniqueSlug`) in the same
  * deterministic order and finds the same rows instead of duplicating them.
  *
- * samplingDefaults literal note: the brief specifies
- * `{ temperature: 0.3, max_tokens: 2048 }`. Checked against the actual v1
- * judge call sites — src/lib/llm/anthropic.ts:48-49 and
- * src/lib/llm/openai-compatible.ts:66/71 — temperature matches (0.3), but
- * both actually use `max_tokens: 4096`, not 2048; `2048` does not appear
- * anywhere in src/lib/llm/**. Used the brief's literal as specified since
- * it's a binding clarification; flagged the discrepancy in the task report
- * rather than silently "fixing" it.
+ * samplingDefaults literal note: both v1 judge call sites — src/lib/llm/anthropic.ts:48-49
+ * and src/lib/llm/openai-compatible.ts:66/71 — use the literal
+ * `{ temperature: 0.3, max_tokens: 4096 }`. This is the correct v1 value.
  */
 import type { JudgeClass, ServingBackend } from '@prisma/client';
 import type { ImportCtx } from './context';
@@ -150,7 +145,7 @@ async function findOrCreateVersion(
       servingBackend: args.servingBackend,
       endpointClass: args.endpointClass,
       protocolSupport: { pointwise: ['score'] },
-      samplingDefaults: { temperature: 0.3, max_tokens: 2048 },
+      samplingDefaults: { temperature: 0.3, max_tokens: 4096 },
     },
   });
   return created.id;
@@ -267,7 +262,7 @@ export async function synthesizeJudges(
       if (!v2UserId) {
         // Dropped owner: no endpoint, but the JudgeModel/Version above
         // still exist for any Task 9/10 rows that reference this triple.
-        ctx.report.add('ModelEndpoint', 'skipped');
+        ctx.report.add('ModelEndpoint', 'dropped');
         continue;
       }
 

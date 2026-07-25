@@ -108,7 +108,7 @@ describe('resolveOwners (DB)', () => {
     expect(owners2.get(v1User.id)).toBeTruthy();
   });
 
-  it("'drop' entries are absent from the returned map", async () => {
+  it("'drop' entries are absent from the returned map and tallied as 'dropped'", async () => {
     const v1UserDropped = await mkV1User();
     const v1UserMapped = await mkV1User();
     const ctx = createImportCtx({
@@ -127,6 +127,7 @@ describe('resolveOwners (DB)', () => {
     expect(owners.has(v1UserDropped.id)).toBe(false);
     expect(owners.has(v1UserMapped.id)).toBe(true);
     expect(owners.size).toBe(1);
+    expect(ctx.report.counts().User).toMatchObject({ created: 1, skipped: 0, dropped: 1 });
   });
 
   it('report mode resolves a full map but writes nothing to v2 (real counts stay 0)', async () => {
