@@ -1,11 +1,21 @@
 /**
- * LLM Retry & Circuit Breaker
+ * LLM Retry
  *
- * - Exponential backoff with jitter for transient failures (rate limits, timeouts).
- * - Per-provider circuit breaker to stop hammering a failing service.
+ * Exponential backoff with jitter for transient failures (rate limits,
+ * timeouts, 5xx, connection errors). Retryability is taxonomy-driven via
+ * `classify()` (see `./errors.ts`) rather than the substring-matching
+ * `isTransientError()` this module used to ship — see git history for the
+ * old implementation.
+ *
+ * The circuit breaker that used to live in this file (an in-process `Map`,
+ * blind to every other replica) has moved to `./breaker-redis.ts`, backed
+ * by Redis so state is shared cluster-wide. Wiring between the two —
+ * breaker gating + retry + `classify()` on every caught error — lives in
+ * `./index.ts`'s `executeJudgment`/`executeRespond`.
  */
 
 import { logger } from '@/lib/logger';
+import { classify } from './errors';
 
 // ─── Retry with Exponential Backoff ────────────────────────────────────────────
 
@@ -20,15 +30,44 @@ export interface RetryOptions {
   isRetryable?: (error: unknown) => boolean;
 }
 
+/**
+ * Default retry predicate: classify the error (taxonomy-driven, never
+ * message-substring-driven — see `./errors.ts`) and retry only
+ * `'retryable'`/`'rate_limited'` kinds. The `'unknown'` provider label here
+ * is a placeholder — `classify()`'s kind decision never branches on the
+ * provider argument, and callers that already classified the error with
+ * the real provider name (e.g. `index.ts`) get an instant passthrough via
+ * `classify()`'s `err instanceof ProviderError` short-circuit, so the real
+ * label is preserved end-to-end.
+ */
+function defaultIsRetryable(error: unknown): boolean {
+  const { kind } = classify(error, 'unknown');
+  return kind === 'retryable' || kind === 'rate_limited';
+}
+
 const DEFAULT_RETRY: Required<RetryOptions> = {
   maxAttempts: 3,
   baseDelayMs: 1000,
   maxDelayMs: 30_000,
-  isRetryable: isTransientError,
+  isRetryable: defaultIsRetryable,
 };
+
+/** A `ProviderError`'s `retryAfterMs`, read structurally (duck-typed, no `errors.ts` import needed here). */
+function retryAfterMsOf(error: unknown): number | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const value = (error as { retryAfterMs?: unknown }).retryAfterMs;
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
 
 /**
  * Run an async function with automatic retries and exponential backoff + jitter.
+ *
+ * A `rate_limited` error's `retryAfterMs` (from a `Retry-After` response
+ * header, see `classify()`) pushes the wait out further than the plain
+ * exponential formula would — "wait at least as long as the server asked"
+ * — but is still bounded by `maxDelayMs`: an upstream returning an
+ * unreasonable `Retry-After` shouldn't be able to stall a request
+ * indefinitely from inside this loop.
  */
 export async function withRetry<T>(
   fn: () => Promise<T>,
@@ -51,10 +90,13 @@ export async function withRetry<T>(
         throw error;
       }
 
-      const delay = Math.min(
+      const exponential = Math.min(
         baseDelayMs * Math.pow(2, attempt - 1) + Math.random() * baseDelayMs,
         maxDelayMs
       );
+      const retryAfterMs = retryAfterMsOf(error);
+      const delay =
+        retryAfterMs !== undefined ? Math.min(Math.max(exponential, retryAfterMs), maxDelayMs) : exponential;
 
       logger.warn('LLM call failed, retrying', {
         attempt,
@@ -70,196 +112,6 @@ export async function withRetry<T>(
   throw lastError;
 }
 
-// ─── Circuit Breaker ───────────────────────────────────────────────────────────
-
-export type CircuitState = 'closed' | 'open' | 'half-open';
-
-export interface CircuitBreakerOptions {
-  /** Failures within the window before opening the circuit */
-  failureThreshold?: number;
-  /** Time in ms before the circuit transitions from open → half-open */
-  resetTimeoutMs?: number;
-  /** Rolling window in ms for counting failures */
-  windowMs?: number;
-}
-
-const DEFAULT_CB: Required<CircuitBreakerOptions> = {
-  failureThreshold: 5,
-  resetTimeoutMs: 60_000,
-  windowMs: 120_000,
-};
-
-interface CircuitBreakerState {
-  state: CircuitState;
-  failures: number[];
-  lastOpenedAt: number;
-  options: Required<CircuitBreakerOptions>;
-}
-
-const circuits = new Map<string, CircuitBreakerState>();
-
-/**
- * Get or create a circuit breaker for a given key (e.g., provider name).
- */
-function getCircuit(key: string, opts: CircuitBreakerOptions = {}): CircuitBreakerState {
-  if (!circuits.has(key)) {
-    circuits.set(key, {
-      state: 'closed',
-      failures: [],
-      lastOpenedAt: 0,
-      options: { ...DEFAULT_CB, ...opts },
-    });
-  }
-  return circuits.get(key)!;
-}
-
-/**
- * Execute a function through a circuit breaker.
- *
- * - **Closed**: requests pass through normally; failures are tracked.
- * - **Open**: requests are immediately rejected for `resetTimeoutMs`.
- * - **Half-open**: a single probe request is allowed. If it succeeds the circuit
- *   resets to closed; if it fails it reopens.
- */
-export async function withCircuitBreaker<T>(
-  key: string,
-  fn: () => Promise<T>,
-  opts: CircuitBreakerOptions = {}
-): Promise<T> {
-  const cb = getCircuit(key, opts);
-  const now = Date.now();
-
-  // Prune old failure timestamps outside the window
-  cb.failures = cb.failures.filter((t) => now - t < cb.options.windowMs);
-
-  // Check state transitions
-  if (cb.state === 'open') {
-    if (now - cb.lastOpenedAt >= cb.options.resetTimeoutMs) {
-      cb.state = 'half-open';
-      logger.info('Circuit breaker half-open, allowing probe', { provider: key });
-    } else {
-      throw new CircuitOpenError(
-        `Circuit breaker open for "${key}". Try again in ${Math.ceil(
-          (cb.options.resetTimeoutMs - (now - cb.lastOpenedAt)) / 1000
-        )}s.`
-      );
-    }
-  }
-
-  try {
-    const result = await fn();
-
-    // Success: reset the circuit
-    if (cb.state === 'half-open') {
-      logger.info('Circuit breaker closed after successful probe', { provider: key });
-    }
-    cb.state = 'closed';
-    cb.failures = [];
-
-    return result;
-  } catch (error) {
-    cb.failures.push(Date.now());
-
-    if (cb.failures.length >= cb.options.failureThreshold || cb.state === 'half-open') {
-      cb.state = 'open';
-      cb.lastOpenedAt = Date.now();
-      logger.error('Circuit breaker opened', {
-        provider: key,
-        failures: cb.failures.length,
-        threshold: cb.options.failureThreshold,
-      });
-    }
-
-    throw error;
-  }
-}
-
-/**
- * Get the current state of a circuit breaker (for health checks / monitoring).
- */
-export function getCircuitState(key: string): CircuitState | 'unknown' {
-  return circuits.get(key)?.state ?? 'unknown';
-}
-
-/**
- * Reset a circuit breaker (e.g., after deploying a fix).
- */
-export function resetCircuit(key: string): void {
-  circuits.delete(key);
-}
-
-// ─── Combined: Retry + Circuit Breaker ─────────────────────────────────────────
-
-export interface ResilientCallOptions extends RetryOptions, CircuitBreakerOptions {}
-
-/**
- * Execute an LLM call with both circuit breaker protection and retry logic.
- * The circuit breaker wraps the entire retry sequence — if all retries fail,
- * it counts as a single circuit breaker failure.
- * When the circuit is half-open, retries are disabled so only a single probe
- * request is sent to the recovering service.
- */
-export async function resilientCall<T>(
-  providerKey: string,
-  fn: () => Promise<T>,
-  opts: ResilientCallOptions = {}
-): Promise<T> {
-  const circuitState = getCircuitState(providerKey);
-  const retryOpts = circuitState === 'half-open' ? { ...opts, maxAttempts: 1 } : opts;
-  return withCircuitBreaker(providerKey, () => withRetry(fn, retryOpts), opts);
-}
-
-// ─── Helpers ───────────────────────────────────────────────────────────────────
-
-export class CircuitOpenError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'CircuitOpenError';
-  }
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Determine whether an error is transient and worth retrying.
- */
-export function isTransientError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-
-  const msg = error.message.toLowerCase();
-
-  // Rate limiting
-  if (msg.includes('rate limit') || msg.includes('429') || msg.includes('too many requests')) {
-    return true;
-  }
-
-  // Timeouts
-  if (msg.includes('timeout') || msg.includes('timed out') || msg.includes('etimedout')) {
-    return true;
-  }
-
-  // Network errors
-  if (
-    msg.includes('econnreset') ||
-    msg.includes('econnrefused') ||
-    msg.includes('socket hang up') ||
-    msg.includes('network') ||
-    msg.includes('fetch failed')
-  ) {
-    return true;
-  }
-
-  // Server errors (5xx from provider SDKs)
-  if (msg.includes('500') || msg.includes('502') || msg.includes('503') || msg.includes('504')) {
-    return true;
-  }
-
-  // Anthropic SDK overloaded error
-  if (msg.includes('overloaded')) {
-    return true;
-  }
-
-  return false;
 }
