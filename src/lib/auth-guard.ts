@@ -5,6 +5,9 @@ import { createHash } from 'crypto';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import type { PermissionScope } from '@/lib/permissions';
+import { getClientIp } from '@/lib/client-ip';
+import { apiLimiter } from '@/lib/rate-limit-redis';
+import { rateLimitHeaders, API_LIMIT } from '@/lib/rate-limit';
 
 export interface AuthSession {
   user: {
@@ -91,6 +94,21 @@ async function authenticateApiKey(): Promise<AuthSession | NextResponse | null> 
  *   // session is AuthSession
  */
 export async function requireAuth(): Promise<AuthSession | NextResponse> {
+  // ── Shared API rate-limit chokepoint (120/min per IP, env-overridable) ──
+  // Every authenticated route calls requireAuth(), so gating here covers
+  // the whole authenticated API surface without per-route boilerplate.
+  // Checked first, before any DB/auth work, so an abusive client doesn't
+  // get free DB queries out of a request that's going to be rejected.
+  const headersList = await headers();
+  const clientIp = getClientIp(headersList);
+  const rateResult = await apiLimiter.check(clientIp);
+  if (!rateResult.ok) {
+    return NextResponse.json(
+      { error: 'Rate limit exceeded. Please slow down.' },
+      { status: 429, headers: rateLimitHeaders(rateResult, API_LIMIT) }
+    );
+  }
+
   // 1. Try API key authentication first
   const apiKeyResult = await authenticateApiKey();
   if (apiKeyResult instanceof NextResponse) return apiKeyResult; // Error response

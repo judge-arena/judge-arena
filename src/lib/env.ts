@@ -50,9 +50,15 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).optional().default('development'),
 
   // ─── Rate Limiting ──
+  // Actual parsing/defaults for these live in src/lib/rate-limit.ts (read
+  // directly off process.env, matching this repo's existing convention —
+  // see that file's docstring for why). Declared here too so `getEnv()`
+  // validates/documents the full env surface.
   RATE_LIMIT_ENABLED: z.coerce.boolean().optional().default(true),
   RATE_LIMIT_AUTH_MAX: z.coerce.number().int().positive().optional().default(5),
-  RATE_LIMIT_API_MAX: z.coerce.number().int().positive().optional().default(60),
+  RATE_LIMIT_API_MAX: z.coerce.number().int().positive().optional().default(120),
+  RATE_LIMIT_JUDGE_MAX: z.coerce.number().int().positive().optional().default(10),
+  RATE_LIMIT_HUGGINGFACE_MAX: z.coerce.number().int().positive().optional().default(30),
 
   // ─── Proxy / Deployment ──
   TRUSTED_PROXY: z.enum(['true', 'false']).optional().default('false'),

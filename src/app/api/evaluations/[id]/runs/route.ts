@@ -8,6 +8,9 @@ import {
   runDetailIncludeConfig,
   toHttpError,
 } from '@/lib/evaluation-run-manager';
+import { judgeLimiter } from '@/lib/rate-limit-redis';
+import { rateLimitHeaders, JUDGE_LIMIT } from '@/lib/rate-limit';
+import { getClientIp } from '@/lib/client-ip';
 import { logger, serializeError } from '@/lib/logger';
 
 const createRunSchema = z.object({
@@ -55,6 +58,18 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'evaluations:run');
   if (scopeCheck) return scopeCheck;
+
+  // Judge runs are expensive (real LLM calls fan out per model/sample) —
+  // apply a tighter limiter on top of the general `api` chokepoint already
+  // enforced inside requireAuth().
+  const clientIp = getClientIp(request.headers);
+  const rateResult = await judgeLimiter.check(clientIp);
+  if (!rateResult.ok) {
+    return NextResponse.json(
+      { error: 'Too many evaluation runs. Please slow down.' },
+      { status: 429, headers: rateLimitHeaders(rateResult, JUDGE_LIMIT) }
+    );
+  }
 
   try {
     const body = await request.json().catch(() => ({}));

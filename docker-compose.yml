@@ -99,7 +99,12 @@ services:
     image: redis:7-alpine
     container_name: judge-arena-redis
     restart: unless-stopped
-    command: redis-server --save 60 1 --loglevel warning --maxmemory 128mb --maxmemory-policy allkeys-lru
+    # noeviction (not allkeys-lru): rate-limit keys are sorted sets with
+    # their own PEXPIRE TTLs, so eviction is unnecessary — and evicting a
+    # rate-limit key under memory pressure would silently let a client
+    # bypass its limit. noeviction instead rejects writes loudly when
+    # maxmemory is hit, matching the podman dev container's flags.
+    command: redis-server --save 60 1 --loglevel warning --maxmemory 128mb --maxmemory-policy noeviction
     volumes:
       - redis_data:/data
     ports:

@@ -3,73 +3,22 @@
  *
  * Centralized request interceptor for:
  * 1. Security headers (CSP, HSTS, X-Frame-Options, etc.)
- * 2. Rate limiting on auth endpoints
- * 3. Request logging with correlation IDs
+ * 2. Request logging with correlation IDs
+ *
+ * Rate limiting does NOT live here. Edge middleware can't hold a Redis
+ * connection, so the in-memory `Map`-based limiter that used to run here
+ * has been deleted — it only ever protected a single replica's in-process
+ * state and did nothing for a second instance. Rate limiting now happens in
+ * route handlers (and the shared `requireAuth()` chokepoint in
+ * `src/lib/auth-guard.ts`) via the Redis-backed limiter in
+ * `src/lib/rate-limit-redis.ts`, which enforces one shared budget across
+ * every replica.
  *
  * Auth enforcement is handled per-route by requireAuth() since middleware
  * runs in the Edge runtime and cannot access Prisma directly.
  */
 
 import { NextResponse } from 'next/server';
-import type { NextRequest } from 'next/server';
-
-/** Simple in-memory rate limiter for Edge runtime (middleware) */
-const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
-
-function checkRateLimit(key: string, maxRequests: number, windowMs: number): boolean {
-  const now = Date.now();
-  const entry = rateLimitMap.get(key);
-
-  if (!entry || now > entry.resetAt) {
-    rateLimitMap.set(key, { count: 1, resetAt: now + windowMs });
-    return true;
-  }
-
-  if (entry.count >= maxRequests) {
-    return false;
-  }
-
-  entry.count++;
-  return true;
-}
-
-// Periodic cleanup (runs on each request, checks lazily)
-let lastCleanup = Date.now();
-function cleanupRateLimits() {
-  const now = Date.now();
-  if (now - lastCleanup < 60000) return; // Cleanup every 60s
-  lastCleanup = now;
-  for (const [key, entry] of rateLimitMap.entries()) {
-    if (now > entry.resetAt) {
-      rateLimitMap.delete(key);
-    }
-  }
-}
-
-/**
- * Extract client IP safely.
- * Only trusts X-Forwarded-For / X-Real-IP when TRUSTED_PROXY is set,
- * indicating the app runs behind a reverse proxy that overwrites these headers.
- * Without a trusted proxy, uses Next.js's built-in IP (from the socket) to
- * prevent clients from spoofing their IP to bypass rate limits.
- */
-function getClientIp(request: NextRequest): string {
-  const trustProxy = process.env.TRUSTED_PROXY === 'true';
-
-  if (trustProxy) {
-    const forwarded = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
-    if (forwarded) return forwarded;
-
-    const realIp = request.headers.get('x-real-ip');
-    if (realIp) return realIp;
-  }
-
-  // `NextRequest.ip` was only ever populated on Vercel's edge network (never
-  // for this app's self-hosted Docker/Node deployment) and was removed from
-  // the type entirely in Next.js 15. Untrusted-proxy requests fall back to
-  // the loopback literal, matching the runtime behavior this app already had.
-  return '127.0.0.1';
-}
 
 /**
  * Add security headers to the response.
@@ -119,49 +68,7 @@ function addSecurityHeaders(response: NextResponse): NextResponse {
   return response;
 }
 
-export function middleware(request: NextRequest) {
-  cleanupRateLimits();
-
-  const { pathname } = request.nextUrl;
-  const clientIp = getClientIp(request);
-
-  // ── Rate limit auth endpoints (5/min per IP) ──
-  if (
-    pathname.startsWith('/api/auth/register') ||
-    pathname.startsWith('/api/auth/callback')
-  ) {
-    const allowed = checkRateLimit(`auth:${clientIp}`, 5, 60 * 1000);
-    if (!allowed) {
-      return new NextResponse(
-        JSON.stringify({ error: 'Too many requests. Please try again later.' }),
-        {
-          status: 429,
-          headers: {
-            'Content-Type': 'application/json',
-            'Retry-After': '60',
-          },
-        }
-      );
-    }
-  }
-
-  // ── Rate limit general API endpoints (120/min per IP) ──
-  if (pathname.startsWith('/api/') && !pathname.startsWith('/api/auth/')) {
-    const allowed = checkRateLimit(`api:${clientIp}`, 120, 60 * 1000);
-    if (!allowed) {
-      return new NextResponse(
-        JSON.stringify({ error: 'Rate limit exceeded. Please slow down.' }),
-        {
-          status: 429,
-          headers: {
-            'Content-Type': 'application/json',
-            'Retry-After': '60',
-          },
-        }
-      );
-    }
-  }
-
+export function middleware() {
   // ── Add request ID header for correlation ──
   const requestId = `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const response = NextResponse.next();

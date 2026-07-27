@@ -2,7 +2,9 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { hash } from 'bcryptjs';
 import { z } from 'zod';
-import { registrationLimiter } from '@/lib/rate-limit';
+import { authLimiter } from '@/lib/rate-limit-redis';
+import { rateLimitHeaders, AUTH_LIMIT } from '@/lib/rate-limit';
+import { getClientIp } from '@/lib/client-ip';
 import { logger, serializeError } from '@/lib/logger';
 
 const registerSchema = z.object({
@@ -13,15 +15,15 @@ const registerSchema = z.object({
 
 export async function POST(request: Request) {
   try {
-    // Apply dedicated registration rate limiter (3/hour per IP)
-    const clientIp = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
-      ?? request.headers.get('x-real-ip')
-      ?? 'unknown';
-    const rateResult = registrationLimiter.check(`register:${clientIp}`);
-    if (!rateResult.allowed) {
+    // Apply the shared `auth` rate limiter (5/min per IP, env-overridable
+    // via RATE_LIMIT_AUTH_MAX) — this route is the concrete "login/session
+    // -sensitive" endpoint it's wired to today; still exists pre-1b-Task-13.
+    const clientIp = getClientIp(request.headers);
+    const rateResult = await authLimiter.check(clientIp);
+    if (!rateResult.ok) {
       return NextResponse.json(
         { error: 'Too many registration attempts. Please try again later.' },
-        { status: 429, headers: { 'Retry-After': String(Math.ceil(rateResult.retryAfterMs / 1000)) } }
+        { status: 429, headers: rateLimitHeaders(rateResult, AUTH_LIMIT) }
       );
     }
 

@@ -13,8 +13,17 @@ export default defineConfig({
     // v2 test DB reachable) — note this exclude is necessary in addition to
     // the `.db.test.ts` naming convention: `tests/**/*.test.ts` above still
     // matches those filenames (they end in `.test.ts`), so without this
-    // exclude they'd be picked up here too.
-    exclude: ['node_modules', '.next', 'prisma', 'tests/db/**', 'tests/importer/**/*.db.test.ts'],
+    // exclude they'd be picked up here too. tests/integration/** requires a
+    // live Redis connection and is run separately via `npm run
+    // test:integration` (see vitest.integration.config.ts), same reasoning.
+    exclude: [
+      'node_modules',
+      '.next',
+      'prisma',
+      'tests/db/**',
+      'tests/importer/**/*.db.test.ts',
+      'tests/integration/**',
+    ],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'text-summary', 'lcov', 'html'],

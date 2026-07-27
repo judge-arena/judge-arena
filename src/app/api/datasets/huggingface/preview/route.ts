@@ -4,6 +4,9 @@ import {
   fetchDatasetMetadata,
   parseHuggingFaceUrl,
 } from '@/lib/huggingface';
+import { huggingfaceLimiter } from '@/lib/rate-limit-redis';
+import { rateLimitHeaders, HUGGINGFACE_LIMIT } from '@/lib/rate-limit';
+import { getClientIp } from '@/lib/client-ip';
 import { logger, serializeError } from '@/lib/logger';
 
 // GET /api/datasets/huggingface/preview?url=...&id=...
@@ -13,6 +16,18 @@ export async function GET(request: Request) {
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'datasets:read');
   if (scopeCheck) return scopeCheck;
+
+  // Proxies an upstream HuggingFace API that has its own rate limits —
+  // apply a tighter limiter on top of the general `api` chokepoint already
+  // enforced inside requireAuth().
+  const clientIp = getClientIp(request.headers);
+  const rateResult = await huggingfaceLimiter.check(clientIp);
+  if (!rateResult.ok) {
+    return NextResponse.json(
+      { error: 'Too many HuggingFace requests. Please slow down.' },
+      { status: 429, headers: rateLimitHeaders(rateResult, HUGGINGFACE_LIMIT) }
+    );
+  }
 
   const { searchParams } = new URL(request.url);
   const url = searchParams.get('url');

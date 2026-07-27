@@ -1,108 +1,63 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { createRateLimiter, rateLimitHeaders } from '@/lib/rate-limit';
+import { describe, it, expect } from 'vitest';
+import {
+  rateLimitHeaders,
+  RATE_LIMIT_ENABLED,
+  AUTH_LIMIT,
+  API_LIMIT,
+  JUDGE_LIMIT,
+  HUGGINGFACE_LIMIT,
+} from '@/lib/rate-limit';
 
-describe('rate-limit', () => {
-  describe('createRateLimiter', () => {
-    let limiter: ReturnType<typeof createRateLimiter>;
+// The Map-based in-memory limiter this file used to test (createRateLimiter
+// et al.) was deleted — see rate-limit.ts's docstring. Redis-backed
+// atomicity/window-expiry/cross-replica behavior is covered by
+// tests/integration/rate-limit.test.ts (needs a live Redis, so it isn't
+// part of this DB/Redis-free unit suite). What's left here is what's
+// actually still pure, synchronous, config-parsing logic: the env-derived
+// limit constants and the header-building helper.
 
-    beforeEach(() => {
-      limiter = createRateLimiter({ windowMs: 1000, maxRequests: 3 });
-    });
-
-    it('should allow requests within limit', () => {
-      const result1 = limiter.check('user-1');
-      expect(result1.allowed).toBe(true);
-      expect(result1.remaining).toBe(2);
-
-      const result2 = limiter.check('user-1');
-      expect(result2.allowed).toBe(true);
-      expect(result2.remaining).toBe(1);
-
-      const result3 = limiter.check('user-1');
-      expect(result3.allowed).toBe(true);
-      expect(result3.remaining).toBe(0);
-    });
-
-    it('should deny requests over limit', () => {
-      limiter.check('user-1');
-      limiter.check('user-1');
-      limiter.check('user-1');
-
-      const result = limiter.check('user-1');
-      expect(result.allowed).toBe(false);
-      expect(result.remaining).toBe(0);
-      expect(result.retryAfterMs).toBeGreaterThan(0);
-    });
-
-    it('should track different keys independently', () => {
-      limiter.check('user-1');
-      limiter.check('user-1');
-      limiter.check('user-1');
-
-      const result1 = limiter.check('user-1');
-      expect(result1.allowed).toBe(false);
-
-      const result2 = limiter.check('user-2');
-      expect(result2.allowed).toBe(true);
-      expect(result2.remaining).toBe(2);
-    });
-
-    it('should reset a specific key', () => {
-      limiter.check('user-1');
-      limiter.check('user-1');
-      limiter.check('user-1');
-      expect(limiter.check('user-1').allowed).toBe(false);
-
-      limiter.reset('user-1');
-      expect(limiter.check('user-1').allowed).toBe(true);
-    });
-
-    it('should allow requests after window expires', async () => {
-      const fastLimiter = createRateLimiter({ windowMs: 50, maxRequests: 1 });
-
-      fastLimiter.check('user-1');
-      expect(fastLimiter.check('user-1').allowed).toBe(false);
-
-      await new Promise((resolve) => setTimeout(resolve, 60));
-
-      expect(fastLimiter.check('user-1').allowed).toBe(true);
-    });
-
-    it('should return correct resetAt timestamp', () => {
-      const before = Date.now();
-      const result = limiter.check('user-1');
-      const after = Date.now();
-
-      expect(result.resetAt).toBeGreaterThanOrEqual(before + 1000);
-      expect(result.resetAt).toBeLessThanOrEqual(after + 1000);
+describe('rate-limit (shared types & config)', () => {
+  describe('env-derived limit constants', () => {
+    it('default to the documented values when no RATE_LIMIT_* env vars are set', () => {
+      // tests/setup.ts doesn't set any RATE_LIMIT_* env var, so these
+      // reflect the fallback defaults baked into rate-limit.ts.
+      expect(RATE_LIMIT_ENABLED).toBe(true);
+      expect(AUTH_LIMIT).toBe(5);
+      expect(API_LIMIT).toBe(120);
+      expect(JUDGE_LIMIT).toBe(10);
+      expect(HUGGINGFACE_LIMIT).toBe(30);
     });
   });
 
   describe('rateLimitHeaders', () => {
-    it('should include Retry-After when not allowed', () => {
-      const headers = rateLimitHeaders({
-        allowed: false,
-        remaining: 0,
-        resetAt: Date.now() + 30000,
-        retryAfterMs: 30000,
-      }, 10);
+    it('includes Retry-After when not ok', () => {
+      const headers = rateLimitHeaders(
+        { ok: false, remaining: 0, resetAt: Date.now() + 30000 },
+        10
+      );
 
-      expect(headers['Retry-After']).toBe('30');
+      expect(headers['Retry-After']).toBeDefined();
+      expect(Number(headers['Retry-After'])).toBeGreaterThan(0);
       expect(headers['X-RateLimit-Remaining']).toBe('0');
       expect(headers['X-RateLimit-Limit']).toBe('10');
     });
 
-    it('should not include Retry-After when allowed', () => {
-      const headers = rateLimitHeaders({
-        allowed: true,
-        remaining: 5,
-        resetAt: Date.now() + 60000,
-        retryAfterMs: 0,
-      }, 10);
+    it('omits Retry-After when ok', () => {
+      const headers = rateLimitHeaders(
+        { ok: true, remaining: 5, resetAt: Date.now() + 60000 },
+        10
+      );
 
       expect(headers['Retry-After']).toBeUndefined();
       expect(headers['X-RateLimit-Remaining']).toBe('5');
       expect(headers['X-RateLimit-Limit']).toBe('10');
+    });
+
+    it('sets X-RateLimit-Reset to the resetAt timestamp in seconds', () => {
+      const resetAt = Date.now() + 45000;
+      const headers = rateLimitHeaders({ ok: true, remaining: 1, resetAt }, 10);
+
+      expect(headers['X-RateLimit-Reset']).toBe(String(Math.ceil(resetAt / 1000)));
     });
   });
 });

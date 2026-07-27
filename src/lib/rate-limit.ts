@@ -1,137 +1,62 @@
 /**
- * ─── Rate Limiting ────────────────────────────────────────────────────────
+ * ─── Rate Limiting — shared types & config ────────────────────────────────
  *
- * In-memory sliding window rate limiter with per-key tracking.
- * For single-process deployments. Can be extended to Redis for multi-process.
+ * The actual limiter implementation lives in `rate-limit-redis.ts` (atomic
+ * Lua sliding window over a shared Redis instance). This file is retained
+ * for two things only:
  *
- * Usage:
- *   const limiter = createRateLimiter({ windowMs: 60000, maxRequests: 10 });
- *   const result = limiter.check('user-123');
- *   if (!result.allowed) { return 429 response }
+ *   1. The `RateLimiter` / `RateLimitCheckResult` interface shape, so code
+ *      that wants to fake a limiter in a test (without touching Redis) has
+ *      a type to implement.
+ *   2. The env-derived numeric limit constants, parsed once here so
+ *      `rate-limit-redis.ts` doesn't duplicate the `Number(process.env.X ??
+ *      fallback)` parsing, and so overriding a limit for ops purposes stays
+ *      a one-env-var change.
+ *
+ * The previous in-memory `Map`-based sliding-window implementation (plus
+ * its `createRateLimiter`/`authLimiter`/`apiLimiter`/`judgeLimiter`/
+ * `registrationLimiter` exports) was deleted: a per-process `Map` can't
+ * enforce a shared budget across multiple replicas, which is exactly the
+ * gap the Redis-backed limiter closes. Node's Edge middleware had its own
+ * *second*, independent in-memory limiter (deleted from `src/middleware.ts`
+ * in the same change) — Edge can't hold a Redis connection, so rate
+ * limiting now happens in route handlers (and the shared `requireAuth()`
+ * chokepoint) instead of middleware.
  */
 
-export interface RateLimitConfig {
-  /** Window duration in milliseconds */
-  windowMs: number;
-  /** Maximum requests allowed per window */
-  maxRequests: number;
-}
-
-export interface RateLimitResult {
-  allowed: boolean;
+export interface RateLimitCheckResult {
+  ok: boolean;
   remaining: number;
   resetAt: number; // Unix timestamp (ms) when the window resets
-  retryAfterMs: number; // 0 if allowed, else ms to wait
-}
-
-interface WindowEntry {
-  timestamps: number[];
 }
 
 export interface RateLimiter {
-  check(key: string): RateLimitResult;
-  reset(key: string): void;
+  check(key: string): Promise<RateLimitCheckResult>;
 }
 
-/**
- * Create an in-memory sliding window rate limiter.
- */
-export function createRateLimiter(config: RateLimitConfig): RateLimiter {
-  const { windowMs, maxRequests } = config;
-  const windows = new Map<string, WindowEntry>();
+// ─── Env-derived limit constants ───────────────────────────────────────────
+// All four limiters use a 60s (per-minute) window. Override via env for ops
+// tuning without a code change — see .env.example.
 
-  // Periodic cleanup every 5 minutes
-  const cleanupInterval = setInterval(() => {
-    const now = Date.now();
-    for (const [key, entry] of windows.entries()) {
-      entry.timestamps = entry.timestamps.filter((t) => now - t < windowMs);
-      if (entry.timestamps.length === 0) {
-        windows.delete(key);
-      }
-    }
-  }, 5 * 60 * 1000);
-
-  // Prevent the cleanup interval from keeping the process alive
-  if (cleanupInterval.unref) {
-    cleanupInterval.unref();
-  }
-
-  return {
-    check(key: string): RateLimitResult {
-      const now = Date.now();
-      let entry = windows.get(key);
-
-      if (!entry) {
-        entry = { timestamps: [] };
-        windows.set(key, entry);
-      }
-
-      // Remove expired timestamps
-      entry.timestamps = entry.timestamps.filter((t) => now - t < windowMs);
-
-      if (entry.timestamps.length >= maxRequests) {
-        const oldestInWindow = entry.timestamps[0];
-        const resetAt = oldestInWindow + windowMs;
-        return {
-          allowed: false,
-          remaining: 0,
-          resetAt,
-          retryAfterMs: resetAt - now,
-        };
-      }
-
-      entry.timestamps.push(now);
-
-      return {
-        allowed: true,
-        remaining: maxRequests - entry.timestamps.length,
-        resetAt: now + windowMs,
-        retryAfterMs: 0,
-      };
-    },
-
-    reset(key: string): void {
-      windows.delete(key);
-    },
-  };
-}
-
-// ─── Pre-configured Limiters ──────────────────────────────────────────────
-
-/** Auth endpoints: 5 requests per minute per IP */
-export const authLimiter = createRateLimiter({
-  windowMs: 60 * 1000,
-  maxRequests: Number(process.env.RATE_LIMIT_AUTH_MAX ?? '5'),
-});
-
-/** General API: 60 requests per minute per user */
-export const apiLimiter = createRateLimiter({
-  windowMs: 60 * 1000,
-  maxRequests: Number(process.env.RATE_LIMIT_API_MAX ?? '60'),
-});
-
-/** LLM judging: 10 requests per minute per user */
-export const judgeLimiter = createRateLimiter({
-  windowMs: 60 * 1000,
-  maxRequests: 10,
-});
-
-/** Registration: 3 requests per hour per IP */
-export const registrationLimiter = createRateLimiter({
-  windowMs: 60 * 60 * 1000,
-  maxRequests: 3,
-});
+export const RATE_LIMIT_ENABLED = (process.env.RATE_LIMIT_ENABLED ?? 'true') !== 'false';
+export const AUTH_LIMIT = Number(process.env.RATE_LIMIT_AUTH_MAX ?? '5');
+export const API_LIMIT = Number(process.env.RATE_LIMIT_API_MAX ?? '120');
+export const JUDGE_LIMIT = Number(process.env.RATE_LIMIT_JUDGE_MAX ?? '10');
+export const HUGGINGFACE_LIMIT = Number(process.env.RATE_LIMIT_HUGGINGFACE_MAX ?? '30');
 
 /**
- * Build rate limit headers for HTTP responses.
+ * Build rate-limit HTTP response headers from a check result.
  */
-export function rateLimitHeaders(result: RateLimitResult, maxRequests: number): Record<string, string> {
-  return {
-    'X-RateLimit-Limit': String(maxRequests),
+export function rateLimitHeaders(result: RateLimitCheckResult, limit: number): Record<string, string> {
+  const headers: Record<string, string> = {
+    'X-RateLimit-Limit': String(limit),
     'X-RateLimit-Remaining': String(result.remaining),
     'X-RateLimit-Reset': String(Math.ceil(result.resetAt / 1000)),
-    ...(result.retryAfterMs > 0
-      ? { 'Retry-After': String(Math.ceil(result.retryAfterMs / 1000)) }
-      : {}),
   };
+
+  if (!result.ok) {
+    headers['Retry-After'] = String(Math.max(0, Math.ceil((result.resetAt - Date.now()) / 1000)));
+  }
+
+  return headers;
 }

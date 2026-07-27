@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { redisHealthy } from '@/lib/redis';
 import { logger, serializeError } from '@/lib/logger';
 
 export const dynamic = 'force-dynamic';
@@ -35,8 +36,25 @@ export async function GET() {
     };
   }
 
+  // ─── Redis check ──
+  // redisHealthy() never throws (500ms-bounded PING, swallows all errors
+  // internally) — safe to call unconditionally, including in production
+  // without REDIS_URL, where getRedis() would otherwise throw.
+  const redisStart = Date.now();
+  const redisUp = await redisHealthy();
+  checks.redis = { status: redisUp ? 'ok' : 'error', latencyMs: Date.now() - redisStart };
+  if (!redisUp) {
+    logger.error('Health check: redis connectivity failed', {});
+  }
+
   // ─── Overall status ──
-  const allHealthy = Object.values(checks).every((c) => c.status === 'ok');
+  // Redis is a hard readiness gate only in production (it backs rate
+  // limiting on every request there — see auth-guard.ts). In dev/test it's
+  // optional infra: rate limiting fails open on Redis errors, so a
+  // contributor running `npm run dev` without a local Redis container
+  // shouldn't see a broken health endpoint over it.
+  const dbHealthy = checks.database.status === 'ok';
+  const allHealthy = isProd ? dbHealthy && redisUp : dbHealthy;
   const totalLatency = Date.now() - startTime;
 
   const body = {

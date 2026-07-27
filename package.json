@@ -15,6 +15,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:db": "sh -c 'set -a; . ./.env.test; set +a; PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION=approved-plan-2026-07-24-1a-testdb-only npx prisma migrate reset --force --skip-seed && npx vitest run --config vitest.db.config.ts'",
+    "test:integration": "sh -c 'set -a; . ./.env.test; set +a; vitest run --config vitest.integration.config.ts'",
     "lint": "eslint src/ prisma/ scripts/ tests/",
     "ctrl": "node scripts/controller.mjs",
     "ctrl:generate": "node scripts/controller.mjs generate",
@@ -47,7 +48,7 @@
     "openai": "^4.82.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "redis": "^4.7.0",
+    "redis": "^5.12.1",
     "sonner": "^1.7.0",
     "tailwind-merge": "^2.6.0",
     "zod": "^3.24.2"
