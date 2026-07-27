@@ -90,4 +90,64 @@ describe('rate-limit-redis: createLimiter (atomic Lua sliding window)', () => {
     // Would be false if both limiters shared a Redis key.
     expect((await limiterB.check(key)).ok).toBe(true);
   });
+
+  it('remaining decrements correctly across sequential check() calls on one key', async () => {
+    const limiter = createLimiter(`remaining-${Date.now()}`, 5, 60);
+    const key = 'single-key';
+
+    const check1 = await limiter.check(key);
+    expect(check1.ok).toBe(true);
+    expect(check1.remaining).toBe(4);
+
+    const check2 = await limiter.check(key);
+    expect(check2.ok).toBe(true);
+    expect(check2.remaining).toBe(3);
+
+    const check3 = await limiter.check(key);
+    expect(check3.ok).toBe(true);
+    expect(check3.remaining).toBe(2);
+
+    const check4 = await limiter.check(key);
+    expect(check4.ok).toBe(true);
+    expect(check4.remaining).toBe(1);
+
+    const check5 = await limiter.check(key);
+    expect(check5.ok).toBe(true);
+    expect(check5.remaining).toBe(0);
+
+    // Next call should be denied with remaining=0
+    const check6 = await limiter.check(key);
+    expect(check6.ok).toBe(false);
+    expect(check6.remaining).toBe(0);
+  });
+
+  it('two different keys under the same limiter are tracked independently', async () => {
+    const limiter = createLimiter(`independent-keys-${Date.now()}`, 2, 60);
+
+    // Key A: use up its budget
+    const keyA1 = await limiter.check('key-a');
+    expect(keyA1.ok).toBe(true);
+    expect(keyA1.remaining).toBe(1);
+
+    const keyA2 = await limiter.check('key-a');
+    expect(keyA2.ok).toBe(true);
+    expect(keyA2.remaining).toBe(0);
+
+    // Key A is now exhausted
+    const keyA3 = await limiter.check('key-a');
+    expect(keyA3.ok).toBe(false);
+
+    // Key B should still have its full budget, unaffected by A's exhaustion
+    const keyB1 = await limiter.check('key-b');
+    expect(keyB1.ok).toBe(true);
+    expect(keyB1.remaining).toBe(1);
+
+    const keyB2 = await limiter.check('key-b');
+    expect(keyB2.ok).toBe(true);
+    expect(keyB2.remaining).toBe(0);
+
+    // Key B is now also exhausted
+    const keyB3 = await limiter.check('key-b');
+    expect(keyB3.ok).toBe(false);
+  });
 });

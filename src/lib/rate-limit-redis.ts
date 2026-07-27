@@ -15,7 +15,7 @@
  */
 
 import { randomUUID } from 'crypto';
-import { getConnectedRedis } from './redis';
+import { getConnectedRedis, RedisConfigError } from './redis';
 import {
   RATE_LIMIT_ENABLED,
   AUTH_LIMIT,
@@ -112,6 +112,13 @@ export function createLimiter(name: string, limit: number, windowSec: number): R
         const [ok, remaining, resetAt] = await evalSlidingWindow(redisKey, now, windowMs, limit, member);
         return { ok: ok === 1, remaining, resetAt };
       } catch (error) {
+        // Configuration errors (e.g., REDIS_URL not set in production) must
+        // propagate so the app fails fast. Only genuine runtime/connection
+        // errors fail open.
+        if (error instanceof RedisConfigError) {
+          throw error;
+        }
+
         // Fail open: a transient Redis outage shouldn't 500 (or silently
         // block) every authenticated request. `/api/health`'s
         // `checks.redis` is the actual signal for "Redis is down" in

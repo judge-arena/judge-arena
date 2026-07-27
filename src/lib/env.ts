@@ -32,7 +32,7 @@ const envSchema = z.object({
   ANTHROPIC_API_KEY: z.string().optional().default(''),
   OPENAI_API_KEY: z.string().optional().default(''),
 
-  // ─── Redis (optional — defaults to in-memory) ──
+  // ─── Redis (mandatory in production, optional in dev/test — see redis.ts) ──
   REDIS_URL: z.string().url().optional(),
   REALTIME_ADAPTER: z.enum(['memory', 'redis']).optional().default('memory'),
   REALTIME_REDIS_CHANNEL: z.string().optional().default('judge-arena:realtime'),

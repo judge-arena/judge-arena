@@ -20,6 +20,20 @@ import { createClient } from 'redis';
 
 export type RedisClient = ReturnType<typeof createClient>;
 
+/**
+ * Thrown by `getRedis()` in production when REDIS_URL is not configured.
+ * Used to differentiate configuration errors (which must propagate, never
+ * fail-open) from transient runtime/connection errors (which may fail-open
+ * to avoid cascading outages).
+ */
+export class RedisConfigError extends Error {
+  override name = 'RedisConfigError';
+
+  constructor(message: string) {
+    super(message);
+  }
+}
+
 let client: RedisClient | null = null;
 let connectPromise: Promise<RedisClient> | null = null;
 
@@ -28,7 +42,7 @@ function resolveRedisUrl(): string {
   if (url) return url;
 
   if (process.env.NODE_ENV === 'production') {
-    throw new Error(
+    throw new RedisConfigError(
       'REDIS_URL is not set. Redis is required in production (rate limiting, ' +
         'realtime SSE fan-out). Set REDIS_URL=redis://host:6379 (or rediss:// ' +
         'for TLS) in the environment before starting the app.'
