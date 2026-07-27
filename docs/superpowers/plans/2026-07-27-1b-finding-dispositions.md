@@ -1,6 +1,6 @@
 # 1b Finding Dispositions — BLOCKER + MAJOR assigned to 1b (1:1)
 
-Each of the 56 findings the 1a disposition table assigned to 1b spec sections,
+Each of the 57 findings (56 unique defects; one breaker finding surfaced in two dimensions) the 1a disposition table assigned to 1b spec sections,
 now mapped to the 1b plan task (T1-T18 in
 `2026-07-27-judge-arena-1b-queue-providers-auth.md`) that resolves it.
 
