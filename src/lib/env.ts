@@ -33,9 +33,10 @@ const envSchema = z.object({
   OPENAI_API_KEY: z.string().optional().default(''),
 
   // ─── Redis (mandatory in production, optional in dev/test — see redis.ts) ──
+  // Also backs the realtime SSE bus (src/lib/realtime/redis-bus.ts), which
+  // shares this same client — no separate adapter/channel env vars; see
+  // src/lib/realtime/factory.ts for the (env-free) adapter selection.
   REDIS_URL: z.string().url().optional(),
-  REALTIME_ADAPTER: z.enum(['memory', 'redis']).optional().default('memory'),
-  REALTIME_REDIS_CHANNEL: z.string().optional().default('judge-arena:realtime'),
 
   // ─── SSE ──
   SSE_KEEP_ALIVE_MS: z.coerce.number().int().positive().optional().default(25000),

@@ -217,9 +217,11 @@ export default function DatasetDetailPage() {
 
   useEffect(() => {
     if (!id) return;
-    const eventSource = new EventSource(
-      `/api/events?topic=datasets&datasetId=${encodeURIComponent(id)}`
-    );
+    // v2: /api/events always scopes to the caller's own `user:{self}` topic
+    // server-side (see src/app/api/events/route.ts). The client-side
+    // `payload.datasetId !== id` check below still filters to this
+    // specific dataset among the user's own dataset.summary.updated events.
+    const eventSource = new EventSource('/api/events');
     const onDatasetSummaryUpdated = (event: MessageEvent) => {
       try {
         const payload = JSON.parse(event.data) as {

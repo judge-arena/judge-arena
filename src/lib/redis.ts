@@ -3,8 +3,9 @@
  *
  * Lazy singleton `redis` v5 client shared by the Lua sliding-window rate
  * limiter (`rate-limit-redis.ts`) and the Redis-backed realtime event bus
- * (`realtime/redis-bus.ts` uses its own dynamic import today; this module
- * is the one new call sites should use going forward).
+ * (`realtime/redis-bus.ts` — publish/replay use this singleton directly;
+ * its pub/sub subscriber uses `getRedis().duplicate()`, since node-redis
+ * requires a dedicated connection while in subscribe mode).
  *
  * Fail-fast contract: in production, calling `getRedis()` (directly, or
  * transitively via `getConnectedRedis()`/`redisHealthy()`) without

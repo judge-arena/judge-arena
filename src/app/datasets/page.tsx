@@ -163,7 +163,10 @@ export default function DatasetsPage() {
   }, [loadDatasets]);
 
   useEffect(() => {
-    const eventSource = new EventSource('/api/events?topic=datasets');
+    // v2: /api/events always scopes to the caller's own `user:{self}` topic
+    // server-side (see src/app/api/events/route.ts) — no query param needed
+    // (or honored) to select "datasets" events anymore.
+    const eventSource = new EventSource('/api/events');
 
     const onDatasetSummaryUpdated = (event: MessageEvent) => {
       try {

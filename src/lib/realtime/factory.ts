@@ -1,38 +1,27 @@
 import type { RealtimeEventBus } from './bus';
 import { InMemoryRealtimeEventBus } from './in-memory-bus';
 import { RedisRealtimeEventBus } from './redis-bus';
-import type { RealtimeEnvelope } from './types';
 
-const REDIS_CHANNEL = process.env.REALTIME_REDIS_CHANNEL ?? 'judge-arena:realtime';
-
-type AdapterKind = 'memory' | 'redis';
-
-function emitToLocal(bus: InMemoryRealtimeEventBus, event: RealtimeEnvelope): Promise<void> {
-  return bus.publish(event);
-}
-
+/**
+ * Adapter selection mirrors src/lib/redis.ts's fail-fast contract — no
+ * env-driven opt-in/opt-out and no silent fallback (the old
+ * REALTIME_ADAPTER var and its "no REDIS_URL => memory" default are gone):
+ *
+ *  - NODE_ENV=test: always in-memory. Unit tests must not require a live
+ *    Redis, and per-test isolation matters more than cross-process realism
+ *    here (integration tests exercise RedisRealtimeEventBus directly,
+ *    bypassing this factory, against the real thing).
+ *  - everything else (dev, production): always RedisRealtimeEventBus, which
+ *    lazily resolves its connection via getRedis()/getConnectedRedis()
+ *    (src/lib/redis.ts) on first publish/subscribe — production REQUIRES
+ *    REDIS_URL (throws RedisConfigError otherwise), dev defaults to
+ *    redis://localhost:6379. A Redis outage surfaces as a thrown error from
+ *    publish()/subscribe(), never a quiet downgrade to in-process-only
+ *    delivery.
+ */
 export function createRealtimeBus(): RealtimeEventBus {
-  const memoryBus = new InMemoryRealtimeEventBus();
-
-  const explicitAdapter = (process.env.REALTIME_ADAPTER ?? '').toLowerCase() as AdapterKind | '';
-  const hasRedisUrl = !!process.env.REDIS_URL;
-
-  const adapter: AdapterKind =
-    explicitAdapter === 'redis'
-      ? 'redis'
-      : explicitAdapter === 'memory'
-        ? 'memory'
-        : hasRedisUrl
-          ? 'redis'
-          : 'memory';
-
-  if (adapter === 'memory') {
-    return memoryBus;
+  if (process.env.NODE_ENV === 'test') {
+    return new InMemoryRealtimeEventBus();
   }
-
-  return new RedisRealtimeEventBus(
-    process.env.REDIS_URL as string,
-    REDIS_CHANNEL,
-    (event) => emitToLocal(memoryBus, event)
-  );
+  return new RedisRealtimeEventBus();
 }

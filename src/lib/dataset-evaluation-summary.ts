@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db';
-import { publishRealtimeEvent } from '@/lib/realtime/events';
+import { publishEvent, userTopic } from '@/lib/realtime/events';
 
 export interface DatasetEvaluationSummary {
   updatedAt: string;
@@ -115,9 +115,12 @@ export async function refreshDatasetEvaluationSummary(datasetId: string): Promis
     },
   });
 
-  await publishRealtimeEvent('dataset.summary.updated', {
-    datasetId,
-    summary,
+  // Route to the dataset owner's topic — dataset.summary.updated is only
+  // meaningful (and only visible) to whoever owns the dataset. `dataset`
+  // above was fetched without a `select`, so `userId` is present.
+  await publishEvent(userTopic(dataset.userId), {
+    type: 'dataset.summary.updated',
+    payload: { datasetId, summary },
   });
 }
 

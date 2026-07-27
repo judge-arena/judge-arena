@@ -30,7 +30,6 @@ services:
     environment:
       - DATABASE_URL=postgresql://judgearena:${POSTGRES_PASSWORD:-changeme}@postgres:5432/judgearena
       - REDIS_URL=redis://redis:6379
-      - REALTIME_ADAPTER=redis
       - NODE_ENV=production
     depends_on:
       postgres:
