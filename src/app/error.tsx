@@ -52,6 +52,11 @@ export default function GlobalError({
           >
             Try Again
           </button>
+          {/* Intentional hard navigation (not next/link) — after an unhandled
+              error we want a full reload to reset all client state; this
+              trips eslint-config-next@15's stricter no-html-link-for-pages
+              rule, which didn't fire under the eslint-config-next@14 setup. */}
+          {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
           <a
             href="/"
             className="rounded-lg border border-surface-300 bg-white px-4 py-2 text-sm font-medium text-surface-700 shadow-sm hover:bg-surface-50 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2 transition-colors dark:border-surface-600 dark:bg-surface-800 dark:text-surface-200 dark:hover:bg-surface-700"

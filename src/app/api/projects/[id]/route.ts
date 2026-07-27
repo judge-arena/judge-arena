@@ -10,10 +10,8 @@ const updateProjectSchema = z.object({
 });
 
 // GET /api/projects/[id]
-export async function GET(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'projects:read');
@@ -130,10 +128,8 @@ export async function GET(
 }
 
 // PATCH /api/projects/[id]
-export async function PATCH(
-  request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function PATCH(request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'projects:write');
@@ -174,10 +170,8 @@ export async function PATCH(
 }
 
 // DELETE /api/projects/[id]
-export async function DELETE(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'projects:write');

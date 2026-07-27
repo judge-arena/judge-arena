@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createVersionSchema } from '@/app/api/datasets/[id]/versions/route';
+import { createVersionSchema } from '@/app/api/datasets/[id]/versions/schema';
 
 describe('createVersionSchema validation', () => {
   it('accepts valid samples array with all fields', () => {

@@ -48,10 +48,8 @@ const fullEvaluationInclude = {
  * In "all" mode for CSV we produce a single file with evaluations data since
  * CSV can only have one table. For JSONL we use a `_type` discriminator field.
  */
-export async function GET(
-  request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'projects:export');

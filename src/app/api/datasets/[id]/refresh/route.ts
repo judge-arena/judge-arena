@@ -6,10 +6,8 @@ import { buildRefreshUpdate } from '@/lib/dataset-refresh-update';
 import { logger, serializeError } from '@/lib/logger';
 
 // POST /api/datasets/[id]/refresh - Refresh metadata from remote source
-export async function POST(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function POST(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'datasets:write');

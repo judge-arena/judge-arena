@@ -70,7 +70,7 @@ describe('Dataset version: samples validation and persistence (real POST route)'
           { input: 'new sample 3', expected: null },
         ],
       }),
-      { params: { id: dataset.id } }
+      { params: Promise.resolve({ id: dataset.id }) }
     );
 
     expect(response.status).toBe(201);
@@ -119,7 +119,7 @@ describe('Dataset version: samples validation and persistence (real POST route)'
       data: { datasetId: dataset.id, index: 1, input: 'sample to copy 2', expected: 'expected 2' },
     });
 
-    const response = await POST(postRequest({}), { params: { id: dataset.id } });
+    const response = await POST(postRequest({}), { params: Promise.resolve({ id: dataset.id }) });
 
     expect(response.status).toBe(201);
     const newVersion = await response.json();
@@ -154,7 +154,7 @@ describe('Dataset version: samples validation and persistence (real POST route)'
 
     // No body at all — request.json() throws (empty stream) unless the
     // route catches it and falls back gracefully.
-    const response = await POST(postRequest(undefined), { params: { id: dataset.id } });
+    const response = await POST(postRequest(undefined), { params: Promise.resolve({ id: dataset.id }) });
 
     expect(response.status).toBe(201);
     const newVersion = await response.json();
@@ -184,7 +184,7 @@ describe('Dataset version: samples validation and persistence (real POST route)'
     });
 
     // Body parses to JS `null` — `'samples' in body` throws unless guarded.
-    const response = await POST(postRequest(null), { params: { id: dataset.id } });
+    const response = await POST(postRequest(null), { params: Promise.resolve({ id: dataset.id }) });
 
     expect(response.status).toBe(201);
     const newVersion = await response.json();
@@ -217,7 +217,7 @@ describe('Dataset version: samples validation and persistence (real POST route)'
 
     const response = await POST(
       postRequest({ samples: 'not-an-array' }),
-      { params: { id: dataset.id } }
+      { params: Promise.resolve({ id: dataset.id }) }
     );
 
     expect(response.status).toBe(400);
@@ -258,7 +258,7 @@ describe('Dataset version: samples validation and persistence (real POST route)'
 
     const response = await POST(
       postRequest({ samples: [{ input: 'test input', expected: 'test expected', metadata: complexMetadata }] }),
-      { params: { id: dataset.id } }
+      { params: Promise.resolve({ id: dataset.id }) }
     );
 
     expect(response.status).toBe(201);

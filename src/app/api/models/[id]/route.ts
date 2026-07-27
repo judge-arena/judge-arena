@@ -15,10 +15,8 @@ const updateModelSchema = z.object({
 });
 
 // GET /api/models/[id]
-export async function GET(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'models:read');
@@ -52,10 +50,8 @@ export async function GET(
 }
 
 // PATCH /api/models/[id]
-export async function PATCH(
-  request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function PATCH(request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'models:write');
@@ -125,10 +121,8 @@ export async function PATCH(
 }
 
 // DELETE /api/models/[id]
-export async function DELETE(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'models:write');

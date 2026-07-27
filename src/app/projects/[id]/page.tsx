@@ -1153,6 +1153,11 @@ export default function ProjectDetailPage() {
                       {datasetPickerOptions.length === 0 && (
                         <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/30 px-3 py-2.5 text-xs text-amber-800 dark:text-amber-300">
                           No datasets with samples available.{' '}
+                          {/* Plain anchor trips eslint-config-next@15's stricter
+                              no-html-link-for-pages rule (silent under the
+                              eslint-config-next@14 setup); preserved as-is to
+                              keep this platform upgrade behavior-neutral. */}
+                          {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
                           <a href="/datasets" className="underline font-medium hover:text-amber-900 dark:hover:text-amber-200">
                             Create a dataset first
                           </a>.

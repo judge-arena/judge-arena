@@ -6,24 +6,7 @@ import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { refreshDatasetEvaluationSummaryForEvaluation } from '@/lib/dataset-evaluation-summary';
 import { logger, serializeError } from '@/lib/logger';
 import { resolveHumanJudgmentScore } from '@/lib/utils';
-
-export const humanJudgmentSchema = z.object({
-  overallScore: z.number().min(0).max(10).optional(),
-  reasoning: z.string().max(5000).optional(),
-  criteriaScores: z
-    .array(
-      z.object({
-        criterionId: z.string(),
-        criterionName: z.string(),
-        score: z.number().min(0),
-        maxScore: z.number().min(1),
-        weight: z.number(),
-        comment: z.string().optional(),
-      })
-    )
-    .optional(),
-  selectedBestModelId: z.string().nullable().optional(),
-});
+import { humanJudgmentSchema } from './schema';
 
 /**
  * POST /api/evaluations/[id]/runs/[runId]/human-judgment
@@ -32,8 +15,9 @@ export const humanJudgmentSchema = z.object({
  */
 export async function POST(
   request: Request,
-  { params }: { params: { id: string; runId: string } }
+  props: { params: Promise<{ id: string; runId: string }> }
 ) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'evaluations:judge');

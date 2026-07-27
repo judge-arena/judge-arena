@@ -14,10 +14,8 @@ const updateDatasetSchema = z.object({
 });
 
 // GET /api/datasets/[id] - Get a single dataset with samples
-export async function GET(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'datasets:read');
@@ -71,10 +69,8 @@ export async function GET(
 }
 
 // PATCH /api/datasets/[id] - Update a dataset
-export async function PATCH(
-  request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function PATCH(request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'datasets:write');
@@ -132,10 +128,8 @@ export async function PATCH(
 }
 
 // DELETE /api/datasets/[id]
-export async function DELETE(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'datasets:write');

@@ -18,10 +18,8 @@ const createRunSchema = z.object({
 const runDetailInclude = runDetailIncludeConfig;
 
 // GET /api/evaluations/[id]/runs — list all runs for a template
-export async function GET(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'evaluations:read');
@@ -51,10 +49,8 @@ export async function GET(
 }
 
 // POST /api/evaluations/[id]/runs — create a new run and fire model judgments
-export async function POST(
-  request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'evaluations:run');

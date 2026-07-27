@@ -20,10 +20,8 @@ const newVersionSchema = z.object({
 });
 
 // GET /api/rubrics/[id]/versions
-export async function GET(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
 
@@ -56,10 +54,8 @@ export async function GET(
 }
 
 // POST /api/rubrics/[id]/versions
-export async function POST(
-  request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'rubrics:write');

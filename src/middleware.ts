@@ -64,8 +64,11 @@ function getClientIp(request: NextRequest): string {
     if (realIp) return realIp;
   }
 
-  // Next.js provides the socket IP via request.ip in Edge runtime
-  return request.ip ?? '127.0.0.1';
+  // `NextRequest.ip` was only ever populated on Vercel's edge network (never
+  // for this app's self-hosted Docker/Node deployment) and was removed from
+  // the type entirely in Next.js 15. Untrusted-proxy requests fall back to
+  // the loopback literal, matching the runtime behavior this app already had.
+  return '127.0.0.1';
 }
 
 /**

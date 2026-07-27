@@ -4,20 +4,11 @@ import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { generateSlug } from '@/lib/config';
 import { logger, serializeError } from '@/lib/logger';
-
-export const createVersionSchema = z.object({
-  samples: z.array(z.object({
-    input: z.string().min(1),
-    expected: z.string().optional().nullable(),
-    metadata: z.record(z.unknown()).optional(),
-  })).optional(),
-});
+import { createVersionSchema } from './schema';
 
 // POST /api/datasets/[id]/versions — create a new version from the current dataset
-export async function POST(
-  request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'datasets:write');
@@ -152,10 +143,8 @@ export async function POST(
 }
 
 // GET /api/datasets/[id]/versions — list all versions of a dataset
-export async function GET(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
 

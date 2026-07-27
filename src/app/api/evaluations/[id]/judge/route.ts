@@ -7,10 +7,8 @@ import { NextResponse } from 'next/server';
  * to the Evaluation template.  This endpoint is kept as a 410 Gone stub so that
  * any lingering client references fail with a clear error rather than a 404.
  */
-export async function POST(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function POST(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   return NextResponse.json(
     {
       error: 'This endpoint has been replaced.',

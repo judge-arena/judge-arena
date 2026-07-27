@@ -28,10 +28,8 @@ const runSummaryInclude = {
 };
 
 // GET /api/evaluations/[id]
-export async function GET(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'evaluations:read');
@@ -78,10 +76,8 @@ export async function GET(
 }
 
 // PATCH /api/evaluations/[id] — update template defaults (rubric / model selections)
-export async function PATCH(
-  request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function PATCH(request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'evaluations:write');
@@ -175,10 +171,8 @@ export async function PATCH(
 }
 
 // DELETE /api/evaluations/[id]
-export async function DELETE(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'evaluations:write');

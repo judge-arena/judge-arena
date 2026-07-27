@@ -17,10 +17,8 @@ import { logger, serializeError } from '@/lib/logger';
  * Includes every column the user entered: index, input, expected, metadata.
  * For local datasets this recreates the original data file.
  */
-export async function GET(
-  request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'datasets:export');

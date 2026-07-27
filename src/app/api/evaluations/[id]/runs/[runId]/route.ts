@@ -41,8 +41,9 @@ const runDetailInclude = {
 // GET /api/evaluations/[id]/runs/[runId]
 export async function GET(
   _request: Request,
-  { params }: { params: { id: string; runId: string } }
+  props: { params: Promise<{ id: string; runId: string }> }
 ) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'evaluations:read');

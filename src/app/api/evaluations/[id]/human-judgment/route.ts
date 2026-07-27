@@ -6,10 +6,8 @@ import { NextResponse } from 'next/server';
  * Human judgments are now tied to individual EvaluationRun records.
  * This endpoint is kept as a 410 Gone stub.
  */
-export async function POST(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function POST(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   return NextResponse.json(
     {
       error: 'This endpoint has been replaced.',

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { humanJudgmentSchema } from '@/app/api/evaluations/[id]/runs/[runId]/human-judgment/route';
+import { humanJudgmentSchema } from '@/app/api/evaluations/[id]/runs/[runId]/human-judgment/schema';
 
 // ─── humanJudgmentSchema: maxScore NaN guard ────────────────────────────────
 // criteriaScores[].maxScore feeds computeWeightedScore's `score / maxScore`

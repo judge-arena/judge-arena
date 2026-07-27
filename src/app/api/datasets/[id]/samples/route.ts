@@ -32,10 +32,8 @@ const bulkReplaceSamplesSchema = z.object({
 });
 
 // POST /api/datasets/[id]/samples — add new samples to the dataset
-export async function POST(
-  request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function POST(request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'datasets:write');
@@ -95,10 +93,8 @@ export async function POST(
 }
 
 // PATCH /api/datasets/[id]/samples — update a single sample
-export async function PATCH(
-  request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function PATCH(request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'datasets:write');
@@ -159,10 +155,8 @@ export async function PATCH(
 }
 
 // DELETE /api/datasets/[id]/samples — delete samples by ID
-export async function DELETE(
-  request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function DELETE(request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'datasets:write');
@@ -241,10 +235,8 @@ export async function DELETE(
 }
 
 // PUT /api/datasets/[id]/samples — bulk replace all samples (used by revert)
-export async function PUT(
-  request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function PUT(request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'datasets:write');

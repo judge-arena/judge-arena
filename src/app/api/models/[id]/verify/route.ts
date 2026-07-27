@@ -11,10 +11,8 @@ const DEFAULT_CLAUDE_MODEL_IDS = new Set([
 ]);
 
 // POST /api/models/[id]/verify
-export async function POST(
-  _request: Request,
-  { params }: { params: { id: string } }
-) {
+export async function POST(_request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   const scopeCheck = requireScope(session, 'models:verify');
