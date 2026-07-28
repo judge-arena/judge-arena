@@ -2,8 +2,14 @@ import { afterAll, describe, expect, it } from 'vitest';
 import type { Channel, ConsumeMessage } from 'amqplib';
 import { prisma } from '@/lib/db';
 import { closeRabbit, getRabbit } from '@/lib/queue/connection';
-import { assertTopology, QUEUE_JUDGMENT_EXECUTE } from '@/lib/queue/topology';
-import { type JudgmentExecuteMsg, type RunCreateMsg } from '@/lib/queue/publish';
+import {
+  assertTopology,
+  QUEUE_DLQ,
+  QUEUE_JUDGMENT_EXECUTE,
+  QUEUE_JUDGMENT_RETRY_30S,
+  QUEUE_JUDGMENT_RETRY_5M,
+} from '@/lib/queue/topology';
+import { type DlqEnvelope, type JudgmentExecuteMsg, type RunCreateMsg } from '@/lib/queue/publish';
 import { ProviderError } from '@/lib/llm/errors';
 import {
   claimJudgment,
@@ -463,5 +469,193 @@ describe('worker claim idempotency (src/worker/claim.ts, judgment-consumer.ts, r
     const run = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: fixture.run.id } });
     expect(run.status).toBe('needs_human');
     expect(run.finalizedAt).not.toBeNull();
+  });
+
+  // ── Retry/DLQ disposition + persist-failure/within-lease hardening ──────
+  // (Task 7 review follow-up: disposition scope, strand-proof duplicates,
+  // attempt-cap integrity — see judgment-consumer.ts / claim.ts docstrings.)
+
+  it('a retryable provider failure on attempt 1 resets the judgment to pending and republishes onto judgment.retry.30s with attempt 2', async () => {
+    const fixture = await createFixture();
+    const judgment = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId);
+
+    const { confirmChannel } = await getRabbit();
+    await assertTopology(confirmChannel);
+    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_RETRY_30S);
+
+    const consumer = createJudgmentConsumer({
+      provider: async () => {
+        throw new ProviderError('temporary provider hiccup', { kind: 'retryable', provider: 'openai', status: 503 });
+      },
+    });
+    const msg: JudgmentExecuteMsg = { judgmentId: judgment.id, runId: fixture.run.id, attempt: 1 };
+    const ch = fakeChannel();
+
+    await consumer.handle(fakeMessage(msg), ch);
+
+    expect(ch.ackCalls).toHaveLength(1);
+    expect(ch.nackCalls).toHaveLength(0);
+
+    const persisted = await prisma.modelJudgment.findUniqueOrThrow({ where: { id: judgment.id } });
+    expect(persisted.status).toBe('pending');
+    expect(persisted.attemptCount).toBe(1); // claim's own increment; not bumped again here
+
+    const published = await drainQueue(confirmChannel, QUEUE_JUDGMENT_RETRY_30S);
+    expect(published).toHaveLength(1);
+    const republished = JSON.parse(published[0].content.toString()) as JudgmentExecuteMsg;
+    expect(republished.judgmentId).toBe(judgment.id);
+    expect(republished.attempt).toBe(2);
+  });
+
+  it('a retryable provider failure once effectiveAttempt reaches the 3-cap marks the judgment error and DLQs it instead of retrying again', async () => {
+    const fixture = await createFixture();
+    const judgment = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId);
+    // Pre-seed attemptCount=2 (as if two prior attempts already ran) so
+    // claimJudgment's own increment brings it to 3 on this delivery —
+    // effectiveAttempt = max(msg.attempt, judgment.attemptCount) must hit
+    // the cap here even though msg.attempt alone (3) already would too;
+    // this is the "normal sequential" shape of the cap, exercised
+    // alongside the crash-reclaim shape covered by claim.ts's own tests.
+    await prisma.modelJudgment.update({ where: { id: judgment.id }, data: { attemptCount: 2 } });
+
+    const { confirmChannel } = await getRabbit();
+    await assertTopology(confirmChannel);
+    await confirmChannel.purgeQueue(QUEUE_DLQ);
+
+    const consumer = createJudgmentConsumer({
+      provider: async () => {
+        throw new ProviderError('still failing after retries', { kind: 'retryable', provider: 'openai', status: 503 });
+      },
+    });
+    const msg: JudgmentExecuteMsg = { judgmentId: judgment.id, runId: fixture.run.id, attempt: 3 };
+    const ch = fakeChannel();
+
+    await consumer.handle(fakeMessage(msg), ch);
+
+    expect(ch.ackCalls).toHaveLength(1);
+    expect(ch.nackCalls).toHaveLength(0);
+
+    const persisted = await prisma.modelJudgment.findUniqueOrThrow({ where: { id: judgment.id } });
+    expect(persisted.status).toBe('error');
+    expect(persisted.error).toContain('still failing after retries');
+
+    const dlqMessages = await drainQueue(confirmChannel, QUEUE_DLQ);
+    expect(dlqMessages).toHaveLength(1);
+    const envelope = JSON.parse(dlqMessages[0].content.toString()) as DlqEnvelope;
+    expect(envelope.reason).toContain('still failing after retries');
+    expect((envelope.originalMessage as JudgmentExecuteMsg).judgmentId).toBe(judgment.id);
+  });
+
+  it('a breakerOpen provider failure routes to judgment.retry.5m regardless of attempt', async () => {
+    const fixture = await createFixture();
+    const judgment = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId);
+
+    const { confirmChannel } = await getRabbit();
+    await assertTopology(confirmChannel);
+    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_RETRY_5M);
+
+    const consumer = createJudgmentConsumer({
+      provider: async () => {
+        throw new ProviderError('circuit breaker open', {
+          kind: 'retryable',
+          provider: 'openai',
+          breakerOpen: true,
+        });
+      },
+    });
+    const msg: JudgmentExecuteMsg = { judgmentId: judgment.id, runId: fixture.run.id, attempt: 1 };
+    const ch = fakeChannel();
+
+    await consumer.handle(fakeMessage(msg), ch);
+
+    expect(ch.ackCalls).toHaveLength(1);
+    expect(ch.nackCalls).toHaveLength(0);
+
+    const persisted = await prisma.modelJudgment.findUniqueOrThrow({ where: { id: judgment.id } });
+    expect(persisted.status).toBe('pending');
+
+    const published = await drainQueue(confirmChannel, QUEUE_JUDGMENT_RETRY_5M);
+    expect(published).toHaveLength(1);
+    const republished = JSON.parse(published[0].content.toString()) as JudgmentExecuteMsg;
+    expect(republished.judgmentId).toBe(judgment.id);
+    expect(republished.attempt).toBe(2);
+  });
+
+  it('a provider success with persistSuccess failing 3x DLQs the full result and leaves the judgment row running, never re-executing the provider', async () => {
+    const fixture = await createFixture();
+    const judgment = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId);
+
+    const { confirmChannel } = await getRabbit();
+    await assertTopology(confirmChannel);
+    await confirmChannel.purgeQueue(QUEUE_DLQ);
+
+    const calls: RunProviderJudgmentInput[] = [];
+    let persistAttempts = 0;
+    const consumer = createJudgmentConsumer({
+      provider: fakeProvider(calls, { overallScore: 9, reasoning: 'persist-failure fixture reasoning' }),
+      persist: async () => {
+        persistAttempts += 1;
+        throw new Error('simulated persist failure');
+      },
+    });
+    const msg: JudgmentExecuteMsg = { judgmentId: judgment.id, runId: fixture.run.id, attempt: 1 };
+    const ch = fakeChannel();
+
+    await consumer.handle(fakeMessage(msg), ch);
+
+    expect(calls).toHaveLength(1); // provider called exactly once — a persist failure never re-executes it
+    expect(persistAttempts).toBe(3); // bounded local retry budget (3 attempts) exhausted
+    expect(ch.ackCalls).toHaveLength(1);
+    expect(ch.nackCalls).toHaveLength(0);
+
+    const persisted = await prisma.modelJudgment.findUniqueOrThrow({ where: { id: judgment.id } });
+    expect(persisted.status).toBe('running'); // left running for a future reaper reclaim, not flipped to error
+    expect(persisted.overallScore).toBeNull(); // persistSuccess never actually wrote — every local attempt threw
+
+    const dlqMessages = await drainQueue(confirmChannel, QUEUE_DLQ);
+    expect(dlqMessages).toHaveLength(1);
+    const envelope = JSON.parse(dlqMessages[0].content.toString()) as DlqEnvelope;
+    expect(envelope.reason).toBe('persist-failed-after-success');
+    const original = envelope.originalMessage as JudgmentExecuteMsg & {
+      result: { overallScore: number; reasoning: string };
+    };
+    expect(original.judgmentId).toBe(judgment.id);
+    expect(original.result.overallScore).toBe(9); // the FULL JudgmentResult travels with the DLQ envelope
+    expect(original.result.reasoning).toBe('persist-failure fixture reasoning');
+  });
+
+  it('a redelivery landing on a within-lease running claim republishes the SAME message onto judgment.retry.30s instead of stranding it', async () => {
+    const fixture = await createFixture();
+    const judgment = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId);
+
+    // Same "claimed and died" simulation as the claim-then-abandon test
+    // above, but this test asserts the NEW republish-not-strand behavior.
+    const claimResult = await claimJudgment(judgment.id);
+    expect(claimResult).toBe('claimed');
+
+    const { confirmChannel } = await getRabbit();
+    await assertTopology(confirmChannel);
+    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_RETRY_30S);
+
+    const calls: RunProviderJudgmentInput[] = [];
+    const consumer = createJudgmentConsumer({ provider: fakeProvider(calls) });
+    const msg: JudgmentExecuteMsg = { judgmentId: judgment.id, runId: fixture.run.id, attempt: 1 };
+    const ch = fakeChannel();
+
+    await consumer.handle(fakeMessage(msg), ch);
+
+    expect(calls).toHaveLength(0); // this delivery doesn't own the claim — never touches the provider
+    expect(ch.ackCalls).toHaveLength(1);
+    expect(ch.nackCalls).toHaveLength(0);
+
+    const persisted = await prisma.modelJudgment.findUniqueOrThrow({ where: { id: judgment.id } });
+    expect(persisted.status).toBe('running'); // untouched — still the original claim
+    expect(persisted.attemptCount).toBe(1); // not bumped by this delivery
+
+    const published = await drainQueue(confirmChannel, QUEUE_JUDGMENT_RETRY_30S);
+    expect(published).toHaveLength(1);
+    const republished = JSON.parse(published[0].content.toString()) as JudgmentExecuteMsg;
+    expect(republished.judgmentId).toBe(judgment.id);
+    expect(republished.attempt).toBe(1); // unchanged — a delayed re-check, not a new attempt
   });
 });

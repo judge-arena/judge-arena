@@ -8,17 +8,33 @@
  * Postgres's row-level locking on `UPDATE ... WHERE` makes the race atomic,
  * no `SELECT ... FOR UPDATE` or app-level mutex required.
  *
- * `'already_done'` is intentionally overloaded to cover two distinct DB
- * states — a genuinely terminal (`completed`/`error`) row, AND a `running`
- * row still comfortably inside its lease (someone else's live claim, not
- * yet stale). Both mean the same thing to a `judgment.execute` consumer:
- * don't call the provider, just ack. Only a `running` row whose `updatedAt`
- * has aged past `LEASE_MS` (the original claimant presumably died
- * mid-flight — killed process, dropped connection, crashed before ack) is
- * worth reclaiming, and that reclaim is itself just another conditional
+ * `'already_done'` means a genuinely terminal row (`completed`/`error`) —
+ * don't call the provider, just ack. A `running` row still comfortably
+ * inside its lease (someone else's live claim, not yet stale — or this
+ * call's own loss of the reclaim race below) is a DIFFERENT outcome,
+ * `'in_progress'`: unlike a terminal row, it isn't safe to just strand the
+ * message until the lease expires (Task 8's reclaim-sweeping reaper doesn't
+ * exist yet, so nothing would ever re-check it) — the consumer instead
+ * republishes the same message onto the 30s retry queue for a delayed
+ * re-check (see judgment-consumer.ts). Only a `running` row whose
+ * `updatedAt` has aged past `LEASE_MS` (the original claimant presumably
+ * died mid-flight — killed process, dropped connection, crashed before ack)
+ * is worth reclaiming, and that reclaim is itself just another conditional
  * UPDATE (`status: 'running', updatedAt: { lt: staleBefore }`), so a second
  * racing reclaim attempt loses cleanly the same way the initial claim does
- * (falls through to `'already_done'`, not a crash or a double-claim).
+ * (falls through to `'in_progress'`, not a crash or a double-claim).
+ *
+ * `'retry_claim'` covers a narrow inspection race: the initial conditional
+ * UPDATE (`WHERE status = 'pending'`) can find 0 rows because the row
+ * wasn't `pending` at that instant, yet by the time this function's
+ * follow-up `SELECT` runs, a concurrent write (e.g. another delivery's
+ * retryable-error disposition resetting the row back to `pending`) has
+ * landed in that gap and the row reads `pending` again — a real, live
+ * claim opportunity, not a terminal state. Misreporting it as
+ * `'already_done'` would silently strand a claimable judgment. The caller
+ * retries `claimJudgment()` once more; if that still doesn't resolve to
+ * `'claimed'`/`'stale_running'`, nack-requeue the message rather than loop
+ * claim attempts inline.
  */
 
 import { prisma } from '@/lib/db';
@@ -35,7 +51,7 @@ const EVALUATION_MODEL_TIMEOUT_MS = Number(process.env.EVALUATION_MODEL_TIMEOUT_
  */
 export const LEASE_MS = EVALUATION_MODEL_TIMEOUT_MS + 30_000;
 
-export type ClaimResult = 'claimed' | 'already_done' | 'not_found' | 'stale_running';
+export type ClaimResult = 'claimed' | 'already_done' | 'not_found' | 'stale_running' | 'in_progress' | 'retry_claim';
 
 /**
  * Attempt to claim `judgmentId` for processing.
@@ -45,10 +61,16 @@ export type ClaimResult = 'claimed' | 'already_done' | 'not_found' | 'stale_runn
  * - `'stale_running'` — the row was `running` but its lease had expired;
  *   this call won the reclaim (fresh `updatedAt`/incremented
  *   `attemptCount`); proceed to process it exactly like `'claimed'`.
- * - `'already_done'` — the row is terminal (`completed`/`error`), OR it's
- *   `running` and still within its lease (a live claim — either someone
- *   else's, or this call lost a reclaim race to a concurrent caller). Ack
- *   without calling the provider.
+ * - `'in_progress'` — the row is `running` and still within its lease (a
+ *   live claim — either someone else's, or this call lost a reclaim race to
+ *   a concurrent caller). Don't call the provider; the caller republishes
+ *   this same message onto the 30s retry queue for a delayed re-check
+ *   rather than dropping it (see judgment-consumer.ts).
+ * - `'already_done'` — the row is terminal (`completed`/`error`). Ack
+ *   without calling the provider or republishing anything.
+ * - `'retry_claim'` — an inspection-race artifact: the row read `pending`
+ *   again by the time of the follow-up SELECT (see module doc). The caller
+ *   should call `claimJudgment()` once more.
  * - `'not_found'` — no such judgment row. Ack (nothing to do).
  */
 export async function claimJudgment(judgmentId: string): Promise<ClaimResult> {
@@ -66,6 +88,13 @@ export async function claimJudgment(judgmentId: string): Promise<ClaimResult> {
   });
   if (!row) return 'not_found';
 
+  if (row.status === 'pending') {
+    // Inspection race: the row wasn't 'pending' when the conditional UPDATE
+    // above ran, but is 'pending' again now — a concurrent reset landed in
+    // the gap. Live claim opportunity; let the caller retry the attempt.
+    return 'retry_claim';
+  }
+
   if (row.status !== 'running') {
     // 'completed' or 'error' — terminal, nothing to reclaim.
     return 'already_done';
@@ -75,7 +104,7 @@ export async function claimJudgment(judgmentId: string): Promise<ClaimResult> {
   if (row.updatedAt >= staleBefore) {
     // Running, still within lease — duplicate delivery of a live claim.
     // The holder will finish (and ack) or its lease will eventually expire.
-    return 'already_done';
+    return 'in_progress';
   }
 
   const reclaim = await prisma.modelJudgment.updateMany({
@@ -87,5 +116,5 @@ export async function claimJudgment(judgmentId: string): Promise<ClaimResult> {
   // Lost the reclaim race to a concurrent caller (or the original claimant
   // resumed and touched the row again just in time) — treat as a live claim
   // this call doesn't own.
-  return 'already_done';
+  return 'in_progress';
 }
