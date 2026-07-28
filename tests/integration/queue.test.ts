@@ -11,6 +11,8 @@ import {
 } from '@/lib/queue/topology';
 import {
   publishJudgmentExecute,
+  publishJudgmentRetry30s,
+  publishJudgmentRetry5m,
   publishRunCreate,
   publishToDlq,
   type JudgmentExecuteMsg,
@@ -87,14 +89,17 @@ beforeAll(async () => {
 });
 
 afterEach(async () => {
-  // Purge the three main work queues so leftover messages from one test
-  // (e.g. a publish whose consume assertion failed) can't leak into the
-  // next. Retry queues aren't purged — nothing in this suite publishes
-  // into them directly (the DLX-proof test uses its own throwaway queue).
+  // Purge the work queues so leftover messages from one test (e.g. a
+  // publish whose consume assertion failed) can't leak into the next.
+  // judgment.retry.30s/5m are included now that publishJudgmentRetry30s/5m
+  // round-trip tests below actually put messages on them (the DLX-proof
+  // test still uses its own throwaway queue, not these).
   const { confirmChannel } = await getRabbit();
   await confirmChannel.purgeQueue(QUEUE_JUDGMENT_EXECUTE);
   await confirmChannel.purgeQueue(QUEUE_RUN_CREATE);
   await confirmChannel.purgeQueue(QUEUE_DLQ);
+  await confirmChannel.purgeQueue(QUEUE_JUDGMENT_RETRY_30S);
+  await confirmChannel.purgeQueue(QUEUE_JUDGMENT_RETRY_5M);
 });
 
 afterAll(async () => {
@@ -171,6 +176,32 @@ describe('publish -> consume round-trip (publisher confirms)', () => {
 
     expect(JSON.parse(received.content.toString())).toEqual(msg);
     expect(received.properties.deliveryMode).toBe(2);
+    confirmChannel.ack(received);
+  });
+
+  it('publishJudgmentRetry30s lands a persistent, confirmed message on judgment.retry.30s', async () => {
+    const msg: JudgmentExecuteMsg = { judgmentId: 'judgment-retry-30s', runId: 'run-1', attempt: 2 };
+    await publishJudgmentRetry30s(msg);
+
+    const { confirmChannel } = await getRabbit();
+    const received = await consumeOne(confirmChannel, QUEUE_JUDGMENT_RETRY_30S);
+
+    expect(JSON.parse(received.content.toString())).toEqual(msg);
+    expect(received.properties.deliveryMode).toBe(2);
+    expect(received.properties.contentType).toBe('application/json');
+    confirmChannel.ack(received);
+  });
+
+  it('publishJudgmentRetry5m lands a persistent, confirmed message on judgment.retry.5m', async () => {
+    const msg: JudgmentExecuteMsg = { judgmentId: 'judgment-retry-5m', runId: 'run-1', attempt: 3 };
+    await publishJudgmentRetry5m(msg);
+
+    const { confirmChannel } = await getRabbit();
+    const received = await consumeOne(confirmChannel, QUEUE_JUDGMENT_RETRY_5M);
+
+    expect(JSON.parse(received.content.toString())).toEqual(msg);
+    expect(received.properties.deliveryMode).toBe(2);
+    expect(received.properties.contentType).toBe('application/json');
     confirmChannel.ack(received);
   });
 

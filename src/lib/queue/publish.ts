@@ -15,7 +15,14 @@
  */
 
 import { getRabbit } from './connection';
-import { EXCHANGE, QUEUE_DLQ, QUEUE_JUDGMENT_EXECUTE, QUEUE_RUN_CREATE } from './topology';
+import {
+  EXCHANGE,
+  QUEUE_DLQ,
+  QUEUE_JUDGMENT_EXECUTE,
+  QUEUE_JUDGMENT_RETRY_30S,
+  QUEUE_JUDGMENT_RETRY_5M,
+  QUEUE_RUN_CREATE,
+} from './topology';
 import type { ConfirmChannel } from 'amqplib';
 
 export interface JudgmentExecuteMsg {
@@ -84,6 +91,31 @@ export async function publishJudgmentExecute(msg: JudgmentExecuteMsg): Promise<v
 export async function publishRunCreate(msg: RunCreateMsg): Promise<void> {
   const { confirmChannel } = await getRabbit();
   await publishConfirmed(confirmChannel, EXCHANGE, QUEUE_RUN_CREATE, msg);
+}
+
+/**
+ * Publish a judgment onto the 30s retry holding queue (Task 7's worker,
+ * first retryable failure on a message's `attempt` 1 -> 2). The queue's own
+ * `x-message-ttl` + `x-dead-letter-exchange`/`-routing-key` (see
+ * topology.ts) redeliver it onto `judgment.execute` once the TTL elapses —
+ * this function only ever puts the message on the holding queue, it never
+ * touches `judgment.execute` directly.
+ */
+export async function publishJudgmentRetry30s(msg: JudgmentExecuteMsg): Promise<void> {
+  const { confirmChannel } = await getRabbit();
+  await publishConfirmed(confirmChannel, EXCHANGE, QUEUE_JUDGMENT_RETRY_30S, msg);
+}
+
+/**
+ * Publish a judgment onto the 5m retry holding queue (Task 7's worker,
+ * second retryable failure on attempt 2 -> 3, or any breaker-open failure
+ * regardless of attempt — see judgment-consumer.ts's disposition logic).
+ * Same dead-letter-back-onto-`judgment.execute` mechanism as
+ * `publishJudgmentRetry30s`, just the longer-TTL queue.
+ */
+export async function publishJudgmentRetry5m(msg: JudgmentExecuteMsg): Promise<void> {
+  const { confirmChannel } = await getRabbit();
+  await publishConfirmed(confirmChannel, EXCHANGE, QUEUE_JUDGMENT_RETRY_5M, msg);
 }
 
 /**

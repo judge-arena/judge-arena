@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "next dev",
+    "worker": "tsx src/worker/main.ts",
     "build": "npx prisma generate && next build",
     "start": "node .next/standalone/server.js",
     "test": "vitest run",
