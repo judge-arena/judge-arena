@@ -6,7 +6,8 @@
  * resolve a `ModelEndpoint` to call through -> run the provider call (via
  * the `runProviderJudgment` seam, injectable for tests) -> persist the
  * result -> publish `judgment.completed` on `run:{runId}` (best-effort,
- * never fails the message) -> a placeholder finalization pass -> ack.
+ * never fails the message) -> finalization pass (`maybeFinalizeRun`, src/lib/
+ * run-finalizer.ts) -> ack.
  *
  * ── The provider seam ───────────────────────────────────────────────────────
  * `runProviderJudgment` is intentionally narrow: `{ judgment, run, rubric,
@@ -86,6 +87,7 @@ import {
 import { classify, ProviderError } from '@/lib/llm/errors';
 import { executeJudgment } from '@/lib/llm';
 import type { JudgmentRequest, JudgmentResponse, ProviderConfig } from '@/lib/llm';
+import { maybeFinalizeRun } from '@/lib/run-finalizer';
 import { claimJudgment } from './claim';
 
 /** Attempt budget: 1st delivery (attempt=1) plus up to 2 retries. On the
@@ -263,35 +265,14 @@ async function persistSuccess(
 }
 
 /**
- * TASK 8 replaces: minimal placeholder finalization. Counts remaining
- * `pending`/`running` judgments for the run; if none remain, flips the run
- * to `needs_human` + stamps `finalizedAt`. No `SELECT ... FOR UPDATE` row
- * lock — two judgments on the same run finishing at nearly the same instant
- * could both observe `remaining === 0` and both reach the `updateMany`
- * below, but its own `status: { in: [...] }` guard makes that harmless (the
- * second call just updates 0 rows once the first has already moved the run
- * off `pending`/`judging`). Task 8 replaces this with a real
- * concurrency-safe finalization pass.
- */
-async function maybeFinalizeRun(runId: string): Promise<void> {
-  const remaining = await prisma.modelJudgment.count({
-    where: { runId, status: { in: ['pending', 'running'] } },
-  });
-  if (remaining > 0) return;
-
-  await prisma.evaluationRun.updateMany({
-    where: { id: runId, status: { in: ['pending', 'judging'] } },
-    data: { status: 'needs_human', finalizedAt: new Date() },
-  });
-}
-
-/**
- * `maybeFinalizeRun`, isolated in its own try/catch. A finalization failure
- * must never propagate into the disposition catch below (where it would get
- * misclassified as a provider error, resetting an already-`completed` — or,
- * for the error-path callers, already-`error` — judgment back to `pending`
- * and triggering a bogus provider retry) and must never affect the
- * judgment row itself. Log and continue either way.
+ * `maybeFinalizeRun` (src/lib/run-finalizer.ts — the real, `SELECT ... FOR
+ * UPDATE`-locked, concurrency-safe finalization pass), isolated in its own
+ * try/catch. A finalization failure must never propagate into the
+ * disposition catch below (where it would get misclassified as a provider
+ * error, resetting an already-`completed` — or, for the error-path callers,
+ * already-`error` — judgment back to `pending` and triggering a bogus
+ * provider retry) and must never affect the judgment row itself. Log and
+ * continue either way.
  */
 async function safeFinalizeRun(runId: string): Promise<void> {
   try {

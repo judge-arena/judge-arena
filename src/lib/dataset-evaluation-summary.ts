@@ -28,40 +28,19 @@ function average(values: number[]): number | null {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-export async function refreshDatasetEvaluationSummary(datasetId: string): Promise<void> {
-  const dataset = await prisma.dataset.findUnique({
-    where: { id: datasetId },
-    include: {
-      evaluations: {
-        include: {
-          runs: {
-            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-            take: 1,
-            include: {
-              modelJudgments: {
-                select: {
-                  status: true,
-                  overallScore: true,
-                },
-              },
-              humanJudgment: {
-                select: {
-                  overallScore: true,
-                },
-              },
-            },
-          },
-        },
-      },
-    },
-  });
+interface EvaluationForSummary {
+  responseText: string | null;
+  runs: Array<{
+    modelJudgments: Array<{ status: string; overallScore: number | null }>;
+    humanJudgment: { overallScore: number } | null;
+  }>;
+}
 
-  if (!dataset) return;
-
+function computeSummary(evaluations: EvaluationForSummary[]): DatasetEvaluationSummary {
   const modelAveragesBySample: number[] = [];
   const humanScoresBySample: number[] = [];
 
-  dataset.evaluations.forEach((evaluation) => {
+  evaluations.forEach((evaluation) => {
     const latestRun = evaluation.runs[0];
     if (!latestRun) return;
 
@@ -94,33 +73,96 @@ export async function refreshDatasetEvaluationSummary(datasetId: string): Promis
     }
   });
 
-  const summary: DatasetEvaluationSummary = {
+  return {
     updatedAt: new Date().toISOString(),
-    sampleCount: dataset.evaluations.length,
+    sampleCount: evaluations.length,
     samplesWithModelScores: modelAveragesBySample.length,
     samplesWithHumanScores: humanScoresBySample.length,
     averageModelScore: average(modelAveragesBySample),
     averageHumanScore: average(humanScoresBySample),
   };
+}
 
-  const metadata = parseMetadata(dataset.remoteMetadata);
+/**
+ * Recompute a dataset's `evaluationSummary` and write it back, race-free.
+ *
+ * Pre-Task-8, this did a plain read-modify-write: `dataset.findUnique()`
+ * (including everything needed to compute the summary), compute in memory,
+ * then `dataset.update()` with `{ ...oldMetadata, evaluationSummary }` — two
+ * unsynchronized round trips. Two calls racing for the same dataset (e.g.
+ * two runs on two different evaluations of the same dataset finalizing
+ * within milliseconds of each other, both triggering a refresh) could both
+ * read the same pre-race `remoteMetadata`, both compute a summary from
+ * their own snapshot of the DB, and then write back-to-back — the SECOND
+ * writer's `{ ...oldMetadata, ... }` spread is built from a snapshot that
+ * doesn't include whatever the FIRST writer had already committed to
+ * `remoteMetadata`'s other fields, silently discarding it (a lost update).
+ *
+ * Fix: a single `$transaction` that opens with
+ * `SELECT ... FROM "Dataset" WHERE id = $1 FOR UPDATE` (`$queryRaw` — no
+ * query-builder equivalent), serializing every concurrent call for the same
+ * dataset on Postgres's own row lock. The evaluations/runs/judgments read
+ * used to COMPUTE the summary, and the `remoteMetadata` read used to
+ * PRESERVE non-summary fields, both happen INSIDE this same transaction
+ * (after the lock is held) — under READ COMMITTED, each statement sees the
+ * latest committed data, so the second caller to acquire the lock reads
+ * whatever the first caller just committed, rather than a stale pre-lock
+ * snapshot. The write is a single `UPDATE` merging the freshly-recomputed
+ * summary into that freshly-read metadata. (`buildRefreshUpdate` in
+ * dataset-refresh-update.ts, used by the separate HF-refresh route, is
+ * untouched — it has its own preserve-evaluationSummary contract and isn't
+ * part of this race.)
+ */
+export async function refreshDatasetEvaluationSummary(datasetId: string): Promise<void> {
+  const commit = await prisma.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw<Array<{ id: string; userId: string; remoteMetadata: string | null }>>`
+      SELECT id, "userId", "remoteMetadata" FROM "Dataset" WHERE id = ${datasetId} FOR UPDATE
+    `;
+    const dataset = rows[0];
+    if (!dataset) return null;
 
-  await prisma.dataset.update({
-    where: { id: datasetId },
-    data: {
-      remoteMetadata: JSON.stringify({
-        ...metadata,
-        evaluationSummary: summary,
-      }),
-    },
+    const evaluations = await tx.evaluation.findMany({
+      where: { datasetId },
+      select: {
+        responseText: true,
+        runs: {
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          take: 1,
+          select: {
+            modelJudgments: { select: { status: true, overallScore: true } },
+            humanJudgment: { select: { overallScore: true } },
+          },
+        },
+      },
+    });
+
+    const summary = computeSummary(evaluations);
+
+    // Freshly-read remoteMetadata (this transaction's OWN post-lock SELECT
+    // above) — never a snapshot read before the lock was acquired. This is
+    // what kills the lost-update race described above.
+    const metadata = parseMetadata(dataset.remoteMetadata);
+
+    await tx.dataset.update({
+      where: { id: datasetId },
+      data: { remoteMetadata: JSON.stringify({ ...metadata, evaluationSummary: summary }) },
+    });
+
+    return { summary, userId: dataset.userId };
   });
 
+  if (!commit) return;
+
   // Route to the dataset owner's topic — dataset.summary.updated is only
-  // meaningful (and only visible) to whoever owns the dataset. `dataset`
-  // above was fetched without a `select`, so `userId` is present.
-  await publishEvent(userTopic(dataset.userId), {
+  // meaningful (and only visible) to whoever owns the dataset. Unlike
+  // run-finalizer.ts's post-finalization call into this function (which
+  // treats the whole refresh as a best-effort, non-fatal side effect), a
+  // publish failure HERE propagates — same contract as before this task
+  // (see realtime/events.ts's docstring: this module lets `publishEvent`
+  // failures propagate to its own callers, who each decide what that means).
+  await publishEvent(userTopic(commit.userId), {
     type: 'dataset.summary.updated',
-    payload: { datasetId, summary },
+    payload: { datasetId, summary: commit.summary },
   });
 }
 

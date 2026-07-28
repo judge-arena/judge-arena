@@ -26,11 +26,13 @@ import http from 'node:http';
 import type { Channel, ConsumeMessage } from 'amqplib';
 import { getRabbit, closeRabbit, rabbitHealthy } from '@/lib/queue/connection';
 import { assertTopology, QUEUE_JUDGMENT_EXECUTE, QUEUE_RUN_CREATE } from '@/lib/queue/topology';
+import { publishJudgmentRetry30s, type JudgmentExecuteMsg } from '@/lib/queue/publish';
 import { redisHealthy } from '@/lib/redis';
 import { prisma } from '@/lib/db';
 import { logger, serializeError } from '@/lib/logger';
 import { createJudgmentConsumer } from './judgment-consumer';
 import { createRunCreateConsumer } from './run-create-consumer';
+import { startReaper } from './reaper';
 
 const MODEL_CONCURRENCY_PER_RUN = Number(process.env.EVALUATION_MODEL_CONCURRENCY_PER_RUN ?? '2');
 const PREFETCH = Math.max(1, MODEL_CONCURRENCY_PER_RUN) * 4;
@@ -91,28 +93,79 @@ async function main(): Promise<void> {
 
   const judgmentConsumer = createJudgmentConsumer();
   const runCreateConsumer = createRunCreateConsumer();
+  const reaper = startReaper();
 
   let inFlight = 0;
   let draining = false;
   const consumerTags: string[] = [];
 
+  /**
+   * Wraps a consumer's `handle()` with the in-flight counter and a
+   * requeue-on-unexpected-failure fallback. A handler completing its own
+   * claim/ack/retry/DLQ disposition should never throw — an escaping error
+   * here means something upstream of that disposition broke (DB/queue
+   * connectivity, a bug in context-loading, malformed message content).
+   *
+   * First failure on a given delivery (`msg.fields.redelivered === false`):
+   * plain nack-requeue, same as before this task — gives a one-off
+   * transient blip (a dropped DB connection that immediately reconnects)
+   * the benefit of the doubt with an immediate retry.
+   *
+   * Second+ failure on the SAME message (`msg.fields.redelivered === true`
+   * — this delivery is already a requeue of a previously-unacked message):
+   * a bare nack-requeue here would just loop it back to this same consumer
+   * at full speed (RabbitMQ's requeue-on-nack has no delay), spinning tight
+   * on whatever's actually broken instead of backing off. For
+   * `judgment.execute` messages specifically, route onto that queue's own
+   * 30s retry holding queue instead — same TTL-then-dead-letter-back-onto-
+   * judgment.execute mechanism judgment-consumer.ts's own retryable-error
+   * disposition uses, just entered from a different failure surface (a
+   * dispatch-level throw, not a classified provider error). This is bounded
+   * because the message keeps its original `attempt` field: once it's back
+   * on judgment.execute and the handler runs successfully enough to reach
+   * its own disposition logic, judgment-consumer.ts's `effectiveAttempt`
+   * cap (`MAX_ATTEMPTS`) still applies on that subsequent attempt, so a
+   * truly poison message still eventually reaches the DLQ rather than
+   * retrying forever — this dispatch-level guard only adds a delay before
+   * that normal cap-driven path gets another chance to run. `run.create`
+   * messages have no equivalent retry queue (their handler already
+   * swallows its own errors per its own module doc — this whole catch is
+   * already the rare "shouldn't happen" case for them), so they always fall
+   * through to the plain nack-requeue below regardless of `redelivered`.
+   */
   async function dispatch(
     msg: ConsumeMessage,
     ch: Channel,
-    handler: (msg: ConsumeMessage, ch: Channel) => Promise<void>
+    handler: (msg: ConsumeMessage, ch: Channel) => Promise<void>,
+    queueName: string
   ): Promise<void> {
     inFlight += 1;
     try {
       await handler(msg, ch);
     } catch (error) {
-      // A handler completing its own claim/ack/retry/DLQ disposition should
-      // never throw — this is a genuinely unexpected failure (DB/queue
-      // connectivity, a bug). Nack with requeue so the message isn't lost;
-      // never drop it silently. If the underlying cause is persistent (e.g.
-      // DB truly down) this does mean tight redelivery until it recovers —
-      // accepted for now, no backoff-on-unexpected-error mechanism exists
-      // yet at this layer.
-      logger.error('unhandled consumer error — requeueing', { error: serializeError(error) });
+      logger.error('unhandled consumer error', {
+        queue: queueName,
+        redelivered: Boolean(msg.fields.redelivered),
+        error: serializeError(error),
+      });
+
+      if (msg.fields.redelivered && queueName === QUEUE_JUDGMENT_EXECUTE) {
+        try {
+          const parsed = JSON.parse(msg.content.toString()) as JudgmentExecuteMsg;
+          await publishJudgmentRetry30s(parsed);
+          ch.ack(msg);
+          return;
+        } catch (routeError) {
+          logger.error(
+            'dispatch: failed to route a repeatedly-failing judgment.execute message to judgment.retry.30s — falling back to nack-requeue',
+            { error: serializeError(routeError) }
+          );
+        }
+      }
+
+      // First failure on this delivery, a run.create message, or the
+      // retry-queue routing attempt above itself failed — nack-requeue so
+      // the message isn't lost; never drop it silently.
       ch.nack(msg, false, true);
     } finally {
       inFlight -= 1;
@@ -123,7 +176,7 @@ async function main(): Promise<void> {
     QUEUE_JUDGMENT_EXECUTE,
     (msg) => {
       if (!msg) return;
-      void dispatch(msg, confirmChannel, judgmentConsumer.handle);
+      void dispatch(msg, confirmChannel, judgmentConsumer.handle, QUEUE_JUDGMENT_EXECUTE);
     },
     { noAck: false }
   );
@@ -133,7 +186,7 @@ async function main(): Promise<void> {
     QUEUE_RUN_CREATE,
     (msg) => {
       if (!msg) return;
-      void dispatch(msg, confirmChannel, runCreateConsumer.handle);
+      void dispatch(msg, confirmChannel, runCreateConsumer.handle, QUEUE_RUN_CREATE);
     },
     { noAck: false }
   );
@@ -146,6 +199,7 @@ async function main(): Promise<void> {
     draining = true;
     logger.info(`${signal} received — draining worker`);
 
+    reaper.stop();
     await Promise.all(consumerTags.map((tag) => confirmChannel.cancel(tag)));
 
     const drainStart = Date.now();

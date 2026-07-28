@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { refreshDatasetEvaluationSummaryForEvaluation } from '@/lib/dataset-evaluation-summary';
+import { markRunCompleted } from '@/lib/run-finalizer';
 import { logger, serializeError } from '@/lib/logger';
 import { resolveHumanJudgmentScore } from '@/lib/utils';
 import { humanJudgmentSchema } from './schema';
@@ -119,14 +120,11 @@ export async function POST(
       },
     });
 
-    // Mark run as completed once human judgment is submitted
-    // (transitions from needs_human -> completed, or judging -> completed)
-    if (run.status !== 'completed') {
-      await prisma.evaluationRun.update({
-        where: { id: params.runId },
-        data: { status: 'completed' },
-      });
-    }
+    // Mark run as completed once human judgment is submitted — guarded
+    // transition (needs_human -> completed ONLY; see run-finalizer.ts's
+    // markRunCompleted doc). A run still pending/judging (automated judging
+    // not finished yet) or already completed is a safe no-op here.
+    await markRunCompleted(params.runId);
 
     await refreshDatasetEvaluationSummaryForEvaluation(run.evaluation.id);
 

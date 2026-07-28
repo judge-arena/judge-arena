@@ -438,7 +438,7 @@ describe('worker claim idempotency (src/worker/claim.ts, judgment-consumer.ts, r
     createdRunIds.push(runs[0].id);
   });
 
-  it('a non_retryable provider error marks the judgment error and acks — no retry/DLQ publish — and the placeholder finalizer flips the run', async () => {
+  it('a non_retryable provider error marks the judgment error and acks — no retry/DLQ publish — and the finalizer flips the run to error (zero completed)', async () => {
     const fixture = await createFixture();
     const judgment = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId);
 
@@ -463,11 +463,14 @@ describe('worker claim idempotency (src/worker/claim.ts, judgment-consumer.ts, r
     expect(persisted.status).toBe('error');
     expect(persisted.error).toContain('bad request: malformed rubric');
 
-    // TASK 8 replaces: the run had exactly this one judgment, so the
-    // placeholder finalizer should have flipped it once nothing remains
-    // pending/running.
+    // The run had exactly this one judgment, and it errored — the real
+    // finalizer (src/lib/run-finalizer.ts, Task 8) distinguishes "at least
+    // one completed" (-> needs_human) from "zero completed, all error"
+    // (-> error) once nothing remains pending/running. See
+    // tests/integration/finalization.test.ts for the finalizer's own
+    // dedicated coverage of both branches.
     const run = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: fixture.run.id } });
-    expect(run.status).toBe('needs_human');
+    expect(run.status).toBe('error');
     expect(run.finalizedAt).not.toBeNull();
   });
 
