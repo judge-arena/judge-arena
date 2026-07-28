@@ -196,5 +196,50 @@ describe('export', () => {
       expect(parsedLine.model_criteria_scores).toBe('');
       expect(parsedLine.human_criteria_scores).toBe('');
     });
+
+    it('emits fallback values when modelConfig is null', () => {
+      const evaluation = {
+        id: 'eval-1',
+        title: 'Test Evaluation',
+        inputText: 'input',
+        runs: [
+          {
+            id: 'run-1',
+            status: 'completed',
+            createdAt: '2026-07-24T00:00:00.000Z',
+            modelJudgments: [
+              {
+                status: 'completed',
+                overallScore: 8,
+                reasoning: 'looks good',
+                rawResponse: '{}',
+                criteriaScores: criteriaScoresArray,
+                latencyMs: 120,
+                tokenCount: 42,
+                modelConfig: null,
+              },
+            ],
+          },
+        ],
+      };
+      const rows = flattenEvaluationForExport(evaluation);
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].model_name).toBe('unknown-model');
+      expect(rows[0].model_provider).toBe('unknown');
+      expect(rows[0].model_id).toBe('unknown');
+
+      // Verify CSV row is produced without throwing
+      const csv = toCsv(rows as unknown as Array<Record<string, unknown>>);
+      expect(csv).toContain('unknown-model');
+      expect(csv).toContain('unknown');
+
+      // Verify JSONL row is produced without throwing
+      const jsonl = toJsonl(rows as unknown as Array<Record<string, unknown>>);
+      const parsedLine = JSON.parse(jsonl.trim().split('\n')[0]);
+      expect(parsedLine.model_name).toBe('unknown-model');
+      expect(parsedLine.model_provider).toBe('unknown');
+      expect(parsedLine.model_id).toBe('unknown');
+    });
   });
 });

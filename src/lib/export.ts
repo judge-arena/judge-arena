@@ -150,7 +150,7 @@ export function flattenEvaluationForExport(evaluation: {
       criteriaScores: unknown;
       latencyMs: number | null;
       tokenCount: number | null;
-      modelConfig: { name: string; provider: string; modelId?: string };
+      modelConfig: { name: string; provider: string; modelId?: string } | null;
     }>;
     humanJudgment?: {
       overallScore: number;
@@ -229,9 +229,9 @@ export function flattenEvaluationForExport(evaluation: {
       for (const judgment of run.modelJudgments) {
         rows.push({
           ...baseRow,
-          model_name: judgment.modelConfig.name,
-          model_provider: judgment.modelConfig.provider,
-          model_id: judgment.modelConfig.modelId ?? '',
+          model_name: judgment.modelConfig?.name ?? 'unknown-model',
+          model_provider: judgment.modelConfig?.provider ?? 'unknown',
+          model_id: judgment.modelConfig?.modelId ?? 'unknown',
           model_judgment_status: judgment.status,
           model_overall_score:
             judgment.overallScore != null ? String(judgment.overallScore) : '',

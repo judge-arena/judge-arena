@@ -320,8 +320,8 @@ export default function RunDetailPage() {
                       {modelJudgments.map((judgment: any) => (
                         <ModelJudgmentCard
                           key={judgment.id}
-                          modelName={judgment.modelConfig.name}
-                          provider={judgment.modelConfig.provider}
+                          modelName={judgment.modelConfig?.name ?? 'Unknown model'}
+                          provider={judgment.modelConfig?.provider ?? ''}
                           overallScore={judgment.overallScore}
                           reasoning={judgment.reasoning}
                           criteriaScores={judgment.criteriaScores}
@@ -332,16 +332,16 @@ export default function RunDetailPage() {
                           mode={evaluationMode}
                           isSelected={
                             evaluationMode === 'respond' &&
-                            selectedBestModelId === judgment.modelConfig.id
+                            selectedBestModelId === judgment.modelConfig?.id
                           }
                           expandedReasoning={true}
                           onSelect={
                             evaluationMode === 'respond'
                               ? () =>
                                   setSelectedBestModelId(
-                                    selectedBestModelId === judgment.modelConfig.id
+                                    selectedBestModelId === judgment.modelConfig?.id
                                       ? null
-                                      : judgment.modelConfig.id
+                                      : judgment.modelConfig?.id ?? null
                                   )
                               : undefined
                           }
@@ -360,7 +360,7 @@ export default function RunDetailPage() {
                             </th>
                             {completedJudgments.map((j: any) => (
                               <th key={j.id} className="px-4 py-3 text-center text-xs font-semibold text-surface-500 dark:text-surface-400">
-                                {j.modelConfig.name}
+                                {j.modelConfig?.name ?? 'Unknown model'}
                               </th>
                             ))}
                           </tr>
@@ -422,8 +422,8 @@ export default function RunDetailPage() {
                     mode={evaluationMode}
                     criteria={criteria}
                     modelJudgmentIds={completedJudgments.map((j: any) => ({
-                      id: j.modelConfig.id,
-                      name: j.modelConfig.name,
+                      id: j.modelConfig?.id ?? '',
+                      name: j.modelConfig?.name ?? 'Unknown model',
                     }))}
                     existingJudgment={
                       humanJudgment
