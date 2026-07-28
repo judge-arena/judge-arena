@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { closeRabbit, getRabbit, rabbitHealthy } from '@/lib/queue/connection';
+import { closeRabbit, getRabbit, rabbitHealthy, getConnectionState } from '@/lib/queue/connection';
 import {
   assertTopology,
   EXCHANGE,
@@ -251,5 +251,46 @@ describe('retry queue TTL + DLX topology', () => {
     confirmChannel.ack(received);
 
     await confirmChannel.deleteQueue(proofQueue);
+  });
+});
+
+describe('intentional close does not reconnect', () => {
+  it('closeRabbit() stops reconnect attempts — no reconnect is scheduled after intentional close', async () => {
+    // Establish a connection first
+    const { confirmChannel } = await getRabbit();
+    expect(confirmChannel).toBeDefined();
+
+    // Verify we're connected
+    let state = getConnectionState();
+    expect(state.connected).toBe(true);
+    expect(state.reconnectScheduled).toBe(false);
+
+    const connectAttemptsBeforeClose = state.connectAttempts;
+
+    // Close intentionally
+    await closeRabbit();
+
+    // Verify connection was closed
+    state = getConnectionState();
+    expect(state.connected).toBe(false);
+    expect(state.reconnectScheduled).toBe(false);
+    expect(state.connectAttempts).toBe(connectAttemptsBeforeClose);
+
+    // Wait longer than the 1s initial backoff to ensure no reconnect occurs
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    // Verify no reconnect was scheduled or attempted
+    state = getConnectionState();
+    expect(state.connected).toBe(false);
+    expect(state.reconnectScheduled).toBe(false);
+    expect(state.connectAttempts).toBe(connectAttemptsBeforeClose);
+
+    // Verify we can reconnect fresh after the intentional close
+    const reconnected = await getRabbit();
+    expect(reconnected.conn).toBeDefined();
+    expect(reconnected.confirmChannel).toBeDefined();
+
+    // Clean up for next test
+    await closeRabbit();
   });
 });

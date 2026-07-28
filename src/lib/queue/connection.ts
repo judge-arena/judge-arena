@@ -67,7 +67,11 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 // own, defeating the shutdown and potentially keeping the process alive.
 let intentionalClose = false;
 
-function resolveRabbitUrl(): string {
+// Test-only counter for tracking connection attempts (incremented on each
+// getRabbit() call that initiates a connection).
+let connectAttempts = 0;
+
+export function resolveRabbitUrl(): string {
   const url = process.env.RABBITMQ_URL;
   if (url) return url;
 
@@ -146,6 +150,7 @@ function ensureChannel(liveConn: ChannelModel): Promise<ConfirmChannel> {
 }
 
 async function createConnection(): Promise<{ conn: ChannelModel; confirmChannel: ConfirmChannel }> {
+  connectAttempts++;
   const url = resolveRabbitUrl();
   const newConn = await amqp.connect(url);
 
@@ -262,4 +267,22 @@ export async function closeRabbit(): Promise<void> {
 
   clearState();
   reconnectDelayMs = RECONNECT_INITIAL_MS;
+  // Note: connectAttempts is NOT reset on intentional close, so the test
+  // can verify that no new attempts were scheduled/made after close.
+}
+
+/**
+ * Test-only probe into the connection state machine. Returns internal state
+ * to verify reconnect behavior in regression tests.
+ */
+export function getConnectionState(): {
+  connected: boolean;
+  reconnectScheduled: boolean;
+  connectAttempts: number;
+} {
+  return {
+    connected: conn !== null && confirmChannel !== null,
+    reconnectScheduled: reconnectTimer !== null,
+    connectAttempts,
+  };
 }
