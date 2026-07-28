@@ -176,11 +176,11 @@ describe('importRuns (DB)', () => {
         where: { runId: v2Run1!.id, overallScore: 6 },
         include: { modelConfig: true },
       });
-      expect(v2Judgment1b!.modelConfig.userId).toBe(archiveUser!.id);
-      expect(v2Judgment1b!.modelConfig.provider).toBe('openai');
-      expect(v2Judgment1b!.modelConfig.modelId).toBe('gpt-4o');
-      expect(v2Judgment1b!.modelConfig.slug).toBeNull();
-      expect(v2Judgment1b!.modelConfig.apiKey).toBeNull();
+      expect(v2Judgment1b!.modelConfig!.userId).toBe(archiveUser!.id);
+      expect(v2Judgment1b!.modelConfig!.provider).toBe('openai');
+      expect(v2Judgment1b!.modelConfig!.modelId).toBe('gpt-4o');
+      expect(v2Judgment1b!.modelConfig!.slug).toBeNull();
+      expect(v2Judgment1b!.modelConfig!.apiKey).toBeNull();
 
       // judgeModelVersionId comes straight from the synthesized judges map.
       expect(v2Judgment1a!.judgeModelVersionId).toBe(judges.get(f.modelConfigA.id)!.versionId);
@@ -310,8 +310,10 @@ describe('importRuns (DB)', () => {
 
   it(
     'two v1 ModelConfigs that synthesize to the SAME JudgeModelVersion, both referenced by judgments ' +
-      'on ONE run, both survive as distinct ModelJudgment rows on first apply and stay stable on re-run ' +
-      '(the reviewer-flagged idempotency-collapse scenario)',
+      'on ONE run, MERGE under v2b (Task 6): only one ModelJudgment row survives, the other is dropped ' +
+      'with a reported collision — not silently lost, and stable on re-run ' +
+      '(the reviewer-flagged idempotency-collapse scenario; v1a asserted "both survive", v2b tightens the ' +
+      'unique index NULLS NOT DISTINCT so that is no longer possible for two pairOrder-null judgments)',
     async () => {
       const userA = await mkV1User();
       const ownerMap: OwnerMap = {
@@ -332,12 +334,12 @@ describe('importRuns (DB)', () => {
       const evaluation = await mkV1Evaluation(project.id, userA.id);
       const run = await mkV1EvaluationRun(evaluation.id, userA.id, { status: 'completed' });
 
-      await mkV1ModelJudgment(run.id, configC.id, {
+      const judgmentC = await mkV1ModelJudgment(run.id, configC.id, {
         status: 'completed',
         overallScore: 9,
         reasoning: 'first judgment, high score',
       });
-      await mkV1ModelJudgment(run.id, configD.id, {
+      const judgmentD = await mkV1ModelJudgment(run.id, configD.id, {
         status: 'completed',
         overallScore: 2,
         reasoning: 'second judgment, low score',
@@ -350,6 +352,7 @@ describe('importRuns (DB)', () => {
       // Confirm the collision precondition actually holds — otherwise this
       // test wouldn't be exercising the bug at all.
       expect(judges1.get(configC.id)!.versionId).toBe(judges1.get(configD.id)!.versionId);
+      const versionId = judges1.get(configC.id)!.versionId;
 
       const ids1 = await importArtifacts(ctx1, owners1);
       await importRuns(ctx1, owners1, ids1, judges1);
@@ -358,17 +361,39 @@ describe('importRuns (DB)', () => {
         await db.evaluationRun.findFirst({ where: { evaluationId: ids1.evaluation.get(evaluation.id) } })
       )!.id;
 
-      // ── First apply: BOTH judgments created, both scores present ──
+      // ── First apply: the DB's NULLS NOT DISTINCT unique index on
+      // (runId, judgeModelVersionId, pairOrder) now rejects the SECOND
+      // insert for this (run, version) pair (both judgments have
+      // pairOrder: null) — exactly ONE row survives, whichever the
+      // multiset matcher's deterministic v1-id-sorted processing order
+      // attempted first. The other is tallied `dropped`, never a crash and
+      // never silently lost. ──
       const afterFirstApply = await db.modelJudgment.findMany({ where: { runId: v2RunId } });
-      expect(afterFirstApply).toHaveLength(2);
-      expect(afterFirstApply.map((j) => j.overallScore).sort()).toEqual([2, 9]);
-      expect(ctx1.report.counts().ModelJudgment).toMatchObject({ created: 2, skipped: 0 });
+      expect(afterFirstApply).toHaveLength(1);
+      expect([2, 9]).toContain(afterFirstApply[0].overallScore);
+      expect(ctx1.report.counts().ModelJudgment).toMatchObject({ created: 1, skipped: 0, dropped: 1 });
 
-      // ── Re-run against the SAME v1 data: still exactly two rows (no
-      // duplication), and the second run's tally is skipped:2 (each
-      // incoming judgment matches its own now-existing row by its distinct
-      // overallScore), never a P2002 from the (runId, judgeModelVersionId,
-      // pairOrder) unique constraint (pairOrder is NULLS-DISTINCT). ──
+      // The collision is recorded (both v1 ids), not just tallied as a bare
+      // number — this is what the reconcile report's merge-collision list
+      // surfaces.
+      expect(ctx1.modelJudgmentMergeCollisions).toHaveLength(1);
+      const collision1 = ctx1.modelJudgmentMergeCollisions[0];
+      expect(collision1.runId).toBe(v2RunId);
+      expect(collision1.judgeModelVersionId).toBe(versionId);
+      expect([collision1.survivingV1Id, collision1.droppedV1Id].sort()).toEqual(
+        [judgmentC.id, judgmentD.id].sort()
+      );
+      // The row that survived matches the v1 id the collision recorded as
+      // "surviving" (by score, since scores are distinct in this fixture).
+      const survivingScore = collision1.survivingV1Id === judgmentC.id ? 9 : 2;
+      expect(afterFirstApply[0].overallScore).toBe(survivingScore);
+
+      // ── Re-run against the SAME v1 data: still exactly ONE row (no
+      // duplication, no resurrection of the dropped one) — the surviving
+      // v1 judgment matches the multiset pool by content (skipped), and the
+      // dropped v1 judgment finds no pool entry to match, attempts a
+      // create, and hits the SAME P2002 backstop again (deterministically
+      // re-dropped, not a growing loss). ──
       const ctx2 = createImportCtx({ mode: 'apply', ownerMap });
       const owners2 = await resolveOwners(ctx2);
       const judges2 = await synthesizeJudges(ctx2, owners2);
@@ -376,9 +401,17 @@ describe('importRuns (DB)', () => {
       await importRuns(ctx2, owners2, ids2, judges2);
 
       const afterSecondApply = await db.modelJudgment.findMany({ where: { runId: v2RunId } });
-      expect(afterSecondApply).toHaveLength(2);
-      expect(afterSecondApply.map((j) => j.overallScore).sort()).toEqual([2, 9]);
-      expect(ctx2.report.counts().ModelJudgment).toMatchObject({ created: 0, skipped: 2 });
+      expect(afterSecondApply).toHaveLength(1);
+      expect(afterSecondApply[0].id).toBe(afterFirstApply[0].id);
+      expect(ctx2.report.counts().ModelJudgment).toMatchObject({ created: 0, skipped: 1, dropped: 1 });
+
+      expect(ctx2.modelJudgmentMergeCollisions).toHaveLength(1);
+      expect(ctx2.modelJudgmentMergeCollisions[0]).toMatchObject({
+        runId: v2RunId,
+        judgeModelVersionId: versionId,
+        survivingV1Id: collision1.survivingV1Id,
+        droppedV1Id: collision1.droppedV1Id,
+      });
     }
   );
 

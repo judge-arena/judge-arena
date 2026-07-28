@@ -7,7 +7,7 @@ import { resolveOwners, ARCHIVE_USER_EMAIL } from '../../scripts/importer/owners
 import { synthesizeJudges } from '../../scripts/importer/judges';
 import { importArtifacts } from '../../scripts/importer/artifacts';
 import { importRuns } from '../../scripts/importer/runs';
-import { reconcile } from '../../scripts/importer/reconcile';
+import { reconcile, formatReconcileReport, mergeCollisionPreflight } from '../../scripts/importer/reconcile';
 import { runImport } from '../../scripts/importer/cli';
 import { db, truncateAll } from '../db/helpers';
 import {
@@ -229,7 +229,75 @@ describe('reconcile (DB)', () => {
     expect(byEntity.EvaluationRun).toMatchObject({ v1: 2, v2: 1, expectedDelta: 1 });
     expect(byEntity.ModelJudgment).toMatchObject({ v1: 3, v2: 2, expectedDelta: 1 });
     expect(byEntity.HumanJudgment).toMatchObject({ v1: 2, v2: 1, expectedDelta: 1 });
+
+    // No ModelJudgment merge collisions in this fixture — configA/configB
+    // are distinct (provider, modelId, endpoint) triples, so they never
+    // share a synthesized JudgeModelVersion.
+    expect(result.modelJudgmentMergeCollisions).toEqual([]);
   });
+
+  it(
+    'mergeCollisionPreflight (v2b, Task 6): counts v1 runs with >=2 judgments mapping to the same ' +
+      'synthesized version BEFORE any write, and reconcile() surfaces the actual collision(s) it causes',
+    async () => {
+      const f = await buildFixture();
+
+      // configE shares configA's exact (provider, modelId, endpoint) triple
+      // -> synthesizes to the SAME JudgeModelVersion (see ./judges.ts) —
+      // the precondition mergeCollisionPreflight is meant to detect. Owned
+      // by userB (dropped), NOT userA — JudgeModelVersion synthesis groups
+      // by triple alone (owner-independent), but `ensureModelConfig`'s
+      // ensure-key is (userId, provider, modelId, endpoint); giving configE
+      // userA's own owner would make it content-match and collapse onto
+      // configA's already-ensured v2 ModelConfig row, tripping the
+      // UNRELATED "two v1 ModelConfig ids collapse onto one v2 row" known
+      // limitation documented in this module's doc comment — not what this
+      // test is about.
+      const configE = await mkV1ModelConfig(f.userB.id, { provider: 'anthropic', modelId: 'claude-3-opus' });
+
+      const collidingRun = await mkV1EvaluationRun(f.evaluation.id, f.userA.id, { status: 'completed' });
+      const judgment1 = await mkV1ModelJudgment(collidingRun.id, f.configA.id, {
+        status: 'completed',
+        overallScore: 8,
+      });
+      const judgment2 = await mkV1ModelJudgment(collidingRun.id, configE.id, {
+        status: 'completed',
+        overallScore: 3,
+      });
+
+      // A second run with only ONE judgment on that same triple — no
+      // collision precondition there, must not be counted.
+      const cleanRun = await mkV1EvaluationRun(f.evaluation.id, f.userA.id, { status: 'completed' });
+      await mkV1ModelJudgment(cleanRun.id, f.configA.id, { status: 'completed', overallScore: 5 });
+
+      const preflightCtx = createImportCtx({ mode: 'apply', ownerMap: f.ownerMap });
+      liveCtxs.push(preflightCtx);
+
+      // Runs BEFORE any phase / any v2 write — it's v1-only.
+      const preflight = await mergeCollisionPreflight(preflightCtx);
+      expect(preflight.runsWithCollisions).toBe(1);
+      expect(preflight.expectedDroppedJudgments).toBe(1);
+      expect(await db.evaluationRun.count()).toBe(0);
+
+      const { ctx, ids } = await runFullPipeline(f.ownerMap);
+      const result = await reconcile(ctx, ids);
+
+      expect(result.modelJudgmentMergeCollisions).toHaveLength(1);
+      const collision = result.modelJudgmentMergeCollisions[0];
+      expect([collision.survivingV1Id, collision.droppedV1Id].sort()).toEqual(
+        [judgment1.id, judgment2.id].sort()
+      );
+
+      // The report's aligned-column rendering includes the collision, by
+      // both v1 ids, without affecting `ok` (the row count / spot check 3
+      // already explain the numeric delta).
+      const formatted = formatReconcileReport(result);
+      expect(formatted).toContain('ModelJudgment merge collisions (1)');
+      expect(formatted).toContain(collision.survivingV1Id);
+      expect(formatted).toContain(collision.droppedV1Id);
+      expect(result.ok).toBe(true);
+    }
+  );
 
   it('injected mismatch: deleting a v2 ModelJudgment after import flips reconcile to ok:false with the ModelJudgment row flagged', async () => {
     const f = await buildFixture();

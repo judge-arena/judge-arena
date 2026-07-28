@@ -345,7 +345,97 @@ All pages live in `src/app/` and use the Next.js App Router.
 
 ## Extending the Database Schema
 
-### Recipe
+> **Superseded recipe below the line, kept for the pre-v2/SQLite `db:push`
+> workflow only.** Since the v2 migration (1a) the project runs Postgres
+> with real, checked-in migrations under `prisma/migrations/` — every
+> environment (dev, `test:db`, CI-to-be per the 1b plan's Task 17) applies
+> `prisma migrate deploy`/`migrate reset`, never `db push`. Use the recipe
+> immediately below for any schema change from 1a onward; the old `db push`
+> steps still work against a scratch SQLite/`dev.db` setup but are not how
+> this repo's real databases are changed.
+
+### Recipe (v2, Postgres, migrations — current)
+
+1. **Edit `prisma/schema.prisma`** — add or modify models. If the change
+   needs SQL Prisma's schema DSL can't express (e.g. `NULLS NOT DISTINCT`,
+   see the pseudo-drift note below), you'll hand-edit the generated SQL in
+   step 3.
+2. **Generate the diff SQL** against the live dev database:
+
+   ```bash
+   npx prisma migrate diff \
+     --from-url "postgresql://judge_arena:password@localhost:5432/judge_arena" \
+     --to-schema-datamodel prisma/schema.prisma --script
+   ```
+
+3. **Create the migration directory** (`prisma/migrations/<timestamp>_<name>/migration.sql`)
+   and place the generated SQL there, hand-editing/adding any statements
+   Prisma's diff can't produce (raw index recreation, one-time backfill
+   `UPDATE`s, etc.) — document every hand edit in a comment block at the top
+   of the file, same as `20260728215410_v2b_idempotency_tighten` does.
+4. **Apply it to the dev database**:
+
+   ```bash
+   PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION=<approved-plan-id> npx prisma migrate deploy
+   ```
+
+   The consent env var is this environment's gate on agent-run schema
+   changes against a real database — use the id approved for the plan/task
+   doing the work (dev DB is disposable, but the gate still applies).
+5. **Regenerate the client**: `npx prisma generate`.
+6. **Verify against the test database**: `npm run test:db` runs
+   `prisma migrate reset --force --skip-seed` first, replaying the FULL
+   migration chain (including every hand-edited statement) from scratch —
+   this is the real test that your migration file, not just your `schema.prisma`
+   edit, is correct. Never consider a schema change done until this passes.
+7. **Update the seed file** if your new model should have default data — `prisma/seed.ts`.
+8. **Update TypeScript types** in `src/types/index.ts` to reflect the new shapes.
+
+### Known migrate-diff pseudo-drift
+
+Some SQL a migration needs cannot be expressed by Prisma's schema DSL at
+all — the migration file still carries the real SQL (hand-edited per the
+recipe above). The natural worry is that a *future* `prisma migrate diff`
+(or `db push`) run against a database that has it applied will propose
+"fixing" it back to whatever Prisma's own reading of `schema.prisma` would
+generate — **verified empirically (Prisma 6.19.2) that this is NOT what
+happens**, for a more fundamental reason: Prisma's schema engine has no
+internal representation of these attributes at all, so it doesn't
+"decide" to leave them alone — it genuinely cannot see them. `prisma db
+pull` against a migrated database silently drops the attribute from its
+own introspected model; `prisma migrate diff --from-url ...
+--to-schema-datamodel prisma/schema.prisma` reports an empty diff; `prisma
+db push` reports "already in sync". There is currently nothing to
+whitelist in a CI drift check for the case below — a plain `migrate diff`
+gate would pass clean today. Currently one case:
+
+| Migration | What's really there | Why `schema.prisma` can't say it |
+|---|---|---|
+| `20260728215410_v2b_idempotency_tighten` | `ModelJudgment_runId_judgeModelVersionId_pairOrder_key` recreated `NULLS NOT DISTINCT` (real pointwise idempotency, 1b Task 6) | `@@unique([runId, judgeModelVersionId, pairOrder])` has no Prisma DSL syntax for `NULLS NOT DISTINCT` (PG15+) |
+
+The real hazard is the opposite direction from "drift tooling nags you to
+revert it": because `schema.prisma` can never re-declare this attribute,
+the migration file's raw SQL is the ONLY record of it. If a future
+migration ever needs to recreate this same index for an unrelated reason
+(e.g. touching a column it covers), that migration must hand-add `NULLS
+NOT DISTINCT` again — nothing in the toolchain will warn if it's
+forgotten, for the same reason nothing warns about drift today: Prisma
+can't see the attribute either way. Anyone adding a NEW schema change that
+also needs a Prisma-inexpressible SQL clause should add a row to this
+table and re-verify (`db pull`/`migrate diff`/`db push` against a database
+that has the migration applied) rather than assume the "pseudo-drift"
+framing without checking — as this section itself originally did, before
+being corrected against real `psql`/Prisma output while landing 1b Task 6.
+
+### Schema conventions
+
+- Use `cuid()` for primary keys.
+- Add `createdAt DateTime @default(now())` and `updatedAt DateTime @updatedAt` to every model.
+- Add `@@index` on foreign key columns.
+- Use `onDelete: Cascade` for owned relations (e.g., criteria belong to rubric).
+- JSON payloads use Prisma `Json` (JSONB) columns (criteriaScores et al. migrated in v2); document expected shape in a comment beside the field.
+
+### Recipe (pre-v2, SQLite `db:push` — superseded)
 
 1. **Edit `prisma/schema.prisma`** — add or modify models.
 2. **Push to the dev database**:
@@ -353,8 +443,6 @@ All pages live in `src/app/` and use the Next.js App Router.
    ```bash
    npm run db:push
    ```
-
-   For production deployments, use `npm run db:migrate` instead.
 
 3. **Regenerate the client**:
 
@@ -364,14 +452,6 @@ All pages live in `src/app/` and use the Next.js App Router.
 
 4. **Update the seed file** if your new model should have default data — `prisma/seed.ts`.
 5. **Update TypeScript types** in `src/types/index.ts` to reflect the new shapes.
-
-### Schema conventions
-
-- Use `cuid()` for primary keys.
-- Add `createdAt DateTime @default(now())` and `updatedAt DateTime @updatedAt` to every model.
-- Add `@@index` on foreign key columns.
-- Use `onDelete: Cascade` for owned relations (e.g., criteria belong to rubric).
-- JSON payloads use Prisma `Json` (JSONB) columns (criteriaScores et al. migrated in v2); document expected shape in a comment beside the field.
 
 ---
 

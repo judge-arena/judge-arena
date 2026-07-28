@@ -400,8 +400,8 @@ model ModelJudgment {
   id            String        @id @default(cuid())
   runId         String
   run           EvaluationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
-  modelConfigId String
-  modelConfig   ModelConfig   @relation(fields: [modelConfigId], references: [id], onDelete: Restrict)
+  modelConfigId String? // nullable (1b): write path (Task 9) stops setting this — JudgeModelVersion is the identity now
+  modelConfig   ModelConfig?  @relation(fields: [modelConfigId], references: [id], onDelete: Restrict)
 
   // ── Provenance (which judge, which prompt, pinned at judgment time) ──
   judgeModelVersionId String?

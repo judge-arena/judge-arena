@@ -63,7 +63,7 @@ describe('ModelJudgment / EvaluationRun v2 provenance', () => {
     await truncateAll();
   });
 
-  it('unique (runId, judgeModelVersionId, pairOrder); duplicate rejects P2002 while distinct-NULL rows coexist', async () => {
+  it('unique (runId, judgeModelVersionId, pairOrder) is NULLS NOT DISTINCT (v2b): duplicate rejects P2002, and a shared-NULL tuple collides too', async () => {
     const user = await mkUser();
     const project = await mkProject(user.id);
     const evaluation = await mkEvaluation(project.id, user.id);
@@ -91,14 +91,26 @@ describe('ModelJudgment / EvaluationRun v2 provenance', () => {
       })
     ).rejects.toMatchObject({ code: 'P2002' });
 
-    // Postgres unique constraints treat NULL as distinct from every other
-    // NULL, so two rows with no judgeModelVersionId pinned (same run,
-    // same pairOrder) must coexist without tripping the constraint.
+    // v2b (Task 6) recreates this index NULLS NOT DISTINCT (see the
+    // v2b_idempotency_tighten migration) — a NULL judgeModelVersionId is now
+    // treated as equal to another NULL, same as any other value, so two rows
+    // sharing (runId, judgeModelVersionId=NULL, pairOrder='a') collide just
+    // like the real-version duplicate above. Before this migration, Postgres's
+    // default NULLS DISTINCT semantics let this second insert through.
     const nullRow1 = await db.modelJudgment.create({
       data: { runId: run.id, modelConfigId: modelConfig.id, pairOrder: 'a' },
     });
+    await expect(
+      db.modelJudgment.create({
+        data: { runId: run.id, modelConfigId: modelConfig.id, pairOrder: 'a' },
+      })
+    ).rejects.toMatchObject({ code: 'P2002' });
+
+    // A differing pairOrder still disambiguates two null-judgeModelVersionId
+    // rows — NULLS NOT DISTINCT only changes how NULLs compare to NULLs, not
+    // whether distinct non-null column values keep disambiguating.
     const nullRow2 = await db.modelJudgment.create({
-      data: { runId: run.id, modelConfigId: modelConfig.id, pairOrder: 'a' },
+      data: { runId: run.id, modelConfigId: modelConfig.id, pairOrder: 'b' },
     });
     expect(nullRow1.id).not.toBe(nullRow2.id);
     expect(nullRow1.judgeModelVersionId).toBeNull();

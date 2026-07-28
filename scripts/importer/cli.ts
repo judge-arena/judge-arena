@@ -32,7 +32,7 @@ import { resolveOwners } from './owners';
 import { synthesizeJudges } from './judges';
 import { importArtifacts } from './artifacts';
 import { importRuns } from './runs';
-import { reconcile, formatReconcileReport } from './reconcile';
+import { reconcile, formatReconcileReport, mergeCollisionPreflight } from './reconcile';
 
 const VALID_MODES: readonly ImportMode[] = ['report', 'apply'];
 
@@ -152,6 +152,18 @@ export async function runImport(argv: string[]): Promise<RunImportResult> {
 
   try {
     await assertApplyAllowed(ctx, args.force);
+
+    // v1-only pre-flight (v2b, Task 6) — reported up front, in EITHER mode,
+    // before any phase runs: how many ModelJudgment merge collisions (the
+    // NULLS NOT DISTINCT DB-level backstop in ./runs.ts) this import is
+    // about to hit. report mode has no other way to see this number (it
+    // never attempts the v2 write that would actually conflict).
+    const preflight = await mergeCollisionPreflight(ctx);
+    console.log(
+      `Pre-flight: ${preflight.runsWithCollisions} v1 run(s) have >=2 judgments mapping to the same ` +
+        `synthesized JudgeModelVersion — expect ~${preflight.expectedDroppedJudgments} judgment(s) to merge ` +
+        '(dropped, not lost — see the reconciliation report) under the NULLS NOT DISTINCT unique index.\n'
+    );
 
     const owners = await resolveOwners(ctx);
     const judges = await synthesizeJudges(ctx, owners);

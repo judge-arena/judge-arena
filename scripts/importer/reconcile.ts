@@ -43,13 +43,25 @@
  *   - EvaluationRun/ModelJudgment/HumanJudgment: no id-map is threaded this
  *     far (./runs.ts returns `void`), so `expectedDelta = ctx.report`'s own
  *     `dropped` tally for that entity — accurate here because every drop
- *     path for these three entities is a structural cascade (dropped
- *     evaluation -> dropped run -> dropped judgments/human judgment, see
- *     ./runs.ts) that IS tallied under `dropped` with no untallied gap,
- *     unlike User below. (The separate `ModelJudgmentCriteriaScoresMalformed`
- *     / `*CriteriaUnmapped` tallies live under different report keys and
- *     never affect these three entities' own row counts — they degrade a
- *     row's `criteriaScores` field, they don't drop the row.)
+ *     path for these three entities IS tallied under `dropped` with no
+ *     untallied gap, unlike User below. For EvaluationRun/HumanJudgment
+ *     that's always a structural cascade (dropped evaluation -> dropped run
+ *     -> dropped judgments/human judgment, see ./runs.ts). ModelJudgment has
+ *     a SECOND drop path since v2b (Task 6): a DB-level unique-constraint
+ *     collision on `(runId, judgeModelVersionId, pairOrder)` — now `NULLS
+ *     NOT DISTINCT` — when the multiset matcher's own documented residual
+ *     gap fires (two distinct v1 ModelConfigs synthesizing to the same
+ *     JudgeModelVersion, both referenced on one run); `findOrCreateModelJudgment`
+ *     tallies that under `dropped` too (see ./runs.ts's P2002 catch), so
+ *     this row count's formula still holds, and every such collision is
+ *     additionally recorded in `ctx.modelJudgmentMergeCollisions` — surfaced
+ *     below alongside the row counts, not gating `ok` on its own (spot check
+ *     3's per-model shortfall-vs-dropped-tally comparison already covers the
+ *     numeric explainability of this delta). (The separate
+ *     `ModelJudgmentCriteriaScoresMalformed` / `*CriteriaUnmapped` tallies
+ *     live under different report keys and never affect these three
+ *     entities' own row counts — they degrade a row's `criteriaScores`
+ *     field, they don't drop the row.)
  *   - User: NEITHER of the above applies cleanly. `resolveOwners` (see
  *     ./owners.ts) only tallies `User`/`dropped` for an EXPLICIT `'drop'`
  *     ownerMap entry, not for a v1 user simply absent from `ownerMap`
@@ -100,7 +112,7 @@
  * See the four `spotCheck*` functions below; each is documented at its own
  * definition.
  */
-import type { ImportCtx, OwnerMap } from './context';
+import type { ImportCtx, ModelJudgmentMergeCollision, OwnerMap } from './context';
 import type { IdMaps } from './artifacts';
 import { ARCHIVE_USER_EMAIL } from './owners';
 
@@ -125,6 +137,13 @@ export interface ReconcileResult {
   /** Non-gating tallies worth surfacing at the go/no-go decision point (e.g.
    * malformed-criteriaScores degradations) — never affects `ok`. */
   warnings: string[];
+  /** Every ModelJudgment merge collision the run actually hit (see
+   * ./context.ts's ModelJudgmentMergeCollision doc) — copied straight from
+   * `ctx.modelJudgmentMergeCollisions`. Non-gating (the numeric delta it
+   * represents is already covered by the ModelJudgment row count and spot
+   * check 3); surfaced here so an operator can see exactly which v1 ids
+   * merged, not just how many. */
+  modelJudgmentMergeCollisions: ModelJudgmentMergeCollision[];
 }
 
 type MappedOwner = Extract<OwnerMap[string], { email: string }>;
@@ -227,6 +246,69 @@ async function rowCountsJudgeSynthesis(ctx: ImportCtx): Promise<RowCount[]> {
     rowCount('JudgeModelVersion', triples.size, versionCount, 0),
     rowCount('ModelEndpoint', keptEndpointPairs.size, endpointCount, 0),
   ];
+}
+
+// ─── Pre-flight: expected ModelJudgment merge count (v2b, Task 6) ─────────
+
+export interface MergeCollisionPreflight {
+  /** Number of distinct v1 EvaluationRun ids with >=2 ModelJudgments whose
+   * ModelConfigs map to the SAME synthesized JudgeModelVersion (share
+   * ./judges.ts's (provider, modelId, endpoint) triple, `tripleKey` above).
+   * Each such run is where a NULLS NOT DISTINCT merge collision (see
+   * ./runs.ts's P2002 catch) will fire on apply. */
+  runsWithCollisions: number;
+  /** Upper-bound count of individual v1 ModelJudgment rows expected to be
+   * dropped by the collision backstop: summed, per (run, triple) group, as
+   * (group size - 1) — one judgment per group always survives (whichever
+   * sorts first by v1 id, see ./runs.ts's deterministic processing order),
+   * every other one in the same group collides. */
+  expectedDroppedJudgments: number;
+}
+
+/**
+ * v1-only pre-flight (two queries, no v2 dependency at all) — computes,
+ * BEFORE any write, how many ModelJudgment merge collisions (see ./runs.ts's
+ * "ModelJudgment idempotency" module doc / P2002 catch) the import is about
+ * to hit. Runs in EITHER mode: report mode's own per-row tallies can't
+ * predict a collision (report mode never actually attempts the v2 write that
+ * would conflict — see ./runs.ts's `ctx.mode !== 'apply'` early return), so
+ * this pre-flight is report mode's ONLY visibility into the expected merge
+ * count ("report mode shows expected merge count" per the task brief); apply
+ * mode gets both this upfront estimate AND the post-hoc, exact
+ * `ctx.modelJudgmentMergeCollisions` list (surfaced via `reconcile`'s
+ * `ReconcileResult.modelJudgmentMergeCollisions`) from actually running the
+ * import. The two should agree in apply mode — `cli.ts` prints both.
+ */
+export async function mergeCollisionPreflight(ctx: ImportCtx): Promise<MergeCollisionPreflight> {
+  const [judgments, configs] = await Promise.all([
+    ctx.v1.modelJudgment.findMany({ select: { runId: true, modelConfigId: true } }),
+    ctx.v1.modelConfig.findMany({ select: { id: true, provider: true, modelId: true, endpoint: true } }),
+  ]);
+
+  const tripleByConfigId = new Map(configs.map((c) => [c.id, tripleKey(c.provider, c.modelId, c.endpoint)]));
+
+  const groupSizeByRunAndTriple = new Map<string, { runId: string; size: number }>();
+  for (const j of judgments) {
+    const triple = tripleByConfigId.get(j.modelConfigId);
+    if (!triple) continue; // orphaned v1 modelConfigId reference — not this pre-flight's concern
+    const key = `${j.runId} ${triple}`;
+    const entry = groupSizeByRunAndTriple.get(key);
+    if (entry) {
+      entry.size += 1;
+    } else {
+      groupSizeByRunAndTriple.set(key, { runId: j.runId, size: 1 });
+    }
+  }
+
+  const runsWithCollisions = new Set<string>();
+  let expectedDroppedJudgments = 0;
+  for (const { runId, size } of groupSizeByRunAndTriple.values()) {
+    if (size < 2) continue;
+    runsWithCollisions.add(runId);
+    expectedDroppedJudgments += size - 1;
+  }
+
+  return { runsWithCollisions: runsWithCollisions.size, expectedDroppedJudgments };
 }
 
 // ─── Row counts: entry point ────────────────────────────────────────────────
@@ -343,11 +425,16 @@ interface ModelAgg {
  * `overallScore` across judgments with `status: 'completed'` and a non-null
  * score. */
 function aggregateByProviderModel(
-  rows: Array<{ overallScore: number | null; modelConfig: { provider: string; modelId: string } }>
+  rows: Array<{ overallScore: number | null; modelConfig: { provider: string; modelId: string } | null }>
 ): Map<string, ModelAgg> {
   const sums = new Map<string, { count: number; sum: number }>();
   for (const r of rows) {
     if (r.overallScore === null) continue;
+    // v2 ModelJudgment.modelConfig became optional in v2b (Task 6); v1's
+    // never is (frozen legacy schema). A null modelConfig has no
+    // (provider, modelId) to key this aggregate by, so it's excluded here
+    // — same treatment as src/app/api/leaderboard/route.ts's own aggregate.
+    if (r.modelConfig === null) continue;
     const key = `${r.modelConfig.provider}/${r.modelConfig.modelId}`;
     const entry = sums.get(key) ?? { count: 0, sum: 0 };
     entry.count += 1;
@@ -552,7 +639,7 @@ export async function reconcile(ctx: ImportCtx, ids: IdMaps): Promise<ReconcileR
 
   const ok = rowCounts.every((r) => r.ok) && spotChecks.every((s) => s.ok);
   const warnings = computeWarnings(ctx);
-  return { rowCounts, spotChecks, ok, warnings };
+  return { rowCounts, spotChecks, ok, warnings, modelJudgmentMergeCollisions: ctx.modelJudgmentMergeCollisions };
 }
 
 // ─── Human-readable report table ────────────────────────────────────────────
@@ -587,6 +674,16 @@ export function formatReconcileReport(result: ReconcileResult): string {
   const nameWidth = Math.max(4, ...result.spotChecks.map((s) => s.name.length));
   for (const s of result.spotChecks) {
     lines.push(`  [${s.ok ? 'OK  ' : 'FAIL'}] ${pad(s.name, nameWidth)}   ${s.detail}`);
+  }
+
+  if (result.modelJudgmentMergeCollisions.length > 0) {
+    lines.push('', `ModelJudgment merge collisions (${result.modelJudgmentMergeCollisions.length}):`);
+    for (const c of result.modelJudgmentMergeCollisions) {
+      lines.push(
+        `  run=${c.runId} judgeModelVersion=${c.judgeModelVersionId}: ` +
+          `kept v1 ModelJudgment ${c.survivingV1Id}, dropped v1 ModelJudgment ${c.droppedV1Id}`
+      );
+    }
   }
 
   if (result.warnings.length > 0) {

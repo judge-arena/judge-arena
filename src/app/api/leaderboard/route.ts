@@ -119,6 +119,11 @@ export async function GET() {
 
     for (const j of judgments) {
       if (j.overallScore === null) continue;
+      // modelConfigId became optional in v2b (Task 6) — the write path
+      // still always sets it today (retirement lands in Task 9), but a
+      // judgment with no ModelConfig has no model identity to key the
+      // leaderboard by, so it's excluded rather than crashing the route.
+      if (j.modelConfig === null) continue;
 
       const key = j.modelConfig.id;
       let entry = modelMap.get(key);

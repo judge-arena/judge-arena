@@ -108,6 +108,7 @@ describe('importer cli', () => {
         mode,
         ownerMap: {},
         report: new ImportReport(),
+        modelJudgmentMergeCollisions: [],
       };
     }
 

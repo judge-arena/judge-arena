@@ -10,9 +10,14 @@
  * (EvaluationRun.evaluationId, ModelJudgment.runId, HumanJudgment.runId).
  *
  * ── modelConfigId: the "ensure" resolution ──────────────────────────────
- * `ModelJudgment.modelConfigId` is REQUIRED on the v2 schema (not nullable
- * — `onDelete` was tightened `Cascade` -> `Restrict` in Task 4, but the
- * column itself stays required until 1b retires ModelConfig entirely) and
+ * `ModelJudgment.modelConfigId` became nullable in v2b (Task 6 — the 1b
+ * write path stops setting it once JudgeModelVersion is the sole write-path
+ * identity, Task 9), but THIS importer still always resolves and sets a real
+ * value: v1 has no JudgeModelVersion identity of its own, so `modelConfigId`
+ * (via `ensureModelConfig` below) remains the only provenance link an
+ * imported judgment carries back to which v1 model actually produced it.
+ * `onDelete` stayed `Restrict` (tightened from `Cascade` in Task 4, schema
+ * unchanged by Task 6 — only the NOT NULL constraint was dropped) and
  * `HumanJudgment.selectedBestModelId` references the same table. v1
  * ModelConfig rows are NOT imported as ModelConfig in v2 — Task 8's
  * `synthesizeJudges` replaces them with JudgeModel/JudgeModelVersion — so
@@ -50,13 +55,13 @@
  *     `(evaluationId, createdAt)` (createdAt is preserved verbatim from
  *     v1, see below, so it's a stable disambiguator across re-runs).
  *   - ModelJudgment:  the live `@@unique([runId, judgeModelVersionId,
- *     pairOrder])` CANNOT be relied on for idempotency here — every
- *     v1-imported judgment has `pairOrder: null`, and Postgres unique
- *     indexes treat NULL as distinct from NULL, so the DB would happily
- *     insert duplicates AND a naive single-row `findFirst` on `(runId,
- *     judgeModelVersionId, pairOrder: null)` would falsely collapse two
- *     genuinely distinct judgments onto each other (see below). Matched
- *     instead via MULTISET content-matching, scoped per `(runId,
+ *     pairOrder])` CANNOT be relied on ALONE for idempotency here — every
+ *     v1-imported judgment has `pairOrder: null`. Before v2b (Task 6),
+ *     Postgres unique indexes treated NULL as distinct from NULL, so the DB
+ *     would happily insert duplicates; a naive single-row `findFirst` on
+ *     `(runId, judgeModelVersionId, pairOrder: null)` would ALSO falsely
+ *     collapse two genuinely distinct judgments onto each other (see below).
+ *     Matched instead via MULTISET content-matching, scoped per `(runId,
  *     judgeModelVersionId)`:
  *       1. All of a run's v1 ModelJudgments are processed in deterministic
  *          v1-id order (sorted once when `judgmentsByRun` is built).
@@ -71,27 +76,51 @@
  *          identical triple is, for idempotency purposes, "the same
  *          judgment" a prior apply already created. On a match, that pool
  *          row is CONSUMED (spliced out, so it can't match a second
- *          incoming judgment) and tallied `skipped`; no match creates a
- *          new row and tallies `created`.
+ *          incoming judgment) and tallied `skipped`; no match attempts a
+ *          create.
  *     Why this matters: two distinct v1 ModelConfigs (even across
  *     different owners, or the same owner) that share `(provider, modelId,
  *     endpoint)` synthesize to the SAME JudgeModelVersion (see
- *     ./judges.ts). If both are referenced by judgments on ONE run, the
- *     old single-row `findFirst` would treat the second judgment as
+ *     ./judges.ts). If both are referenced by judgments on ONE run, a naive
+ *     single-row `findFirst` would treat the second judgment as
  *     already-imported and silently drop it on the FIRST apply. The
- *     multiset match instead creates BOTH rows on first apply (the pool is
- *     empty, so neither judgment matches anything) and, on every
+ *     multiset match instead attempts BOTH rows on first apply (the pool is
+ *     empty, so neither judgment matches anything) — and, on every
  *     subsequent re-run, each incoming judgment matches exactly one of the
  *     two now-existing rows by its own distinct `(createdAt, overallScore,
- *     latencyMs)` — stable, not collapsing, and the DB's NULLS-DISTINCT
- *     `pairOrder` uniqueness never rejects the second insert (no P2002).
- *     Residual limitation (not fully closed, and out of scope beyond what
- *     the two-judgment collision case above requires): if two DISTINCT v1
- *     judgments in the same `(runId, judgeModelVersionId)` pool happen to
- *     share an IDENTICAL `(createdAt, overallScore, latencyMs)` triple,
- *     only one pool row exists to match both, so a re-run would still
- *     create a duplicate for the second — the same content-match-collision
- *     class documented for Rubric/Project/Dataset in ./artifacts.ts.
+ *     latencyMs)`, so a re-run never re-attempts either create.
+ *
+ *     v2b DB-LEVEL BACKSTOP (Task 6, closes 1a flag I2): the unique index is
+ *     now recreated `NULLS NOT DISTINCT`, so a NULL `pairOrder` is no longer
+ *     exempt — two judgments attempting `(runId, judgeModelVersionId,
+ *     pairOrder: null)` at once now genuinely collide at the DB. On FIRST
+ *     apply, this means the multiset match's "attempts BOTH rows" step above
+ *     no longer always succeeds for both: the second `create` in the pair
+ *     throws P2002. `findOrCreateModelJudgment` catches it, corrects the
+ *     optimistic `created` tally to `dropped`, and records the collision
+ *     (both v1 ids — the occupant already present and the one that lost) in
+ *     `ctx.modelJudgmentMergeCollisions` for the reconcile report. This is
+ *     NOT a regression from the pre-v2b behavior described above — it is the
+ *     intended semantic tightening this migration exists to add, and the
+ *     multiset matcher's job changes accordingly: it still fully owns
+ *     RE-RUN idempotency (matching existing content so a second apply never
+ *     re-attempts a create at all), while the unique index now owns
+ *     preventing two DISTINCT judgments from ever coexisting under the same
+ *     (run, judge version) with no pairOrder to disambiguate them — exactly
+ *     the "real pointwise idempotency" 1b Task 6 was scoped to add. A run
+ *     with such a collision keeps exactly ONE ModelJudgment per (run, judge
+ *     version) pair instead of one per v1 row; which v1 row wins is
+ *     deterministic (v1-id sort order, see step 1) but not policy-significant
+ *     — the point is no crash and no SILENT loss, not a specific tie-break.
+ *
+ *     Residual limitation (unchanged by v2b, out of scope beyond what the
+ *     above requires): if two DISTINCT v1 judgments in the same `(runId,
+ *     judgeModelVersionId)` pool happen to share an IDENTICAL `(createdAt,
+ *     overallScore, latencyMs)` triple, only one pool row exists to match
+ *     both on a re-run, so re-running against the SAME already-merged v1
+ *     data reproduces the identical drop deterministically (not a new,
+ *     growing loss) — the same content-match-collision class documented for
+ *     Rubric/Project/Dataset in ./artifacts.ts.
  *   - HumanJudgment:  real `@@unique` on `runId` — `findUnique` is exact.
  *
  * ── criteriaScores ───────────────────────────────────────────────────────
@@ -338,7 +367,13 @@ async function findOrCreateRun(
   }
 
   const status: RunStatus = stranded ? 'error' : castStatus(v1.status, RUN_STATUSES, 'EvaluationRun');
-  const terminal = status === 'completed' || status === 'error';
+  // v2b (Task 6, 1a handoff flag M4): finalization sets `finalizedAt` for
+  // BOTH `completed` and `needs_human`, not just `completed` — a
+  // `needs_human` run has stopped judging and is waiting on a human, exactly
+  // as finalized as a completed one from the importer's perspective. Mirrors
+  // the migration's one-time backfill UPDATE for rows imported before this
+  // fix existed.
+  const finalized = status === 'completed' || status === 'error' || status === 'needs_human';
 
   const created = await ctx.v2.evaluationRun.create({
     data: {
@@ -347,7 +382,7 @@ async function findOrCreateRun(
       protocol: 'pointwise',
       status,
       deadlineAt: null,
-      finalizedAt: terminal ? v1.updatedAt : null,
+      finalizedAt: finalized ? v1.updatedAt : null,
       triggeredById: v2TriggeredById,
       createdAt: v1.createdAt,
       updatedAt: v1.updatedAt,
@@ -397,6 +432,21 @@ function consumeMatchingJudgment(pool: V2ModelJudgment[], v1: V1ModelJudgment): 
   return true;
 }
 
+/** Per-`importRuns`-call tracker of which v1 ModelJudgment id currently
+ * "occupies" a given (runId, judgeModelVersionId) unique-index slot — every
+ * v1-imported row's `pairOrder` is null, so that pair alone identifies the
+ * slot. Updated whenever a judgment for that key resolves (multiset match ->
+ * skip, or a successful create), read when a LATER judgment for the same key
+ * hits P2002 so the collision can be logged/recorded with both v1 ids, not
+ * just the dropped one. */
+function occupantKey(runId: string, judgeModelVersionId: string): string {
+  return `${runId}:${judgeModelVersionId}`;
+}
+
+function isP2002(err: unknown): err is Prisma.PrismaClientKnownRequestError {
+  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
+}
+
 async function findOrCreateModelJudgment(
   ctx: ImportCtx,
   v1: V1ModelJudgment,
@@ -406,10 +456,14 @@ async function findOrCreateModelJudgment(
   v2ModelConfigId: string,
   criterionIds: Map<string, string>,
   runIsStranded: boolean,
-  pool: V2ModelJudgment[]
+  pool: V2ModelJudgment[],
+  occupants: Map<string, string>
 ): Promise<void> {
+  const key = occupantKey(v2RunId, judgeModelVersionId);
+
   if (consumeMatchingJudgment(pool, v1)) {
     ctx.report.add('ModelJudgment', 'skipped');
+    occupants.set(key, v1.id);
     return;
   }
 
@@ -420,33 +474,65 @@ async function findOrCreateModelJudgment(
   const status: JudgmentStatus = stuck ? 'error' : castStatus(v1.status, JUDGMENT_STATUSES, 'ModelJudgment');
   const error = stuck ? 'v1-import: stranded' : v1.error;
 
-  await ctx.v2.modelJudgment.create({
-    data: {
+  try {
+    await ctx.v2.modelJudgment.create({
+      data: {
+        runId: v2RunId,
+        modelConfigId: v2ModelConfigId,
+        judgeModelVersionId,
+        promptTemplateId,
+        samplingParams: { temperature: 0.3, max_tokens: 4096, source: 'v1-defaults' },
+        reasoningEnabled: null,
+        pairOrder: null,
+        overallScore: v1.overallScore,
+        reasoning: v1.reasoning,
+        rawResponse: v1.rawResponse,
+        criteriaScores: remapCriteriaScores(v1.criteriaScores, criterionIds, ctx, 'ModelJudgment', v1.id),
+        latencyMs: v1.latencyMs,
+        tokenCount: v1.tokenCount,
+        inputTokens: null,
+        outputTokens: null,
+        servedModelId: null,
+        finishReason: null,
+        parseMode: null,
+        status,
+        error,
+        startedAt: null,
+        createdAt: v1.createdAt,
+        updatedAt: v1.createdAt, // v1 ModelJudgment has no updatedAt of its own.
+      },
+    });
+    occupants.set(key, v1.id);
+  } catch (err) {
+    if (!isP2002(err)) throw err;
+
+    // DB-level backstop (v2b, Task 6 — closes 1a flag I2): the unique index
+    // on (runId, judgeModelVersionId, pairOrder), now NULLS NOT DISTINCT,
+    // rejected this insert. This is the multiset matcher's own documented
+    // residual gap (module doc above, "ModelJudgment idempotency" section)
+    // actually firing: two DISTINCT v1 ModelConfigs that synthesize to the
+    // SAME JudgeModelVersion (see ./judges.ts), both referenced by judgments
+    // on this one run, both with pairOrder null (every v1-imported row's
+    // is). Never a crash and never a silent loss: correct the optimistic
+    // 'created' tally above to 'dropped', and record the collision (with
+    // BOTH v1 ids) for the reconcile report's merge-collision list.
+    ctx.report.add('ModelJudgment', 'created', -1);
+    ctx.report.add('ModelJudgment', 'dropped');
+    const survivingV1Id = occupants.get(key) ?? '(unknown — pre-existing row, v1 id not tracked this call)';
+    ctx.modelJudgmentMergeCollisions.push({
       runId: v2RunId,
-      modelConfigId: v2ModelConfigId,
       judgeModelVersionId,
-      promptTemplateId,
-      samplingParams: { temperature: 0.3, max_tokens: 4096, source: 'v1-defaults' },
-      reasoningEnabled: null,
-      pairOrder: null,
-      overallScore: v1.overallScore,
-      reasoning: v1.reasoning,
-      rawResponse: v1.rawResponse,
-      criteriaScores: remapCriteriaScores(v1.criteriaScores, criterionIds, ctx, 'ModelJudgment', v1.id),
-      latencyMs: v1.latencyMs,
-      tokenCount: v1.tokenCount,
-      inputTokens: null,
-      outputTokens: null,
-      servedModelId: null,
-      finishReason: null,
-      parseMode: null,
-      status,
-      error,
-      startedAt: null,
-      createdAt: v1.createdAt,
-      updatedAt: v1.createdAt, // v1 ModelJudgment has no updatedAt of its own.
-    },
-  });
+      survivingV1Id,
+      droppedV1Id: v1.id,
+    });
+    console.warn(
+      `importRuns: ModelJudgment merge collision on (runId=${v2RunId}, judgeModelVersionId=${judgeModelVersionId}, pairOrder=null): ` +
+        `v1 ModelJudgment ${v1.id} collides with already-imported v1 ModelJudgment ${survivingV1Id} — ` +
+        'dropping v1 ModelJudgment ' +
+        v1.id +
+        ' (NULLS NOT DISTINCT DB-level backstop; see the reconcile report merge-collision list)'
+    );
+  }
 }
 
 // ─── HumanJudgment ──────────────────────────────────────────────────────────
@@ -507,6 +593,9 @@ export async function importRuns(
   };
   const ensureModelConfig = makeModelConfigEnsurer(ctx, owners, getArchiveUserId);
   const loadJudgmentPool = makeJudgmentPoolLoader(ctx);
+  // See findOrCreateModelJudgment's "occupantKey" doc — one map for the
+  // whole call, keyed by (v2RunId, judgeModelVersionId).
+  const occupants = new Map<string, string>();
 
   const now = new Date();
 
@@ -570,7 +659,8 @@ export async function importRuns(
         v2ModelConfigId,
         ids.criterion,
         runIsStranded,
-        pool
+        pool,
+        occupants
       );
     }
 
