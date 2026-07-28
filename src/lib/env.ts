@@ -38,6 +38,15 @@ const envSchema = z.object({
   // src/lib/realtime/factory.ts for the (env-free) adapter selection.
   REDIS_URL: z.string().url().optional(),
 
+  // ─── RabbitMQ (mandatory in production, optional in dev/test — see connection.ts) ──
+  // Backs the judgment-execution and run-create queues (src/lib/queue/**).
+  // Required in production: getRabbit() throws RabbitConfigError at first
+  // use if unset with NODE_ENV=production. Non-production environments
+  // default to amqp://guest:guest@localhost:5672 if unset, so this is
+  // optional for local dev — but the queue integration tests obviously
+  // need a real RabbitMQ running to exercise.
+  RABBITMQ_URL: z.string().url().optional(),
+
   // ─── SSE ──
   SSE_KEEP_ALIVE_MS: z.coerce.number().int().positive().optional().default(25000),
 

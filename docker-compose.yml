@@ -4,6 +4,7 @@
 #   - app:      Next.js application (Judge Arena)
 #   - postgres: PostgreSQL 16 database
 #   - redis:    Redis 7 for rate limiting & realtime events
+#   - rabbitmq: RabbitMQ 3.13 for the judgment-execution/run-create queues
 #
 # Usage:
 #   cp .env.example .env.production
@@ -30,11 +31,14 @@ services:
     environment:
       - DATABASE_URL=postgresql://judgearena:${POSTGRES_PASSWORD:-changeme}@postgres:5432/judgearena
       - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-judgearena}:${RABBITMQ_PASSWORD:-changeme}@rabbitmq:5672
       - NODE_ENV=production
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     networks:
       - judge-arena-net
@@ -116,10 +120,38 @@ services:
       timeout: 5s
       retries: 5
 
+  # ─── RabbitMQ ──
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: judge-arena-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-judgearena}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-changeme}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    networks:
+      - judge-arena-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   postgres_data:
     driver: local
   redis_data:
+    driver: local
+  # Queue types (quorum for judgment.execute/run.create/judge.dlq; classic
+  # +TTL+DLX for the judgment.retry.* holding queues) are declared at the
+  # application level via assertTopology() (src/lib/queue/topology.ts), not
+  # here — this volume just persists broker state (queues, messages)
+  # across restarts.
+  rabbitmq_data:
     driver: local
 
 networks:

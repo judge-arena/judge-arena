@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { redisHealthy } from '@/lib/redis';
+import { rabbitHealthy } from '@/lib/queue/connection';
 import { logger, serializeError } from '@/lib/logger';
 
 export const dynamic = 'force-dynamic';
@@ -47,14 +48,26 @@ export async function GET() {
     logger.error('Health check: redis connectivity failed', {});
   }
 
+  // ─── RabbitMQ check ──
+  // rabbitHealthy() never throws (500ms-bounded checkExchange, swallows all
+  // errors internally, including getRabbit() throwing in production without
+  // RABBITMQ_URL) — safe to call unconditionally, same as redisHealthy().
+  const rabbitStart = Date.now();
+  const rabbitUp = await rabbitHealthy();
+  checks.rabbitmq = { status: rabbitUp ? 'ok' : 'error', latencyMs: Date.now() - rabbitStart };
+  if (!rabbitUp) {
+    logger.error('Health check: rabbitmq connectivity failed', {});
+  }
+
   // ─── Overall status ──
-  // Redis is a hard readiness gate only in production (it backs rate
-  // limiting on every request there — see auth-guard.ts). In dev/test it's
-  // optional infra: rate limiting fails open on Redis errors, so a
-  // contributor running `npm run dev` without a local Redis container
-  // shouldn't see a broken health endpoint over it.
+  // Redis and RabbitMQ are hard readiness gates only in production (Redis
+  // backs rate limiting on every request; RabbitMQ backs judgment execution
+  // end-to-end — see auth-guard.ts and src/lib/queue/**). In dev/test both
+  // are optional infra: rate limiting fails open on Redis errors, and a
+  // contributor running `npm run dev` without local Redis/RabbitMQ
+  // containers shouldn't see a broken health endpoint over it.
   const dbHealthy = checks.database.status === 'ok';
-  const allHealthy = isProd ? dbHealthy && redisUp : dbHealthy;
+  const allHealthy = isProd ? dbHealthy && redisUp && rabbitUp : dbHealthy;
   const totalLatency = Date.now() - startTime;
 
   const body = {
