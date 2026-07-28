@@ -26,13 +26,14 @@ import http from 'node:http';
 import type { Channel, ConsumeMessage } from 'amqplib';
 import { getRabbit, closeRabbit, rabbitHealthy } from '@/lib/queue/connection';
 import { assertTopology, QUEUE_JUDGMENT_EXECUTE, QUEUE_RUN_CREATE } from '@/lib/queue/topology';
-import { publishJudgmentRetry30s, type JudgmentExecuteMsg } from '@/lib/queue/publish';
+import { publishJudgmentRetry30s } from '@/lib/queue/publish';
 import { redisHealthy } from '@/lib/redis';
 import { prisma } from '@/lib/db';
 import { logger, serializeError } from '@/lib/logger';
 import { createJudgmentConsumer } from './judgment-consumer';
 import { createRunCreateConsumer } from './run-create-consumer';
 import { startReaper } from './reaper';
+import { handleDispatchFailure } from './dispatch-failure';
 
 const MODEL_CONCURRENCY_PER_RUN = Number(process.env.EVALUATION_MODEL_CONCURRENCY_PER_RUN ?? '2');
 const PREFETCH = Math.max(1, MODEL_CONCURRENCY_PER_RUN) * 4;
@@ -106,32 +107,12 @@ async function main(): Promise<void> {
    * here means something upstream of that disposition broke (DB/queue
    * connectivity, a bug in context-loading, malformed message content).
    *
-   * First failure on a given delivery (`msg.fields.redelivered === false`):
-   * plain nack-requeue, same as before this task — gives a one-off
-   * transient blip (a dropped DB connection that immediately reconnects)
-   * the benefit of the doubt with an immediate retry.
-   *
-   * Second+ failure on the SAME message (`msg.fields.redelivered === true`
-   * — this delivery is already a requeue of a previously-unacked message):
-   * a bare nack-requeue here would just loop it back to this same consumer
-   * at full speed (RabbitMQ's requeue-on-nack has no delay), spinning tight
-   * on whatever's actually broken instead of backing off. For
-   * `judgment.execute` messages specifically, route onto that queue's own
-   * 30s retry holding queue instead — same TTL-then-dead-letter-back-onto-
-   * judgment.execute mechanism judgment-consumer.ts's own retryable-error
-   * disposition uses, just entered from a different failure surface (a
-   * dispatch-level throw, not a classified provider error). This is bounded
-   * because the message keeps its original `attempt` field: once it's back
-   * on judgment.execute and the handler runs successfully enough to reach
-   * its own disposition logic, judgment-consumer.ts's `effectiveAttempt`
-   * cap (`MAX_ATTEMPTS`) still applies on that subsequent attempt, so a
-   * truly poison message still eventually reaches the DLQ rather than
-   * retrying forever — this dispatch-level guard only adds a delay before
-   * that normal cap-driven path gets another chance to run. `run.create`
-   * messages have no equivalent retry queue (their handler already
-   * swallows its own errors per its own module doc — this whole catch is
-   * already the rare "shouldn't happen" case for them), so they always fall
-   * through to the plain nack-requeue below regardless of `redelivered`.
+   * The actual ack/nack/retry-publish decision lives in
+   * `handleDispatchFailure` (./dispatch-failure.ts) — pulled out so it can
+   * be unit-tested with a mocked `Channel` and an injected
+   * `publishJudgmentRetry30s`, independent of this file's module-scope
+   * `main()` call. See that module's doc for the full redelivered /
+   * queue-specific reasoning.
    */
   async function dispatch(
     msg: ConsumeMessage,
@@ -143,30 +124,7 @@ async function main(): Promise<void> {
     try {
       await handler(msg, ch);
     } catch (error) {
-      logger.error('unhandled consumer error', {
-        queue: queueName,
-        redelivered: Boolean(msg.fields.redelivered),
-        error: serializeError(error),
-      });
-
-      if (msg.fields.redelivered && queueName === QUEUE_JUDGMENT_EXECUTE) {
-        try {
-          const parsed = JSON.parse(msg.content.toString()) as JudgmentExecuteMsg;
-          await publishJudgmentRetry30s(parsed);
-          ch.ack(msg);
-          return;
-        } catch (routeError) {
-          logger.error(
-            'dispatch: failed to route a repeatedly-failing judgment.execute message to judgment.retry.30s — falling back to nack-requeue',
-            { error: serializeError(routeError) }
-          );
-        }
-      }
-
-      // First failure on this delivery, a run.create message, or the
-      // retry-queue routing attempt above itself failed — nack-requeue so
-      // the message isn't lost; never drop it silently.
-      ch.nack(msg, false, true);
+      await handleDispatchFailure(ch, msg, queueName, error, { publishJudgmentRetry30s });
     } finally {
       inFlight -= 1;
     }
