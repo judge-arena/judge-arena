@@ -144,8 +144,13 @@ async function mkEvaluation(
   userId: string,
   overrides: Partial<{ datasetId: string | null }> = {}
 ) {
+  // responseText set -> judge mode (src/lib/run-mode.ts's deriveRunMode) —
+  // this suite's one judgment-consumer call site (below) injects a
+  // judge-mode fake provider with a rubric attached; every other test here
+  // manipulates ModelJudgment/EvaluationRun rows directly and never goes
+  // through mode-sensitive code at all.
   return prisma.evaluation.create({
-    data: { projectId, userId, inputText: 'fixture input', ...overrides },
+    data: { projectId, userId, inputText: 'fixture input', responseText: 'fixture response under judgment', ...overrides },
   });
 }
 

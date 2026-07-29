@@ -159,8 +159,13 @@ async function mkProject(userId: string) {
 }
 
 async function mkEvaluation(projectId: string, userId: string) {
+  // responseText set -> judge mode (src/lib/run-mode.ts's deriveRunMode).
+  // Every test in this file exercises the judge-mode provider seam
+  // (`provider`, injected as `fakeProvider`) with a rubric attached — see
+  // tests/integration/respond-mode.test.ts for this file's respond-mode
+  // counterpart, added by Task 9b.
   return prisma.evaluation.create({
-    data: { projectId, userId, inputText: 'fixture input' },
+    data: { projectId, userId, inputText: 'fixture input', responseText: 'fixture response under judgment' },
   });
 }
 

@@ -61,6 +61,19 @@
  * Either way the message is acked (not requeued) — retrying a
  * deterministic expansion failure (missing PromptTemplate, empty
  * modelSelections, etc.) would just fail identically forever.
+ *
+ * ── Mode-conditional prompt template (Task 9b) ──────────────────────────────
+ * `RunCreateMsg` carries no mode field of its own (the message contract is
+ * ids-only — see queue/publish.ts's module doc), so this consumer re-derives
+ * the mode itself via `deriveRunMode` (src/lib/run-mode.ts) off the
+ * `Evaluation.responseText` it looks up by `msg.evaluationId`, mirroring
+ * `launchBulkRunCreates`' own derivation at publish time (both read the same
+ * column — the only way they could disagree is the evaluation's
+ * `responseText` changing between publish and consume, which nothing in
+ * this codebase does after creation). A `PromptTemplate` is resolved and
+ * required ONLY for `'judge'` mode; `'respond'` mode expands with
+ * `promptTemplateId: null` on every created `ModelJudgment` — v1 never
+ * rendered a rubric template when there is no rubric to render one against.
  */
 
 import type { Channel, ConsumeMessage } from 'amqplib';
@@ -68,6 +81,7 @@ import type { RunProtocol } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { logger, serializeError } from '@/lib/logger';
 import { publishJudgmentExecute, type RunCreateMsg } from '@/lib/queue/publish';
+import { deriveRunMode } from '@/lib/run-mode';
 
 const EVALUATION_MODEL_TIMEOUT_MS = Number(process.env.EVALUATION_MODEL_TIMEOUT_MS ?? '120000');
 /** Slack added on top of `judgmentCount * EVALUATION_MODEL_TIMEOUT_MS` when
@@ -160,9 +174,22 @@ export function createRunCreateConsumer(): RunCreateConsumer {
     let createdRunId: string | null = null;
 
     try {
-      const promptTemplate = await resolveCurrentPromptTemplate(msg.runSpec.protocol);
-      if (!promptTemplate) {
-        throw new Error(`No PromptTemplate found for protocol "${msg.runSpec.protocol}"`);
+      const evaluation = await prisma.evaluation.findUnique({
+        where: { id: msg.evaluationId },
+        select: { responseText: true },
+      });
+      const mode = deriveRunMode(evaluation?.responseText);
+
+      // promptTemplateId is null on respond judgments — only judge-mode
+      // expansion resolves+requires a PromptTemplate row (see module doc's
+      // "Mode-conditional prompt template" section).
+      let promptTemplateId: string | null = null;
+      if (mode === 'judge') {
+        const promptTemplate = await resolveCurrentPromptTemplate(msg.runSpec.protocol);
+        if (!promptTemplate) {
+          throw new Error(`No PromptTemplate found for protocol "${msg.runSpec.protocol}"`);
+        }
+        promptTemplateId = promptTemplate.id;
       }
 
       // Dedupe by modelConfigId — the per-model identity for this
@@ -207,7 +234,7 @@ export function createRunCreateConsumer(): RunCreateConsumer {
             runId: createdRun.id,
             judgeModelVersionId: sel.judgeModelVersionId,
             modelConfigId: sel.modelConfigId,
-            promptTemplateId: promptTemplate.id,
+            promptTemplateId,
             status: 'pending' as const,
           })),
           skipDuplicates: true,

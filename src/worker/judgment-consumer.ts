@@ -30,6 +30,39 @@
  * misconfiguration should surface as a judgment error, not a request sent
  * with a garbage model id.
  *
+ * ── Respond mode (Task 9b — restored, not new) ──────────────────────────────
+ * v1 (`evaluation-run-manager.ts`, deleted by Task 9) supported two run
+ * modes: "judge" (score an existing response against a rubric,
+ * `executeJudgment`) and "respond" (no response exists yet — each selected
+ * model GENERATES one from the prompt, `executeRespond`). Task 9 shipped
+ * judge-mode only and 501'd respond-mode at launch time
+ * (`src/lib/run-launch.ts`). Task 9b restores respond-mode as a first-class
+ * queue path (Trijeet decision 2026-07-29): every message is dispatched
+ * through `deriveRunMode` (`src/lib/run-mode.ts`, v1's exact
+ * `responseText?.trim() ? 'judge' : 'respond'` rule, re-derived here off
+ * `context.run.evaluation.responseText` — already loaded by
+ * `judgmentContextQuery`, no extra query needed) to one of two provider
+ * seams:
+ *   - `'judge'`   -> `runProviderJudgment` (existing, described above);
+ *     rubric is REQUIRED (unchanged from Task 9).
+ *   - `'respond'` -> `runProviderResponse` (new; default implementation
+ *     `defaultRunProviderResponse` wraps `executeRespond` through the
+ *     IDENTICAL `ProviderConfig`/`mapServingBackendToProvider` adapter and
+ *     `callThroughResilience` — classify()/breaker/retry — machinery
+ *     `executeJudgment` already goes through; nothing new is introduced).
+ *     Rubric is NOT required; `promptTemplateId` is `null` on every
+ *     respond-mode `ModelJudgment` (set at creation time by
+ *     `run-launch.ts`/`run-create-consumer.ts`, not here).
+ * Persistence mirrors this same split: `persistSuccess` (judge) vs.
+ * `persistRespondSuccess` (respond) — see that function's doc for why the
+ * persisted SHAPE must match v1's respond judgment exactly (generated text
+ * into `reasoning`, `overallScore` stays `null`). Both go through the same
+ * generic `persistSuccessWithRetry` bounded-retry/DLQ-preservation wrapper,
+ * and the classify()-driven retry/DLQ disposition below is entirely
+ * mode-agnostic (it never inspects which provider seam produced the
+ * error) — Tasks 7/8's retry/DLQ/claim machinery applies identically to
+ * both modes.
+ *
  * ── Disposition scope — provider errors ONLY ────────────────────────────────
  * The `classify()`-driven retry/DLQ disposition below wraps ONLY the
  * `provider()` call. Persistence (`persistSuccess`) and finalization
@@ -73,7 +106,8 @@
  */
 
 import type { Channel, ConsumeMessage } from 'amqplib';
-import type { ModelEndpoint, Prisma } from '@prisma/client';
+import type { ModelEndpoint } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { logger, serializeError } from '@/lib/logger';
 import { decryptSafe } from '@/lib/crypto';
@@ -85,9 +119,10 @@ import {
   type JudgmentExecuteMsg,
 } from '@/lib/queue/publish';
 import { classify, ProviderError } from '@/lib/llm/errors';
-import { executeJudgment } from '@/lib/llm';
-import type { JudgmentRequest, JudgmentResponse, ProviderConfig } from '@/lib/llm';
+import { executeJudgment, executeRespond } from '@/lib/llm';
+import type { JudgmentRequest, JudgmentResponse, ProviderConfig, RespondRequest, RespondResponse } from '@/lib/llm';
 import { maybeFinalizeRun } from '@/lib/run-finalizer';
+import { deriveRunMode } from '@/lib/run-mode';
 import { claimJudgment } from './claim';
 
 /** Attempt budget: 1st delivery (attempt=1) plus up to 2 retries. On the
@@ -200,6 +235,56 @@ export const defaultRunProviderJudgment: ProviderFn = async (input) => {
   return executeJudgment(providerName, request, config);
 };
 
+// ─── The respond-mode provider seam (Task 9b) ────────────────────────────────
+
+export interface RunProviderResponseInput {
+  judgment: JudgmentContext;
+  run: RunWithEvaluation;
+  version: VersionWithJudgeModel;
+  endpoint: ModelEndpoint;
+}
+
+/** What a respond provider call produces — alias of `RespondResponse` (see
+ * src/lib/llm/provider.ts); named `RespondResult` to match
+ * `RunProviderJudgmentInput`/`JudgmentResult`'s naming convention above. */
+export type RespondResult = RespondResponse;
+
+export type RespondProviderFn = (input: RunProviderResponseInput) => Promise<RespondResult>;
+
+/** Default `runProviderResponse` — the respond-mode mirror of
+ * `defaultRunProviderJudgment`: adapts a `JudgeModelVersion` +
+ * `ModelEndpoint` pair into the existing `ProviderConfig`/`executeRespond`
+ * mechanics (same `baseModel` guard, same `mapServingBackendToProvider`
+ * routing, same `callThroughResilience`-wrapped resilience machinery
+ * `executeJudgment` uses — see module doc's "Respond mode" section). Prompt
+ * resolution mirrors v1's `evaluation-run-manager.ts` respond branch
+ * exactly: `promptText` if set, else fall back to `inputText`. */
+export const defaultRunProviderResponse: RespondProviderFn = async (input) => {
+  const { run, version, endpoint } = input;
+  const providerName = mapServingBackendToProvider(version.servingBackend);
+
+  const modelId = version.judgeModel.baseModel;
+  if (!modelId) {
+    throw new ProviderError(
+      `JudgeModel "${version.judgeModel.slug}" has no baseModel configured — cannot resolve a ` +
+        `provider model id for JudgeModelVersion ${version.id}`,
+      { kind: 'non_retryable', provider: providerName }
+    );
+  }
+
+  const config: ProviderConfig = {
+    modelId,
+    endpoint: endpoint.endpoint ?? undefined,
+    apiKey: endpoint.apiKeyEnc ? decryptSafe(endpoint.apiKeyEnc) : undefined,
+  };
+
+  const request: RespondRequest = {
+    promptText: run.evaluation.promptText?.trim() || run.evaluation.inputText,
+  };
+
+  return executeRespond(providerName, request, config);
+};
+
 // ─── Endpoint resolution ─────────────────────────────────────────────────────
 
 /**
@@ -265,6 +350,44 @@ async function persistSuccess(
 }
 
 /**
+ * Respond-mode mirror of `persistSuccess` — persists v1's EXACT respond
+ * judgment shape (`evaluation-run-manager.ts`'s respond branch, inspected
+ * via `git show 2610871:src/lib/evaluation-run-manager.ts`): the generated
+ * text lands in `reasoning` (NOT a new field — the run-detail UI's
+ * `ModelJudgmentCard` already reads `judgment.reasoning` for both modes,
+ * see src/app/evaluate/[id]/runs/[runId]/page.tsx), `overallScore` stays
+ * `null` (no scoring concept in respond mode — `resolveHumanJudgmentScore`'s
+ * 'respond' branch never reads it either), `criteriaScores` stays `null`
+ * (`Prisma.DbNull`, matching v1's `Prisma.DbNull` exactly), and `status`
+ * becomes `'completed'`.
+ */
+async function persistRespondSuccess(
+  judgmentId: string,
+  result: RespondResult,
+  version: VersionWithJudgeModel
+): Promise<void> {
+  await prisma.modelJudgment.update({
+    where: { id: judgmentId },
+    data: {
+      status: 'completed',
+      error: null,
+      overallScore: null,
+      reasoning: result.responseText,
+      rawResponse: result.rawResponse,
+      criteriaScores: Prisma.DbNull,
+      latencyMs: result.latencyMs,
+      tokenCount: result.tokenCount,
+      // Provenance capture — same as persistSuccess's judge-mode write;
+      // harmless/accurate for respond mode too (the version's own
+      // sampling/reasoning config, independent of which seam executed it).
+      samplingParams: (version.samplingDefaults ?? undefined) as Prisma.InputJsonValue | undefined,
+      reasoningEnabled:
+        version.reasoningMode === 'always' ? true : version.reasoningMode === 'none' ? false : null,
+    },
+  });
+}
+
+/**
  * `maybeFinalizeRun` (src/lib/run-finalizer.ts — the real, `SELECT ... FOR
  * UPDATE`-locked, concurrency-safe finalization pass), isolated in its own
  * try/catch. A finalization failure must never propagate into the
@@ -311,18 +434,25 @@ async function safeFinalizeRun(runId: string): Promise<void> {
  *
  * Returns `true` once persisted, `false` if the retry budget was
  * exhausted (DLQ envelope already published in that case).
+ *
+ * Generic over the result type (Task 9b): identical for judge
+ * (`JudgmentResult`) and respond (`RespondResult`) — the retry/backoff/DLQ-
+ * preservation CONTRACT doesn't care which shape it's persisting, only the
+ * caller-supplied `doPersist` thunk (built from `persist`/`persistRespond`
+ * closing over `result`/`version`) differs. This is the "same machinery"
+ * requirement from Tasks 7/8: respond-mode gets IDENTICAL persist-retry/DLQ
+ * semantics, not a parallel reimplementation.
  */
-async function persistSuccessWithRetry(
+async function persistSuccessWithRetry<TResult>(
   msg: JudgmentExecuteMsg,
-  result: JudgmentResult,
-  version: VersionWithJudgeModel,
-  persist: PersistFn
+  result: TResult,
+  doPersist: () => Promise<void>
 ): Promise<boolean> {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= PERSIST_MAX_ATTEMPTS; attempt += 1) {
     try {
-      await persist(msg.judgmentId, result, version);
+      await doPersist();
       return true;
     } catch (error) {
       lastError = error;
@@ -364,16 +494,31 @@ export type PersistFn = (
   version: VersionWithJudgeModel
 ) => Promise<void>;
 
+/** `persistRespondSuccess`'s signature — the respond-mode mirror of
+ * `PersistFn`, constructor-injectable the same way. */
+export type PersistRespondFn = (
+  judgmentId: string,
+  result: RespondResult,
+  version: VersionWithJudgeModel
+) => Promise<void>;
+
 export interface JudgmentConsumerOptions {
-  /** Constructor-injected provider seam — defaults to
+  /** Constructor-injected judge-mode provider seam — defaults to
    * `defaultRunProviderJudgment`. Tests inject a fake to assert exactly-once
    * provider-call semantics without a live LLM/Redis-breaker dependency. */
   provider?: ProviderFn;
-  /** Constructor-injected persist seam — defaults to `persistSuccess`.
-   * Tests inject a fake that throws to exercise `persistSuccessWithRetry`'s
-   * bounded-retry / DLQ-preservation path deterministically, without
-   * needing to break the real DB connection to simulate a persist failure. */
+  /** Constructor-injected respond-mode provider seam (Task 9b) — defaults
+   * to `defaultRunProviderResponse`. Same rationale as `provider`. */
+  providerResponse?: RespondProviderFn;
+  /** Constructor-injected judge-mode persist seam — defaults to
+   * `persistSuccess`. Tests inject a fake that throws to exercise
+   * `persistSuccessWithRetry`'s bounded-retry / DLQ-preservation path
+   * deterministically, without needing to break the real DB connection to
+   * simulate a persist failure. */
   persist?: PersistFn;
+  /** Constructor-injected respond-mode persist seam (Task 9b) — defaults to
+   * `persistRespondSuccess`. Same rationale as `persist`. */
+  persistRespond?: PersistRespondFn;
 }
 
 export interface JudgmentConsumer {
@@ -382,7 +527,9 @@ export interface JudgmentConsumer {
 
 export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): JudgmentConsumer {
   const provider = options.provider ?? defaultRunProviderJudgment;
+  const providerResponse = options.providerResponse ?? defaultRunProviderResponse;
   const persist = options.persist ?? persistSuccess;
+  const persistRespond = options.persistRespond ?? persistRespondSuccess;
 
   async function handle(raw: ConsumeMessage, ch: Channel): Promise<void> {
     const msg = JSON.parse(raw.content.toString()) as JudgmentExecuteMsg;
@@ -426,16 +573,31 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
 
     const context = await judgmentContextQuery(msg.judgmentId);
     const judgeModelVersion = context?.judgeModelVersion ?? null;
-    const rubric = context?.run.rubric ?? null;
 
-    if (!context || !judgeModelVersion || !rubric) {
+    if (!context || !judgeModelVersion) {
       await markJudgmentError(
         msg.judgmentId,
         !context
           ? 'Judgment row disappeared between claim and load'
-          : !judgeModelVersion
-            ? 'ModelJudgment has no judgeModelVersionId set — the worker path requires one'
-            : 'EvaluationRun has no rubric — cannot build a pointwise judgment prompt'
+          : 'ModelJudgment has no judgeModelVersionId set — the worker path requires one'
+      );
+      await safeFinalizeRun(msg.runId);
+      ch.ack(raw);
+      return;
+    }
+
+    // Mode derivation (Task 9b) — v1's exact `responseText?.trim() ?
+    // 'judge' : 'respond'` rule, shared via src/lib/run-mode.ts so this
+    // worker and the human-judgment route never disagree about which mode
+    // a run is in. `responseText` is already loaded by
+    // `judgmentContextQuery` — no extra query needed.
+    const mode = deriveRunMode(context.run.evaluation.responseText);
+    const rubric = context.run.rubric ?? null;
+
+    if (mode === 'judge' && !rubric) {
+      await markJudgmentError(
+        msg.judgmentId,
+        'EvaluationRun has no rubric — cannot build a pointwise judgment prompt'
       );
       await safeFinalizeRun(msg.runId);
       ch.ack(raw);
@@ -455,16 +617,29 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
 
     // The classify()-driven retry/DLQ disposition below wraps ONLY this
     // provider() call — see the module doc's "Disposition scope" section
-    // for why persistence and finalization must not share this catch.
-    let result: JudgmentResult;
+    // for why persistence and finalization must not share this catch. Mode-
+    // agnostic: it never inspects which seam (judge/respond) produced the
+    // error — Tasks 7/8's retry/DLQ/claim machinery applies identically to
+    // both (see module doc's "Respond mode" section).
+    let judgeResult: JudgmentResult | null = null;
+    let respondResult: RespondResult | null = null;
     try {
-      result = await provider({
-        judgment: context,
-        run: context.run,
-        rubric,
-        version: judgeModelVersion,
-        endpoint,
-      });
+      if (mode === 'judge') {
+        judgeResult = await provider({
+          judgment: context,
+          run: context.run,
+          rubric: rubric!, // non-null — guarded above when mode === 'judge'
+          version: judgeModelVersion,
+          endpoint,
+        });
+      } else {
+        respondResult = await providerResponse({
+          judgment: context,
+          run: context.run,
+          version: judgeModelVersion,
+          endpoint,
+        });
+      }
     } catch (rawError) {
       const providerError = classify(rawError, mapServingBackendToProvider(judgeModelVersion.servingBackend));
 
@@ -512,7 +687,14 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
     // bounded local retry + DLQ preservation (persistSuccessWithRetry);
     // it must never reset the judgment to 'pending' and trigger a
     // re-execution of a provider call that already succeeded.
-    const persisted = await persistSuccessWithRetry(msg, result, judgeModelVersion, persist);
+    const persisted =
+      mode === 'judge'
+        ? await persistSuccessWithRetry(msg, judgeResult!, () =>
+            persist(msg.judgmentId, judgeResult!, judgeModelVersion)
+          )
+        : await persistSuccessWithRetry(msg, respondResult!, () =>
+            persistRespond(msg.judgmentId, respondResult!, judgeModelVersion)
+          );
     if (!persisted) {
       // Retry budget exhausted — already logged fatally and DLQ'd (with
       // the full result) inside persistSuccessWithRetry. Row intentionally

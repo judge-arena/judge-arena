@@ -7,6 +7,7 @@ import { refreshDatasetEvaluationSummaryForEvaluation } from '@/lib/dataset-eval
 import { markRunCompleted } from '@/lib/run-finalizer';
 import { logger, serializeError } from '@/lib/logger';
 import { resolveHumanJudgmentScore } from '@/lib/utils';
+import { deriveRunMode } from '@/lib/run-mode';
 import { humanJudgmentSchema } from './schema';
 
 /**
@@ -57,7 +58,7 @@ export async function POST(
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    const mode = run.evaluation.responseText?.trim() ? 'judge' : 'respond';
+    const mode = deriveRunMode(run.evaluation.responseText);
     const completedModelIds = run.modelJudgments
       .filter((judgment) => judgment.status === 'completed')
       .map((judgment) => judgment.modelConfigId);

@@ -63,6 +63,7 @@
 import type { ModelConfig, Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { ensureJudgeIdentityForModelConfig } from '@/lib/judge-identity';
+import { deriveRunMode } from '@/lib/run-mode';
 import { logger } from '@/lib/logger';
 import { publishJudgmentExecute, publishRunCreate, type JudgmentExecuteMsg, type RunCreateMsg } from '@/lib/queue/publish';
 
@@ -92,23 +93,22 @@ export function toRunLaunchHttpError(error: unknown): { status: number; message:
  * v1's in-process run engine (the now-deleted `evaluation-run-manager.ts`)
  * supported two modes per run: "judge" (score a response against a rubric,
  * `executeJudgment`) and "respond" (generate a model response with no
- * rubric, `executeRespond`). The 1b queue-based worker
- * (`src/worker/judgment-consumer.ts`) only ever implements the judge path —
- * `RunProtocol` itself only has judging variants (`pointwise` / `pairwise` /
- * `listwise`), and `judgmentContextQuery` unconditionally requires
- * `run.rubric`, erroring every judgment ("EvaluationRun has no rubric") for
- * a respond-mode run. That gap predates this task (Stage B / Tasks 7-8
- * shipped the worker without a respond-mode path) — Task 9 does not add
- * respond-mode support, which is out of scope (no schema/protocol for it).
- * What Task 9 DOES do: fail fast and clearly here, at launch time, instead
- * of silently creating a run/judgments that the worker will later error out
- * one-by-one with a confusing "no rubric" message. The UI still lets a user
- * pick "respond" mode + "Create & Run" together (src/app/projects/[id]/
- * page.tsx), so this is a real, reachable path, not a hypothetical.
+ * rubric, `executeRespond`). Task 9 (the initial queue-migration cut of
+ * this file) shipped judge-mode only and fail-fast 501'd respond-mode here
+ * at launch time, because the Task 7/8 worker
+ * (`src/worker/judgment-consumer.ts`) only ever implemented the judge path.
+ * Task 9b (Trijeet decision 2026-07-29) restores respond-mode as a first-
+ * class queue path — both `launchSingleRun` and `launchBulkRunCreates`
+ * below now derive the mode via `deriveRunMode` (`src/lib/run-mode.ts`,
+ * v1's exact `responseText?.trim() ? 'judge' : 'respond'` rule) and only
+ * require a rubric / resolve a `PromptTemplate` for judge-mode runs —
+ * respond-mode runs get `rubricId: null` and `promptTemplateId: null` on
+ * every created `ModelJudgment`, mirroring v1's `createEvaluationRun`. The
+ * worker side of this restoration lives in `judgment-consumer.ts`
+ * (`runProviderResponse` seam) and `run-create-consumer.ts` (same
+ * mode-conditional prompt-template gate, re-derived from the evaluation
+ * since `RunCreateMsg` carries no mode field of its own).
  */
-const RESPOND_MODE_UNSUPPORTED_MESSAGE =
-  'Respond-mode evaluations (model self-response generation, no rubric) are not supported by ' +
-  'the queue-based run worker. Use judge mode (a response to evaluate against a rubric) instead.';
 
 // ─── Shared run-detail include (moved verbatim from evaluation-run-manager.ts) ──
 
@@ -208,12 +208,10 @@ export async function launchSingleRun(
   });
   if (!evaluation) throw new RunLaunchError(404, 'Evaluation not found');
 
-  if (!evaluation.responseText?.trim()) {
-    throw new RunLaunchError(501, RESPOND_MODE_UNSUPPORTED_MESSAGE);
-  }
+  const mode = deriveRunMode(evaluation.responseText);
 
   const rubricId = params.rubricId ?? evaluation.rubricId ?? null;
-  if (!rubricId) {
+  if (mode === 'judge' && !rubricId) {
     throw new RunLaunchError(
       400,
       'No rubric assigned. Assign a rubric to the evaluation template or pass rubricId.'
@@ -249,9 +247,16 @@ export async function launchSingleRun(
 
   const versionIdByModelConfigId = await resolveJudgeIdentities(modelRecords);
 
-  const promptTemplate = await resolveCurrentPromptTemplate();
-  if (!promptTemplate) {
-    throw new RunLaunchError(500, 'No PromptTemplate found for protocol "pointwise"');
+  // promptTemplateId is null on respond judgments (no rubric template to
+  // render against — the model generates a response, it isn't judging
+  // one) — only judge-mode runs resolve+require a PromptTemplate row.
+  let promptTemplateId: string | null = null;
+  if (mode === 'judge') {
+    const promptTemplate = await resolveCurrentPromptTemplate();
+    if (!promptTemplate) {
+      throw new RunLaunchError(500, 'No PromptTemplate found for protocol "pointwise"');
+    }
+    promptTemplateId = promptTemplate.id;
   }
 
   const deadlineAt = new Date(
@@ -274,7 +279,7 @@ export async function launchSingleRun(
           create: selectedModelIds.map((modelConfigId) => ({
             modelConfigId, // dual-write, legacy — see module doc
             judgeModelVersionId: versionIdByModelConfigId.get(modelConfigId)!,
-            promptTemplateId: promptTemplate.id,
+            promptTemplateId,
             status: 'pending' as const,
           })),
         },
@@ -390,17 +395,18 @@ export async function launchBulkRunCreates(
       });
       if (!evaluation) throw new Error('Evaluation not found');
 
-      if (!evaluation.responseText?.trim()) {
-        throw new Error(RESPOND_MODE_UNSUPPORTED_MESSAGE);
-      }
+      const mode = deriveRunMode(evaluation.responseText);
 
       const rubricId = evaluation.rubricId ?? null;
-      if (!rubricId) {
+      if (mode === 'judge' && !rubricId) {
         throw new Error('No rubric assigned. Assign a rubric to the evaluation template or pass rubricId.');
       }
-      // eslint-disable-next-line no-await-in-loop
-      const rubric = await prisma.rubric.findUnique({ where: { id: rubricId }, select: { id: true } });
-      if (!rubric) throw new Error('Rubric not found');
+      let rubric: { id: string } | null = null;
+      if (rubricId) {
+        // eslint-disable-next-line no-await-in-loop
+        rubric = await prisma.rubric.findUnique({ where: { id: rubricId }, select: { id: true } });
+        if (!rubric) throw new Error('Rubric not found');
+      }
 
       const modelConfigs = evaluation.modelSelections.map((selection) => selection.modelConfig);
       if (modelConfigs.length === 0) {
