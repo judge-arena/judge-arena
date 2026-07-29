@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, requireScope, isAdmin, optionalAuth, resolveResourceAccess } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin, optionalAuth, resolveResourceAccess, RateLimitedError } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
 import { createRubricVersion, RubricVersionConflictError } from '@/lib/rubric-versions';
 
@@ -19,15 +19,23 @@ const newVersionSchema = z.object({
   criteria: z.array(criterionSchema).min(1, 'At least one criterion is required'),
 });
 
-// GET /api/rubrics/[id]/versions — same visibility rule as GET
-// /api/rubrics/[id]: public if the rubric is visibility: 'public', else
-// owner/admin only. This sub-resource carries no user/email join, so
-// there's no separate serializer step — the gate below IS the whole fix.
+// GET /api/rubrics/[id]/versions — same access rule as GET /api/rubrics/[id]
+// (public if the rubric is visibility: 'public', else owner/admin only) AND
+// the same requireScope('rubrics:read') gate the sibling [id] route applies
+// — this route previously skipped it, so a narrowly-scoped dev key (missing
+// rubrics:read) could read a private rubric's versions anyway. This
+// sub-resource carries no user/email join, so there's no separate
+// serializer step needed beyond the gate.
 export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
-  const session = await optionalAuth();
 
   try {
+    const session = await optionalAuth();
+    if (session) {
+      const scopeCheck = requireScope(session, 'rubrics:read');
+      if (scopeCheck) return scopeCheck;
+    }
+
     const rubric = await prisma.rubric.findUnique({ where: { id: params.id } });
     if (!rubric) {
       return NextResponse.json({ error: 'Rubric not found' }, { status: 404 });
@@ -46,6 +54,7 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
 
     return NextResponse.json(versions);
   } catch (error) {
+    if (error instanceof RateLimitedError) return error.response;
     logger.error('Failed to fetch rubric versions', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to fetch rubric versions' },

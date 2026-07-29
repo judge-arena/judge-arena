@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { requireAuth, requireScope, isAdmin, optionalAuth } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin, optionalAuth, RateLimitedError } from '@/lib/auth-guard';
 import { generateSlug } from '@/lib/config';
 import {
   fetchDatasetMetadata,
@@ -42,20 +42,20 @@ const createDatasetSchema = z.object({
 // GET /api/datasets - List datasets visible to the current user
 // Supports ?limit=N&cursor=ID for pagination
 export async function GET(request: Request) {
-  const session = await optionalAuth();
-  if (session) {
-    const scopeCheck = requireScope(session, 'datasets:read');
-    if (scopeCheck) return scopeCheck;
-  }
-
-  const { searchParams } = new URL(request.url);
-  const source = searchParams.get('source'); // 'local' | 'remote'
-  const visibility = searchParams.get('visibility'); // 'private' | 'public'
-  const projectId = searchParams.get('projectId');
-  const { limit, cursor } = parsePaginationParams(searchParams);
-  const pageArgs = buildPrismaPageArgs({ limit, cursor });
-
   try {
+    const session = await optionalAuth();
+    if (session) {
+      const scopeCheck = requireScope(session, 'datasets:read');
+      if (scopeCheck) return scopeCheck;
+    }
+
+    const { searchParams } = new URL(request.url);
+    const source = searchParams.get('source'); // 'local' | 'remote'
+    const visibility = searchParams.get('visibility'); // 'private' | 'public'
+    const projectId = searchParams.get('projectId');
+    const { limit, cursor } = parsePaginationParams(searchParams);
+    const pageArgs = buildPrismaPageArgs({ limit, cursor });
+
     // Anonymous callers see ONLY public datasets. Authenticated non-admins
     // see their own (private + public) plus everyone else's public ones.
     // Admins see everything.
@@ -98,6 +98,7 @@ export async function GET(request: Request) {
 
     return paginatedJson(body, limit, total);
   } catch (error) {
+    if (error instanceof RateLimitedError) return error.response;
     logger.error('Failed to fetch datasets', { error });
     return NextResponse.json(
       { error: 'Failed to fetch datasets' },

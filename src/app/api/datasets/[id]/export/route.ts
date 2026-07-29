@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { requireScope, optionalAuth, resolveResourceAccess } from '@/lib/auth-guard';
+import { requireScope, optionalAuth, resolveResourceAccess, RateLimitedError } from '@/lib/auth-guard';
 import {
   flattenDatasetSample,
   toCsv,
@@ -19,23 +19,24 @@ import { logger, serializeError } from '@/lib/logger';
  */
 export async function GET(request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
-  const session = await optionalAuth();
-  if (session) {
-    const scopeCheck = requireScope(session, 'datasets:export');
-    if (scopeCheck) return scopeCheck;
-  }
-
-  const { searchParams } = new URL(request.url);
-  const format = (searchParams.get('format') ?? 'csv').toLowerCase();
-
-  if (format !== 'csv' && format !== 'jsonl') {
-    return NextResponse.json(
-      { error: 'Unsupported format. Use ?format=csv or ?format=jsonl' },
-      { status: 400 }
-    );
-  }
 
   try {
+    const session = await optionalAuth();
+    if (session) {
+      const scopeCheck = requireScope(session, 'datasets:export');
+      if (scopeCheck) return scopeCheck;
+    }
+
+    const { searchParams } = new URL(request.url);
+    const format = (searchParams.get('format') ?? 'csv').toLowerCase();
+
+    if (format !== 'csv' && format !== 'jsonl') {
+      return NextResponse.json(
+        { error: 'Unsupported format. Use ?format=csv or ?format=jsonl' },
+        { status: 400 }
+      );
+    }
+
     const dataset = await prisma.dataset.findUnique({
       where: { id: params.id },
       include: {
@@ -85,6 +86,7 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
 
     return csvResponse(toCsv(rows), `${safeName}_samples_${timestamp}.csv`);
   } catch (error) {
+    if (error instanceof RateLimitedError) return error.response;
     logger.error('Dataset export failed', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to export dataset' },

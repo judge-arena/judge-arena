@@ -84,31 +84,21 @@ async function authenticateApiKey(): Promise<AuthSession | NextResponse | null> 
 }
 
 /**
- * Get the authenticated session or return a 401 response.
- * Supports both NextAuth session cookies AND developer API keys.
+ * Resolve API-key or session identity — the credential-checking half of
+ * `requireAuth()`, WITHOUT its IP-keyed rate-limit gate. Shared by:
  *
- * Usage in API routes:
+ *   - `requireAuth()`, which applies that gate FIRST (before any DB work),
+ *     then delegates here.
+ *   - `optionalAuth()`, which needs identity resolved FIRST so it can pick
+ *     the RIGHT rate-limit key (the caller's own user id once a session
+ *     resolves, vs. client IP when none does) — see that function's doc
+ *     comment for why identity has to come before its limiter check.
  *
- *   const session = await requireAuth();
- *   if (session instanceof NextResponse) return session;
- *   // session is AuthSession
+ * Returns an `AuthSession` on success, or a `NextResponse` (401/403) for
+ * every "credentials present but invalid" case: bad/expired/inactive API
+ * key, or a session cookie whose user id no longer resolves.
  */
-export async function requireAuth(): Promise<AuthSession | NextResponse> {
-  // ── Shared API rate-limit chokepoint (120/min per IP, env-overridable) ──
-  // Every authenticated route calls requireAuth(), so gating here covers
-  // the whole authenticated API surface without per-route boilerplate.
-  // Checked first, before any DB/auth work, so an abusive client doesn't
-  // get free DB queries out of a request that's going to be rejected.
-  const headersList = await headers();
-  const clientIp = getClientIp(headersList);
-  const rateResult = await apiLimiter.check(clientIp);
-  if (!rateResult.ok) {
-    return NextResponse.json(
-      { error: 'Rate limit exceeded. Please slow down.' },
-      { status: 429, headers: rateLimitHeaders(rateResult, API_LIMIT) }
-    );
-  }
-
+async function resolveIdentity(): Promise<AuthSession | NextResponse> {
   // 1. Try API key authentication first
   const apiKeyResult = await authenticateApiKey();
   if (apiKeyResult instanceof NextResponse) return apiKeyResult; // Error response
@@ -150,6 +140,35 @@ export async function requireAuth(): Promise<AuthSession | NextResponse> {
     },
     // No apiKeyScopes — session auth has full access (governed by role)
   };
+}
+
+/**
+ * Get the authenticated session or return a 401 response.
+ * Supports both NextAuth session cookies AND developer API keys.
+ *
+ * Usage in API routes:
+ *
+ *   const session = await requireAuth();
+ *   if (session instanceof NextResponse) return session;
+ *   // session is AuthSession
+ */
+export async function requireAuth(): Promise<AuthSession | NextResponse> {
+  // ── Shared API rate-limit chokepoint (120/min per IP, env-overridable) ──
+  // Every authenticated route calls requireAuth(), so gating here covers
+  // the whole authenticated API surface without per-route boilerplate.
+  // Checked first, before any DB/auth work, so an abusive client doesn't
+  // get free DB queries out of a request that's going to be rejected.
+  const headersList = await headers();
+  const clientIp = getClientIp(headersList);
+  const rateResult = await apiLimiter.check(clientIp);
+  if (!rateResult.ok) {
+    return NextResponse.json(
+      { error: 'Rate limit exceeded. Please slow down.' },
+      { status: 429, headers: rateLimitHeaders(rateResult, API_LIMIT) }
+    );
+  }
+
+  return resolveIdentity();
 }
 
 /**
@@ -206,31 +225,74 @@ export function isAdmin(session: AuthSession): boolean {
 }
 
 /**
- * Resolve the current session WITHOUT requiring one — never throws, never
- * returns a NextResponse. Used by routes that serve both public
- * (`visibility: 'public'`) and gated content (spec §7 D3: public research
- * data defaults to open reads; see src/lib/serializers.ts + the access
- * matrix in tests/db/access-matrix.test.ts): `null` means "anonymous
- * caller", not an error condition the route needs to branch its error
- * handling on.
+ * Thrown by `optionalAuth()` when the resolved caller — anonymous, keyed
+ * by client IP, or authenticated, keyed by their own user id — is over
+ * the shared `apiLimiter` budget. Every `optionalAuth()` call site MUST
+ * wrap the call (and, since `requireScope()` runs right after it off the
+ * same session, that check too) in the route's existing try/catch and
+ * check `error instanceof RateLimitedError` FIRST, returning
+ * `error.response` — an uncaught throw here surfaces as Next.js's generic
+ * 500 error page, not the 429 this class carries. See every GET handler
+ * in rubrics/datasets/projects (list, `[id]`, `[id]/versions`,
+ * `[id]/export`) for the pattern; tests/db/access-matrix.test.ts asserts
+ * the 429 actually comes out the other end for both an anonymous and an
+ * authenticated over-limit caller.
+ */
+export class RateLimitedError extends Error {
+  constructor(public readonly response: NextResponse) {
+    super('Rate limit exceeded');
+    this.name = 'RateLimitedError';
+  }
+}
+
+/**
+ * Resolve the current session WITHOUT requiring one — never returns a
+ * NextResponse; `null` means "anonymous caller", not an error condition
+ * the route needs to branch its error handling on. Used by routes that
+ * serve both public (`visibility: 'public'`) and gated content (spec §7
+ * D3: public research data defaults to open reads; see
+ * src/lib/serializers.ts + the access matrix in
+ * tests/db/access-matrix.test.ts).
  *
- * Delegates to `requireAuth()` so anonymous callers on these routes still
- * benefit from its API-key resolution and shared rate-limit chokepoint —
- * with one deliberate tradeoff: EVERY failure mode of `requireAuth()`
- * (missing session, invalid/expired API key, and rate-limit-exceeded)
- * collapses to `null` here, not just "no credentials presented". A
- * request that's actually over the rate limit is therefore served as
- * anonymous rather than getting a 429 on these specific routes. That's an
- * accepted gap for this task (public-read routes were fully auth-gated,
- * and therefore already covered by requireAuth()'s 429, before Task 14 —
- * this only affects the newly-opened anonymous surface) — a caller
- * presenting a BAD key on a public-read route degrades to "read the public
- * view", it doesn't get blocked outright. Revisit if anonymous abuse of
- * public-read routes becomes a real problem.
+ * Identity is resolved FIRST (via the same API-key/session logic
+ * `requireAuth()` uses, factored out as `resolveIdentity()` — but WITHOUT
+ * `requireAuth()`'s own IP-keyed rate gate, which would otherwise throttle
+ * an authenticated caller by shared IP before we even know they're
+ * authenticated). "No credentials" and "bad/expired/inactive credentials"
+ * both still collapse to `null` here — an invalid API key on a
+ * public-read route degrades to "read the public view", it doesn't get
+ * blocked outright. That part of the original design is unchanged.
+ *
+ * What IS new: this function now applies its OWN `apiLimiter` check —
+ * keyed by the caller's user id once a session resolves, or by client IP
+ * when none does — and THROWS `RateLimitedError` (429, same body/header
+ * shape `requireAuth()` uses) when that check fails, instead of folding
+ * "over limit" into the same `null` bucket as "no/bad credentials". Before
+ * this, EVERY failure mode of the old `requireAuth()`-delegating
+ * implementation (including rate-limit-exceeded) collapsed to `null`, so
+ * an over-limit client was served the anonymous public view — unlimited,
+ * unthrottled — instead of a 429. Now rate-limiting is enforced for BOTH
+ * anonymous and authenticated callers on every public-read route; only a
+ * caller truly within budget (or presenting no/bad credentials, which
+ * never bypasses the check) ever reaches the anonymous/public branch.
  */
 export async function optionalAuth(): Promise<AuthSession | null> {
-  const result = await requireAuth();
-  return result instanceof NextResponse ? null : result;
+  const identity = await resolveIdentity();
+  const session = identity instanceof NextResponse ? null : identity;
+
+  const headersList = await headers();
+  const rateKey = session ? `user:${session.user.id}` : getClientIp(headersList);
+  const rateResult = await apiLimiter.check(rateKey);
+  if (!rateResult.ok) {
+    throw new RateLimitedError(
+      NextResponse.json(
+        { error: 'Rate limit exceeded. Please slow down.' },
+        { status: 429, headers: rateLimitHeaders(rateResult, API_LIMIT) }
+      )
+    );
+  }
+
+  return session;
 }
 
 /**

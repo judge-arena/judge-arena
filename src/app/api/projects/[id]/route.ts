@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, requireScope, optionalAuth, resolveResourceAccess, requireOwnership } from '@/lib/auth-guard';
+import { requireAuth, requireScope, optionalAuth, resolveResourceAccess, requireOwnership, RateLimitedError } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicProject } from '@/lib/serializers';
 
@@ -17,15 +17,76 @@ const updateProjectSchema = z.object({
 // part of the public-visibility set, regardless of the parent project's
 // visibility) and are only ever returned to the project's owner/admin, the
 // same as the owner's email on every other public serializer in this file.
+//
+// Access is resolved from a CHEAP projection FIRST (id/userId/visibility/
+// isDefault/name/description/publishedAt/_count — no evaluations at all),
+// and the expensive nested include (evaluations -> runs -> modelJudgments/
+// humanJudgment, every evaluation author's email) only ever runs on the
+// OWNER/admin branch below. Before this, the heavy query ran for EVERY
+// caller — including anonymous ones on this now-public route — and got
+// thrown away on the public branch: an anonymous-amplification vector
+// (T14 follow-up finding) on a route anyone can now hit with no auth.
 export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
-  const session = await optionalAuth();
-  if (session) {
-    const scopeCheck = requireScope(session, 'projects:read');
-    if (scopeCheck) return scopeCheck;
-  }
 
   try {
+    const session = await optionalAuth();
+    if (session) {
+      const scopeCheck = requireScope(session, 'projects:read');
+      if (scopeCheck) return scopeCheck;
+    }
+
+    const projectMeta = await prisma.project.findUnique({
+      where: { id: params.id },
+      select: {
+        id: true,
+        userId: true,
+        visibility: true,
+        isDefault: true,
+        name: true,
+        slug: true,
+        description: true,
+        publishedAt: true,
+        createdAt: true,
+        updatedAt: true,
+        user: { select: { id: true, name: true } },
+        _count: { select: { evaluations: true } },
+      },
+    });
+
+    if (!projectMeta) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+    }
+
+    const isPublic = projectMeta.visibility === 'public' || projectMeta.isDefault;
+    const decision = resolveResourceAccess(session, projectMeta.userId, isPublic);
+    if ('error' in decision) return decision.error;
+
+    if (decision.access === 'public') {
+      // Public/anonymous path: the cheap projection above IS the full
+      // response (via toPublicProject) — no evaluations query, no
+      // author-email join, ever. Only datasets that are THEMSELVES
+      // public, filtered in the DB rather than fetched-then-discarded.
+      const publicDatasets = await prisma.dataset.findMany({
+        where: { projectId: projectMeta.id, visibility: 'public' },
+        select: {
+          id: true,
+          name: true,
+          source: true,
+          visibility: true,
+          sampleCount: true,
+          huggingFaceId: true,
+        },
+        orderBy: { updatedAt: 'desc' },
+      });
+
+      return NextResponse.json({
+        ...toPublicProject(projectMeta),
+        datasets: publicDatasets,
+      });
+    }
+
+    // Owner/admin path — full heavy query, unchanged from before this fix.
     const project = await prisma.project.findUnique({
       where: { id: params.id },
       include: {
@@ -113,25 +174,14 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
     });
 
     if (!project) {
+      // Vanishingly unlikely (deleted between the cheap and heavy
+      // queries) — same 404 shape as the cheap-path check above.
       return NextResponse.json({ error: 'Project not found' }, { status: 404 });
     }
 
-    const isPublic = project.visibility === 'public' || project.isDefault;
-    const decision = resolveResourceAccess(session, project.userId, isPublic);
-    if ('error' in decision) return decision.error;
-
-    if (decision.access === 'owner') {
-      return NextResponse.json(project);
-    }
-
-    return NextResponse.json({
-      ...toPublicProject(project),
-      // Only datasets that are THEMSELVES public — this select set
-      // (id/name/source/visibility/sampleCount/huggingFaceId) already
-      // carries no user join, so no further stripping is needed.
-      datasets: project.datasets.filter((d) => d.visibility === 'public'),
-    });
+    return NextResponse.json(project);
   } catch (error) {
+    if (error instanceof RateLimitedError) return error.response;
     logger.error('Failed to fetch project', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to fetch project' },

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, requireScope, optionalAuth, resolveResourceAccess, requireOwnership } from '@/lib/auth-guard';
+import { requireAuth, requireScope, optionalAuth, resolveResourceAccess, requireOwnership, RateLimitedError } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicDataset } from '@/lib/serializers';
 
@@ -19,13 +19,14 @@ const updateDatasetSchema = z.object({
 // owner/admin only. Access matrix: tests/db/access-matrix.test.ts.
 export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
-  const session = await optionalAuth();
-  if (session) {
-    const scopeCheck = requireScope(session, 'datasets:read');
-    if (scopeCheck) return scopeCheck;
-  }
 
   try {
+    const session = await optionalAuth();
+    if (session) {
+      const scopeCheck = requireScope(session, 'datasets:read');
+      if (scopeCheck) return scopeCheck;
+    }
+
     const dataset = await prisma.dataset.findUnique({
       where: { id: params.id },
       include: {
@@ -70,6 +71,7 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
       parent: dataset.parent,
     });
   } catch (error) {
+    if (error instanceof RateLimitedError) return error.response;
     logger.error('Failed to fetch dataset', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to fetch dataset' },

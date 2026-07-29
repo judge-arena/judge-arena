@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, requireScope, isAdmin, optionalAuth, resolveResourceAccess } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin, optionalAuth, resolveResourceAccess, RateLimitedError } from '@/lib/auth-guard';
 import { generateSlug } from '@/lib/config';
 import { logger, serializeError } from '@/lib/logger';
 import { createVersionSchema } from './schema';
@@ -142,12 +142,22 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
   }
 }
 
-// GET /api/datasets/[id]/versions — list all versions of a dataset
+// GET /api/datasets/[id]/versions — same access rule as GET
+// /api/datasets/[id] (public if the dataset is visibility: 'public', else
+// owner/admin only) AND the same requireScope('datasets:read') gate the
+// sibling [id] route applies — this route previously skipped it, so a
+// narrowly-scoped dev key (missing datasets:read) could read a private
+// dataset's versions anyway.
 export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
-  const session = await optionalAuth();
 
   try {
+    const session = await optionalAuth();
+    if (session) {
+      const scopeCheck = requireScope(session, 'datasets:read');
+      if (scopeCheck) return scopeCheck;
+    }
+
     const dataset = await prisma.dataset.findUnique({
       where: { id: params.id },
       select: { id: true, parentId: true, userId: true, visibility: true },
@@ -186,6 +196,7 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
 
     return NextResponse.json(versions);
   } catch (error) {
+    if (error instanceof RateLimitedError) return error.response;
     logger.error('Failed to list dataset versions', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to list versions' },

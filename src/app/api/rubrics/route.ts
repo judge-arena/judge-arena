@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, requireScope, isAdmin, optionalAuth } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin, optionalAuth, RateLimitedError } from '@/lib/auth-guard';
 import { generateSlug } from '@/lib/config';
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicRubric } from '@/lib/serializers';
@@ -24,13 +24,13 @@ const createRubricSchema = z.object({
 // (admin sees all). Anonymous callers see only public rubrics. Access
 // matrix: tests/db/access-matrix.test.ts.
 export async function GET() {
-  const session = await optionalAuth();
-  if (session) {
-    const scopeCheck = requireScope(session, 'rubrics:read');
-    if (scopeCheck) return scopeCheck;
-  }
-
   try {
+    const session = await optionalAuth();
+    if (session) {
+      const scopeCheck = requireScope(session, 'rubrics:read');
+      if (scopeCheck) return scopeCheck;
+    }
+
     const where = !session
       ? { visibility: 'public' as const }
       : isAdmin(session)
@@ -56,6 +56,7 @@ export async function GET() {
 
     return NextResponse.json(body);
   } catch (error) {
+    if (error instanceof RateLimitedError) return error.response;
     logger.error('Failed to fetch rubrics', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to fetch rubrics' },

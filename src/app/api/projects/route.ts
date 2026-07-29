@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, requireScope, isAdmin, optionalAuth } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin, optionalAuth, RateLimitedError } from '@/lib/auth-guard';
 import { generateSlug } from '@/lib/config';
 import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib/pagination';
 import { logger } from '@/lib/logger';
@@ -18,13 +18,13 @@ const createProjectSchema = z.object({
 // definition) projects; authed non-admins additionally see their own.
 // Admins see all. Supports ?limit=N&cursor=ID for pagination.
 export async function GET(request: Request) {
-  const session = await optionalAuth();
-  if (session) {
-    const scopeCheck = requireScope(session, 'projects:read');
-    if (scopeCheck) return scopeCheck;
-  }
-
   try {
+    const session = await optionalAuth();
+    if (session) {
+      const scopeCheck = requireScope(session, 'projects:read');
+      if (scopeCheck) return scopeCheck;
+    }
+
     const { searchParams } = new URL(request.url);
     const { limit, cursor } = parsePaginationParams(searchParams);
     const pageArgs = buildPrismaPageArgs({ limit, cursor });
@@ -59,6 +59,7 @@ export async function GET(request: Request) {
 
     return paginatedJson(body, limit, total);
   } catch (error) {
+    if (error instanceof RateLimitedError) return error.response;
     logger.error('Failed to fetch projects', { error });
     return NextResponse.json(
       { error: 'Failed to fetch projects' },

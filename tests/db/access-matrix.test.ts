@@ -2,15 +2,18 @@ import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { getServerSession } from 'next-auth';
 import { headers } from 'next/headers';
 import { createHash } from 'crypto';
+import { apiLimiter } from '@/lib/rate-limit-redis';
 import { db, truncateAll, mkUser, mkRubric } from './helpers';
 
 import { GET as getLeaderboard } from '@/app/api/leaderboard/route';
 
 import { GET as listRubrics, POST as createRubricRoute } from '@/app/api/rubrics/route';
 import { GET as getRubric, PATCH as patchRubric, DELETE as deleteRubric } from '@/app/api/rubrics/[id]/route';
+import { GET as getRubricVersions } from '@/app/api/rubrics/[id]/versions/route';
 
 import { GET as listDatasets, POST as createDatasetRoute } from '@/app/api/datasets/route';
 import { GET as getDataset, PATCH as patchDataset, DELETE as deleteDataset } from '@/app/api/datasets/[id]/route';
+import { GET as getDatasetVersions } from '@/app/api/datasets/[id]/versions/route';
 
 import { GET as listProjects, POST as createProjectRoute } from '@/app/api/projects/route';
 import { GET as getProject, PATCH as patchProject, DELETE as deleteProject } from '@/app/api/projects/[id]/route';
@@ -77,11 +80,17 @@ vi.mock('next/headers', () => ({
 // authorization logic under test. Fake the limiter to always admit, the
 // same pattern rate-limit.ts's module doc calls out ("so code that wants
 // to fake a limiter in a test... has a type to implement").
+//
+// `check` is a `vi.fn()` (not a plain async function) so the dedicated
+// "optionalAuth() rate-limit" describe block below can override it with
+// `mockResolvedValueOnce({ ok: false, ... })` for exactly one call, to
+// prove an over-limit caller gets a 429 instead of silently collapsing to
+// the anonymous public view (see src/lib/auth-guard.ts's optionalAuth()).
 vi.mock('@/lib/rate-limit-redis', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/rate-limit-redis')>();
   return {
     ...actual,
-    apiLimiter: { check: async () => ({ ok: true, remaining: 999, resetAt: Date.now() + 60_000 }) },
+    apiLimiter: { check: vi.fn(async () => ({ ok: true, remaining: 999, resetAt: Date.now() + 60_000 })) },
   };
 });
 
@@ -431,6 +440,20 @@ describe('Access matrix — list endpoints (anonymous: public only; authed: own 
     expect(ids).not.toContain(priv.id);
   });
 
+  it('GET /api/datasets: an authed stranger sees public datasets + their OWN private ones, not the owner\'s private one', async () => {
+    const ownerPublic = await mkDataset(ctx.ownerId, 'public');
+    const ownerPrivate = await mkDataset(ctx.ownerId, 'private');
+    const strangerPrivate = await mkDataset(ctx.strangerId, 'private');
+
+    setSessionFor('stranger', ctx);
+    const res = await listDatasets(new Request('http://localhost/api/datasets'));
+    const body = await res.json();
+    const ids = body.data.map((d: any) => d.id);
+    expect(ids).toContain(ownerPublic.id);
+    expect(ids).toContain(strangerPrivate.id);
+    expect(ids).not.toContain(ownerPrivate.id);
+  });
+
   it('GET /api/projects: anonymous sees ONLY public/default projects', async () => {
     const pub = await mkProject(ctx.ownerId, 'public');
     const priv = await mkProject(ctx.ownerId, 'private');
@@ -441,6 +464,20 @@ describe('Access matrix — list endpoints (anonymous: public only; authed: own 
     const ids = body.data.map((p: any) => p.id);
     expect(ids).toContain(pub.id);
     expect(ids).not.toContain(priv.id);
+  });
+
+  it('GET /api/projects: an authed stranger sees public/default projects + their OWN private ones, not the owner\'s private one', async () => {
+    const ownerPublic = await mkProject(ctx.ownerId, 'public');
+    const ownerPrivate = await mkProject(ctx.ownerId, 'private');
+    const strangerPrivate = await mkProject(ctx.strangerId, 'private');
+
+    setSessionFor('stranger', ctx);
+    const res = await listProjects(new Request('http://localhost/api/projects'));
+    const body = await res.json();
+    const ids = body.data.map((p: any) => p.id);
+    expect(ids).toContain(ownerPublic.id);
+    expect(ids).toContain(strangerPrivate.id);
+    expect(ids).not.toContain(ownerPrivate.id);
   });
 });
 
@@ -504,7 +541,7 @@ describe('Access matrix — PII stripping on the public view (T14: "dataset resp
     expect(await res.text()).not.toContain('owner-secret-pii@test.local');
   });
 
-  it('project: anonymous GET of a public project never contains the owner email, and carries no evaluations array at all', async () => {
+  it('project: anonymous GET of a public project succeeds via the cheap path — never contains the owner email, carries no evaluations array, but the response shape is otherwise unchanged (_count still surfaces as evaluationCount)', async () => {
     const project = await mkProject(ctx.ownerId, 'public');
 
     setSessionFor('anonymous', ctx);
@@ -515,6 +552,33 @@ describe('Access matrix — PII stripping on the public view (T14: "dataset resp
     const body = await res.json();
     expect(JSON.stringify(body)).not.toContain('owner-secret-pii@test.local');
     expect(body.evaluations).toBeUndefined();
+    // Cheap-path refactor (T14 follow-up: GET /api/projects/[id] used to
+    // run the heavy nested evaluations/runs/modelJudgments/humanJudgment/
+    // author-email query for anonymous callers before discarding almost
+    // all of it) — the public shape itself must be unaffected: id/name/
+    // visibility/owner/evaluationCount (from the cheap _count select) and
+    // a datasets array are all still present.
+    expect(body.id).toBe(project.id);
+    expect(typeof body.evaluationCount).toBe('number');
+    expect(Array.isArray(body.datasets)).toBe(true);
+    expect(body.owner).toEqual({ id: ctx.ownerId, name: null });
+  });
+
+  it('project: owner GET of their OWN public project still gets the full shape (evaluations array + real email) — the cheap-path refactor above only short-circuits the PUBLIC branch, not the owner one', async () => {
+    const project = await mkProject(ctx.ownerId, 'public');
+    await db.evaluation.create({
+      data: { userId: ctx.ownerId, projectId: project.id, inputText: 'owner-eval' },
+    });
+
+    setSessionFor('owner', ctx);
+    const res = await getProject(new Request(`http://localhost/api/projects/${project.id}`), {
+      params: Promise.resolve({ id: project.id }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body.evaluations)).toBe(true);
+    expect(body.evaluations.length).toBe(1);
+    expect(JSON.stringify(body)).toContain('owner-secret-pii@test.local');
   });
 
   it('dataset list: a public dataset owned by someone else never carries that owner\'s email in the list response', async () => {
@@ -733,5 +797,155 @@ describe('Access matrix — API keys require an interactive session (privilege-e
       params: Promise.resolve({ id: own.id }),
     });
     expect(res.status).toBe(403);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// optionalAuth() rate-limit: an over-limit caller must get 429, never be
+// silently served the anonymous public view (T14 follow-up — see
+// src/lib/auth-guard.ts's `optionalAuth()`/`RateLimitedError` doc
+// comments). Keyed by client IP for a caller with no session, or by the
+// caller's OWN user id once a session resolves — either way, "over limit"
+// is now distinguished from "no/bad credentials" (which still falls
+// through to the anonymous public view, unchanged).
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('Access matrix — optionalAuth() rate-limit distinguishes 429 from anonymous', () => {
+  let ctx: Ctx;
+
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+    (headers as unknown as Mock).mockReset();
+    (headers as unknown as Mock).mockImplementation(async () => new Headers());
+    const owner = await mkUser();
+    const stranger = await mkUser();
+    const admin = await mkUser({ role: 'admin' });
+    ctx = { ownerId: owner.id, strangerId: stranger.id, adminId: admin.id };
+  });
+
+  it('an ANONYMOUS caller over the apiLimiter budget on a public GET gets 429, not a 200 anonymous view', async () => {
+    const pub = await mkRubric(ctx.ownerId, { visibility: 'public' });
+    setSessionFor('anonymous', ctx);
+    (apiLimiter.check as unknown as Mock).mockResolvedValueOnce({
+      ok: false,
+      remaining: 0,
+      resetAt: Date.now() + 60_000,
+    });
+
+    const res = await getRubric(new Request(`http://localhost/api/rubrics/${pub.id}`), {
+      params: Promise.resolve({ id: pub.id }),
+    });
+    expect(res.status).toBe(429);
+  });
+
+  it('an AUTHENTICATED (stranger) caller over the apiLimiter budget on a public GET also gets 429 — enforced via their own user-id key, not silently degraded to anonymous', async () => {
+    const pub = await mkRubric(ctx.ownerId, { visibility: 'public' });
+    setSessionFor('stranger', ctx);
+    (apiLimiter.check as unknown as Mock).mockResolvedValueOnce({
+      ok: false,
+      remaining: 0,
+      resetAt: Date.now() + 60_000,
+    });
+
+    const res = await getRubric(new Request(`http://localhost/api/rubrics/${pub.id}`), {
+      params: Promise.resolve({ id: pub.id }),
+    });
+    expect(res.status).toBe(429);
+  });
+
+  it('a caller WITHIN budget still gets the normal 200 public view — the mockResolvedValueOnce override above is per-test, not global', async () => {
+    const pub = await mkRubric(ctx.ownerId, { visibility: 'public' });
+    setSessionFor('anonymous', ctx);
+
+    const res = await getRubric(new Request(`http://localhost/api/rubrics/${pub.id}`), {
+      params: Promise.resolve({ id: pub.id }),
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// Versions sub-resources: same access rule as the sibling [id] GET route
+// (public if visibility: 'public', else owner/admin only) AND the same
+// requireScope(...'read') guard the sibling routes apply — these two
+// routes previously skipped the scope check entirely, so a narrowly-
+// scoped dev key (missing rubrics:read/datasets:read) could read a
+// PRIVATE resource's versions anyway (T14 follow-up).
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('Access matrix — versions routes: requireScope + public-read parity with sibling [id] routes', () => {
+  let ctx: Ctx;
+
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+    (headers as unknown as Mock).mockReset();
+    (headers as unknown as Mock).mockImplementation(async () => new Headers());
+    const owner = await mkUser();
+    const stranger = await mkUser();
+    const admin = await mkUser({ role: 'admin' });
+    ctx = { ownerId: owner.id, strangerId: stranger.id, adminId: admin.id };
+  });
+
+  async function mkScopedKey(userId: string, scopes: string[]): Promise<string> {
+    const rawKey = `vgk_${Buffer.from(uniq('scoped')).toString('base64url')}`;
+    const keyHash = createHash('sha256').update(rawKey).digest('hex');
+    await db.developerApiKey.create({
+      data: {
+        userId,
+        name: 'Scoped Key',
+        prefix: rawKey.slice(0, 12),
+        keyHash,
+        scopes: JSON.stringify(scopes),
+      },
+    });
+    return rawKey;
+  }
+
+  it('GET /api/rubrics/[id]/versions: a scoped key WITHOUT rubrics:read is 403 on a PRIVATE rubric\'s versions', async () => {
+    const rubric = await mkRubric(ctx.ownerId, { visibility: 'private' });
+    const rawKey = await mkScopedKey(ctx.ownerId, ['stats:read']); // no rubrics:read
+    (headers as unknown as Mock).mockImplementation(
+      async () => new Headers({ authorization: `Bearer ${rawKey}` })
+    );
+
+    const res = await getRubricVersions(new Request(`http://localhost/api/rubrics/${rubric.id}/versions`), {
+      params: Promise.resolve({ id: rubric.id }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('GET /api/rubrics/[id]/versions: anonymous can read a PUBLIC rubric\'s versions with no auth at all', async () => {
+    const rubric = await mkRubric(ctx.ownerId, { visibility: 'public' });
+    setSessionFor('anonymous', ctx);
+
+    const res = await getRubricVersions(new Request(`http://localhost/api/rubrics/${rubric.id}/versions`), {
+      params: Promise.resolve({ id: rubric.id }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('GET /api/datasets/[id]/versions: a scoped key WITHOUT datasets:read is 403 on a PRIVATE dataset\'s versions', async () => {
+    const dataset = await mkDataset(ctx.ownerId, 'private');
+    const rawKey = await mkScopedKey(ctx.ownerId, ['stats:read']); // no datasets:read
+    (headers as unknown as Mock).mockImplementation(
+      async () => new Headers({ authorization: `Bearer ${rawKey}` })
+    );
+
+    const res = await getDatasetVersions(new Request(`http://localhost/api/datasets/${dataset.id}/versions`), {
+      params: Promise.resolve({ id: dataset.id }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('GET /api/datasets/[id]/versions: anonymous can read a PUBLIC dataset\'s versions with no auth at all', async () => {
+    const dataset = await mkDataset(ctx.ownerId, 'public');
+    setSessionFor('anonymous', ctx);
+
+    const res = await getDatasetVersions(new Request(`http://localhost/api/datasets/${dataset.id}/versions`), {
+      params: Promise.resolve({ id: dataset.id }),
+    });
+    expect(res.status).toBe(200);
   });
 });
