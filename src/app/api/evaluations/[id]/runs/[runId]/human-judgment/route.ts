@@ -8,6 +8,7 @@ import { markRunCompleted } from '@/lib/run-finalizer';
 import { logger, serializeError } from '@/lib/logger';
 import { resolveHumanJudgmentScore } from '@/lib/utils';
 import { deriveRunMode } from '@/lib/run-mode';
+import { judgmentIdentityKey } from '@/lib/model-display';
 import { humanJudgmentSchema } from './schema';
 
 /**
@@ -44,6 +45,7 @@ export async function POST(
         modelJudgments: {
           select: {
             modelConfigId: true,
+            judgeModelVersionId: true,
             status: true,
           },
         },
@@ -59,9 +61,13 @@ export async function POST(
     }
 
     const mode = deriveRunMode(run.evaluation.responseText);
-    const completedModelIds = run.modelJudgments
-      .filter((judgment) => judgment.status === 'completed')
-      .map((judgment) => judgment.modelConfigId);
+    const completedJudgments = run.modelJudgments.filter((judgment) => judgment.status === 'completed');
+    // Task 12: identity key is judgeModelVersionId when set (every judgment
+    // created by the current write path), falling back to the legacy
+    // modelConfigId for rows that predate it — see src/lib/model-display.ts.
+    const completedModelIds = completedJudgments
+      .map((judgment) => judgmentIdentityKey(judgment))
+      .filter((id): id is string => id !== null);
 
     if (mode === 'respond') {
       if (!data.selectedBestModelId) {
@@ -102,6 +108,22 @@ export async function POST(
       );
     }
 
+    // Task 12: `data.selectedBestModelId` (wire field name unchanged for
+    // backward compat) carries EITHER identity kind now — a
+    // judgeModelVersionId (every judgment the current write path creates)
+    // or a legacy modelConfigId (rows that predate Task 12). Route the
+    // posted value to whichever FK column it actually matches among this
+    // run's completed judgments, nulling the other — never both, never
+    // guessed.
+    const isVersionSelection =
+      mode === 'respond' &&
+      !!data.selectedBestModelId &&
+      completedJudgments.some((j) => j.judgeModelVersionId === data.selectedBestModelId);
+    const selectedBestModelId =
+      mode === 'respond' && !isVersionSelection ? data.selectedBestModelId ?? null : null;
+    const selectedBestJudgeModelVersionId =
+      mode === 'respond' && isVersionSelection ? data.selectedBestModelId ?? null : null;
+
     // Upsert human judgment for this run
     const judgment = await prisma.humanJudgment.upsert({
       where: { runId: params.runId },
@@ -109,7 +131,8 @@ export async function POST(
         overallScore: normalizedOverallScore,
         reasoning: data.reasoning,
         criteriaScores: data.criteriaScores ?? Prisma.DbNull,
-        selectedBestModelId: mode === 'respond' ? data.selectedBestModelId : null,
+        selectedBestModelId,
+        selectedBestJudgeModelVersionId,
       },
       create: {
         runId: params.runId,
@@ -117,7 +140,8 @@ export async function POST(
         overallScore: normalizedOverallScore,
         reasoning: data.reasoning,
         criteriaScores: data.criteriaScores ?? Prisma.DbNull,
-        selectedBestModelId: mode === 'respond' ? data.selectedBestModelId : null,
+        selectedBestModelId,
+        selectedBestJudgeModelVersionId,
       },
     });
 

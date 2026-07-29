@@ -10,7 +10,7 @@ import { logger, serializeError } from '@/lib/logger';
 
 const createRunSchema = z.object({
   rubricId: z.string().optional(),        // override; defaults to evaluation.rubricId
-  modelConfigIds: z.array(z.string()).max(10).optional(), // override; defaults to evaluation.modelSelections
+  judgeModelVersionIds: z.array(z.string()).max(10).optional(), // override; defaults to evaluation.modelSelections
 });
 
 // GET /api/evaluations/[id]/runs — list all runs for a template
@@ -81,7 +81,7 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
       evaluationId: params.id,
       triggeredById: session.user.id,
       rubricId: data.rubricId,
-      modelConfigIds: data.modelConfigIds,
+      judgeModelVersionIds: data.judgeModelVersionIds,
     });
 
     if (launch.publishFailed) {

@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn, formatDateTime, getScoreColor } from '@/lib/utils';
+import { resolveModelDisplay, judgmentIdentityKey } from '@/lib/model-display';
 import { toast } from 'sonner';
 
 // Evaluation run as returned nested inside templates from GET /api/evaluations
@@ -20,8 +21,18 @@ interface RunSummary {
   createdAt: string;
   triggeredBy: { id: string; name: string | null; email: string };
   rubric?: { id: string; name: string; version: number } | null;
-  runModelSelections: { modelConfigId: string; modelConfig: { name: string; provider: string } }[];
-  modelJudgments: { id: string; status: string; overallScore: number | null; modelConfig: { name: string } }[];
+  runModelSelections: {
+    modelConfigId: string | null;
+    judgeModelVersionId: string | null;
+    modelConfig: { id: string; name: string; provider: string } | null;
+    judgeModelVersion?: {
+      id: string;
+      ordinal: number;
+      servingBackend: string;
+      judgeModel: { id: string; name: string; baseModel: string | null };
+    } | null;
+  }[];
+  modelJudgments: { id: string; status: string; overallScore: number | null; modelConfig: { name: string } | null }[];
   humanJudgment?: { overallScore: number } | null;
   // injected by the client after flattening
   evaluationTitle: string | null;
@@ -164,8 +175,15 @@ export default function EvaluationsPage() {
 
     setQueueingRunId(run.id);
     try {
+      // Task 12: judgeModelVersionId (falling back to the legacy
+      // modelConfigId is impossible for the runs API now — see
+      // judgmentIdentityKey) is the requeue selection; entries that predate
+      // Task 12 and only ever got a modelConfigId are dropped rather than
+      // sent as a judgeModelVersionId the API wouldn't recognize.
       const body: Record<string, unknown> = {
-        modelConfigIds: run.runModelSelections.map((selection) => selection.modelConfigId),
+        judgeModelVersionIds: run.runModelSelections
+          .map((selection) => selection.judgeModelVersionId)
+          .filter((id): id is string => !!id),
       };
       if (run.rubric?.id) {
         body.rubricId = run.rubric.id;
@@ -427,11 +445,14 @@ export default function EvaluationsPage() {
                                 {run.triggeredBy?.name || run.triggeredBy?.email}
                               </span>
                             </span>
-                            {run.runModelSelections.slice(0, 4).map((s) => (
-                              <Badge key={s.modelConfigId} variant="default" size="sm" className="dark:bg-surface-700 dark:text-surface-200 dark:border-surface-600">
-                                {s.modelConfig.name}
-                              </Badge>
-                            ))}
+                            {run.runModelSelections.slice(0, 4).map((s, i) => {
+                              const display = resolveModelDisplay(s);
+                              return (
+                                <Badge key={judgmentIdentityKey(s) ?? i} variant="default" size="sm" className="dark:bg-surface-700 dark:text-surface-200 dark:border-surface-600">
+                                  {display.name}
+                                </Badge>
+                              );
+                            })}
                             {run.runModelSelections.length > 4 && (
                               <Badge variant="default" size="sm" className="dark:bg-surface-700 dark:text-surface-200 dark:border-surface-600">
                                 +{run.runModelSelections.length - 4} more

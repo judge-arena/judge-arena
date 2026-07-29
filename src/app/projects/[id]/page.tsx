@@ -453,6 +453,16 @@ export default function ProjectDetailPage() {
     }
   };
 
+  // Task 12: `selectedModelIds` stores ModelEndpoint ids (the checkbox/
+  // quick-add identity, unchanged UI-side) — the evaluations API now
+  // selects by judgeModelVersionId instead, so this maps the endpoint
+  // selection through to the version ids it identifies just before
+  // building the POST payload.
+  const selectedJudgeModelVersionIds = () =>
+    selectedModelIds
+      .map((id) => availableModels.find((m: any) => m.id === id)?.judgeModelVersionId)
+      .filter((id: unknown): id is string => typeof id === 'string');
+
   const handleCreateEvaluation = async (
     runMode: 'create' | 'create_and_run'
   ) => {
@@ -485,7 +495,7 @@ export default function ProjectDetailPage() {
             ? { promptText: respondInputText }
             : { promptText: judgePromptText, responseText: judgeResponseText }),
           ...(selectedRubricVersionId && { rubricId: selectedRubricVersionId }),
-          modelConfigIds: selectedModelIds,
+          judgeModelVersionIds: selectedJudgeModelVersionIds(),
         };
       } else if (datasetSource === 'remote') {
         payload = {
@@ -500,7 +510,7 @@ export default function ProjectDetailPage() {
           expectedColumn: hfExpectedColumn || undefined,
           inputType: hfExpectedColumn ? 'query-response' : 'query',
           ...(selectedRubricVersionId && { rubricId: selectedRubricVersionId }),
-          modelConfigIds: selectedModelIds,
+          judgeModelVersionIds: selectedJudgeModelVersionIds(),
         };
       } else {
         payload = {
@@ -509,7 +519,7 @@ export default function ProjectDetailPage() {
           projectId,
           datasetId: selectedDatasetId,
           ...(selectedRubricVersionId && { rubricId: selectedRubricVersionId }),
-          modelConfigIds: selectedModelIds,
+          judgeModelVersionIds: selectedJudgeModelVersionIds(),
         };
       }
 

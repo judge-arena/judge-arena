@@ -129,12 +129,19 @@ export default function EvaluateTemplatePage() {
     }
     setLaunching(true);
     try {
+      // Task 12: runModelIds stores ModelEndpoint ids (the checkbox
+      // identity, unchanged UI-side) — map through to the judgeModelVersionId
+      // each identifies, since that's the run-launch selection now.
+      const judgeModelVersionIds = runModelIds
+        .map((id) => allModels.find((m: any) => m.id === id)?.judgeModelVersionId)
+        .filter((id: unknown): id is string => typeof id === 'string');
+
       const res = await fetch(`/api/evaluations/${evaluationId}/runs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...(runRubricId ? { rubricId: runRubricId } : {}),
-          modelConfigIds: runModelIds,
+          judgeModelVersionIds,
         }),
       });
       if (res.ok) {

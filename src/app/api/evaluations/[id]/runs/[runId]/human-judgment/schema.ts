@@ -20,5 +20,9 @@ export const humanJudgmentSchema = z.object({
       })
     )
     .optional(),
+  // Task 12: carries EITHER identity kind — a judgeModelVersionId (every
+  // judgment the current write path creates) or a legacy modelConfigId
+  // (rows that predate Task 12). The wire field name is unchanged for
+  // backward compat; route.ts resolves which FK column it actually matches.
   selectedBestModelId: z.string().nullable().optional(),
 });

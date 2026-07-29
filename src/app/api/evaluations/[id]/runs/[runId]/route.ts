@@ -3,6 +3,15 @@ import { prisma } from '@/lib/db';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
 
+// Task 12: minimal JudgeModelVersion+JudgeModel select for display fallback
+// when modelConfig is null — see src/lib/model-display.ts.
+const judgeModelVersionDisplaySelect = {
+  id: true,
+  ordinal: true,
+  servingBackend: true,
+  judgeModel: { select: { id: true, name: true, baseModel: true } },
+} as const;
+
 const runDetailInclude = {
   rubric: {
     include: { criteria: { orderBy: { order: 'asc' as const } } },
@@ -11,12 +20,14 @@ const runDetailInclude = {
   runModelSelections: {
     include: {
       modelConfig: { select: { id: true, name: true, provider: true, modelId: true } },
+      judgeModelVersion: { select: judgeModelVersionDisplaySelect },
     },
     orderBy: { createdAt: 'asc' as const },
   },
   modelJudgments: {
     include: {
       modelConfig: { select: { id: true, name: true, provider: true, modelId: true } },
+      judgeModelVersion: { select: judgeModelVersionDisplaySelect },
     },
     orderBy: { createdAt: 'asc' as const },
   },

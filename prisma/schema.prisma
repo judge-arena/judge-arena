@@ -227,29 +227,34 @@ model JudgeModel {
 }
 
 model JudgeModelVersion {
-  id                     String              @id @default(cuid())
+  id                     String                     @id @default(cuid())
   judgeModelId           String
-  judgeModel             JudgeModel          @relation(fields: [judgeModelId], references: [id], onDelete: Restrict)
+  judgeModel             JudgeModel                 @relation(fields: [judgeModelId], references: [id], onDelete: Restrict)
   ordinal                Int
   weightsRevision        String?
-  quantization           Quantization        @default(none)
+  quantization           Quantization               @default(none)
   quantMethod            String?
   servingBackend         ServingBackend
   endpointClass          String?
   trainingDataVintage    DateTime?
   parentVersionId        String?
-  parentVersion          JudgeModelVersion?  @relation("VersionLineage", fields: [parentVersionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  successors             JudgeModelVersion[] @relation("VersionLineage")
-  reasoningMode          ReasoningMode       @default(none)
+  parentVersion          JudgeModelVersion?         @relation("VersionLineage", fields: [parentVersionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  successors             JudgeModelVersion[]        @relation("VersionLineage")
+  reasoningMode          ReasoningMode              @default(none)
   samplingDefaults       Json?
   protocolSupport        Json // {"pointwise":["score"],"pairwise":["selection"],...}
-  supportsRubricAnchored Boolean             @default(true)
-  trustState             TrustState          @default(untrusted)
+  supportsRubricAnchored Boolean                    @default(true)
+  trustState             TrustState                 @default(untrusted)
   retiredAt              DateTime?
-  createdAt              DateTime            @default(now())
+  createdAt              DateTime                   @default(now())
   endpoints              ModelEndpoint[]
   judgments              ModelJudgment[]
   calibrationRuns        CalibrationRun[]
+  // Task 12: reverse relations for the evaluation/run model-selection and
+  // "best response" identity columns that now point at a version directly.
+  evaluationSelections   EvaluationModelSelection[]
+  runSelections          RunModelSelection[]
+  bestSelections         HumanJudgment[]            @relation("BestJudgeModelVersionSelection")
 
   @@unique([judgeModelId, ordinal])
 }
@@ -264,6 +269,11 @@ model ModelEndpoint {
   apiKeyEnc           String?
   isActive            Boolean           @default(true)
   verifiedAt          DateTime?
+  // Task 12: mirrors the legacy ModelConfig.verificationError field so the
+  // /api/models[/[id]]/verify surface (now ModelEndpoint-keyed) can persist
+  // and display a human-readable failure reason instead of only clearing
+  // verifiedAt. Never set together with a fresh verifiedAt.
+  verificationError   String?
   archFingerprint     Json?
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
@@ -324,16 +334,27 @@ model Evaluation {
 }
 
 model EvaluationModelSelection {
-  id            String      @id @default(cuid())
-  evaluationId  String
-  evaluation    Evaluation  @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
-  modelConfigId String
-  modelConfig   ModelConfig @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
-  createdAt     DateTime    @default(now())
+  id                  String             @id @default(cuid())
+  evaluationId        String
+  evaluation          Evaluation         @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+  // Task 12: modelConfigId becomes optional — the write path (POST/PATCH
+  // /api/evaluations) stops populating it; existing rows keep it. See
+  // judgeModelVersionId below, the new selection identity.
+  modelConfigId       String?
+  modelConfig         ModelConfig?       @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
+  // Task 12: the SOURCE of truth for a selection going forward — set from
+  // one of the selecting user's own ModelEndpoints. Nullable only so
+  // pre-Task-12 rows (modelConfigId-only) remain valid; every row created
+  // by the current write path sets this.
+  judgeModelVersionId String?
+  judgeModelVersion   JudgeModelVersion? @relation(fields: [judgeModelVersionId], references: [id], onDelete: Restrict)
+  createdAt           DateTime           @default(now())
 
   @@unique([evaluationId, modelConfigId])
+  @@unique([evaluationId, judgeModelVersionId])
   @@index([evaluationId])
   @@index([modelConfigId])
+  @@index([judgeModelVersionId])
 }
 
 // ─── Evaluation Run ───────────────────────────────────────────────────────────
@@ -382,16 +403,21 @@ model RunCandidate {
 
 // Models selected for a specific run (snapshot at run creation time)
 model RunModelSelection {
-  id            String        @id @default(cuid())
-  runId         String
-  run           EvaluationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
-  modelConfigId String
-  modelConfig   ModelConfig   @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
-  createdAt     DateTime      @default(now())
+  id                  String             @id @default(cuid())
+  runId               String
+  run                 EvaluationRun      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  // Task 12: optional — see EvaluationModelSelection's identical comment.
+  modelConfigId       String?
+  modelConfig         ModelConfig?       @relation(fields: [modelConfigId], references: [id], onDelete: Cascade)
+  judgeModelVersionId String?
+  judgeModelVersion   JudgeModelVersion? @relation(fields: [judgeModelVersionId], references: [id], onDelete: Restrict)
+  createdAt           DateTime           @default(now())
 
   @@unique([runId, modelConfigId])
+  @@unique([runId, judgeModelVersionId])
   @@index([runId])
   @@index([modelConfigId])
+  @@index([judgeModelVersionId])
 }
 
 // ─── Judgments ───────────────────────────────────────────────────────────────
@@ -439,20 +465,30 @@ model ModelJudgment {
 }
 
 model HumanJudgment {
-  id                  String        @id @default(cuid())
-  runId               String        @unique
-  run                 EvaluationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
-  overallScore        Float
-  reasoning           String?
-  criteriaScores      Json? // Array<{ criterionId, criterionName, score, maxScore, weight, comment? }>
-  selectedBestModelId String?
-  selectedBestModel   ModelConfig?  @relation("BestModelSelection", fields: [selectedBestModelId], references: [id], onDelete: SetNull)
-  userId              String
-  user                User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt           DateTime      @default(now())
-  updatedAt           DateTime      @updatedAt
+  id                              String             @id @default(cuid())
+  runId                           String             @unique
+  run                             EvaluationRun      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  overallScore                    Float
+  reasoning                       String?
+  criteriaScores                  Json? // Array<{ criterionId, criterionName, score, maxScore, weight, comment? }>
+  // Legacy (pre-Task-12) "best response" pick in respond mode — kept as-is
+  // for old rows/deep FK wiring (Task 6 carry, minimized scope per the
+  // Task 12 brief: the human-judgment route now prefers
+  // selectedBestJudgeModelVersionId below and only falls back to this FK
+  // when a legacy modelConfigId-shaped identity is posted).
+  selectedBestModelId             String?
+  selectedBestModel               ModelConfig?       @relation("BestModelSelection", fields: [selectedBestModelId], references: [id], onDelete: SetNull)
+  // Task 12: the version-identity equivalent of selectedBestModelId — set
+  // by new respond-mode "best response" picks.
+  selectedBestJudgeModelVersionId String?
+  selectedBestJudgeModelVersion   JudgeModelVersion? @relation("BestJudgeModelVersionSelection", fields: [selectedBestJudgeModelVersionId], references: [id], onDelete: SetNull)
+  userId                          String
+  user                            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt                       DateTime           @default(now())
+  updatedAt                       DateTime           @updatedAt
 
   @@index([userId])
+  @@index([selectedBestJudgeModelVersionId])
 }
 
 // ─── Developer API Keys ──────────────────────────────────────────────────────

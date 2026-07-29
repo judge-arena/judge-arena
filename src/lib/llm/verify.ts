@@ -4,7 +4,7 @@
  * Folds into the registry-driven dispatch (Task 10): instead of hand-
  * rolling its own `Anthropic`/`OpenAI` SDK client construction (the old
  * shape — a third, ad-hoc reimplementation of provider-calling logic
- * alongside `anthropic.ts`/`openai-compatible.ts`), this now goes through
+ * alongside `anthropic.ts`/`openai-compatible.ts`), this goes through
  * `registry.ts`'s `getDescriptor`/`resolveApiKey`/`execute` — the exact
  * same dispatch a real judgment/respond call uses (same timeout wiring,
  * same backend module).
@@ -12,16 +12,22 @@
  * Returns an `archFingerprint` (served model id, context length if the
  * backend's response exposes it — neither the Anthropic Messages API nor
  * an OpenAI-compatible chat completion does today) for the caller to
- * persist. As of this task, the only caller is the legacy `ModelConfig`
- * verify route (`src/app/api/models/[id]/verify/route.ts`), which has no
- * `ModelEndpoint`/`archFingerprint` column to write it to yet (Task 12
- * introduces the real `ModelEndpoint` CRUD/verify surface) — that route
- * simply doesn't persist it. Documented as a carry, not silently dropped.
+ * persist.
+ *
+ * Task 12: `VerifyModelInput` now takes a `ServingBackend` directly instead
+ * of the legacy `ModelConfig.provider` string ('anthropic'|'openai'|
+ * 'local') — the caller is `POST /api/models/[id]/verify`
+ * (`src/app/api/models/[id]/verify/route.ts`), which is now `ModelEndpoint`
+ * -keyed (its `JudgeModelVersion.servingBackend` IS a `ServingBackend`
+ * already; no legacy mapping needed). That route persists the returned
+ * `archFingerprint` onto `ModelEndpoint.archFingerprint`, closing the Task
+ * 10 carry documented here previously ("no ModelEndpoint/archFingerprint
+ * column to write it to yet").
  */
 
+import type { ServingBackend } from '@prisma/client';
 import {
   getDescriptor,
-  legacyProviderToBackend,
   resolveApiKey,
   execute,
   NO_AUTH_PLACEHOLDER_KEY,
@@ -29,7 +35,8 @@ import {
 } from './registry';
 
 export interface VerifyModelInput {
-  provider: 'anthropic' | 'openai' | 'local';
+  servingBackend: ServingBackend;
+  /** The literal provider-side model id to call with (`JudgeModel.baseModel`). */
   modelId: string;
   endpoint?: string;
   apiKey?: string;
@@ -49,10 +56,10 @@ export interface VerifyModelResult {
  * the no-key case as closely as the fixed leak allows.
  *
  * `input.apiKey` — when present — is used DIRECTLY, not routed through
- * `resolveApiKey`'s `apiKeyEnc` slot: the caller (the legacy `ModelConfig`
- * verify route) already calls `decryptSafe(model.apiKey)` before invoking
+ * `resolveApiKey`'s `apiKeyEnc` slot: the caller (`POST /api/models/[id]/
+ * verify`) already calls `decryptSafe(endpoint.apiKeyEnc)` before invoking
  * `verifyModelConnection` (closing the ciphertext-as-key bug at the call
- * site, per the task brief), so `input.apiKey` here is already plaintext.
+ * site), so `input.apiKey` here is already plaintext.
  * Routing an already-plaintext value back through `resolveApiKey`'s
  * `decryptSafe` call is a harmless no-op (`decryptSafe` skips anything not
  * tagged as ciphertext) but wastes a redundant check and muddies
@@ -94,8 +101,7 @@ function resolveVerifyApiKey(descriptor: ProviderDescriptor, input: VerifyModelI
 }
 
 export async function verifyModelConnection(input: VerifyModelInput): Promise<VerifyModelResult> {
-  const backend = legacyProviderToBackend(input.provider);
-  const descriptor = getDescriptor(backend);
+  const descriptor = getDescriptor(input.servingBackend);
   const apiKey = resolveVerifyApiKey(descriptor, input);
 
   const raw = await execute(descriptor, {

@@ -5,166 +5,258 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 
+/** One entry from GET /api/models/catalog. */
+export interface CatalogEntry {
+  judgeModelVersionId: string;
+  judgeModelId: string;
+  ordinal: number;
+  servingBackend: string;
+  quantization: string;
+  trustState: string;
+  name: string;
+  slug: string;
+  judgeClass: string;
+  scoringMechanism: string;
+  baseModel: string | null;
+}
+
+/** Data this form hands back to `onSubmit` — a discriminated union matching
+ * `POST /api/models`'s two create shapes, or the PATCH-shaped connection-only
+ * edit. `mode: 'edit'` is used both for the "Add Model" dialog's edit path
+ * and standalone editing of an existing ModelEndpoint. */
+export type ModelConfigFormSubmit =
+  | { mode: 'catalog'; judgeModelVersionId: string; endpoint: string; apiKey: string; isActive: boolean }
+  | {
+      mode: 'custom';
+      name: string;
+      judgeClass: string;
+      scoringMechanism: string;
+      servingBackend: string;
+      baseModel: string;
+      endpoint: string;
+      apiKey: string;
+      isActive: boolean;
+    }
+  | { mode: 'edit'; endpoint: string; apiKey: string; isActive: boolean };
+
+interface EditingSummary {
+  name: string;
+  servingBackend: string;
+  baseModel: string | null;
+  ordinal: number;
+}
+
 interface ModelConfigFormProps {
+  /** Catalog to pick from — required for create mode, ignored in edit mode. */
+  catalog: CatalogEntry[];
+  /** When set, the form is in EDIT mode: only endpoint/apiKey/isActive are
+   * editable, and `editingSummary` renders a read-only catalog header
+   * instead of the catalog/custom picker (the underlying JudgeModel/Version
+   * is immutable — see `/api/models/[id]`'s doc). */
+  editingSummary?: EditingSummary;
   initialData?: {
-    name: string;
-    provider: string;
-    modelId: string;
     endpoint: string;
     apiKey: string;
     isActive: boolean;
   };
-  onSubmit: (data: {
-    name: string;
-    provider: string;
-    modelId: string;
-    endpoint: string;
-    apiKey: string;
-    isActive: boolean;
-  }) => void;
+  onSubmit: (data: ModelConfigFormSubmit) => void;
   loading?: boolean;
   submitLabel?: string;
 }
 
-const providerOptions = [
-  { value: 'anthropic', label: 'Anthropic (Claude)' },
-  { value: 'openai', label: 'OpenAI (GPT)' },
-  { value: 'local', label: 'Local / Self-Hosted' },
+const JUDGE_CLASS_OPTIONS = [
+  { value: 'prompted_api', label: 'Prompted (hosted API)' },
+  { value: 'prompted_open_weight', label: 'Prompted (open-weight)' },
+  { value: 'finetuned_judge_lm', label: 'Fine-tuned judge LM' },
+  { value: 'sequence_classifier_rm', label: 'Sequence-classifier reward model' },
+  { value: 'generative_rm', label: 'Generative reward model' },
+  { value: 'specialized_safety', label: 'Specialized: safety' },
+  { value: 'specialized_factuality', label: 'Specialized: factuality' },
 ];
 
-const presetModels: Record<string, Array<{ value: string; label: string }>> = {
-  anthropic: [
-    { value: 'claude-sonnet-4-5-20250514', label: 'Claude Sonnet 4.5' },
-    { value: 'claude-sonnet-4-6-20250627', label: 'Claude Sonnet 4.6' },
-    { value: 'claude-opus-4-5-20250630', label: 'Claude Opus 4.5' },
-    { value: 'claude-haiku-3-5-20241022', label: 'Claude Haiku 3.5' },
-    { value: 'custom', label: 'Custom Model ID...' },
-  ],
-  openai: [
-    { value: 'gpt-4o', label: 'GPT-4o' },
-    { value: 'gpt-4o-mini', label: 'GPT-4o Mini' },
-    { value: 'gpt-4-turbo', label: 'GPT-4 Turbo' },
-    { value: 'o1', label: 'o1' },
-    { value: 'o3-mini', label: 'o3-mini' },
-    { value: 'custom', label: 'Custom Model ID...' },
-  ],
-  local: [
-    { value: 'custom', label: 'Enter Model ID...' },
-  ],
-};
+const SCORING_MECHANISM_OPTIONS = [
+  { value: 'critique_generative', label: 'Generative critique (text -> parsed score)' },
+  { value: 'token_probability', label: 'Token probability' },
+  { value: 'reward_head_scalar', label: 'Reward-head scalar' },
+];
+
+const SERVING_BACKEND_OPTIONS = [
+  { value: 'anthropic', label: 'Anthropic' },
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'openrouter', label: 'OpenRouter' },
+  { value: 'vllm', label: 'vLLM (self-hosted, guided decoding)' },
+  { value: 'ollama', label: 'Ollama (local, respond-only — not judge-eligible)' },
+];
 
 export function ModelConfigForm({
+  catalog,
+  editingSummary,
   initialData,
   onSubmit,
   loading,
-  submitLabel = 'Add Model',
+  submitLabel,
 }: ModelConfigFormProps) {
-  const [provider, setProvider] = useState(initialData?.provider || 'anthropic');
-  const [modelPreset, setModelPreset] = useState('custom');
-  const [modelId, setModelId] = useState(initialData?.modelId || '');
-  const [name, setName] = useState(initialData?.name || '');
-  const [endpoint, setEndpoint] = useState(initialData?.endpoint || '');
-  const [apiKey, setApiKey] = useState(initialData?.apiKey || '');
+  const isEdit = !!editingSummary;
+  const [pickMode, setPickMode] = useState<'catalog' | 'custom'>('catalog');
+
+  const [judgeModelVersionId, setJudgeModelVersionId] = useState(catalog[0]?.judgeModelVersionId ?? '');
+  const [name, setName] = useState('');
+  const [judgeClass, setJudgeClass] = useState(JUDGE_CLASS_OPTIONS[0].value);
+  const [scoringMechanism, setScoringMechanism] = useState(SCORING_MECHANISM_OPTIONS[0].value);
+  const [servingBackend, setServingBackend] = useState(SERVING_BACKEND_OPTIONS[0].value);
+  const [baseModel, setBaseModel] = useState('');
+
+  const [endpoint, setEndpoint] = useState(initialData?.endpoint ?? '');
+  const [apiKey, setApiKey] = useState(initialData?.apiKey ?? '');
   const [isActive, setIsActive] = useState(initialData?.isActive ?? true);
 
-  const handleProviderChange = (newProvider: string) => {
-    setProvider(newProvider);
-    setModelPreset('custom');
-    setModelId('');
-    setEndpoint(newProvider === 'local' ? 'http://localhost:11434/v1' : '');
-  };
-
-  const handlePresetChange = (preset: string) => {
-    setModelPreset(preset);
-    if (preset !== 'custom') {
-      setModelId(preset);
-      // Auto-set name from preset label
-      const presetItem = presetModels[provider]?.find((m) => m.value === preset);
-      if (presetItem && !name) {
-        setName(presetItem.label);
-      }
-    }
-  };
+  const catalogOptions = catalog.map((c) => ({
+    value: c.judgeModelVersionId,
+    label: `${c.name} v${c.ordinal} (${c.servingBackend})`,
+  }));
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onSubmit({
-      name: name || modelId,
-      provider,
-      modelId,
-      endpoint,
-      apiKey,
-      isActive,
-    });
+    if (isEdit) {
+      onSubmit({ mode: 'edit', endpoint, apiKey, isActive });
+      return;
+    }
+    if (pickMode === 'catalog') {
+      if (!judgeModelVersionId) return;
+      onSubmit({ mode: 'catalog', judgeModelVersionId, endpoint, apiKey, isActive });
+    } else {
+      onSubmit({
+        mode: 'custom',
+        name,
+        judgeClass,
+        scoringMechanism,
+        servingBackend,
+        baseModel,
+        endpoint,
+        apiKey,
+        isActive,
+      });
+    }
   };
+
+  const canSubmit = isEdit
+    ? true
+    : pickMode === 'catalog'
+      ? !!judgeModelVersionId
+      : !!name.trim() && !!baseModel.trim();
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
-      <Select
-        label="Provider"
-        options={providerOptions}
-        value={provider}
-        onChange={(e) => handleProviderChange(e.target.value)}
-      />
-
-      {presetModels[provider] && (
-        <Select
-          label="Model"
-          options={presetModels[provider]}
-          value={modelPreset}
-          onChange={(e) => handlePresetChange(e.target.value)}
-          placeholder="Select a model..."
-        />
+      {isEdit && editingSummary && (
+        <div className="rounded-lg border border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-800 px-3 py-2.5">
+          <p className="text-sm font-medium text-surface-800 dark:text-surface-200">
+            {editingSummary.name} <span className="text-xs text-surface-400">v{editingSummary.ordinal}</span>
+          </p>
+          <p className="text-xs text-surface-500 dark:text-surface-400 font-mono">
+            {editingSummary.servingBackend} · {editingSummary.baseModel ?? 'no base model set'}
+          </p>
+          <p className="mt-1 text-2xs text-surface-400">
+            The judge identity is fixed once created — only the connection below (endpoint/key/active) can be edited here.
+          </p>
+        </div>
       )}
 
-      {(modelPreset === 'custom' || provider === 'local') && (
-        <Input
-          label="Model ID"
-          value={modelId}
-          onChange={(e) => setModelId(e.target.value)}
-          placeholder={
-            provider === 'local'
-              ? 'e.g., llama3, mistral, codestral'
-              : 'e.g., claude-sonnet-4-5-20250514'
-          }
-          required
-          hint="The exact model identifier used for API calls"
-        />
+      {!isEdit && (
+        <>
+          <div className="flex gap-2 rounded-lg border border-surface-200 dark:border-surface-700 p-1">
+            <button
+              type="button"
+              onClick={() => setPickMode('catalog')}
+              className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                pickMode === 'catalog'
+                  ? 'bg-brand-600 text-white'
+                  : 'text-surface-600 dark:text-surface-400 hover:bg-surface-100 dark:hover:bg-surface-700'
+              }`}
+            >
+              Pick from catalog
+            </button>
+            <button
+              type="button"
+              onClick={() => setPickMode('custom')}
+              className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                pickMode === 'custom'
+                  ? 'bg-brand-600 text-white'
+                  : 'text-surface-600 dark:text-surface-400 hover:bg-surface-100 dark:hover:bg-surface-700'
+              }`}
+            >
+              Add custom model
+            </button>
+          </div>
+
+          {pickMode === 'catalog' ? (
+            catalog.length === 0 ? (
+              <div className="rounded-lg border border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-800 px-3 py-2 text-xs text-surface-500 dark:text-surface-400">
+                No catalog entries yet — add a custom model instead.
+              </div>
+            ) : (
+              <Select
+                label="Judge model"
+                options={catalogOptions}
+                value={judgeModelVersionId}
+                onChange={(e) => setJudgeModelVersionId(e.target.value)}
+                hint="Your own endpoint/key will be created for this catalog entry."
+              />
+            )
+          ) : (
+            <>
+              <Input
+                label="Display name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g., My fine-tuned Llama judge"
+                required
+              />
+              <Select
+                label="Judge class"
+                options={JUDGE_CLASS_OPTIONS}
+                value={judgeClass}
+                onChange={(e) => setJudgeClass(e.target.value)}
+              />
+              <Select
+                label="Scoring mechanism"
+                options={SCORING_MECHANISM_OPTIONS}
+                value={scoringMechanism}
+                onChange={(e) => setScoringMechanism(e.target.value)}
+              />
+              <Select
+                label="Serving backend"
+                options={SERVING_BACKEND_OPTIONS}
+                value={servingBackend}
+                onChange={(e) => setServingBackend(e.target.value)}
+              />
+              <Input
+                label="Base model id"
+                value={baseModel}
+                onChange={(e) => setBaseModel(e.target.value)}
+                placeholder="e.g., claude-sonnet-4-5-20250514, meta-llama/Llama-3-70b"
+                required
+                hint="The exact model identifier used for API calls"
+              />
+            </>
+          )}
+        </>
       )}
 
       <Input
-        label="Display Name"
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder="e.g., Claude Sonnet 4.5"
-        hint="Friendly name shown in the UI"
+        label="API Endpoint"
+        value={endpoint}
+        onChange={(e) => setEndpoint(e.target.value)}
+        placeholder="http://localhost:8000/v1 (optional — leave blank for the official host)"
+        hint="Custom/self-hosted endpoint. Leave blank to use the backend's default host."
       />
-
-      {provider === 'local' && (
-        <Input
-          label="API Endpoint"
-          value={endpoint}
-          onChange={(e) => setEndpoint(e.target.value)}
-          placeholder="http://localhost:11434/v1"
-          hint="OpenAI-compatible API endpoint (Ollama, vLLM, llama.cpp, LM Studio)"
-        />
-      )}
 
       <Input
         label="API Key"
         type="password"
         value={apiKey}
         onChange={(e) => setApiKey(e.target.value)}
-        placeholder={
-          provider === 'local'
-            ? 'Optional for local models'
-            : 'Overrides environment variable'
-        }
-        hint={
-          provider === 'local'
-            ? 'Leave blank for local models that don\'t require authentication'
-            : 'Leave blank to use the environment variable'
-        }
+        placeholder="Leave blank to keep the current key / use no auth"
+        hint="Stored encrypted. Falls back to the server's env var for Anthropic/OpenAI with no custom endpoint."
       />
 
       <label className="flex items-center gap-2 cursor-pointer">
@@ -174,19 +266,13 @@ export function ModelConfigForm({
           onChange={(e) => setIsActive(e.target.checked)}
           className="rounded border-surface-300 text-brand-600 focus:ring-brand-500"
         />
-        <span className="text-sm text-surface-700">
+        <span className="text-sm text-surface-700 dark:text-surface-300">
           Active (include in evaluations)
         </span>
       </label>
 
-      <Button
-        type="submit"
-        variant="primary"
-        className="w-full"
-        loading={loading}
-        disabled={!modelId}
-      >
-        {submitLabel}
+      <Button type="submit" variant="primary" className="w-full" loading={loading} disabled={!canSubmit}>
+        {submitLabel ?? (isEdit ? 'Save Model' : 'Add Model')}
       </Button>
     </form>
   );

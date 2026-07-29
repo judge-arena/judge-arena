@@ -4,11 +4,17 @@ import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { encryptIfNeeded } from '@/lib/crypto';
 import { logger } from '@/lib/logger';
+import { modelEndpointInclude, modelEndpointToWireShape } from '../shared';
 
-const updateModelSchema = z.object({
-  name: z.string().min(1).max(100).optional(),
-  provider: z.enum(['anthropic', 'openai', 'local']).optional(),
-  modelId: z.string().min(1).optional(),
+/**
+ * PATCH/DELETE /api/models/[id] — operates on a `ModelEndpoint` (Task 12).
+ * The catalog (`JudgeModel`/`JudgeModelVersion` — name, judgeClass,
+ * servingBackend, baseModel, ...) is immutable per-version here: this route
+ * only ever touches the per-user connection (endpoint URL, API key,
+ * isActive). Catalog retirement (`JudgeModel.retiredAt`) is an admin-only
+ * concern out of this task's scope.
+ */
+const updateEndpointSchema = z.object({
   endpoint: z.string().url().optional().or(z.literal('')).or(z.null()),
   apiKey: z.string().optional().or(z.null()),
   isActive: z.boolean().optional(),
@@ -23,33 +29,26 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
   if (scopeCheck) return scopeCheck;
 
   try {
-    const model = await prisma.modelConfig.findUnique({
+    const endpoint = await prisma.modelEndpoint.findUnique({
       where: { id: params.id },
+      include: modelEndpointInclude,
     });
 
-    if (!model) {
+    if (!endpoint) {
       return NextResponse.json({ error: 'Model not found' }, { status: 404 });
     }
-
-    if (model.userId !== session.user.id && !isAdmin(session)) {
+    if (endpoint.userId !== session.user.id && !isAdmin(session)) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    return NextResponse.json({
-      ...model,
-      apiKey: undefined,
-      hasApiKey: !!model.apiKey,
-    });
+    return NextResponse.json(modelEndpointToWireShape(endpoint));
   } catch (error) {
     logger.error('Failed to fetch model', { error, modelId: params.id });
-    return NextResponse.json(
-      { error: 'Failed to fetch model' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to fetch model' }, { status: 500 });
   }
 }
 
-// PATCH /api/models/[id]
+// PATCH /api/models/[id] — rotate key / change endpoint / toggle active
 export async function PATCH(request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
   const session = await requireAuth();
@@ -59,64 +58,45 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
 
   try {
     const body = await request.json();
-    const data = updateModelSchema.parse(body);
+    const data = updateEndpointSchema.parse(body);
 
-    const existing = await prisma.modelConfig.findUnique({
-      where: { id: params.id },
-    });
-
+    const existing = await prisma.modelEndpoint.findUnique({ where: { id: params.id } });
     if (!existing) {
       return NextResponse.json({ error: 'Model not found' }, { status: 404 });
     }
-
     if (existing.userId !== session.user.id && !isAdmin(session)) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
     const updateData: Record<string, unknown> = {};
-    if (data.name !== undefined) updateData.name = data.name;
-    if (data.provider !== undefined) updateData.provider = data.provider;
-    if (data.modelId !== undefined) updateData.modelId = data.modelId;
-    if (data.endpoint !== undefined)
-      updateData.endpoint = data.endpoint || null;
-    if (data.apiKey !== undefined) updateData.apiKey = data.apiKey ? encryptIfNeeded(data.apiKey) : null;
+    if (data.endpoint !== undefined) updateData.endpoint = data.endpoint || null;
+    if (data.apiKey !== undefined) updateData.apiKeyEnc = data.apiKey ? encryptIfNeeded(data.apiKey) : null;
     if (data.isActive !== undefined) updateData.isActive = data.isActive;
 
-    const connectionChanged =
-      data.provider !== undefined ||
-      data.modelId !== undefined ||
-      data.endpoint !== undefined ||
-      data.apiKey !== undefined;
-
+    const connectionChanged = data.endpoint !== undefined || data.apiKey !== undefined;
     if (connectionChanged) {
-      updateData.isVerified = false;
+      // Connection settings changed — the previous verification (and any
+      // captured archFingerprint) no longer applies to what this endpoint
+      // will actually be called with. Mirrors the pre-Task-12 ModelConfig
+      // route's "Connection settings changed. Click Test to verify." reset.
       updateData.verifiedAt = null;
-      updateData.verificationError =
-        'Connection settings changed. Click Test to verify.';
+      updateData.verificationError = 'Connection settings changed. Click Test to verify.';
+      updateData.archFingerprint = null;
     }
 
-    const model = await prisma.modelConfig.update({
+    const updated = await prisma.modelEndpoint.update({
       where: { id: params.id },
       data: updateData,
+      include: modelEndpointInclude,
     });
 
-    return NextResponse.json({
-      ...model,
-      apiKey: undefined,
-      hasApiKey: !!model.apiKey,
-    });
+    return NextResponse.json(modelEndpointToWireShape(updated));
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return NextResponse.json(
-        { error: 'Validation failed', details: error.errors },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Validation failed', details: error.errors }, { status: 400 });
     }
     logger.error('Failed to update model', { error, modelId: params.id });
-    return NextResponse.json(
-      { error: 'Failed to update model' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to update model' }, { status: 500 });
   }
 }
 
@@ -129,19 +109,21 @@ export async function DELETE(_request: Request, props: { params: Promise<{ id: s
   if (scopeCheck) return scopeCheck;
 
   try {
-    const existing = await prisma.modelConfig.findUnique({ where: { id: params.id }, select: { userId: true } });
+    const existing = await prisma.modelEndpoint.findUnique({ where: { id: params.id }, select: { userId: true } });
     if (!existing) return NextResponse.json({ error: 'Model not found' }, { status: 404 });
     if (existing.userId !== session.user.id && !isAdmin(session)) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    await prisma.modelConfig.delete({ where: { id: params.id } });
+    // No FK anywhere references ModelEndpoint.id (the worker resolves an
+    // endpoint dynamically by (judgeModelVersionId, userId) at execution
+    // time — see judgment-consumer.ts's resolveEndpoint — rather than
+    // pinning a persisted endpointId), so this is a plain delete with no
+    // cascade/restrict concerns.
+    await prisma.modelEndpoint.delete({ where: { id: params.id } });
     return NextResponse.json({ success: true });
   } catch (error) {
     logger.error('Failed to delete model', { error, modelId: params.id });
-    return NextResponse.json(
-      { error: 'Failed to delete model' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Failed to delete model' }, { status: 500 });
   }
 }

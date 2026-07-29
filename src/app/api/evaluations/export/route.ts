@@ -28,6 +28,17 @@ const fullEvaluationInclude = {
           modelConfig: {
             select: { id: true, name: true, provider: true, modelId: true },
           },
+          // Task 12: identity source for every judgment the current write
+          // path creates (modelConfig is null on those) — see
+          // src/lib/export.ts's flattenEvaluationForExport.
+          judgeModelVersion: {
+            select: {
+              id: true,
+              ordinal: true,
+              servingBackend: true,
+              judgeModel: { select: { id: true, name: true, baseModel: true } },
+            },
+          },
         },
         orderBy: { createdAt: 'asc' as const },
       },

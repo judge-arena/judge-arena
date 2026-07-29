@@ -176,17 +176,33 @@ async function mkRubric(userId: string) {
   });
 }
 
-async function mkModelConfig(userId: string) {
-  return prisma.modelConfig.create({
+async function mkJudgeVersionWithEndpoint(userId: string) {
+  const judgeModel = await prisma.judgeModel.create({
     data: {
-      name: uniq('fixture-model'),
-      provider: 'openai',
-      modelId: uniq('fixture-model-id'),
-      isActive: true,
-      isVerified: true,
-      userId,
+      name: uniq('fixture-judge'),
+      slug: uniq('fixture-judge-slug'),
+      judgeClass: 'prompted_api',
+      scoringMechanism: 'critique_generative',
+      baseModel: uniq('fixture-base-model'),
     },
   });
+  createdJudgeModelIds.push(judgeModel.id);
+
+  const version = await prisma.judgeModelVersion.create({
+    data: {
+      judgeModelId: judgeModel.id,
+      ordinal: 1,
+      servingBackend: 'openai',
+      protocolSupport: { pointwise: ['score'] },
+    },
+  });
+  createdVersionIds.push(version.id);
+
+  const endpoint = await prisma.modelEndpoint.create({
+    data: { userId, judgeModelVersionId: version.id, isActive: true, verifiedAt: new Date() },
+  });
+
+  return { judgeModel, version, endpoint };
 }
 
 /** `mode: 'judge'` sets responseText (an existing response is being
@@ -197,7 +213,7 @@ async function mkModelConfig(userId: string) {
 async function mkEvaluation(
   projectId: string,
   userId: string,
-  opts: { mode: 'judge' | 'respond'; rubricId?: string | null; modelConfigIds: string[] }
+  opts: { mode: 'judge' | 'respond'; rubricId?: string | null; judgeModelVersionIds: string[] }
 ) {
   const evaluation = await prisma.evaluation.create({
     data: {
@@ -209,7 +225,7 @@ async function mkEvaluation(
         : { promptText: 'fixture prompt to respond to' }),
       ...(opts.rubricId ? { rubricId: opts.rubricId } : {}),
       modelSelections: {
-        create: opts.modelConfigIds.map((modelConfigId) => ({ modelConfigId })),
+        create: opts.judgeModelVersionIds.map((judgeModelVersionId) => ({ judgeModelVersionId })),
       },
     },
   });
@@ -253,11 +269,11 @@ describe('respond-mode: single run (launchSingleRun + judgment-consumer)', () =>
   it('launches with no rubric; the worker persists generated text into `reasoning` (v1 shape) via the respond seam; run finishes needs_human', async () => {
     const user = await mkUser();
     const project = await mkProject(user.id);
-    const modelA = await mkModelConfig(user.id);
-    const modelB = await mkModelConfig(user.id);
+    const modelA = await mkJudgeVersionWithEndpoint(user.id);
+    const modelB = await mkJudgeVersionWithEndpoint(user.id);
     const evaluation = await mkEvaluation(project.id, user.id, {
       mode: 'respond',
-      modelConfigIds: [modelA.id, modelB.id],
+      judgeModelVersionIds: [modelA.version.id, modelB.version.id],
     });
 
     const { confirmChannel } = await getRabbit();
@@ -324,11 +340,11 @@ describe('respond-mode: bulk launch (launchBulkRunCreates + run-create-consumer)
   it('accepts a respond-mode evaluation with NO rubric assigned; run.create expansion writes promptTemplateId:null judgments that complete via the respond seam', async () => {
     const user = await mkUser();
     const project = await mkProject(user.id);
-    const model = await mkModelConfig(user.id);
+    const model = await mkJudgeVersionWithEndpoint(user.id);
     const evaluation = await mkEvaluation(project.id, user.id, {
       mode: 'respond',
       rubricId: null,
-      modelConfigIds: [model.id],
+      judgeModelVersionIds: [model.version.id],
     });
 
     const { confirmChannel } = await getRabbit();
@@ -389,17 +405,17 @@ describe('mode-dispatch regression: judge and respond runs handled by the SAME c
     const user = await mkUser();
     const project = await mkProject(user.id);
     const rubric = await mkRubric(user.id);
-    const judgeModel = await mkModelConfig(user.id);
-    const respondModel = await mkModelConfig(user.id);
+    const judgeModel = await mkJudgeVersionWithEndpoint(user.id);
+    const respondModel = await mkJudgeVersionWithEndpoint(user.id);
 
     const judgeEval = await mkEvaluation(project.id, user.id, {
       mode: 'judge',
       rubricId: rubric.id,
-      modelConfigIds: [judgeModel.id],
+      judgeModelVersionIds: [judgeModel.version.id],
     });
     const respondEval = await mkEvaluation(project.id, user.id, {
       mode: 'respond',
-      modelConfigIds: [respondModel.id],
+      judgeModelVersionIds: [respondModel.version.id],
     });
 
     const { confirmChannel } = await getRabbit();
@@ -463,8 +479,8 @@ describe('respond-mode: human best-model selection completes the run (human-judg
     const user = await mkUser();
     mockSessionFor(user);
     const project = await mkProject(user.id);
-    const model = await mkModelConfig(user.id);
-    const evaluation = await mkEvaluation(project.id, user.id, { mode: 'respond', modelConfigIds: [model.id] });
+    const model = await mkJudgeVersionWithEndpoint(user.id);
+    const evaluation = await mkEvaluation(project.id, user.id, { mode: 'respond', judgeModelVersionIds: [model.version.id] });
 
     const { confirmChannel } = await getRabbit();
     await assertTopology(confirmChannel);
@@ -488,20 +504,24 @@ describe('respond-mode: human best-model selection completes the run (human-judg
     expect(preRun.status).toBe('needs_human');
 
     const completedJudgment = await prisma.modelJudgment.findFirstOrThrow({ where: { runId: launch.run.id } });
-    expect(completedJudgment.modelConfigId).toBe(model.id);
+    expect(completedJudgment.judgeModelVersionId).toBe(model.version.id);
+    expect(completedJudgment.modelConfigId).toBeNull(); // Task 12: write path stops setting this
 
     const response = await postHumanJudgment(
       new Request(`http://localhost/api/evaluations/${evaluation.id}/runs/${launch.run.id}/human-judgment`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ selectedBestModelId: completedJudgment.modelConfigId }),
+        body: JSON.stringify({ selectedBestModelId: completedJudgment.judgeModelVersionId }),
       }),
       { params: Promise.resolve({ id: evaluation.id, runId: launch.run.id }) }
     );
 
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body.selectedBestModelId).toBe(model.id);
+    // Task 12: a judgeModelVersionId-shaped selection lands in the NEW
+    // selectedBestJudgeModelVersionId column, not the legacy one.
+    expect(body.selectedBestJudgeModelVersionId).toBe(model.version.id);
+    expect(body.selectedBestModelId).toBeNull();
     expect(body.overallScore).toBe(0); // placeholder — respond mode has no scoring concept (resolveHumanJudgmentScore)
 
     // markRunCompleted's guarded needs_human -> completed transition.

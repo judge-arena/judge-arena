@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { getServerSession } from 'next-auth';
 import type { Channel, ConsumeMessage } from 'amqplib';
+import type { ServingBackend } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { closeRabbit, getRabbit } from '@/lib/queue/connection';
 import { assertTopology, QUEUE_JUDGMENT_EXECUTE, QUEUE_RUN_CREATE } from '@/lib/queue/topology';
@@ -12,12 +13,17 @@ import { POST as postRun } from '@/app/api/evaluations/[id]/runs/route';
 import { POST as postEvaluations } from '@/app/api/evaluations/route';
 import { GET as getStats } from '@/app/api/stats/route';
 
-// Integration suite — Task 9 (web tier becomes a RabbitMQ producer). Needs a
-// live Postgres (see .env.test's DATABASE_URL — schema already migrated,
-// e.g. by a prior `npm run test:db` run), a live RabbitMQ (RABBITMQ_URL),
-// and a live Redis (REDIS_URL — requireAuth()'s apiLimiter + the judge
-// route's judgeLimiter both gate through it). Run via `npm run
-// test:integration`, never as part of plain `npm test`.
+// Integration suite — Task 9 (web tier becomes a RabbitMQ producer), rewired
+// for Task 12 (runtime switches to JudgeModel/Version/Endpoint identity —
+// EvaluationModelSelection/RunModelSelection are now selected by
+// judgeModelVersionId directly, sourced from the selecting user's OWN
+// ModelEndpoint; ModelConfig is no longer the selection source and no new
+// ModelConfig rows are ever created by this path). Needs a live Postgres
+// (see .env.test's DATABASE_URL — schema already migrated, e.g. by a prior
+// `npm run test:db` run), a live RabbitMQ (RABBITMQ_URL), and a live Redis
+// (REDIS_URL — requireAuth()'s apiLimiter + the judge route's judgeLimiter
+// both gate through it). Run via `npm run test:integration`, never as part
+// of plain `npm test`.
 //
 // Persistent DB, same convention as tests/integration/worker-claims.test.ts:
 // every fixture helper below tracks the ids it creates into module-level
@@ -143,24 +149,56 @@ async function mkRubric(userId: string) {
   });
 }
 
-async function mkModelConfig(userId: string, overrides: Partial<{ provider: string; modelId: string; endpoint: string | null }> = {}) {
-  return prisma.modelConfig.create({
+/**
+ * Task 12 fixture: a catalog `JudgeModel` + `JudgeModelVersion` (ordinal 1)
+ * plus an ACTIVE, VERIFIED `ModelEndpoint` owned by `userId` — the source of
+ * a selectable "model" in the current runtime. Replaces the old
+ * `mkModelConfig` (which created a `ModelConfig` the removed
+ * `ensureJudgeIdentityForModelConfig` bridge would have resolved a version
+ * for). `requireOwnedActiveEndpoints` (`src/lib/run-launch.ts`) requires
+ * exactly this shape (active + `verifiedAt` set) to allow a launch.
+ */
+async function mkJudgeVersionWithEndpoint(
+  userId: string,
+  overrides: Partial<{ servingBackend: ServingBackend; baseModel: string }> = {}
+) {
+  const judgeModel = await prisma.judgeModel.create({
     data: {
-      name: uniq('fixture-model'),
-      provider: overrides.provider ?? 'openai',
-      modelId: overrides.modelId ?? uniq('fixture-model-id'),
-      endpoint: overrides.endpoint ?? null,
-      isActive: true,
-      isVerified: true,
-      userId,
+      name: uniq('fixture-judge'),
+      slug: uniq('fixture-judge-slug'),
+      judgeClass: 'prompted_api',
+      scoringMechanism: 'critique_generative',
+      baseModel: overrides.baseModel ?? uniq('fixture-base-model'),
     },
   });
+  createdJudgeModelIds.push(judgeModel.id);
+
+  const version = await prisma.judgeModelVersion.create({
+    data: {
+      judgeModelId: judgeModel.id,
+      ordinal: 1,
+      servingBackend: overrides.servingBackend ?? 'openai',
+      protocolSupport: { pointwise: ['score'] },
+    },
+  });
+  createdVersionIds.push(version.id);
+
+  const endpoint = await prisma.modelEndpoint.create({
+    data: {
+      userId,
+      judgeModelVersionId: version.id,
+      isActive: true,
+      verifiedAt: new Date(),
+    },
+  });
+
+  return { judgeModel, version, endpoint };
 }
 
 async function mkEvaluation(
   projectId: string,
   userId: string,
-  opts: { rubricId?: string | null; modelConfigIds: string[] }
+  opts: { rubricId?: string | null; judgeModelVersionIds: string[] }
 ) {
   const evaluation = await prisma.evaluation.create({
     data: {
@@ -170,27 +208,12 @@ async function mkEvaluation(
       responseText: 'fixture response under judgment', // judge mode
       ...(opts.rubricId ? { rubricId: opts.rubricId } : {}),
       modelSelections: {
-        create: opts.modelConfigIds.map((modelConfigId) => ({ modelConfigId })),
+        create: opts.judgeModelVersionIds.map((judgeModelVersionId) => ({ judgeModelVersionId })),
       },
     },
   });
   createdEvaluationIds.push(evaluation.id);
   return evaluation;
-}
-
-/** Tracks a judgeModelVersionId (and its parent JudgeModel) for FK-safe
- * cleanup — `ensureJudgeIdentityForModelConfig` (called internally by
- * launchSingleRun/launchBulkRunCreates) creates these as a side effect. */
-async function trackJudgeIdentity(versionId: string): Promise<void> {
-  if (createdVersionIds.includes(versionId)) return;
-  createdVersionIds.push(versionId);
-  const version = await prisma.judgeModelVersion.findUnique({
-    where: { id: versionId },
-    select: { judgeModelId: true },
-  });
-  if (version && !createdJudgeModelIds.includes(version.judgeModelId)) {
-    createdJudgeModelIds.push(version.judgeModelId);
-  }
 }
 
 afterAll(async () => {
@@ -214,15 +237,15 @@ beforeEach(async () => {
 });
 
 describe('launchSingleRun (src/lib/run-launch.ts)', () => {
-  it('creates a pending run + pending judgments (judgeModelVersionId + modelConfigId set on every row) and publishes exactly one judgment.execute per row', async () => {
+  it('creates a pending run + pending judgments (judgeModelVersionId set, modelConfigId left null — Task 12 write path) and publishes exactly one judgment.execute per row', async () => {
     const user = await mkUser();
     const project = await mkProject(user.id);
     const rubric = await mkRubric(user.id);
-    const modelA = await mkModelConfig(user.id);
-    const modelB = await mkModelConfig(user.id);
+    const modelA = await mkJudgeVersionWithEndpoint(user.id);
+    const modelB = await mkJudgeVersionWithEndpoint(user.id);
     const evaluation = await mkEvaluation(project.id, user.id, {
       rubricId: rubric.id,
-      modelConfigIds: [modelA.id, modelB.id],
+      judgeModelVersionIds: [modelA.version.id, modelB.version.id],
     });
 
     const { confirmChannel } = await getRabbit();
@@ -238,11 +261,12 @@ describe('launchSingleRun (src/lib/run-launch.ts)', () => {
     for (const judgment of result.run.modelJudgments) {
       expect(judgment.status).toBe('pending');
       expect(judgment.judgeModelVersionId).toBeTruthy();
-      expect(judgment.modelConfigId).toBeTruthy(); // dual-write, legacy
-      await trackJudgeIdentity(judgment.judgeModelVersionId!);
+      expect(judgment.modelConfigId).toBeNull(); // Task 12: write path stops setting this
     }
-    // Distinct ModelConfigs with distinct modelIds -> distinct judge identities.
-    expect(new Set(result.run.modelJudgments.map((j) => j.judgeModelVersionId)).size).toBe(2);
+    // Distinct versions -> distinct judge identities.
+    expect(new Set(result.run.modelJudgments.map((j) => j.judgeModelVersionId))).toEqual(
+      new Set([modelA.version.id, modelB.version.id])
+    );
 
     const published = await drainQueue(confirmChannel, QUEUE_JUDGMENT_EXECUTE);
     expect(published).toHaveLength(2);
@@ -256,10 +280,10 @@ describe('launchSingleRun (src/lib/run-launch.ts)', () => {
     const user = await mkUser();
     const project = await mkProject(user.id);
     const rubric = await mkRubric(user.id);
-    const model = await mkModelConfig(user.id);
+    const model = await mkJudgeVersionWithEndpoint(user.id);
     const evaluation = await mkEvaluation(project.id, user.id, {
       rubricId: rubric.id,
-      modelConfigIds: [model.id],
+      judgeModelVersionIds: [model.version.id],
     });
 
     const result = await launchSingleRun(
@@ -267,9 +291,6 @@ describe('launchSingleRun (src/lib/run-launch.ts)', () => {
       { publish: async () => { throw new Error('simulated broker outage'); } }
     );
     createdRunIds.push(result.run.id);
-    for (const judgment of result.run.modelJudgments) {
-      await trackJudgeIdentity(judgment.judgeModelVersionId!);
-    }
 
     expect(result.publishFailed).toBe(true);
     expect(result.publishError).toBe('simulated broker outage');
@@ -284,10 +305,10 @@ describe('launchSingleRun (src/lib/run-launch.ts)', () => {
     const user = await mkUser();
     const project = await mkProject(user.id);
     const rubric = await mkRubric(user.id);
-    const model = await mkModelConfig(user.id);
+    const model = await mkJudgeVersionWithEndpoint(user.id);
     const evaluation = await mkEvaluation(project.id, user.id, {
       rubricId: rubric.id,
-      modelConfigIds: [model.id],
+      judgeModelVersionIds: [model.version.id],
     });
 
     const result = await launchSingleRun(
@@ -299,7 +320,7 @@ describe('launchSingleRun (src/lib/run-launch.ts)', () => {
           // 'needs_human') before our publish() call's confirm-ack came
           // back — the message really was delivered, but publish() throws
           // on our side anyway (e.g. a timed-out confirm or a socket error
-          // raised after the broker already accepted it).
+          // raised AFTER the broker already accepted it).
           await prisma.evaluationRun.update({
             where: { id: runId },
             data: { status: 'needs_human', finalizedAt: new Date() },
@@ -309,9 +330,6 @@ describe('launchSingleRun (src/lib/run-launch.ts)', () => {
       }
     );
     createdRunIds.push(result.run.id);
-    for (const judgment of result.run.modelJudgments) {
-      await trackJudgeIdentity(judgment.judgeModelVersionId!);
-    }
 
     // Reported as accepted, not failed — the guarded updateMany found the
     // run already off pending/judging (count 0) and backed off rather than
@@ -329,10 +347,10 @@ describe('launchSingleRun (src/lib/run-launch.ts)', () => {
     mockSessionFor(user);
     const project = await mkProject(user.id);
     const rubric = await mkRubric(user.id);
-    const model = await mkModelConfig(user.id);
+    const model = await mkJudgeVersionWithEndpoint(user.id);
     const evaluation = await mkEvaluation(project.id, user.id, {
       rubricId: rubric.id,
-      modelConfigIds: [model.id],
+      judgeModelVersionIds: [model.version.id],
     });
 
     const response = await postRun(
@@ -342,13 +360,30 @@ describe('launchSingleRun (src/lib/run-launch.ts)', () => {
     expect(response.status).toBe(201);
     const body = await response.json();
     createdRunIds.push(body.id);
-    for (const judgment of body.modelJudgments) {
-      await trackJudgeIdentity(judgment.judgeModelVersionId);
-    }
 
     expect(body.status).toBe('pending');
     expect(body.modelJudgments).toHaveLength(1);
     expect(body.modelJudgments[0].judgeModelVersionId).toBeTruthy();
+  });
+
+  it('no cross-user endpoint borrow: launching against a version the caller has no endpoint for fails with a clear 400, even if ANOTHER user has one', async () => {
+    const owner = await mkUser();
+    const stranger = await mkUser();
+    const project = await mkProject(stranger.id);
+    const rubric = await mkRubric(stranger.id);
+    // owner has the endpoint; stranger does not.
+    const model = await mkJudgeVersionWithEndpoint(owner.id);
+    const evaluation = await mkEvaluation(project.id, stranger.id, {
+      rubricId: rubric.id,
+      judgeModelVersionIds: [model.version.id],
+    });
+
+    await expect(
+      launchSingleRun({ evaluationId: evaluation.id, triggeredById: stranger.id })
+    ).rejects.toMatchObject({
+      status: 400,
+      message: expect.stringContaining(model.version.id),
+    });
   });
 });
 
@@ -357,15 +392,15 @@ describe('launchBulkRunCreates (src/lib/run-launch.ts)', () => {
     const user = await mkUser();
     const project = await mkProject(user.id);
     const rubric = await mkRubric(user.id);
-    const model = await mkModelConfig(user.id);
+    const model = await mkJudgeVersionWithEndpoint(user.id);
 
     const goodEvaluation = await mkEvaluation(project.id, user.id, {
       rubricId: rubric.id,
-      modelConfigIds: [model.id],
+      judgeModelVersionIds: [model.version.id],
     });
     const badEvaluation = await mkEvaluation(project.id, user.id, {
       rubricId: null, // judge mode (responseText set) with no rubric -> invalid
-      modelConfigIds: [model.id],
+      judgeModelVersionIds: [model.version.id],
     });
 
     const { confirmChannel } = await getRabbit();
@@ -384,22 +419,19 @@ describe('launchBulkRunCreates (src/lib/run-launch.ts)', () => {
     const msg = JSON.parse(published[0].content.toString()) as RunCreateMsg;
     expect(msg.evaluationId).toBe(goodEvaluation.id);
     expect(msg.runSpec.modelSelections).toEqual([
-      expect.objectContaining({ modelConfigId: model.id }),
+      expect.objectContaining({ judgeModelVersionId: model.version.id, modelConfigId: null }),
     ]);
-    for (const sel of msg.runSpec.modelSelections) {
-      await trackJudgeIdentity(sel.judgeModelVersionId);
-    }
   });
 
-  it('bulk launch end-to-end (Task 9 review fix #1): consumer-created judgments have BOTH judgeModelVersionId and modelConfigId, RunModelSelection rows exist, and the leaderboard join includes them', async () => {
+  it('bulk launch end-to-end (Task 9 review fix #1, carried through Task 12): consumer-created judgments carry judgeModelVersionId (modelConfigId null), RunModelSelection rows exist, and the leaderboard join resolves via judgeModelVersion', async () => {
     const user = await mkUser();
     const project = await mkProject(user.id);
     const rubric = await mkRubric(user.id);
-    const modelA = await mkModelConfig(user.id);
-    const modelB = await mkModelConfig(user.id);
+    const modelA = await mkJudgeVersionWithEndpoint(user.id);
+    const modelB = await mkJudgeVersionWithEndpoint(user.id);
     const evaluation = await mkEvaluation(project.id, user.id, {
       rubricId: rubric.id,
-      modelConfigIds: [modelA.id, modelB.id],
+      judgeModelVersionIds: [modelA.version.id, modelB.version.id],
     });
 
     const { confirmChannel } = await getRabbit();
@@ -410,24 +442,20 @@ describe('launchBulkRunCreates (src/lib/run-launch.ts)', () => {
     expect(result.accepted).toEqual([evaluation.id]);
     expect(result.failed).toEqual([]);
 
-    // Producer side: the real, drained run.create message carries a
-    // {judgeModelVersionId, modelConfigId} pair per selected model — not a
-    // bare judgeModelVersionId[] (the pre-fix shape that left the consumer
-    // with nothing to dual-write).
+    // Producer side: the real, drained run.create message carries
+    // {judgeModelVersionId, modelConfigId: null} per selected model.
     const published = await drainQueue(confirmChannel, QUEUE_RUN_CREATE);
     expect(published).toHaveLength(1);
     const msg = JSON.parse(published[0].content.toString()) as RunCreateMsg;
-    expect(new Set(msg.runSpec.modelSelections.map((sel) => sel.modelConfigId))).toEqual(
-      new Set([modelA.id, modelB.id])
+    expect(new Set(msg.runSpec.modelSelections.map((sel) => sel.judgeModelVersionId))).toEqual(
+      new Set([modelA.version.id, modelB.version.id])
     );
-    for (const sel of msg.runSpec.modelSelections) {
-      await trackJudgeIdentity(sel.judgeModelVersionId);
-    }
+    expect(msg.runSpec.modelSelections.every((sel) => sel.modelConfigId === null)).toBe(true);
 
     // Consumer side: feed the real drained message straight into the
     // run.create consumer (same "fabricated ConsumeMessage into handle()"
     // pattern tests/integration/worker-claims.test.ts uses) — no live
-    // worker process needed to exercise the actual expansion + dual-write.
+    // worker process needed to exercise the actual expansion.
     const consumer = createRunCreateConsumer();
     const ch = fakeChannel();
     await consumer.handle(fakeMessage(msg), ch);
@@ -441,26 +469,48 @@ describe('launchBulkRunCreates (src/lib/run-launch.ts)', () => {
     expect(judgments).toHaveLength(2);
     for (const judgment of judgments) {
       expect(judgment.judgeModelVersionId).toBeTruthy();
-      expect(judgment.modelConfigId).toBeTruthy(); // dual-write — was null before the fix
+      expect(judgment.modelConfigId).toBeNull(); // Task 12: no dual-write anymore
     }
-    expect(new Set(judgments.map((j) => j.modelConfigId))).toEqual(new Set([modelA.id, modelB.id]));
+    expect(new Set(judgments.map((j) => j.judgeModelVersionId))).toEqual(
+      new Set([modelA.version.id, modelB.version.id])
+    );
 
-    // RunModelSelection rows — never written by the bulk path before the fix.
+    // RunModelSelection rows — never written by the bulk path before the
+    // Task 9 review fix; still written, now judgeModelVersionId-keyed.
     const selections = await prisma.runModelSelection.findMany({ where: { runId: run.id } });
-    expect(new Set(selections.map((s) => s.modelConfigId))).toEqual(new Set([modelA.id, modelB.id]));
+    expect(new Set(selections.map((s) => s.judgeModelVersionId))).toEqual(
+      new Set([modelA.version.id, modelB.version.id])
+    );
 
     // The leaderboard aggregation path (src/app/api/leaderboard/route.ts)
-    // selects `modelJudgment.modelConfig` and does
-    // `if (j.modelConfig === null) continue` — assert that exact join is
-    // non-null for every judgment this bulk launch created.
-    const withModelConfig = await prisma.modelJudgment.findMany({
+    // now resolves identity via the judgeModelVersion/judgeModel join
+    // (modelConfig is null on every Task-12-created row) — assert that
+    // join is non-null for every judgment this bulk launch created.
+    const withJudgeModelVersion = await prisma.modelJudgment.findMany({
       where: { runId: run.id },
-      select: { modelConfig: { select: { id: true, name: true, provider: true, modelId: true } } },
+      select: { judgeModelVersion: { select: { id: true, judgeModel: { select: { id: true } } } } },
     });
-    expect(withModelConfig).toHaveLength(2);
-    for (const j of withModelConfig) {
-      expect(j.modelConfig).not.toBeNull();
+    expect(withJudgeModelVersion).toHaveLength(2);
+    for (const j of withJudgeModelVersion) {
+      expect(j.judgeModelVersion).not.toBeNull();
     }
+  });
+
+  it('no cross-user endpoint borrow: a bulk-launched evaluation whose selection has no endpoint owned by the triggering user fails per-evaluation, not silently', async () => {
+    const owner = await mkUser();
+    const stranger = await mkUser();
+    const project = await mkProject(stranger.id);
+    const rubric = await mkRubric(stranger.id);
+    const model = await mkJudgeVersionWithEndpoint(owner.id); // NOT stranger's endpoint
+    const evaluation = await mkEvaluation(project.id, stranger.id, {
+      rubricId: rubric.id,
+      judgeModelVersionIds: [model.version.id],
+    });
+
+    const result = await launchBulkRunCreates([evaluation.id], stranger.id);
+    expect(result.accepted).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0].reason).toContain(model.version.id);
   });
 
   it('end-to-end through the real POST /api/evaluations (dataset-batch, create_and_run) route: 202 with accepted/failed', async () => {
@@ -468,7 +518,7 @@ describe('launchBulkRunCreates (src/lib/run-launch.ts)', () => {
     mockSessionFor(user);
     const project = await mkProject(user.id);
     const rubric = await mkRubric(user.id);
-    const model = await mkModelConfig(user.id);
+    const model = await mkJudgeVersionWithEndpoint(user.id);
 
     const dataset = await prisma.dataset.create({
       data: {
@@ -499,7 +549,7 @@ describe('launchBulkRunCreates (src/lib/run-launch.ts)', () => {
           projectId: project.id,
           datasetId: dataset.id,
           rubricId: rubric.id,
-          modelConfigIds: [model.id],
+          judgeModelVersionIds: [model.version.id],
         }),
       })
     );
@@ -514,14 +564,6 @@ describe('launchBulkRunCreates (src/lib/run-launch.ts)', () => {
     const { confirmChannel } = await getRabbit();
     const published = await drainQueue(confirmChannel, QUEUE_RUN_CREATE);
     expect(published.length).toBeGreaterThanOrEqual(2);
-    for (const raw of published) {
-      const msg = JSON.parse(raw.content.toString()) as RunCreateMsg;
-      if (body.evaluationIds.includes(msg.evaluationId)) {
-        for (const sel of msg.runSpec.modelSelections) {
-          await trackJudgeIdentity(sel.judgeModelVersionId);
-        }
-      }
-    }
   });
 });
 
@@ -531,17 +573,14 @@ describe('GET /api/stats — DB-backed queue counts (replaces getQueueStats())',
     mockSessionFor(user);
     const project = await mkProject(user.id);
     const rubric = await mkRubric(user.id);
-    const model = await mkModelConfig(user.id);
+    const model = await mkJudgeVersionWithEndpoint(user.id);
     const evaluation = await mkEvaluation(project.id, user.id, {
       rubricId: rubric.id,
-      modelConfigIds: [model.id],
+      judgeModelVersionIds: [model.version.id],
     });
 
     const launch = await launchSingleRun({ evaluationId: evaluation.id, triggeredById: user.id });
     createdRunIds.push(launch.run.id);
-    for (const judgment of launch.run.modelJudgments) {
-      await trackJudgeIdentity(judgment.judgeModelVersionId!);
-    }
 
     const response = await getStats();
     expect(response.status).toBe(200);

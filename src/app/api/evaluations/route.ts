@@ -14,7 +14,7 @@ const createBatchSchema = z.object({
   projectId: z.string().min(1),
   datasetId: z.string().min(1, 'Dataset is required'),
   rubricId: z.string().optional(),
-  modelConfigIds: z.array(z.string()).max(10).optional(),
+  judgeModelVersionIds: z.array(z.string()).max(10).optional(),
   runMode: z.enum(['create', 'create_and_run']).optional(),
 });
 
@@ -28,7 +28,7 @@ const createRemoteDatasetSchema = z.object({
   inputColumn: z.string().min(1, 'Input column is required'),
   expectedColumn: z.string().optional(),
   rubricId: z.string().optional(),
-  modelConfigIds: z.array(z.string()).max(10).optional(),
+  judgeModelVersionIds: z.array(z.string()).max(10).optional(),
   runMode: z.enum(['create', 'create_and_run']).optional(),
   inputType: z.enum(['query', 'query-response']).optional(),
 });
@@ -42,7 +42,7 @@ const createEvaluationLegacySchema = z.object({
   promptText: z.string().optional(),
   responseText: z.string().optional(),
   rubricId: z.string().optional(),
-  modelConfigIds: z.array(z.string()).max(10).optional(),
+  judgeModelVersionIds: z.array(z.string()).max(10).optional(),
   runMode: z.enum(['create', 'create_and_run']).optional(),
   createAndRun: z.boolean().optional(),
 }).refine(
@@ -60,6 +60,16 @@ const createEvaluationLegacySchema = z.object({
   }
 );
 
+// Task 12: minimal JudgeModelVersion+JudgeModel select for display fallback
+// when modelConfig is null (see src/lib/model-display.ts) — every row
+// created by the current write path.
+const judgeModelVersionDisplaySelect = {
+  id: true,
+  ordinal: true,
+  servingBackend: true,
+  judgeModel: { select: { id: true, name: true, baseModel: true } },
+} as const;
+
 // Shared include for run summaries
 const runSummaryInclude = {
   rubric: { select: { id: true, name: true, version: true } },
@@ -67,12 +77,14 @@ const runSummaryInclude = {
   runModelSelections: {
     include: {
       modelConfig: { select: { id: true, name: true, provider: true, modelId: true } },
+      judgeModelVersion: { select: judgeModelVersionDisplaySelect },
     },
     orderBy: { createdAt: 'asc' as const },
   },
   modelJudgments: {
     include: {
       modelConfig: { select: { id: true, name: true, provider: true } },
+      judgeModelVersion: { select: judgeModelVersionDisplaySelect },
     },
     orderBy: { createdAt: 'asc' as const },
   },
@@ -90,6 +102,7 @@ const evaluationInclude = {
       modelConfig: {
         select: { id: true, name: true, provider: true, modelId: true, isActive: true, isVerified: true },
       },
+      judgeModelVersion: { select: judgeModelVersionDisplaySelect },
     },
     orderBy: { createdAt: 'asc' as const },
   },
@@ -137,35 +150,53 @@ export async function GET(request: Request) {
   }
 }
 
-// ── Helper: validate model IDs ──
-async function resolveModelIds(modelConfigIds: string[] | undefined): Promise<{ ids: string[]; error?: string }> {
-  let selectedModelIds = modelConfigIds ?? [];
-
-  if (modelConfigIds === undefined) {
-    const defaults = await prisma.modelConfig.findMany({
-      where: { isActive: true, isVerified: true },
-      select: { id: true },
+// ── Helper: validate/default judge model version IDs (Task 12) ──
+//
+// Default-model resolution is now per-user: with no explicit selection,
+// default to the CALLING user's own active+verified ModelEndpoints — never
+// another user's (kills the 1a INFO "global cross-user defaults" finding,
+// which used to pull from ANY user's active+verified ModelConfig). With an
+// explicit selection, every requested judgeModelVersionId must have an
+// active+verified ModelEndpoint owned by userId — mirrors
+// src/lib/run-launch.ts's requireOwnedActiveEndpoints (the same rule
+// enforced again, defense in depth, at launch time).
+async function resolveJudgeVersionIds(
+  userId: string,
+  judgeModelVersionIds: string[] | undefined
+): Promise<{ ids: string[]; error?: string }> {
+  if (judgeModelVersionIds === undefined) {
+    const defaults = await prisma.modelEndpoint.findMany({
+      where: { userId, isActive: true, verifiedAt: { not: null } },
+      select: { judgeModelVersionId: true },
       orderBy: { createdAt: 'asc' },
       take: 10,
     });
-    selectedModelIds = defaults.map((m: any) => m.id);
+    return { ids: [...new Set(defaults.map((e) => e.judgeModelVersionId))] };
   }
 
-  if (selectedModelIds.length > 10) {
+  const selectedVersionIds = [...new Set(judgeModelVersionIds)];
+
+  if (selectedVersionIds.length > 10) {
     return { ids: [], error: 'You can select up to 10 models per evaluation' };
   }
 
-  if (selectedModelIds.length > 0) {
-    const validModels = await prisma.modelConfig.findMany({
-      where: { id: { in: selectedModelIds }, isVerified: true },
-      select: { id: true },
+  if (selectedVersionIds.length > 0) {
+    const owned = await prisma.modelEndpoint.findMany({
+      where: { userId, judgeModelVersionId: { in: selectedVersionIds }, isActive: true, verifiedAt: { not: null } },
+      select: { judgeModelVersionId: true },
     });
-    if (validModels.length !== new Set(selectedModelIds).size) {
-      return { ids: [], error: 'One or more selected models are missing or not verified.' };
+    const covered = new Set(owned.map((e) => e.judgeModelVersionId));
+    if (selectedVersionIds.some((id) => !covered.has(id))) {
+      return {
+        ids: [],
+        error:
+          'One or more selected judge models have no active, verified endpoint configured for you. ' +
+          'Configure your own endpoint on the Models page.',
+      };
     }
   }
 
-  return { ids: selectedModelIds };
+  return { ids: selectedVersionIds };
 }
 
 // POST /api/evaluations - Create evaluation(s) from text or dataset
@@ -197,7 +228,7 @@ export async function POST(request: Request) {
     }
 
     // ── Validate models ──
-    const { ids: selectedModelIds, error: modelError } = await resolveModelIds(body.modelConfigIds);
+    const { ids: selectedVersionIds, error: modelError } = await resolveJudgeVersionIds(session.user.id, body.judgeModelVersionIds);
     if (modelError) return NextResponse.json({ error: modelError }, { status: 400 });
 
     // ══════════════════════════════════════════════════════════════════════
@@ -245,7 +276,7 @@ export async function POST(request: Request) {
           userId: session.user.id,
           ...(data.rubricId && { rubricId: data.rubricId }),
           modelSelections: {
-            create: [...new Set(selectedModelIds)].map((modelConfigId) => ({ modelConfigId })),
+            create: [...new Set(selectedVersionIds)].map((judgeModelVersionId) => ({ judgeModelVersionId })),
           },
         } satisfies Prisma.EvaluationUncheckedCreateInput,
         include: evaluationInclude,
@@ -431,7 +462,7 @@ export async function POST(request: Request) {
               datasetSampleId: sample.id,
               ...(remoteData.rubricId && { rubricId: remoteData.rubricId }),
               modelSelections: {
-                create: [...new Set(selectedModelIds)].map((modelConfigId) => ({ modelConfigId })),
+                create: [...new Set(selectedVersionIds)].map((judgeModelVersionId) => ({ judgeModelVersionId })),
               },
             } satisfies Prisma.EvaluationUncheckedCreateInput,
           })
@@ -518,7 +549,7 @@ export async function POST(request: Request) {
             datasetSampleId: sample.id,
             ...(batchData.rubricId && { rubricId: batchData.rubricId }),
             modelSelections: {
-              create: [...new Set(selectedModelIds)].map((modelConfigId) => ({ modelConfigId })),
+              create: [...new Set(selectedVersionIds)].map((judgeModelVersionId) => ({ judgeModelVersionId })),
             },
           } satisfies Prisma.EvaluationUncheckedCreateInput,
         })

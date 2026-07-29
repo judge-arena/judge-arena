@@ -14,12 +14,13 @@ import {
   DialogBody,
 } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ModelConfigForm } from '@/components/models/model-config-form';
+import { ModelConfigForm, type CatalogEntry, type ModelConfigFormSubmit } from '@/components/models/model-config-form';
 import { getProviderInfo } from '@/lib/utils';
 import { toast } from 'sonner';
 
 export default function ModelsPage() {
   const [models, setModels] = useState<any[]>([]);
+  const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -30,8 +31,12 @@ export default function ModelsPage() {
 
   const loadModels = async () => {
     try {
-      const res = await fetch('/api/models');
-      if (res.ok) setModels(await res.json());
+      const [modelsRes, catalogRes] = await Promise.all([
+        fetch('/api/models'),
+        fetch('/api/models/catalog'),
+      ]);
+      if (modelsRes.ok) setModels(await modelsRes.json());
+      if (catalogRes.ok) setCatalog(await catalogRes.json());
     } catch (err) {
       console.error('Failed to load models:', err);
     } finally {
@@ -43,14 +48,8 @@ export default function ModelsPage() {
     loadModels();
   }, []);
 
-  const handleCreate = async (data: {
-    name: string;
-    provider: string;
-    modelId: string;
-    endpoint: string;
-    apiKey: string;
-    isActive: boolean;
-  }) => {
+  const handleCreate = async (data: ModelConfigFormSubmit) => {
+    if (data.mode === 'edit') return; // unreachable — the create dialog never sets editingSummary
     setCreating(true);
     try {
       const res = await fetch('/api/models', {
@@ -85,26 +84,15 @@ export default function ModelsPage() {
     setEditOpen(true);
   };
 
-  const handleUpdate = async (data: {
-    name: string;
-    provider: string;
-    modelId: string;
-    endpoint: string;
-    apiKey: string;
-    isActive: boolean;
-  }) => {
-    if (!editingModel) return;
+  const handleUpdate = async (data: ModelConfigFormSubmit) => {
+    if (!editingModel || data.mode !== 'edit') return;
 
     setSavingEdit(true);
     try {
       const payload: any = {
-        name: data.name,
-        provider: data.provider,
-        modelId: data.modelId,
         endpoint: data.endpoint,
         isActive: data.isActive,
       };
-
       if (data.apiKey.trim().length > 0) {
         payload.apiKey = data.apiKey;
       }
@@ -152,7 +140,7 @@ export default function ModelsPage() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Delete this model configuration?')) return;
+    if (!confirm('Delete this model endpoint?')) return;
     try {
       const res = await fetch(`/api/models/${id}`, { method: 'DELETE' });
       if (res.ok) {
@@ -188,7 +176,7 @@ export default function ModelsPage() {
     <div>
       <Header
         title="Models"
-        description="Configure LLM models for evaluations"
+        description="Pick from the judge catalog or add a custom model, then configure your own endpoint/key"
         actions={
           <Button
             variant="primary"
@@ -234,7 +222,7 @@ export default function ModelsPage() {
               </svg>
             }
             title="No models configured"
-            description="Add LLM models to use as judges for evaluating submissions."
+            description="Pick a judge from the catalog or add a custom model to use as a judge for evaluations."
             action={
               <Button
                 variant="primary"
@@ -260,7 +248,7 @@ export default function ModelsPage() {
                       <div className="min-w-0">
                         <CardTitle className="truncate">{model.name}</CardTitle>
                         <CardDescription className="mt-1">
-                          {providerInfo.label}
+                          {providerInfo.label} · v{model.ordinal}
                         </CardDescription>
                       </div>
                       <div className="flex items-center gap-1.5">
@@ -283,9 +271,9 @@ export default function ModelsPage() {
                     <div className="space-y-3">
                       <div className="space-y-1">
                         <div className="flex items-center justify-between text-xs">
-                          <span className="text-surface-500 dark:text-surface-400">Model ID</span>
+                          <span className="text-surface-500 dark:text-surface-400">Base model</span>
                           <span className="font-mono text-surface-700 dark:text-surface-300 truncate ml-2 max-w-[60%] text-right">
-                            {model.modelId}
+                            {model.modelId || '—'}
                           </span>
                         </div>
                         {model.endpoint && (
@@ -295,6 +283,11 @@ export default function ModelsPage() {
                               {model.endpoint}
                             </span>
                           </div>
+                        )}
+                        {!model.isVerified && model.verificationError && (
+                          <p className="text-2xs text-amber-600 dark:text-amber-400 truncate" title={model.verificationError}>
+                            {model.verificationError}
+                          </p>
                         )}
                       </div>
 
@@ -373,7 +366,7 @@ export default function ModelsPage() {
             <DialogTitle>Add Model</DialogTitle>
           </DialogHeader>
           <DialogBody>
-            <ModelConfigForm onSubmit={handleCreate} loading={creating} />
+            <ModelConfigForm catalog={catalog} onSubmit={handleCreate} loading={creating} />
           </DialogBody>
         </DialogContent>
       </Dialog>
@@ -392,10 +385,14 @@ export default function ModelsPage() {
           <DialogBody>
             {editingModel && (
               <ModelConfigForm
-                initialData={{
+                catalog={catalog}
+                editingSummary={{
                   name: editingModel.name,
-                  provider: editingModel.provider,
-                  modelId: editingModel.modelId,
+                  servingBackend: editingModel.servingBackend,
+                  baseModel: editingModel.baseModel,
+                  ordinal: editingModel.ordinal,
+                }}
+                initialData={{
                   endpoint: editingModel.endpoint || '',
                   apiKey: '',
                   isActive: editingModel.isActive,

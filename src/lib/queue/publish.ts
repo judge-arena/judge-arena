@@ -36,22 +36,22 @@ export interface RunCreateMsg {
   runSpec: {
     rubricId?: string;
     /**
-     * One entry per selected model, carrying BOTH identities the 1b runtime
-     * needs: `judgeModelVersionId` (what the worker's judgment-consumer
-     * actually executes against) and `modelConfigId` (the legacy dual-write
-     * identity — see judge-identity.ts's module doc — that the leaderboard
-     * aggregation, run detail page, human-judgment route, and CSV/JSONL
-     * export still join/read on). A bare `judgeModelVersionId[]` here (the
-     * pre-review shape) gave `run-create-consumer.ts` no `modelConfigId` to
-     * write, so every bulk/dataset-launched `ModelJudgment` left it `null`
-     * — silently excluded from the leaderboard
-     * (`if (j.modelConfig === null) continue`) and with no
-     * `RunModelSelection` row created at all. Pairing both ids on the
-     * message fixes that at the source; see run-launch.ts's
-     * `launchBulkRunCreates` (producer) and run-create-consumer.ts
-     * (consumer dual-write) for the two ends of this.
+     * One entry per selected model. `judgeModelVersionId` is the identity
+     * `run-create-consumer.ts` actually creates `ModelJudgment`/
+     * `RunModelSelection` rows against — the ONLY field the worker's
+     * judgment-consumer executes on. `modelConfigId` is Task 12's legacy
+     * dual-write field (see `src/lib/run-launch.ts`'s module doc): always
+     * `null` for runs launched by the current write path, since nothing
+     * derives a `ModelConfig` back-reference for a `JudgeModelVersion`
+     * created via the catalog or a custom-model POST. Kept on the message
+     * shape (rather than removed) so `ModelJudgment.modelConfigId` can still
+     * be set for the rare case a future caller resolves one — see
+     * run-create-consumer.ts's dedupe/write logic, which is keyed on
+     * `judgeModelVersionId` (NOT `modelConfigId` — every entry can be `null`
+     * now, so a `modelConfigId`-keyed `Map` would silently collapse them
+     * all into one).
      */
-    modelSelections: Array<{ judgeModelVersionId: string; modelConfigId: string }>;
+    modelSelections: Array<{ judgeModelVersionId: string; modelConfigId: string | null }>;
     triggeredById: string;
     protocol: 'pointwise';
   };

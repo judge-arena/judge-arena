@@ -98,44 +98,73 @@ async function main() {
 
   console.log(`  ✓ Created rubric: ${rubric.name}`);
 
-  // Create default model configs
-  const models = await Promise.all([
-    prisma.modelConfig.create({
-      data: {
-        name: 'Claude Sonnet 4.5',
-        provider: 'anthropic',
-        modelId: 'claude-sonnet-4-5-20250514',
-        isActive: true,
-        isVerified: true,
-        verifiedAt: new Date(),
-        userId: adminUser.id,
-      },
-    }),
-    prisma.modelConfig.create({
-      data: {
-        name: 'Claude Sonnet 4.6',
-        provider: 'anthropic',
-        modelId: 'claude-sonnet-4-6-20250627',
-        isActive: true,
-        isVerified: true,
-        verifiedAt: new Date(),
-        userId: adminUser.id,
-      },
-    }),
-    prisma.modelConfig.create({
-      data: {
-        name: 'Claude Opus 4.5',
-        provider: 'anthropic',
-        modelId: 'claude-opus-4-5-20250630',
-        isActive: true,
-        isVerified: true,
-        verifiedAt: new Date(),
-        userId: adminUser.id,
-      },
-    }),
-  ]);
+  // ── Catalog: the 3 Anthropic defaults as JudgeModel+Version entries ────────
+  // Task 12: ModelConfig is write-retired — the runtime's "default models"
+  // are catalog JudgeModel/JudgeModelVersion entries plus a per-user
+  // ModelEndpoint (here, the admin's own, active+pre-verified so the sample
+  // evaluation/run below can launch immediately). Any user can create their
+  // OWN endpoint against the same catalog entries from the Models page.
+  const DEFAULT_ANTHROPIC_JUDGES = [
+    { name: 'Claude Sonnet 4.5', slug: 'claude-sonnet-4-5', baseModel: 'claude-sonnet-4-5-20250514' },
+    { name: 'Claude Sonnet 4.6', slug: 'claude-sonnet-4-6', baseModel: 'claude-sonnet-4-6-20250627' },
+    { name: 'Claude Opus 4.5', slug: 'claude-opus-4-5', baseModel: 'claude-opus-4-5-20250630' },
+  ] as const;
 
-  console.log(`  ✓ Created ${models.length} model configurations`);
+  const endpoints = [];
+  for (const judge of DEFAULT_ANTHROPIC_JUDGES) {
+    // eslint-disable-next-line no-await-in-loop -- sequential seed script, small N (3), idempotency (upsert/find-or-create) matters more than parallelism here
+    const judgeModel = await prisma.judgeModel.upsert({
+      where: { slug: judge.slug },
+      update: {},
+      create: {
+        name: judge.name,
+        slug: judge.slug,
+        judgeClass: 'prompted_api',
+        scoringMechanism: 'critique_generative',
+        baseModel: judge.baseModel,
+      },
+    });
+
+    // eslint-disable-next-line no-await-in-loop
+    const version = await prisma.judgeModelVersion.upsert({
+      where: { judgeModelId_ordinal: { judgeModelId: judgeModel.id, ordinal: 1 } },
+      update: {},
+      create: {
+        judgeModelId: judgeModel.id,
+        ordinal: 1,
+        servingBackend: 'anthropic',
+        protocolSupport: { pointwise: ['score'] },
+        samplingDefaults: { temperature: 0.3, max_tokens: 4096 },
+        trustState: 'trusted',
+      },
+    });
+
+    // ModelEndpoint has no compound unique constraint (see
+    // src/app/api/models/route.ts's doc) — find-or-create keeps this
+    // idempotent across re-seeds. No endpoint/apiKeyEnc set: the
+    // 'anthropic' descriptor is kind:'api' with no custom endpoint, so a
+    // real call falls back to the ANTHROPIC_API_KEY env var (see
+    // registry.ts's resolveApiKey).
+    // eslint-disable-next-line no-await-in-loop
+    let endpoint = await prisma.modelEndpoint.findFirst({
+      where: { userId: adminUser.id, judgeModelVersionId: version.id },
+    });
+    if (!endpoint) {
+      // eslint-disable-next-line no-await-in-loop
+      endpoint = await prisma.modelEndpoint.create({
+        data: {
+          userId: adminUser.id,
+          judgeModelVersionId: version.id,
+          isActive: true,
+          verifiedAt: new Date(),
+        },
+      });
+    }
+
+    endpoints.push({ judgeModel, version, endpoint });
+  }
+
+  console.log(`  ✓ Created ${endpoints.length} catalog judge models + versions + admin endpoints`);
 
   // Create the Leaderboard project (default, visible to all)
   const leaderboard = await prisma.project.upsert({
@@ -224,7 +253,7 @@ export async function authenticate(req: Request): Promise<User> {
 `,
       userId: adminUser.id,
       modelSelections: {
-        create: models.map((m) => ({ modelConfigId: m.id })),
+        create: endpoints.map((e) => ({ judgeModelVersionId: e.version.id })),
       },
     },
   });
@@ -239,7 +268,7 @@ export async function authenticate(req: Request): Promise<User> {
       status: 'pending',
       triggeredById: adminUser.id,
       runModelSelections: {
-        create: models.map((m) => ({ modelConfigId: m.id })),
+        create: endpoints.map((e) => ({ judgeModelVersionId: e.version.id })),
       },
     },
   });
@@ -250,7 +279,7 @@ export async function authenticate(req: Request): Promise<User> {
   console.log(`\n📋 Summary:`);
   console.log(`   - 2 Users (admin + demo)`);
   console.log(`   - 1 Rubric with 5 criteria`);
-  console.log(`   - ${models.length} Model configurations`);
+  console.log(`   - ${endpoints.length} catalog judge models + versions + admin endpoints`);
   console.log(`   - 1 Leaderboard (default project) + 1 sample project`);
   console.log(`   - 1 Public remote dataset (LiveCodeBench)`);
   console.log(`   - 1 Evaluation template + 1 run`);

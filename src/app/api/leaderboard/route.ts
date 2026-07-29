@@ -10,6 +10,7 @@ import { NextResponse } from 'next/server';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { logger, serializeError } from '@/lib/logger';
+import { resolveModelDisplay } from '@/lib/model-display';
 
 interface ModelLeaderboardEntry {
   modelId: string;
@@ -100,6 +101,17 @@ export async function GET() {
                 modelId: true,
               },
             },
+            // Task 12: every judgment the current write path creates has
+            // modelConfig === null — this join is the identity source for
+            // those rows. See src/lib/model-display.ts's resolveModelDisplay.
+            judgeModelVersion: {
+              select: {
+                id: true,
+                ordinal: true,
+                servingBackend: true,
+                judgeModel: { select: { id: true, name: true, baseModel: true } },
+              },
+            },
           },
         });
 
@@ -114,19 +126,21 @@ export async function GET() {
 
     for (const j of judgments) {
       if (j.overallScore === null) continue;
-      // modelConfigId became optional in v2b (Task 6) — the write path
-      // still always sets it today (retirement lands in Task 9), but a
-      // judgment with no ModelConfig has no model identity to key the
-      // leaderboard by, so it's excluded rather than crashing the route.
-      if (j.modelConfig === null) continue;
+      // Task 12: modelConfig is null on every judgment the current write
+      // path creates — judgeModelVersion/judgeModel is the identity source
+      // for those. A judgment with NEITHER join (data integrity issue, not
+      // a normal runtime condition) is excluded rather than crashing the
+      // route — resolveModelDisplay's 'unknown' sentinel.
+      if (j.modelConfig === null && j.judgeModelVersion === null) continue;
 
-      const key = j.modelConfig.id;
+      const display = resolveModelDisplay(j);
+      const key = display.id;
       let entry = modelMap.get(key);
       if (!entry) {
         entry = {
-          modelName: j.modelConfig.name,
-          provider: j.modelConfig.provider,
-          providerModelId: j.modelConfig.modelId,
+          modelName: display.name,
+          provider: display.provider,
+          providerModelId: display.modelId,
           scores: [],
           latencies: [],
         };

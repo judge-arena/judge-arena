@@ -10,7 +10,15 @@
  *
  * JSONL follows the JSON Lines standard (https://jsonlines.org/) — one
  * valid JSON object per line, newline-delimited.
+ *
+ * Task 12: `flattenEvaluationForExport`'s per-judgment `model_*` columns now
+ * carry the JUDGE identity (slug + ordinal + servingBackend) via
+ * `resolveModelDisplay` (`src/lib/model-display.ts`) when a judgment has no
+ * `modelConfig` join (every row the current write path creates) — the
+ * export file format/columns are unchanged, only the source of the values
+ * differs per row depending on when it was created.
  */
+import { resolveModelDisplay } from '@/lib/model-display';
 
 /* ─── CSV helpers ──────────────────────────────────────────────────────── */
 
@@ -150,7 +158,13 @@ export function flattenEvaluationForExport(evaluation: {
       criteriaScores: unknown;
       latencyMs: number | null;
       tokenCount: number | null;
-      modelConfig: { name: string; provider: string; modelId?: string } | null;
+      modelConfig: { id: string; name: string; provider: string; modelId?: string } | null;
+      judgeModelVersion?: {
+        id: string;
+        ordinal: number;
+        servingBackend: string;
+        judgeModel: { id: string; name: string; baseModel: string | null };
+      } | null;
     }>;
     humanJudgment?: {
       overallScore: number;
@@ -227,11 +241,18 @@ export function flattenEvaluationForExport(evaluation: {
       });
     } else {
       for (const judgment of run.modelJudgments) {
+        // Preserves the pre-Task-12 export contract's exact fallback
+        // literals ('unknown-model'/'unknown'/'unknown') for a judgment
+        // with NEITHER join — resolveModelDisplay's generic 'Unknown
+        // model' sentinel is UI-label-cased, not this CSV/JSONL column's
+        // stable data-value contract.
+        const hasIdentity = judgment.modelConfig !== null || judgment.judgeModelVersion != null;
+        const display = hasIdentity ? resolveModelDisplay(judgment) : null;
         rows.push({
           ...baseRow,
-          model_name: judgment.modelConfig?.name ?? 'unknown-model',
-          model_provider: judgment.modelConfig?.provider ?? 'unknown',
-          model_id: judgment.modelConfig?.modelId ?? 'unknown',
+          model_name: display?.name ?? 'unknown-model',
+          model_provider: display?.provider ?? 'unknown',
+          model_id: display?.modelId ?? 'unknown',
           model_judgment_status: judgment.status,
           model_overall_score:
             judgment.overallScore != null ? String(judgment.overallScore) : '',

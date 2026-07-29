@@ -6,8 +6,17 @@ import { logger, serializeError } from '@/lib/logger';
 
 const updateEvaluationSchema = z.object({
   rubricId: z.string().nullable().optional(),
-  modelConfigIds: z.array(z.string()).max(10).optional(),
+  judgeModelVersionIds: z.array(z.string()).max(10).optional(),
 });
+
+// Task 12: minimal JudgeModelVersion+JudgeModel select for display fallback
+// when modelConfig is null — see src/lib/model-display.ts.
+const judgeModelVersionDisplaySelect = {
+  id: true,
+  ordinal: true,
+  servingBackend: true,
+  judgeModel: { select: { id: true, name: true, baseModel: true } },
+} as const;
 
 const runSummaryInclude = {
   rubric: { select: { id: true, name: true, version: true } },
@@ -15,12 +24,14 @@ const runSummaryInclude = {
   runModelSelections: {
     include: {
       modelConfig: { select: { id: true, name: true, provider: true, modelId: true } },
+      judgeModelVersion: { select: judgeModelVersionDisplaySelect },
     },
     orderBy: { createdAt: 'asc' as const },
   },
   modelJudgments: {
     include: {
       modelConfig: { select: { id: true, name: true, provider: true } },
+      judgeModelVersion: { select: judgeModelVersionDisplaySelect },
     },
     orderBy: { createdAt: 'asc' as const },
   },
@@ -51,6 +62,7 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
             modelConfig: {
               select: { id: true, name: true, provider: true, modelId: true, isActive: true, isVerified: true },
             },
+            judgeModelVersion: { select: judgeModelVersionDisplaySelect },
           },
           orderBy: { createdAt: 'asc' },
         },
@@ -104,14 +116,28 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
       }
     }
 
-    if (data.modelConfigIds !== undefined && data.modelConfigIds.length > 0) {
-      const validModels = await prisma.modelConfig.findMany({
-        where: { id: { in: data.modelConfigIds }, isVerified: true },
-        select: { id: true },
+    if (data.judgeModelVersionIds !== undefined && data.judgeModelVersionIds.length > 0) {
+      // Task 12: every requested judgeModelVersionId must have an active,
+      // verified ModelEndpoint OWNED by the caller — no cross-user borrow
+      // (same rule as POST /api/evaluations's resolveJudgeVersionIds and
+      // src/lib/run-launch.ts's requireOwnedActiveEndpoints).
+      const owned = await prisma.modelEndpoint.findMany({
+        where: {
+          userId: session.user.id,
+          judgeModelVersionId: { in: data.judgeModelVersionIds },
+          isActive: true,
+          verifiedAt: { not: null },
+        },
+        select: { judgeModelVersionId: true },
       });
-      if (validModels.length !== new Set(data.modelConfigIds).size) {
+      const covered = new Set(owned.map((e) => e.judgeModelVersionId));
+      if (data.judgeModelVersionIds.some((id) => !covered.has(id))) {
         return NextResponse.json(
-          { error: 'One or more selected models are missing or not verified.' },
+          {
+            error:
+              'One or more selected judge models have no active, verified endpoint configured for you. ' +
+              'Configure your own endpoint on the Models page.',
+          },
           { status: 400 }
         );
       }
@@ -125,13 +151,13 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
         },
       });
 
-      if (data.modelConfigIds !== undefined) {
+      if (data.judgeModelVersionIds !== undefined) {
         await tx.evaluationModelSelection.deleteMany({ where: { evaluationId: params.id } });
-        if (data.modelConfigIds.length > 0) {
+        if (data.judgeModelVersionIds.length > 0) {
           await tx.evaluationModelSelection.createMany({
-            data: [...new Set(data.modelConfigIds)].map((modelConfigId) => ({
+            data: [...new Set(data.judgeModelVersionIds)].map((judgeModelVersionId) => ({
               evaluationId: params.id,
-              modelConfigId,
+              judgeModelVersionId,
             })),
           });
         }
@@ -149,6 +175,7 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
               modelConfig: {
                 select: { id: true, name: true, provider: true, modelId: true, isActive: true, isVerified: true },
               },
+              judgeModelVersion: { select: judgeModelVersionDisplaySelect },
             },
             orderBy: { createdAt: 'asc' },
           },

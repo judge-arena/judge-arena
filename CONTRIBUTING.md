@@ -486,6 +486,84 @@ the export file format is unchanged from v1.
 
 ---
 
+## API wire-format changes (v2, 1b Task 12)
+
+`/api/models` moves from `ModelConfig` CRUD to `JudgeModel`/`JudgeModelVersion`
+catalog + `ModelEndpoint` CRUD. `ModelConfig` itself is NOT dropped from the
+schema (existing rows/FKs stay valid and readable), but the runtime write
+path stops creating new ones — this route, the evaluation model-selection
+routes, and the worker all operate on the catalog/endpoint model from this
+task onward.
+
+**`GET /api/models`** — was an array of `ModelConfig` rows (`{ id, name,
+provider, modelId, endpoint, isActive, isVerified, verifiedAt,
+verificationError, hasApiKey, userId, ... }`). Now an array of the calling
+user's `ModelEndpoint` rows (admin sees everyone's), each flattened together
+with its `JudgeModelVersion`/`JudgeModel` catalog join:
+
+```jsonc
+{
+  "id": "...",                    // ModelEndpoint id (was the ModelConfig id)
+  "judgeModelVersionId": "...",
+  "judgeModelId": "...",
+  "name": "Claude Sonnet 4.5",    // JudgeModel.name
+  "slug": "claude-sonnet-4-5",
+  "judgeClass": "prompted_api",
+  "scoringMechanism": "critique_generative",
+  "servingBackend": "anthropic",
+  "ordinal": 1,
+  "baseModel": "claude-sonnet-4-5-20250514",
+  "provider": "anthropic",        // alias for servingBackend — legacy field name kept for UI/getProviderInfo() compat
+  "modelId": "claude-sonnet-4-5-20250514", // alias for baseModel
+  "endpoint": null,
+  "isActive": true,
+  "isVerified": true,             // derived: verifiedAt !== null (ModelEndpoint has no isVerified column)
+  "verifiedAt": "...",
+  "verificationError": null,
+  "archFingerprint": { "servedModelId": "...", "contextLength": null },
+  "hasApiKey": false,
+  "userId": "...",
+  "createdAt": "...",
+  "updatedAt": "..."
+}
+```
+
+**`POST /api/models`** — was `{ name, provider, modelId, endpoint?, apiKey?,
+isActive? }` (created a `ModelConfig`). Now a discriminated union on `mode`:
+`{ mode: 'catalog', judgeModelVersionId, endpoint?, apiKey?, isActive? }`
+(creates a `ModelEndpoint` against an existing catalog version — see
+`GET /api/models/catalog`, new in this task) or `{ mode: 'custom', name,
+judgeClass, scoringMechanism, servingBackend, baseModel, endpoint?, apiKey?,
+isActive? }` (creates a brand-new `JudgeModel` + `JudgeModelVersion` ordinal
+1, then the `ModelEndpoint`).
+
+**`PATCH`/`DELETE /api/models/[id]`** — `[id]` is now a `ModelEndpoint` id,
+not a `ModelConfig` id. `PATCH` only accepts `{ endpoint?, apiKey?,
+isActive? }` — the catalog identity (name/provider/modelId) is immutable
+per-version now; there is no route to edit it (retiring a `JudgeModel` via
+`retiredAt` is an admin-only concern, out of this task's scope).
+
+**`POST /api/models/[id]/verify`** — same endpoint-id change; now persists
+the returned `archFingerprint` onto `ModelEndpoint.archFingerprint` (closes
+a Task 10 carry — previously computed but not persisted anywhere).
+
+**Evaluation model selection** — `POST /api/evaluations`, `PATCH
+/api/evaluations/[id]`, and `POST /api/evaluations/[id]/runs` rename their
+`modelConfigIds` request field to `judgeModelVersionIds`. Values are
+`JudgeModelVersion` ids (from `GET /api/models`'s `judgeModelVersionId`
+field), not `ModelEndpoint` ids. Default-model resolution (field omitted)
+now sources from the CALLING user's own active+verified `ModelEndpoint`s
+only — never another user's (this closes the 1a INFO "global cross-user
+defaults" finding; see `src/lib/run-launch.ts` and
+`src/app/api/evaluations/route.ts`'s `resolveJudgeVersionIds`).
+
+**Who's affected:** any `DeveloperApiKey` consumer of `models:*` or
+`evaluations:write`/`evaluations:run` scopes reading/writing the old
+`ModelConfig`-shaped fields. There is no back-compat shim — this is a
+breaking change, effective with this task's deploy.
+
+---
+
 ## Modifying the Rubric / Evaluation Flow
 
 The evaluation pipeline has several linked components. Here's the data flow and where to make changes:

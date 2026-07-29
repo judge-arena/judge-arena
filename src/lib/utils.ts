@@ -137,6 +137,14 @@ export function getProviderInfo(provider: string): {
       return { label: 'OpenAI', color: 'bg-green-100 text-green-800' };
     case 'local':
       return { label: 'Local', color: 'bg-purple-100 text-purple-800' };
+    // ServingBackend values (Task 10/12) — a JudgeModelVersion's backend is
+    // now the "provider" a lot of UI surfaces pass through here.
+    case 'openrouter':
+      return { label: 'OpenRouter', color: 'bg-blue-100 text-blue-800' };
+    case 'vllm':
+      return { label: 'vLLM', color: 'bg-purple-100 text-purple-800' };
+    case 'ollama':
+      return { label: 'Ollama', color: 'bg-teal-100 text-teal-800' };
     default:
       return { label: provider, color: 'bg-gray-100 text-gray-800' };
   }

@@ -15,17 +15,23 @@
  * vLLM's `guided_json`, without changing this registry's shape).
  *
  * This module also owns:
- * - `legacyProviderToBackend()` — the ONE place this mapping lives for LIVE
- *   runtime code: `verify.ts` (legacy `ModelConfig` connection tests) and
- *   `src/lib/judge-identity.ts` (the ModelConfig -> JudgeModelVersion
- *   bridge) both delegate to it now instead of each carrying an independent
- *   copy. `scripts/importer/judges.ts`'s OWN `classifyProvider` (the 1a
+ * - `legacyProviderToBackend()` — the legacy `ModelConfig.provider` string
+ *   ('anthropic'|'openai'|'local') -> `ServingBackend` mapping. As of Task
+ *   12 (runtime write-path retirement) its only live-runtime caller
+ *   (`src/lib/judge-identity.ts`'s `ensureJudgeIdentityForModelConfig`
+ *   bridge) is deleted along with that file — `verify.ts` also moved off it
+ *   (`POST /api/models/[id]/verify` is `ModelEndpoint`-keyed now, so it
+ *   already has a real `ServingBackend`, no legacy string to map). Kept
+ *   here (not deleted) because it's still independently unit-tested
+ *   (`tests/lib/registry.test.ts`) and re-exported from `index.ts`'s public
+ *   surface — a small, correct, self-contained utility with a real test
+ *   suite is not worth churning two more files to remove for zero current
+ *   callers. `scripts/importer/judges.ts`'s OWN `classifyProvider` (the 1a
  *   one-shot v1->v2 migration script) still has its own literal copy —
- *   deliberately NOT unified with this one (same reasoning
- *   `judge-identity.ts`'s module doc already gives for not touching that
- *   script: it processes a frozen v1 dataset once, not live traffic, and
- *   its mapping is pinned to v1's historical semantics rather than meant to
- *   track future `ServingBackend` changes).
+ *   deliberately NOT unified with this one: it processes a frozen v1
+ *   dataset once, not live traffic, and its mapping is pinned to v1's
+ *   historical semantics rather than meant to track future `ServingBackend`
+ *   changes.
  * - `resolveApiKey()` — the ONE place a `ModelEndpoint`'s credential is
  *   resolved, closing two bugs: (1) the ciphertext-as-key bug (callers used
  *   to pass `apiKeyEnc` straight through as if it were already plaintext —
@@ -249,9 +255,12 @@ export function getDescriptor(backend: ServingBackend): ProviderDescriptor {
  * a `'local'` config always has one, so the guard applies regardless of
  * which descriptor id the backend resolves to.
  *
- * Used by `verify.ts` (legacy `ModelConfig` connection tests) and
- * `src/lib/judge-identity.ts` (`classifyProvider`'s `servingBackend` field)
- * — the two "ModelConfig adapter" call sites the task brief calls out.
+ * Task 12: no live-runtime caller remains (`verify.ts` moved to a
+ * `ServingBackend`-keyed input; `src/lib/judge-identity.ts`, the other
+ * former caller, is deleted along with the ModelConfig-write-path bridge it
+ * existed for). Kept for its own test coverage (`tests/lib/registry.test.ts`)
+ * and re-exported from `index.ts`'s public surface — see this module's own
+ * doc for why deleting it isn't worth the churn for zero current callers.
  */
 export function legacyProviderToBackend(provider: string): ServingBackend {
   switch (provider) {

@@ -3,66 +3,77 @@
  *
  * Replaces `src/lib/evaluation-run-manager.ts`'s in-process run engine
  * (`enqueueRunProcessing`/`enqueueEvaluationRunCreation`/`processRun`,
- * deleted in this task) with two publish-then-return functions. The web
- * tier no longer executes judgments itself — it creates rows and hands off
- * to RabbitMQ (`judgment.execute` for a fully-specified single run,
- * `run.create` for a bulk dataset launch that the worker's
- * `run-create-consumer.ts` expands) for `src/worker/*` to actually run.
+ * deleted in Task 9) with two publish-then-return functions. The web tier
+ * no longer executes judgments itself — it creates rows and hands off to
+ * RabbitMQ (`judgment.execute` for a fully-specified single run, `run.create`
+ * for a bulk dataset launch that the worker's `run-create-consumer.ts`
+ * expands) for `src/worker/*` to actually run.
+ *
+ * ── Task 12: runtime switches to JudgeModelVersion identity ────────────────
+ * Through Task 9/11 this module resolved a `judgeModelVersionId` for each
+ * SELECTED `ModelConfig` via `ensureJudgeIdentityForModelConfig`
+ * (`src/lib/judge-identity.ts`, a temporary find-or-create bridge) and
+ * dual-wrote `modelConfigId` + `judgeModelVersionId` on every created row.
+ * Task 12 REVERSES that: `EvaluationModelSelection`/`RunModelSelection` now
+ * carry `judgeModelVersionId` directly (selected by the user from their own
+ * `ModelEndpoint`s via `/api/models` and `/api/evaluations`), so this module
+ * reads that column straight off the evaluation's stored selections (or an
+ * explicit `judgeModelVersionIds` override) — no bridge, no ModelConfig
+ * lookup, no new `JudgeModel`/`JudgeModelVersion`/`ModelEndpoint` rows are
+ * ever created here. `judge-identity.ts` had exactly one caller (this
+ * module) and is deleted along with it.
+ *
+ * `modelConfigId` is left `null` on every row this module creates —
+ * "resolve modelConfigId for legacy dual-write via a version->modelConfig
+ * back-reference IF one exists, else null" per the task brief; no such
+ * back-reference is tracked anywhere in the schema (a `JudgeModelVersion`
+ * created via the catalog or a custom-model POST was never derived FROM a
+ * `ModelConfig`), so this is unconditionally `null` for new rows. Every
+ * downstream reader of `modelConfigId` has been null-guarded since Task 6;
+ * readers now prefer the `judgeModelVersion`/`judgeModel` join when present
+ * (see e.g. `src/app/api/leaderboard/route.ts`).
+ *
+ * ── Ownership: no cross-user endpoint borrow at launch time ─────────────────
+ * Before publishing anything, both `launchSingleRun` and
+ * `launchBulkRunCreates` verify that `triggeredById` (the acting user) has
+ * their OWN active, verified `ModelEndpoint` for every selected
+ * `JudgeModelVersion` — see `requireOwnedActiveEndpoints` below. This is the
+ * web-tier half of the Task 12 "no cross-user endpoint borrow" requirement;
+ * the worker-side half (`src/worker/judgment-consumer.ts`'s `resolveEndpoint`)
+ * independently enforces the same rule at execution time (defense in depth —
+ * a run launched validly could still hit a missing endpoint later if the
+ * user deletes their key between launch and execution).
  *
  * ── launchSingleRun ──────────────────────────────────────────────────────
  * Used by both `POST /api/evaluations` (single-text `create_and_run`) and
  * `POST /api/evaluations/[id]/runs`. One `$transaction` creates the
  * `EvaluationRun` + its `RunModelSelection`s + `ModelJudgment` rows (all
- * `pending`, `judgeModelVersionId` resolved up front via
- * `ensureJudgeIdentityForModelConfig` — see judge-identity.ts for why that
- * resolution, and the `modelConfigId` dual-write below, exist). The
- * transaction ends BEFORE any queue publish — publishing inside a
+ * `pending`, `judgeModelVersionId` set directly from the resolved selection
+ * list). The transaction ends BEFORE any queue publish — publishing inside a
  * transaction would hold a DB connection/lock open across N network round
- * trips to RabbitMQ, and a publish failure would roll back rows whose
- * queue messages the broker may already have accepted, desyncing the two
- * systems. Each `judgment.execute` is published individually, awaited one
- * at a time (small N — selection is capped at 10 models); the first
- * failure stops the loop (further publishes to the same broker are highly
- * likely to fail identically) and the already-created run is compensated
- * to `status: 'error'` rather than left stuck `pending` with no worker ever
- * going to see it.
+ * trips to RabbitMQ, and a publish failure would roll back rows whose queue
+ * messages the broker may already have accepted, desyncing the two systems.
+ * Each `judgment.execute` is published individually, awaited one at a time
+ * (small N — selection is capped at 10 models); the first failure stops the
+ * loop (further publishes to the same broker are highly likely to fail
+ * identically) and the already-created run is compensated to `status:
+ * 'error'` rather than left stuck `pending` with no worker ever going to see
+ * it.
  *
  * ── launchBulkRunCreates ─────────────────────────────────────────────────
  * Used by `POST /api/evaluations`'s dataset-batch and remote-dataset
  * `create_and_run` paths, AFTER the evaluations themselves are already
  * created (transactionally, by the caller — unchanged from before this
- * task). Per evaluation: resolve rubric + judge identities, publish
+ * task). Per evaluation: resolve the rubric + validate the caller's own
+ * endpoints for its stored `judgeModelVersionId` selections, publish
  * `run.create`, and record the outcome — a failure for one evaluation
  * (missing rubric, no models, a broker hiccup) does not abort or silently
  * swallow the rest. Returns `{ accepted, failed }` so the route can respond
  * `202` with a per-item status instead of either an all-or-nothing error or
- * a `runsQueued` count that silently under-reports failures (the
- * swallowed-failure gap this task's brief calls out). The `run.create`
- * message's `runSpec.modelSelections` carries BOTH `judgeModelVersionId`
- * AND `modelConfigId` per selected model (not just a bare
- * `judgeModelVersionId[]`) — `run-create-consumer.ts` needs the pairing to
- * dual-write `modelConfigId` onto each `ModelJudgment` it creates and to
- * write `RunModelSelection` rows, exactly like `launchSingleRun` does for
- * the single-run path below. Without this, bulk-launched judgments lose
- * model identity on the read side (leaderboard excludes them, exports/UI
- * degrade) even though the judgments themselves still run correctly.
- *
- * ── modelConfigId dual-write (temporary — see judge-identity.ts) ───────────
- * `ModelJudgment.modelConfigId` is nullable and the schema's own comment
- * says the write path "stops setting this" — but the CURRENT UI/routes
- * still only select `ModelConfig`s (Task 12 switches to `JudgeModelVersion`
- * selection), and existing consumers (the run detail page, the
- * human-judgment route's `completedModelIds` check, CSV/JSONL export) still
- * read `modelConfigId` off `ModelJudgment`. Setting it to null today would
- * silently break those without Task 9 also migrating every downstream
- * reader to `judgeModelVersionId` — out of this task's file list. So this
- * module dual-writes: `modelConfigId` (legacy, for the UI/exports/human-
- * judgment matching) AND `judgeModelVersionId` (the queue/worker identity).
- * Task 12 deletes the `modelConfigId` side once those readers migrate.
+ * a `runsQueued` count that silently under-reports failures.
  */
-import type { ModelConfig, Prisma } from '@prisma/client';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { ensureJudgeIdentityForModelConfig } from '@/lib/judge-identity';
 import { deriveRunMode } from '@/lib/run-mode';
 import { logger } from '@/lib/logger';
 import { publishJudgmentExecute, publishRunCreate, type JudgmentExecuteMsg, type RunCreateMsg } from '@/lib/queue/publish';
@@ -93,24 +104,27 @@ export function toRunLaunchHttpError(error: unknown): { status: number; message:
  * v1's in-process run engine (the now-deleted `evaluation-run-manager.ts`)
  * supported two modes per run: "judge" (score a response against a rubric,
  * `executeJudgment`) and "respond" (generate a model response with no
- * rubric, `executeRespond`). Task 9 (the initial queue-migration cut of
- * this file) shipped judge-mode only and fail-fast 501'd respond-mode here
- * at launch time, because the Task 7/8 worker
- * (`src/worker/judgment-consumer.ts`) only ever implemented the judge path.
- * Task 9b (Trijeet decision 2026-07-29) restores respond-mode as a first-
- * class queue path — both `launchSingleRun` and `launchBulkRunCreates`
- * below now derive the mode via `deriveRunMode` (`src/lib/run-mode.ts`,
- * v1's exact `responseText?.trim() ? 'judge' : 'respond'` rule) and only
- * require a rubric / resolve a `PromptTemplate` for judge-mode runs —
- * respond-mode runs get `rubricId: null` and `promptTemplateId: null` on
- * every created `ModelJudgment`, mirroring v1's `createEvaluationRun`. The
- * worker side of this restoration lives in `judgment-consumer.ts`
- * (`runProviderResponse` seam) and `run-create-consumer.ts` (same
- * mode-conditional prompt-template gate, re-derived from the evaluation
- * since `RunCreateMsg` carries no mode field of its own).
+ * rubric, `executeRespond`). Task 9b (Trijeet decision 2026-07-29) restores
+ * respond-mode as a first-class queue path — both `launchSingleRun` and
+ * `launchBulkRunCreates` below derive the mode via `deriveRunMode`
+ * (`src/lib/run-mode.ts`, v1's exact `responseText?.trim() ? 'judge' :
+ * 'respond'` rule) and only require a rubric / resolve a `PromptTemplate`
+ * for judge-mode runs — respond-mode runs get `rubricId: null` and
+ * `promptTemplateId: null` on every created `ModelJudgment`, mirroring v1's
+ * `createEvaluationRun`.
  */
 
 // ─── Shared run-detail include (moved verbatim from evaluation-run-manager.ts) ──
+
+/** Minimal `JudgeModelVersion`+`JudgeModel` shape every run-detail-shaped
+ * include below selects, for display fallback when `modelConfig` is null
+ * (new, Task-12-created rows never set it) — see `src/lib/model-display.ts`. */
+const judgeModelVersionDisplaySelect = {
+  id: true,
+  ordinal: true,
+  servingBackend: true,
+  judgeModel: { select: { id: true, name: true, baseModel: true } },
+} as const;
 
 export const runDetailInclude = {
   rubric: {
@@ -120,12 +134,14 @@ export const runDetailInclude = {
   runModelSelections: {
     include: {
       modelConfig: { select: { id: true, name: true, provider: true, modelId: true } },
+      judgeModelVersion: { select: judgeModelVersionDisplaySelect },
     },
     orderBy: { createdAt: 'asc' as const },
   },
   modelJudgments: {
     include: {
       modelConfig: { select: { id: true, name: true, provider: true, modelId: true } },
+      judgeModelVersion: { select: judgeModelVersionDisplaySelect },
     },
     orderBy: { createdAt: 'asc' as const },
   },
@@ -158,14 +174,31 @@ async function resolveCurrentPromptTemplate() {
   });
 }
 
-async function resolveJudgeIdentities(modelConfigs: ModelConfig[]): Promise<Map<string, string>> {
-  const versionIdByModelConfigId = new Map<string, string>();
-  for (const modelConfig of modelConfigs) {
-    // eslint-disable-next-line no-await-in-loop -- sequential find-or-create; selection is capped at 10 models per run, not worth Promise.all's harder-to-reason-about partial-failure semantics for identity creation
-    const identity = await ensureJudgeIdentityForModelConfig(prisma, modelConfig);
-    versionIdByModelConfigId.set(modelConfig.id, identity.versionId);
+/**
+ * Verify `userId` owns an active, verified `ModelEndpoint` for EVERY id in
+ * `versionIds` — the web-tier half of Task 12's "no cross-user endpoint
+ * borrow" requirement (see module doc). Throws `RunLaunchError(400, ...)`
+ * naming every version with no eligible endpoint, rather than a generic
+ * failure — a caller trying to launch against a judge they never configured
+ * (or whose key/endpoint they since deactivated) gets a clear, actionable
+ * message instead of a run that publishes fine and then fails per-judgment
+ * at execution time.
+ */
+async function requireOwnedActiveEndpoints(userId: string, versionIds: string[]): Promise<void> {
+  if (versionIds.length === 0) return;
+  const endpoints = await prisma.modelEndpoint.findMany({
+    where: { userId, judgeModelVersionId: { in: versionIds }, isActive: true, verifiedAt: { not: null } },
+    select: { judgeModelVersionId: true },
+  });
+  const covered = new Set(endpoints.map((e) => e.judgeModelVersionId));
+  const missing = versionIds.filter((id) => !covered.has(id));
+  if (missing.length > 0) {
+    throw new RunLaunchError(
+      400,
+      `No active, verified endpoint configured for judge model version(s): ${missing.join(', ')}. ` +
+        'Configure your own endpoint for each selected judge on the Models page.'
+    );
   }
-  return versionIdByModelConfigId;
 }
 
 // ─── launchSingleRun ────────────────────────────────────────────────────────
@@ -174,7 +207,12 @@ export interface LaunchSingleRunParams {
   evaluationId: string;
   triggeredById: string;
   rubricId?: string;
-  modelConfigIds?: string[];
+  /** Explicit override — one entry per selected `JudgeModelVersion`. When
+   * omitted, defaults to the evaluation's stored `modelSelections`
+   * (`judgeModelVersionId`s only — pre-Task-12 modelConfigId-only rows have
+   * no version id to fall back to and are simply skipped; see the Task 12
+   * report for that documented, accepted limitation). */
+  judgeModelVersionIds?: string[];
 }
 
 export interface LaunchSingleRunDeps {
@@ -200,10 +238,7 @@ export async function launchSingleRun(
   const evaluation = await prisma.evaluation.findUnique({
     where: { id: params.evaluationId },
     include: {
-      modelSelections: {
-        include: { modelConfig: true },
-        orderBy: { createdAt: 'asc' },
-      },
+      modelSelections: { orderBy: { createdAt: 'asc' } },
     },
   });
   if (!evaluation) throw new RunLaunchError(404, 'Evaluation not found');
@@ -224,28 +259,24 @@ export async function launchSingleRun(
     if (!rubric) throw new RunLaunchError(404, 'Rubric not found');
   }
 
-  const selectedModelIds = params.modelConfigIds?.length
-    ? [...new Set(params.modelConfigIds)]
-    : evaluation.modelSelections.map((selection) => selection.modelConfigId);
+  const selectedVersionIds = params.judgeModelVersionIds?.length
+    ? [...new Set(params.judgeModelVersionIds)]
+    : [
+        ...new Set(
+          evaluation.modelSelections
+            .map((selection) => selection.judgeModelVersionId)
+            .filter((id): id is string => !!id)
+        ),
+      ];
 
-  if (selectedModelIds.length === 0) {
+  if (selectedVersionIds.length === 0) {
     throw new RunLaunchError(
       400,
-      'No models selected. Add models to the evaluation template or pass modelConfigIds.'
+      'No models selected. Add models to the evaluation template or pass judgeModelVersionIds.'
     );
   }
 
-  const modelRecords = await prisma.modelConfig.findMany({
-    where: { id: { in: selectedModelIds }, isVerified: true, isActive: true },
-  });
-  if (modelRecords.length !== new Set(selectedModelIds).size) {
-    throw new RunLaunchError(
-      400,
-      'One or more selected models are missing, inactive, or not verified.'
-    );
-  }
-
-  const versionIdByModelConfigId = await resolveJudgeIdentities(modelRecords);
+  await requireOwnedActiveEndpoints(params.triggeredById, selectedVersionIds);
 
   // promptTemplateId is null on respond judgments (no rubric template to
   // render against — the model generates a response, it isn't judging
@@ -260,7 +291,7 @@ export async function launchSingleRun(
   }
 
   const deadlineAt = new Date(
-    Date.now() + selectedModelIds.length * EVALUATION_MODEL_TIMEOUT_MS + DEADLINE_SLACK_MS
+    Date.now() + selectedVersionIds.length * EVALUATION_MODEL_TIMEOUT_MS + DEADLINE_SLACK_MS
   );
 
   const createdRun = await prisma.$transaction(async (tx) => {
@@ -273,12 +304,11 @@ export async function launchSingleRun(
         deadlineAt,
         triggeredById: params.triggeredById,
         runModelSelections: {
-          create: selectedModelIds.map((modelConfigId) => ({ modelConfigId })),
+          create: selectedVersionIds.map((judgeModelVersionId) => ({ judgeModelVersionId })),
         },
         modelJudgments: {
-          create: selectedModelIds.map((modelConfigId) => ({
-            modelConfigId, // dual-write, legacy — see module doc
-            judgeModelVersionId: versionIdByModelConfigId.get(modelConfigId)!,
+          create: selectedVersionIds.map((judgeModelVersionId) => ({
+            judgeModelVersionId, // modelConfigId intentionally left null — see module doc
             promptTemplateId,
             status: 'pending' as const,
           })),
@@ -391,7 +421,7 @@ export async function launchBulkRunCreates(
       // eslint-disable-next-line no-await-in-loop -- each evaluation's resolve+publish must be individually attributable (which one failed and why) — see module doc's launchBulkRunCreates section
       const evaluation = await prisma.evaluation.findUnique({
         where: { id: evaluationId },
-        include: { modelSelections: { include: { modelConfig: true } } },
+        include: { modelSelections: true },
       });
       if (!evaluation) throw new Error('Evaluation not found');
 
@@ -408,21 +438,25 @@ export async function launchBulkRunCreates(
         if (!rubric) throw new Error('Rubric not found');
       }
 
-      const modelConfigs = evaluation.modelSelections.map((selection) => selection.modelConfig);
-      if (modelConfigs.length === 0) {
+      const versionIds = [
+        ...new Set(
+          evaluation.modelSelections
+            .map((selection) => selection.judgeModelVersionId)
+            .filter((id): id is string => !!id)
+        ),
+      ];
+      if (versionIds.length === 0) {
         throw new Error('No models selected for this evaluation.');
       }
 
       // eslint-disable-next-line no-await-in-loop
-      const versionIdByModelConfigId = await resolveJudgeIdentities(modelConfigs);
-      // One selection per model, pairing both identities — NOT deduped by
-      // judgeModelVersionId (that would drop distinct ModelConfigs that
-      // happen to resolve to the same judge identity, and the consumer
-      // needs one ModelJudgment per selected model regardless). Mirrors
-      // launchSingleRun's own per-modelConfigId shape above.
-      const modelSelections = modelConfigs.map((modelConfig) => ({
-        judgeModelVersionId: versionIdByModelConfigId.get(modelConfig.id)!,
-        modelConfigId: modelConfig.id,
+      await requireOwnedActiveEndpoints(triggeredById, versionIds);
+
+      // modelConfigId intentionally left null on every entry — see module
+      // doc's "Task 12: runtime switches to JudgeModelVersion identity".
+      const modelSelections = versionIds.map((judgeModelVersionId) => ({
+        judgeModelVersionId,
+        modelConfigId: null,
       }));
 
       const msg: RunCreateMsg = {

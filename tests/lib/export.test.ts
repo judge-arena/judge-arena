@@ -147,7 +147,7 @@ describe('export', () => {
                 criteriaScores: modelCriteriaScores,
                 latencyMs: 120,
                 tokenCount: 42,
-                modelConfig: { name: 'GPT-4', provider: 'openai', modelId: 'gpt-4' },
+                modelConfig: { id: 'model-gpt-4', name: 'GPT-4', provider: 'openai', modelId: 'gpt-4' },
               },
             ],
           },

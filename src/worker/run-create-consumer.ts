@@ -9,21 +9,26 @@
  * `RunModelSelection`) per entry in `runSpec.modelSelections`, then
  * publishes one `judgment.execute` per created `ModelJudgment` row.
  *
- * ── modelConfigId dual-write (temporary — see judge-identity.ts, and
- * run-launch.ts's module doc for the full rationale) ────────────────────────
- * Each `modelSelections` entry carries BOTH `judgeModelVersionId` (the
- * queue/worker identity every `ModelJudgment` needs to run) AND
- * `modelConfigId` (the legacy identity the leaderboard aggregation, run
- * detail page, human-judgment route, and CSV/JSONL export still read).
- * Before this was fixed (Task 9 review), `run.create` only ever carried a
- * bare `judgeModelVersionId[]` — this consumer had no `modelConfigId` to
- * write, so it always set `modelConfigId: null`, silently excluding every
- * bulk/dataset-launched judgment from the leaderboard
- * (`if (j.modelConfig === null) continue`) and never writing a
- * `RunModelSelection` row at all (the run-level "which models were
- * selected" snapshot `launchSingleRun` writes via its own nested
- * `runModelSelections.create`). Both writes now happen here, inside the
- * same transaction as the `ModelJudgment` creation.
+ * ── judgeModelVersionId is the identity; modelConfigId is legacy (Task 12) ──
+ * Each `modelSelections` entry carries `judgeModelVersionId` (the queue/
+ * worker identity every `ModelJudgment` needs to run — see
+ * `src/lib/run-launch.ts`'s module doc) and `modelConfigId`, which is
+ * ALWAYS `null` for a run launched by the current write path (no
+ * `ModelConfig` back-reference exists for a version created via the
+ * catalog or a custom-model POST). This consumer still writes whatever
+ * `modelConfigId` the message carries (rather than forcing it to `null`
+ * itself) in case a future producer resolves one, but does not derive one
+ * on its own. `judgeModelVersionId`, NOT `modelConfigId`, is what the
+ * dedupe `Map` below is keyed on — every `modelConfigId` can legitimately
+ * be `null` now, and a `null`-keyed `Map` would silently collapse every
+ * selection into one (Task 9 review fix #1's ORIGINAL bug, closed then by
+ * pairing both ids on the message; Task 12 closes the same failure mode
+ * again from the opposite direction — modelConfigId going away rather than
+ * missing — by re-keying the dedupe on judgeModelVersionId instead).
+ * `RunModelSelection` rows are written here too (the run-level "which
+ * models were selected" snapshot `launchSingleRun` writes via its own
+ * nested `runModelSelections.create`) — this expansion path creates the run
+ * first, without models attached, so it needs its own explicit write.
  *
  * ── Redelivery / idempotency (no schema change in this task) ───────────────
  * There is no client-generated idempotency key on `RunCreateMsg`/
@@ -192,13 +197,16 @@ export function createRunCreateConsumer(): RunCreateConsumer {
         promptTemplateId = promptTemplate.id;
       }
 
-      // Dedupe by modelConfigId — the per-model identity for this
+      // Dedupe by judgeModelVersionId — the per-model identity for this
       // expansion (mirrors run-launch.ts's launchSingleRun, which is keyed
       // the same way) — defense in depth alongside the active-run dedupe
       // check above; a redelivery of the identical message produces the
-      // identical (deduped) list either way.
+      // identical (deduped) list either way. Task 12: NOT modelConfigId —
+      // that field is `null` on every entry a current-write-path launch
+      // produces (see queue/publish.ts's RunCreateMsg doc), and a
+      // `null`-keyed Map would collapse every selection into one.
       const modelSelections = [
-        ...new Map(msg.runSpec.modelSelections.map((sel) => [sel.modelConfigId, sel])).values(),
+        ...new Map(msg.runSpec.modelSelections.map((sel) => [sel.judgeModelVersionId, sel])).values(),
       ];
       if (modelSelections.length === 0) {
         throw new Error('runSpec.modelSelections is empty — nothing to expand');
@@ -225,10 +233,10 @@ export function createRunCreateConsumer(): RunCreateConsumer {
         // active-run dedupe check above is what normally prevents that, this
         // is defense in depth (and dedupes duplicate entries within
         // modelSelections, though the `Map` above already handles that case
-        // too). Dual-write: modelConfigId (legacy, for the leaderboard/UI/
-        // exports/human-judgment matching) AND judgeModelVersionId (the
-        // queue/worker identity) — see this file's module doc and
-        // run-launch.ts's for why both are still written.
+        // too). judgeModelVersionId is the queue/worker identity; modelConfigId
+        // is Task 12's legacy field — null for every current-write-path
+        // launch (see queue/publish.ts's RunCreateMsg doc), passed through
+        // as-is (not forced to null) in case a future caller resolves one.
         await tx.modelJudgment.createMany({
           data: modelSelections.map((sel) => ({
             runId: createdRun.id,
@@ -249,6 +257,7 @@ export function createRunCreateConsumer(): RunCreateConsumer {
         await tx.runModelSelection.createMany({
           data: modelSelections.map((sel) => ({
             runId: createdRun.id,
+            judgeModelVersionId: sel.judgeModelVersionId,
             modelConfigId: sel.modelConfigId,
           })),
           skipDuplicates: true,

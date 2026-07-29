@@ -9,6 +9,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { ModelJudgmentCard } from '@/components/evaluation/model-judgment-card';
 import { HumanJudgmentForm } from '@/components/evaluation/human-judgment-form';
 import { getScoreColor, cn, formatDateTime } from '@/lib/utils';
+import { resolveModelDisplay, judgmentIdentityKey } from '@/lib/model-display';
 import { toast } from 'sonner';
 import type { CriteriaScore } from '@/types';
 
@@ -37,8 +38,12 @@ export default function RunDetailPage() {
       if (res.ok) {
         const data = await res.json();
         setRun(data);
-        if (data.humanJudgment?.selectedBestModelId) {
-          setSelectedBestModelId(data.humanJudgment.selectedBestModelId);
+        // Task 12: prefer the new judgeModelVersionId-shaped selection,
+        // falling back to the legacy modelConfigId-shaped one — see
+        // src/lib/model-display.ts's judgmentIdentityKey.
+        const bestId = data.humanJudgment?.selectedBestJudgeModelVersionId ?? data.humanJudgment?.selectedBestModelId;
+        if (bestId) {
+          setSelectedBestModelId(bestId);
         }
       } else {
         if (!silent) {
@@ -317,36 +322,39 @@ export default function RunDetailPage() {
 
                   <TabsContent value="grid">
                     <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                      {modelJudgments.map((judgment: any) => (
-                        <ModelJudgmentCard
-                          key={judgment.id}
-                          modelName={judgment.modelConfig?.name ?? 'Unknown model'}
-                          provider={judgment.modelConfig?.provider ?? ''}
-                          overallScore={judgment.overallScore}
-                          reasoning={judgment.reasoning}
-                          criteriaScores={judgment.criteriaScores}
-                          latencyMs={judgment.latencyMs}
-                          tokenCount={judgment.tokenCount}
-                          status={judgment.status}
-                          error={judgment.error}
-                          mode={evaluationMode}
-                          isSelected={
-                            evaluationMode === 'respond' &&
-                            selectedBestModelId === judgment.modelConfig?.id
-                          }
-                          expandedReasoning={true}
-                          onSelect={
-                            evaluationMode === 'respond'
-                              ? () =>
-                                  setSelectedBestModelId(
-                                    selectedBestModelId === judgment.modelConfig?.id
-                                      ? null
-                                      : judgment.modelConfig?.id ?? null
-                                  )
-                              : undefined
-                          }
-                        />
-                      ))}
+                      {modelJudgments.map((judgment: any) => {
+                        const display = resolveModelDisplay(judgment);
+                        const identityKey = judgmentIdentityKey(judgment);
+                        return (
+                          <ModelJudgmentCard
+                            key={judgment.id}
+                            modelName={display.name}
+                            provider={display.provider}
+                            overallScore={judgment.overallScore}
+                            reasoning={judgment.reasoning}
+                            criteriaScores={judgment.criteriaScores}
+                            latencyMs={judgment.latencyMs}
+                            tokenCount={judgment.tokenCount}
+                            status={judgment.status}
+                            error={judgment.error}
+                            mode={evaluationMode}
+                            isSelected={
+                              evaluationMode === 'respond' &&
+                              identityKey !== null &&
+                              selectedBestModelId === identityKey
+                            }
+                            expandedReasoning={true}
+                            onSelect={
+                              evaluationMode === 'respond'
+                                ? () =>
+                                    setSelectedBestModelId(
+                                      selectedBestModelId === identityKey ? null : identityKey
+                                    )
+                                : undefined
+                            }
+                          />
+                        );
+                      })}
                     </div>
                   </TabsContent>
 
@@ -360,7 +368,7 @@ export default function RunDetailPage() {
                             </th>
                             {completedJudgments.map((j: any) => (
                               <th key={j.id} className="px-4 py-3 text-center text-xs font-semibold text-surface-500 dark:text-surface-400">
-                                {j.modelConfig?.name ?? 'Unknown model'}
+                                {resolveModelDisplay(j).name}
                               </th>
                             ))}
                           </tr>
@@ -422,8 +430,8 @@ export default function RunDetailPage() {
                     mode={evaluationMode}
                     criteria={criteria}
                     modelJudgmentIds={completedJudgments.map((j: any) => ({
-                      id: j.modelConfig?.id ?? '',
-                      name: j.modelConfig?.name ?? 'Unknown model',
+                      id: judgmentIdentityKey(j) ?? '',
+                      name: resolveModelDisplay(j).name,
                     }))}
                     existingJudgment={
                       humanJudgment
@@ -432,7 +440,10 @@ export default function RunDetailPage() {
                             reasoning: humanJudgment.reasoning,
                             criteriaScores:
                               (humanJudgment.criteriaScores as CriteriaScore[] | null) ?? [],
-                            selectedBestModelId: humanJudgment.selectedBestModelId,
+                            // Task 12: prefer the new judgeModelVersionId-shaped
+                            // selection, falling back to the legacy one.
+                            selectedBestModelId:
+                              humanJudgment.selectedBestJudgeModelVersionId ?? humanJudgment.selectedBestModelId,
                           }
                         : undefined
                     }

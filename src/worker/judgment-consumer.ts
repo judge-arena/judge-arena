@@ -285,29 +285,31 @@ export const defaultRunProviderResponse: RespondProviderFn = async (input) => {
 // ─── Endpoint resolution ─────────────────────────────────────────────────────
 
 /**
- * Resolve a `ModelEndpoint` to call through for `judgeModelVersionId`.
- * Preferred: an active endpoint owned by the run's `triggeredBy` user
- * (their own configured key/endpoint for this judge version). Fallback: any
- * active endpoint for the version, regardless of owner — documented gap,
- * not a real multi-tenant authorization model. Acceptable for the worker's
- * current single-process, pre-Task-9/12 scope: the only per-user secret at
- * stake is `apiKeyEnc`, and Task 9 (web tier) / Task 12 (auth hardening) own
- * the real ownership story for judge execution.
+ * Resolve the `ModelEndpoint` to call through for `judgeModelVersionId` —
+ * ALWAYS the run's `triggeredBy` user's own active endpoint for that
+ * version, never anyone else's.
+ *
+ * Task 12 removes the pre-Task-12 cross-user fallback ("any active endpoint
+ * for the version, regardless of owner") that lived here from Task 7
+ * through Task 11 as a documented, disclosed gap. `src/lib/run-launch.ts`
+ * (web tier) now validates the SAME ownership rule at launch time
+ * (`requireOwnedActiveEndpoints`) before a run is even created, so in
+ * practice this should already always find a row — this function's `null`
+ * return remains the defense-in-depth path for the case a user deactivates
+ * or deletes their endpoint between launch and execution (or a run created
+ * before Task 12 has no owner-scoped endpoint at all). `triggeredById` is
+ * nullable on `EvaluationRun` (no owner) — with none, there is by
+ * definition no "their own" endpoint to resolve, so this returns `null`
+ * immediately rather than guessing.
  */
 async function resolveEndpoint(
   judgeModelVersionId: string,
   triggeredById: string | null
 ): Promise<ModelEndpoint | null> {
-  if (triggeredById) {
-    const owned = await prisma.modelEndpoint.findFirst({
-      where: { judgeModelVersionId, userId: triggeredById, isActive: true },
-      orderBy: { createdAt: 'asc' },
-    });
-    if (owned) return owned;
-  }
+  if (!triggeredById) return null;
 
   return prisma.modelEndpoint.findFirst({
-    where: { judgeModelVersionId, isActive: true },
+    where: { judgeModelVersionId, userId: triggeredById, isActive: true },
     orderBy: { createdAt: 'asc' },
   });
 }

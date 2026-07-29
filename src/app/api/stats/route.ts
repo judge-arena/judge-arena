@@ -37,7 +37,9 @@ export async function GET() {
       // Runs (not templates) are what have a status
       prisma.evaluationRun.count({ where: { status: 'completed', ...runFilter } }),
       prisma.evaluationRun.count({ where: { status: { in: ['pending', 'judging'] }, ...runFilter } }),
-      prisma.modelConfig.count({ where: { ...userFilter, isActive: true } }),
+      // Task 12: ModelConfig is write-retired — ModelEndpoint is the live
+      // per-user "configured model" count now.
+      prisma.modelEndpoint.count({ where: { ...userFilter, isActive: true } }),
       prisma.rubric.count({ where: userFilter }),
       prisma.dataset.count({
         where: isAdmin(session)

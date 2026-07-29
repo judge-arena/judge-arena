@@ -44,16 +44,34 @@ export interface EvaluationWithRelations {
   } | null;
   modelSelections: {
     id: string;
-    modelConfigId: string;
+    // Task 12: judgeModelVersionId is the current selection identity;
+    // modelConfigId/modelConfig are legacy (pre-Task-12 rows only — null on
+    // every row the current write path creates). See src/lib/model-display.ts.
+    modelConfigId: string | null;
     modelConfig: {
       id: string;
       name: string;
       provider: string;
       modelId: string;
-    };
+    } | null;
+    judgeModelVersionId: string | null;
+    judgeModelVersion: JudgeModelVersionView | null;
   }[];
   /** Summary of runs for this template (sorted newest-first) */
   runs: EvaluationRunSummary[];
+}
+
+/** Minimal JudgeModelVersion+JudgeModel shape used for identity display
+ * fallback — see src/lib/model-display.ts's resolveModelDisplay. */
+export interface JudgeModelVersionView {
+  id: string;
+  ordinal: number;
+  servingBackend: string;
+  judgeModel: {
+    id: string;
+    name: string;
+    baseModel: string | null;
+  };
 }
 
 // ─── Evaluation Run ───────────────────────────────────────────────────────────
@@ -76,12 +94,14 @@ export interface EvaluationRunSummary {
   };
   runModelSelections: {
     id: string;
-    modelConfigId: string;
+    modelConfigId: string | null;
     modelConfig: {
       id: string;
       name: string;
       provider: string;
-    };
+    } | null;
+    judgeModelVersionId: string | null;
+    judgeModelVersion: JudgeModelVersionView | null;
   }[];
   modelJudgments: {
     id: string;
@@ -91,7 +111,8 @@ export interface EvaluationRunSummary {
       id: string;
       name: string;
       provider: string;
-    };
+    } | null;
+    judgeModelVersion: JudgeModelVersionView | null;
   }[];
   humanJudgment?: {
     overallScore: number;
@@ -130,13 +151,15 @@ export interface EvaluationRunDetail {
   };
   runModelSelections: {
     id: string;
-    modelConfigId: string;
+    modelConfigId: string | null;
     modelConfig: {
       id: string;
       name: string;
       provider: string;
       modelId: string;
-    };
+    } | null;
+    judgeModelVersionId: string | null;
+    judgeModelVersion: JudgeModelVersionView | null;
   }[];
   modelJudgments: ModelJudgmentView[];
   humanJudgment: HumanJudgmentView | null;
@@ -147,7 +170,10 @@ export interface EvaluationRunDetail {
 export interface ModelJudgmentView {
   id: string;
   runId: string;
-  modelConfigId: string;
+  // Task 12: modelConfigId/modelConfig are legacy (null on every row the
+  // current write path creates); judgeModelVersion is the current identity
+  // source. See src/lib/model-display.ts's resolveModelDisplay.
+  modelConfigId: string | null;
   overallScore: number | null;
   reasoning: string | null;
   rawResponse: string | null;
@@ -162,7 +188,9 @@ export interface ModelJudgmentView {
     name: string;
     provider: string;
     modelId: string;
-  };
+  } | null;
+  judgeModelVersionId: string | null;
+  judgeModelVersion: JudgeModelVersionView | null;
 }
 
 export interface HumanJudgmentView {
@@ -171,7 +199,11 @@ export interface HumanJudgmentView {
   overallScore: number;
   reasoning: string | null;
   criteriaScores: CriteriaScore[];
+  // Task 12: selectedBestJudgeModelVersionId is the current "best response"
+  // identity; selectedBestModelId is legacy (pre-Task-12 rows only). See
+  // src/lib/model-display.ts's judgmentIdentityKey.
   selectedBestModelId: string | null;
+  selectedBestJudgeModelVersionId: string | null;
   createdAt: string;
   user?: {
     id: string;
@@ -203,18 +235,36 @@ export interface RubricCriterionView {
   order: number;
 }
 
-// ─── Model Config ─────────────────────────────────────────────────────────────
+// ─── Models (Task 12: JudgeModel catalog + ModelEndpoint) ─────────────────────
+// GET/POST/PATCH /api/models wire shape — see CONTRIBUTING.md's "API
+// wire-format changes (v2, 1b Task 12)" section for the full breaking-change
+// writeup (this replaces the pre-Task-12 ModelConfig-shaped response).
 
-export interface ModelConfigView {
-  id: string;
+export interface ModelEndpointView {
+  id: string; // ModelEndpoint id
+  judgeModelVersionId: string;
+  judgeModelId: string;
   name: string;
+  slug: string;
+  judgeClass: string;
+  scoringMechanism: string;
+  servingBackend: string;
+  ordinal: number;
+  baseModel: string | null;
+  /** Legacy-shaped aliases (== servingBackend / baseModel) kept for UI/
+   * getProviderInfo() compat — see src/app/api/models/shared.ts. */
   provider: string;
   modelId: string;
   endpoint: string | null;
   isActive: boolean;
+  isVerified: boolean;
+  verifiedAt: string | null;
+  verificationError: string | null;
+  archFingerprint: unknown;
+  hasApiKey: boolean;
+  userId: string;
   createdAt: string;
   updatedAt: string;
-  hasApiKey: boolean;
 }
 
 // ─── Project ──────────────────────────────────────────────────────────────────
