@@ -291,7 +291,7 @@ describe('Structured-output parse seam: parseMode "structured" vs "fallback"', (
     warnSpy.mockRestore();
   });
 
-  it('a conforming response from an openrouter (json_schema cap, no custom hook) descriptor also parses as "structured"', async () => {
+  it('1b Task 11 review IMPORTANT fix: a well-formed, unwrapped-JSON response from openrouter (caps "none") descriptor parses as "fallback" — structured output was never requested, so the strict path is never attempted', async () => {
     openaiCreateMock.mockResolvedValue(
       okChatResponse(JSON.stringify({ overallScore: 7, reasoning: 'ok', criteriaScores: [] }), 'openai/gpt-4o')
     );
@@ -305,7 +305,13 @@ describe('Structured-output parse seam: parseMode "structured" vs "fallback"', (
       },
     });
 
-    expect(result.parseMode).toBe('structured');
+    // No response_format/guided_json was ever sent on the outgoing request.
+    const [params] = openaiCreateMock.mock.calls[0];
+    expect(params.response_format).toBeUndefined();
+    expect(params.guided_json).toBeUndefined();
+
+    expect(result.parseMode).toBe('fallback');
+    expect(result.overallScore).toBe(7);
   });
 
   it('1b Task 11 review IMPORTANT fix: a well-formed, unwrapped-JSON response from a plain openai-backed judge still parses as "fallback" — structured output was never requested, so the strict path is never attempted', async () => {

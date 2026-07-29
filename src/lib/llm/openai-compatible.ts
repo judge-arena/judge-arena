@@ -23,21 +23,22 @@
  * attempt the strict structured parse. A descriptor with its own
  * `structuredRequestFields()` hook (vLLM — `backends/vllm.ts`) gets exactly
  * what that hook builds; every other structured-output-capable descriptor
- * with no hook of its own (openrouter's `caps.structuredOutput:
- * 'json_schema'`) gets the plain OpenAI-standard `response_format` shape
- * below by default.
+ * with no hook of its own gets the plain OpenAI-standard `response_format`
+ * shape below by default.
  *
- * 1b Task 11 review IMPORTANT fix: this seam used to also fire for the
- * plain `openai` descriptor (Task 10 had declared `caps.structuredOutput:
- * 'json_schema'` on it, and this seam was the first thing to actually
- * CONSUME that flag) — but real OpenAI's Structured Outputs is MODEL-GATED,
- * not universally supported, so sending `response_format:
- * {type:'json_schema',...}` to gpt-3.5-turbo/gpt-4/gpt-4-turbo hard-400s
- * instead of degrading gracefully. `registry.ts`'s plain `openai` descriptor
- * now declares `caps.structuredOutput: 'none'` (per-model gating deferred
- * to a future task), so this seam only ever fires for vLLM (guided
- * decoding — server-enforced, model-agnostic) and OpenRouter (its own
- * declared per-model pass-through support) — never for real OpenAI.
+ * 1b Task 11 review IMPORTANT fix: this seam now only fires for vLLM
+ * (guided decoding — server-enforced, model-agnostic, inherently safe).
+ * Both plain `openai` and `openrouter` descriptors now declare
+ * `caps.structuredOutput: 'none'` to degrade gracefully:
+ *   - Real OpenAI's Structured Outputs is MODEL-GATED — sending
+ *     `response_format: {type:'json_schema',...}` to gpt-3.5-turbo/gpt-4/
+ *     gpt-4-turbo hard-400s instead of degrading. Per-model gating (checking
+ *     baseModel against Structured-Outputs-capable snapshots) deferred to
+ *     future task.
+ *   - OpenRouter gates `response_format` per-routed-MODEL — it passes the
+ *     param to the underlying model, which hard-400s if that model doesn't
+ *     support Structured Outputs. Per-model gating (allowed-models list per
+ *     backend) also deferred to future task.
  */
 
 import OpenAI from 'openai';
