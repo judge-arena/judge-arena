@@ -6,6 +6,7 @@ import { closeRabbit, getRabbit } from '@/lib/queue/connection';
 import { assertTopology, QUEUE_JUDGMENT_EXECUTE, QUEUE_RUN_CREATE } from '@/lib/queue/topology';
 import type { JudgmentExecuteMsg, RunCreateMsg } from '@/lib/queue/publish';
 import { launchSingleRun, launchBulkRunCreates } from '@/lib/run-launch';
+import { createRunCreateConsumer } from '@/worker/run-create-consumer';
 import { seedPromptTemplates } from '../../prisma/seed-prompt-templates';
 import { POST as postRun } from '@/app/api/evaluations/[id]/runs/route';
 import { POST as postEvaluations } from '@/app/api/evaluations/route';
@@ -70,6 +71,38 @@ async function drainQueue(ch: Channel, queue: string, quietMs = 400): Promise<Co
   });
 
   return messages;
+}
+
+/** Fabricates a `ConsumeMessage`-shaped object carrying `payload` as its
+ * JSON body — same pattern as tests/integration/worker-claims.test.ts's
+ * `fakeMessage`, used below to feed a real, drained `run.create` message
+ * straight into the consumer's `handle()` without a second live-broker
+ * round trip. */
+function fakeMessage(payload: unknown): ConsumeMessage {
+  return {
+    content: Buffer.from(JSON.stringify(payload)),
+    fields: {} as ConsumeMessage['fields'],
+    properties: {} as ConsumeMessage['properties'],
+  } as ConsumeMessage;
+}
+
+interface SpyChannel extends Channel {
+  ackCalls: ConsumeMessage[];
+}
+
+/** Minimal ack-recording spy channel — same pattern as
+ * tests/integration/worker-claims.test.ts's `fakeChannel`. Deliberately NOT
+ * the real confirmChannel: `fakeMessage()`'s fabricated `fields`/
+ * `properties` have no real AMQP delivery tag for a live channel's `ack()`
+ * to act on. */
+function fakeChannel(): SpyChannel {
+  const ackCalls: ConsumeMessage[] = [];
+  return {
+    ack: (msg: ConsumeMessage) => {
+      ackCalls.push(msg);
+    },
+    ackCalls,
+  } as unknown as SpyChannel;
 }
 
 // ─── Fixture helpers ────────────────────────────────────────────────────────
@@ -247,6 +280,50 @@ describe('launchSingleRun (src/lib/run-launch.ts)', () => {
     expect(persisted.status).toBe('error');
   });
 
+  it('an in-doubt publish failure (broker actually had the message) is NOT reported as failed — the guarded compensating update no-ops instead of clobbering a legitimate terminal status', async () => {
+    const user = await mkUser();
+    const project = await mkProject(user.id);
+    const rubric = await mkRubric(user.id);
+    const model = await mkModelConfig(user.id);
+    const evaluation = await mkEvaluation(project.id, user.id, {
+      rubricId: rubric.id,
+      modelConfigIds: [model.id],
+    });
+
+    const result = await launchSingleRun(
+      { evaluationId: evaluation.id, triggeredById: user.id },
+      {
+        publish: async ({ runId }) => {
+          // Simulate the race this fix targets: a worker actually claimed
+          // and finished the judgment (finalizer moved the run to
+          // 'needs_human') before our publish() call's confirm-ack came
+          // back — the message really was delivered, but publish() throws
+          // on our side anyway (e.g. a timed-out confirm or a socket error
+          // raised after the broker already accepted it).
+          await prisma.evaluationRun.update({
+            where: { id: runId },
+            data: { status: 'needs_human', finalizedAt: new Date() },
+          });
+          throw new Error('simulated in-doubt confirm timeout');
+        },
+      }
+    );
+    createdRunIds.push(result.run.id);
+    for (const judgment of result.run.modelJudgments) {
+      await trackJudgeIdentity(judgment.judgeModelVersionId!);
+    }
+
+    // Reported as accepted, not failed — the guarded updateMany found the
+    // run already off pending/judging (count 0) and backed off rather than
+    // stomping the real 'needs_human' transition back to 'error'.
+    expect(result.publishFailed).toBe(false);
+    expect(result.publishError).toBeUndefined();
+    expect(result.run.status).toBe('needs_human');
+
+    const persisted = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: result.run.id } });
+    expect(persisted.status).toBe('needs_human'); // NOT stomped to 'error'
+  });
+
   it('end-to-end through the real POST /api/evaluations/[id]/runs route: 201 with judgeModelVersionId set', async () => {
     const user = await mkUser();
     mockSessionFor(user);
@@ -306,9 +383,83 @@ describe('launchBulkRunCreates (src/lib/run-launch.ts)', () => {
     expect(published).toHaveLength(1);
     const msg = JSON.parse(published[0].content.toString()) as RunCreateMsg;
     expect(msg.evaluationId).toBe(goodEvaluation.id);
-    expect(msg.runSpec.judgeModelVersionIds.length).toBe(1);
-    for (const versionId of msg.runSpec.judgeModelVersionIds) {
-      await trackJudgeIdentity(versionId);
+    expect(msg.runSpec.modelSelections).toEqual([
+      expect.objectContaining({ modelConfigId: model.id }),
+    ]);
+    for (const sel of msg.runSpec.modelSelections) {
+      await trackJudgeIdentity(sel.judgeModelVersionId);
+    }
+  });
+
+  it('bulk launch end-to-end (Task 9 review fix #1): consumer-created judgments have BOTH judgeModelVersionId and modelConfigId, RunModelSelection rows exist, and the leaderboard join includes them', async () => {
+    const user = await mkUser();
+    const project = await mkProject(user.id);
+    const rubric = await mkRubric(user.id);
+    const modelA = await mkModelConfig(user.id);
+    const modelB = await mkModelConfig(user.id);
+    const evaluation = await mkEvaluation(project.id, user.id, {
+      rubricId: rubric.id,
+      modelConfigIds: [modelA.id, modelB.id],
+    });
+
+    const { confirmChannel } = await getRabbit();
+    await assertTopology(confirmChannel);
+    await confirmChannel.purgeQueue(QUEUE_RUN_CREATE);
+
+    const result = await launchBulkRunCreates([evaluation.id], user.id);
+    expect(result.accepted).toEqual([evaluation.id]);
+    expect(result.failed).toEqual([]);
+
+    // Producer side: the real, drained run.create message carries a
+    // {judgeModelVersionId, modelConfigId} pair per selected model — not a
+    // bare judgeModelVersionId[] (the pre-fix shape that left the consumer
+    // with nothing to dual-write).
+    const published = await drainQueue(confirmChannel, QUEUE_RUN_CREATE);
+    expect(published).toHaveLength(1);
+    const msg = JSON.parse(published[0].content.toString()) as RunCreateMsg;
+    expect(new Set(msg.runSpec.modelSelections.map((sel) => sel.modelConfigId))).toEqual(
+      new Set([modelA.id, modelB.id])
+    );
+    for (const sel of msg.runSpec.modelSelections) {
+      await trackJudgeIdentity(sel.judgeModelVersionId);
+    }
+
+    // Consumer side: feed the real drained message straight into the
+    // run.create consumer (same "fabricated ConsumeMessage into handle()"
+    // pattern tests/integration/worker-claims.test.ts uses) — no live
+    // worker process needed to exercise the actual expansion + dual-write.
+    const consumer = createRunCreateConsumer();
+    const ch = fakeChannel();
+    await consumer.handle(fakeMessage(msg), ch);
+    expect(ch.ackCalls).toHaveLength(1);
+
+    const run = await prisma.evaluationRun.findFirstOrThrow({ where: { evaluationId: evaluation.id } });
+    createdRunIds.push(run.id);
+    expect(run.status).toBe('pending');
+
+    const judgments = await prisma.modelJudgment.findMany({ where: { runId: run.id } });
+    expect(judgments).toHaveLength(2);
+    for (const judgment of judgments) {
+      expect(judgment.judgeModelVersionId).toBeTruthy();
+      expect(judgment.modelConfigId).toBeTruthy(); // dual-write — was null before the fix
+    }
+    expect(new Set(judgments.map((j) => j.modelConfigId))).toEqual(new Set([modelA.id, modelB.id]));
+
+    // RunModelSelection rows — never written by the bulk path before the fix.
+    const selections = await prisma.runModelSelection.findMany({ where: { runId: run.id } });
+    expect(new Set(selections.map((s) => s.modelConfigId))).toEqual(new Set([modelA.id, modelB.id]));
+
+    // The leaderboard aggregation path (src/app/api/leaderboard/route.ts)
+    // selects `modelJudgment.modelConfig` and does
+    // `if (j.modelConfig === null) continue` — assert that exact join is
+    // non-null for every judgment this bulk launch created.
+    const withModelConfig = await prisma.modelJudgment.findMany({
+      where: { runId: run.id },
+      select: { modelConfig: { select: { id: true, name: true, provider: true, modelId: true } } },
+    });
+    expect(withModelConfig).toHaveLength(2);
+    for (const j of withModelConfig) {
+      expect(j.modelConfig).not.toBeNull();
     }
   });
 
@@ -366,8 +517,8 @@ describe('launchBulkRunCreates (src/lib/run-launch.ts)', () => {
     for (const raw of published) {
       const msg = JSON.parse(raw.content.toString()) as RunCreateMsg;
       if (body.evaluationIds.includes(msg.evaluationId)) {
-        for (const versionId of msg.runSpec.judgeModelVersionIds) {
-          await trackJudgeIdentity(versionId);
+        for (const sel of msg.runSpec.modelSelections) {
+          await trackJudgeIdentity(sel.judgeModelVersionId);
         }
       }
     }

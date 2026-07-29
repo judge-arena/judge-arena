@@ -164,7 +164,10 @@ describe('publish -> consume round-trip (publisher confirms)', () => {
       evaluationId: 'eval-1',
       runSpec: {
         rubricId: 'rubric-1',
-        judgeModelVersionIds: ['jmv-1', 'jmv-2'],
+        modelSelections: [
+          { judgeModelVersionId: 'jmv-1', modelConfigId: 'mc-1' },
+          { judgeModelVersionId: 'jmv-2', modelConfigId: 'mc-2' },
+        ],
         triggeredById: 'user-1',
         protocol: 'pointwise',
       },

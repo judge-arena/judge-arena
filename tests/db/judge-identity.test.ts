@@ -272,4 +272,30 @@ describe('ensureJudgeIdentityForModelConfig', () => {
       /unrecognized ModelConfig.provider/
     );
   });
+
+  it('a concurrent first-use race on a brand-new (provider, modelId, endpoint) triple resolves to the SAME versionId for both callers instead of one throwing P2002', async () => {
+    // Both calls resolve the same never-before-seen (provider, modelId,
+    // endpoint) triple concurrently — findOrCreateJudgeModel's and
+    // findOrCreateVersion's find-then-create is not atomic, so both can see
+    // "not found" and both attempt `create`. Before the fix, the loser's
+    // `create` would reject with a raw P2002 (JudgeModel.slug /
+    // JudgeModelVersion.(judgeModelId, ordinal) are real unique
+    // constraints) and Promise.all would reject. With the fix, the loser
+    // catches P2002 and re-finds the winner's row instead.
+    const user = await mkUser();
+    const config = await mkModelConfig(user.id, {
+      provider: 'openai',
+      modelId: 'gpt-4o-concurrent-race-fixture',
+      endpoint: null,
+    });
+
+    const [first, second] = await Promise.all([
+      ensureJudgeIdentityForModelConfig(db, config),
+      ensureJudgeIdentityForModelConfig(db, config),
+    ]);
+
+    expect(first.versionId).toBe(second.versionId);
+    expect(await db.judgeModel.count()).toBe(1);
+    expect(await db.judgeModelVersion.count()).toBe(1);
+  });
 });

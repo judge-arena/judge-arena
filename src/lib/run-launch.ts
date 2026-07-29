@@ -37,7 +37,15 @@
  * swallow the rest. Returns `{ accepted, failed }` so the route can respond
  * `202` with a per-item status instead of either an all-or-nothing error or
  * a `runsQueued` count that silently under-reports failures (the
- * swallowed-failure gap this task's brief calls out).
+ * swallowed-failure gap this task's brief calls out). The `run.create`
+ * message's `runSpec.modelSelections` carries BOTH `judgeModelVersionId`
+ * AND `modelConfigId` per selected model (not just a bare
+ * `judgeModelVersionId[]`) — `run-create-consumer.ts` needs the pairing to
+ * dual-write `modelConfigId` onto each `ModelJudgment` it creates and to
+ * write `RunModelSelection` rows, exactly like `launchSingleRun` does for
+ * the single-run path below. Without this, bulk-launched judgments lose
+ * model identity on the read side (leaderboard excludes them, exports/UI
+ * degrade) even though the judgments themselves still run correctly.
  *
  * ── modelConfigId dual-write (temporary — see judge-identity.ts) ───────────
  * `ModelJudgment.modelConfigId` is nullable and the schema's own comment
@@ -55,6 +63,7 @@
 import type { ModelConfig, Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { ensureJudgeIdentityForModelConfig } from '@/lib/judge-identity';
+import { logger } from '@/lib/logger';
 import { publishJudgmentExecute, publishRunCreate, type JudgmentExecuteMsg, type RunCreateMsg } from '@/lib/queue/publish';
 
 const EVALUATION_MODEL_TIMEOUT_MS = Number(process.env.EVALUATION_MODEL_TIMEOUT_MS ?? '120000');
@@ -288,7 +297,42 @@ export async function launchSingleRun(
   }
 
   if (publishFailed) {
-    await prisma.evaluationRun.update({ where: { id: createdRun.id }, data: { status: 'error' } });
+    // Guarded, not unconditional — an unconditional `update({ data: {
+    // status: 'error' } })` here can clobber a legitimate terminal status.
+    // `publish()` throwing does not guarantee the broker never got the
+    // message: a confirm-ack that times out, or a socket error raised
+    // AFTER the broker already durably accepted the publish, looks
+    // identical from here to a real delivery failure ("in-doubt" publish).
+    // If a worker has ALREADY claimed this judgment and the finalizer has
+    // ALREADY moved the run off pending/judging by the time we get here,
+    // that only happens because the broker really did have the message —
+    // stomping the run back to 'error' would destroy a real
+    // completed/needs_human/error transition. Mirrors run-finalizer.ts's
+    // `markRunCompleted` guard: a conditional `updateMany`, never an
+    // unconditional `update`.
+    const guarded = await prisma.evaluationRun.updateMany({
+      where: { id: createdRun.id, status: { in: ['pending', 'judging'] } },
+      data: { status: 'error', finalizedAt: new Date() },
+    });
+    if (guarded.count === 0) {
+      // count === 0 means the run had already progressed for real — the
+      // broker had the message despite publish() throwing on our side.
+      // Treat this as accepted, not failed: callers (the `runs`/
+      // `evaluations` routes) branch on `publishFailed` to choose between a
+      // 502-with-error response and a normal success response, and a 502
+      // here would be actively misleading (nothing is actually broken).
+      // Logged (not surfaced back to the HTTP caller as a field) so the
+      // in-doubt condition is still discoverable, without widening this
+      // function's return contract or every route's response shape for a
+      // rare, self-healed race.
+      logger.warn(
+        'launchSingleRun: publish() threw but the run had already progressed off pending/judging — ' +
+          'treating as accepted (broker had the message), not failed',
+        { runId: createdRun.id, publishError }
+      );
+      publishFailed = false;
+      publishError = undefined;
+    }
   }
 
   const run = await prisma.evaluationRun.findUniqueOrThrow({
@@ -365,13 +409,21 @@ export async function launchBulkRunCreates(
 
       // eslint-disable-next-line no-await-in-loop
       const versionIdByModelConfigId = await resolveJudgeIdentities(modelConfigs);
-      const judgeModelVersionIds = [...new Set(versionIdByModelConfigId.values())];
+      // One selection per model, pairing both identities — NOT deduped by
+      // judgeModelVersionId (that would drop distinct ModelConfigs that
+      // happen to resolve to the same judge identity, and the consumer
+      // needs one ModelJudgment per selected model regardless). Mirrors
+      // launchSingleRun's own per-modelConfigId shape above.
+      const modelSelections = modelConfigs.map((modelConfig) => ({
+        judgeModelVersionId: versionIdByModelConfigId.get(modelConfig.id)!,
+        modelConfigId: modelConfig.id,
+      }));
 
       const msg: RunCreateMsg = {
         evaluationId,
         runSpec: {
           rubricId: rubricId ?? undefined,
-          judgeModelVersionIds,
+          modelSelections,
           triggeredById,
           protocol: 'pointwise',
         },

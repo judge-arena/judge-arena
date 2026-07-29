@@ -184,6 +184,22 @@ async function mkEvaluationRun(evaluationId: string, triggeredById: string, rubr
   return run;
 }
 
+async function mkModelConfig(userId: string) {
+  // Tracked for cleanup via the owning user's cascade (ModelConfig.userId is
+  // Cascade) — no separate tracking array needed, same convention as
+  // mkEndpoint above.
+  return prisma.modelConfig.create({
+    data: {
+      name: uniq('fixture-model'),
+      provider: 'openai',
+      modelId: uniq('fixture-model-id'),
+      isActive: true,
+      isVerified: true,
+      userId,
+    },
+  });
+}
+
 async function mkJudgeModelVersion() {
   const judgeModel = await prisma.judgeModel.create({
     data: {
@@ -369,9 +385,11 @@ describe('worker claim idempotency (src/worker/claim.ts, judgment-consumer.ts, r
     expect(persisted.attemptCount).toBe(2); // once for the original claim, once for the reclaim
   });
 
-  it('run.create redelivery is idempotent: one EvaluationRun, one ModelJudgment per judgeModelVersionId, exactly one judgment.execute publish per row', async () => {
+  it('run.create redelivery is idempotent: one EvaluationRun, one ModelJudgment (+ RunModelSelection) per model selection, exactly one judgment.execute publish per row', async () => {
     const fixture = await createEvaluationOnlyFixture(); // no pre-made run — this test creates it
     const { version: version2 } = await mkJudgeModelVersion();
+    const modelConfig1 = await mkModelConfig(fixture.user.id);
+    const modelConfig2 = await mkModelConfig(fixture.user.id);
 
     const { confirmChannel } = await getRabbit();
     await assertTopology(confirmChannel);
@@ -382,7 +400,10 @@ describe('worker claim idempotency (src/worker/claim.ts, judgment-consumer.ts, r
       evaluationId: fixture.evaluation.id,
       runSpec: {
         rubricId: fixture.rubric.id,
-        judgeModelVersionIds: [fixture.version.id, version2.id],
+        modelSelections: [
+          { judgeModelVersionId: fixture.version.id, modelConfigId: modelConfig1.id },
+          { judgeModelVersionId: version2.id, modelConfigId: modelConfig2.id },
+        ],
         triggeredById: fixture.user.id,
         protocol: 'pointwise',
       },
@@ -405,6 +426,25 @@ describe('worker claim idempotency (src/worker/claim.ts, judgment-consumer.ts, r
     expect(new Set(judgments.map((j) => j.judgeModelVersionId))).toEqual(
       new Set([fixture.version.id, version2.id])
     );
+    // Dual-write (Task 9 review fix #1): modelConfigId is set on every row,
+    // not left null — this is exactly what the leaderboard's
+    // `if (j.modelConfig === null) continue` join depends on.
+    expect(new Set(judgments.map((j) => j.modelConfigId))).toEqual(
+      new Set([modelConfig1.id, modelConfig2.id])
+    );
+    const withModelConfig = await prisma.modelJudgment.findMany({
+      where: { runId: runs[0].id },
+      include: { modelConfig: { select: { id: true } } },
+    });
+    for (const judgment of withModelConfig) {
+      expect(judgment.modelConfig).not.toBeNull();
+    }
+
+    // RunModelSelection rows — never written by this path before the fix.
+    const selections = await prisma.runModelSelection.findMany({ where: { runId: runs[0].id } });
+    expect(new Set(selections.map((s) => s.modelConfigId))).toEqual(
+      new Set([modelConfig1.id, modelConfig2.id])
+    );
 
     const published = await drainQueue(confirmChannel, QUEUE_JUDGMENT_EXECUTE);
     expect(published).toHaveLength(2); // exactly once per row, not doubled by the redelivery
@@ -414,14 +454,14 @@ describe('worker claim idempotency (src/worker/claim.ts, judgment-consumer.ts, r
     expect(publishedIds).toEqual(judgments.map((j) => j.id).sort());
   });
 
-  it('run.create expansion failure (no judgeModelVersionIds to expand) records an errored EvaluationRun rather than silently dropping the message', async () => {
+  it('run.create expansion failure (no modelSelections to expand) records an errored EvaluationRun rather than silently dropping the message', async () => {
     const fixture = await createEvaluationOnlyFixture();
     const runCreateConsumer = createRunCreateConsumer();
     const msg: RunCreateMsg = {
       evaluationId: fixture.evaluation.id,
       runSpec: {
         rubricId: fixture.rubric.id,
-        judgeModelVersionIds: [],
+        modelSelections: [],
         triggeredById: fixture.user.id,
         protocol: 'pointwise',
       },

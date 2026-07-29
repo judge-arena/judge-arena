@@ -2,12 +2,28 @@
  * ─── run.create Consumer ───────────────────────────────────────────────────
  *
  * Expands a `run.create` message (a v1-legacy-style "launch this evaluation
- * against N judge versions" request, used by bulk dataset launches — a
+ * against N selected models" request, used by bulk dataset launches — a
  * single-run web-tier launch (Task 9) is expected to create its
  * `EvaluationRun` + publish `judgment.execute` directly, never through this
- * queue) into one `EvaluationRun` + one `pending` `ModelJudgment` per
- * `judgeModelVersionId`, then publishes one `judgment.execute` per created
- * row.
+ * queue) into one `EvaluationRun` + one `pending` `ModelJudgment` (+ one
+ * `RunModelSelection`) per entry in `runSpec.modelSelections`, then
+ * publishes one `judgment.execute` per created `ModelJudgment` row.
+ *
+ * ── modelConfigId dual-write (temporary — see judge-identity.ts, and
+ * run-launch.ts's module doc for the full rationale) ────────────────────────
+ * Each `modelSelections` entry carries BOTH `judgeModelVersionId` (the
+ * queue/worker identity every `ModelJudgment` needs to run) AND
+ * `modelConfigId` (the legacy identity the leaderboard aggregation, run
+ * detail page, human-judgment route, and CSV/JSONL export still read).
+ * Before this was fixed (Task 9 review), `run.create` only ever carried a
+ * bare `judgeModelVersionId[]` — this consumer had no `modelConfigId` to
+ * write, so it always set `modelConfigId: null`, silently excluding every
+ * bulk/dataset-launched judgment from the leaderboard
+ * (`if (j.modelConfig === null) continue`) and never writing a
+ * `RunModelSelection` row at all (the run-level "which models were
+ * selected" snapshot `launchSingleRun` writes via its own nested
+ * `runModelSelections.create`). Both writes now happen here, inside the
+ * same transaction as the `ModelJudgment` creation.
  *
  * ── Redelivery / idempotency (no schema change in this task) ───────────────
  * There is no client-generated idempotency key on `RunCreateMsg`/
@@ -44,7 +60,7 @@
  *     than leaving it stuck `pending` forever or creating a duplicate row.
  * Either way the message is acked (not requeued) — retrying a
  * deterministic expansion failure (missing PromptTemplate, empty
- * judgeModelVersionIds, etc.) would just fail identically forever.
+ * modelSelections, etc.) would just fail identically forever.
  */
 
 import type { Channel, ConsumeMessage } from 'amqplib';
@@ -149,13 +165,20 @@ export function createRunCreateConsumer(): RunCreateConsumer {
         throw new Error(`No PromptTemplate found for protocol "${msg.runSpec.protocol}"`);
       }
 
-      const judgeModelVersionIds = [...new Set(msg.runSpec.judgeModelVersionIds)];
-      if (judgeModelVersionIds.length === 0) {
-        throw new Error('runSpec.judgeModelVersionIds is empty — nothing to expand');
+      // Dedupe by modelConfigId — the per-model identity for this
+      // expansion (mirrors run-launch.ts's launchSingleRun, which is keyed
+      // the same way) — defense in depth alongside the active-run dedupe
+      // check above; a redelivery of the identical message produces the
+      // identical (deduped) list either way.
+      const modelSelections = [
+        ...new Map(msg.runSpec.modelSelections.map((sel) => [sel.modelConfigId, sel])).values(),
+      ];
+      if (modelSelections.length === 0) {
+        throw new Error('runSpec.modelSelections is empty — nothing to expand');
       }
 
       const deadlineAt = new Date(
-        Date.now() + judgeModelVersionIds.length * EVALUATION_MODEL_TIMEOUT_MS + DEADLINE_SLACK_MS
+        Date.now() + modelSelections.length * EVALUATION_MODEL_TIMEOUT_MS + DEADLINE_SLACK_MS
       );
 
       const run = await prisma.$transaction(async (tx) => {
@@ -173,16 +196,33 @@ export function createRunCreateConsumer(): RunCreateConsumer {
         // skipDuplicates: redelivery-safe if this exact transaction were
         // ever somehow re-attempted against the same run — in practice the
         // active-run dedupe check above is what normally prevents that, this
-        // is defense in depth (and dedupes duplicate ids within
-        // judgeModelVersionIds, though the `new Set` above already handles
-        // that case too).
+        // is defense in depth (and dedupes duplicate entries within
+        // modelSelections, though the `Map` above already handles that case
+        // too). Dual-write: modelConfigId (legacy, for the leaderboard/UI/
+        // exports/human-judgment matching) AND judgeModelVersionId (the
+        // queue/worker identity) — see this file's module doc and
+        // run-launch.ts's for why both are still written.
         await tx.modelJudgment.createMany({
-          data: judgeModelVersionIds.map((judgeModelVersionId) => ({
+          data: modelSelections.map((sel) => ({
             runId: createdRun.id,
-            judgeModelVersionId,
+            judgeModelVersionId: sel.judgeModelVersionId,
+            modelConfigId: sel.modelConfigId,
             promptTemplateId: promptTemplate.id,
-            modelConfigId: null,
             status: 'pending' as const,
+          })),
+          skipDuplicates: true,
+        });
+
+        // RunModelSelection — the run-level "which models were selected"
+        // snapshot. launchSingleRun writes this via its own EvaluationRun
+        // nested `runModelSelections.create`; this expansion path creates
+        // the run first (without models attached), so it needs its own
+        // explicit createMany here. Before this fix, the bulk/dataset-
+        // launch path never wrote these rows at all.
+        await tx.runModelSelection.createMany({
+          data: modelSelections.map((sel) => ({
+            runId: createdRun.id,
+            modelConfigId: sel.modelConfigId,
           })),
           skipDuplicates: true,
         });

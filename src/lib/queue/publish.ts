@@ -35,7 +35,23 @@ export interface RunCreateMsg {
   evaluationId: string;
   runSpec: {
     rubricId?: string;
-    judgeModelVersionIds: string[];
+    /**
+     * One entry per selected model, carrying BOTH identities the 1b runtime
+     * needs: `judgeModelVersionId` (what the worker's judgment-consumer
+     * actually executes against) and `modelConfigId` (the legacy dual-write
+     * identity — see judge-identity.ts's module doc — that the leaderboard
+     * aggregation, run detail page, human-judgment route, and CSV/JSONL
+     * export still join/read on). A bare `judgeModelVersionId[]` here (the
+     * pre-review shape) gave `run-create-consumer.ts` no `modelConfigId` to
+     * write, so every bulk/dataset-launched `ModelJudgment` left it `null`
+     * — silently excluded from the leaderboard
+     * (`if (j.modelConfig === null) continue`) and with no
+     * `RunModelSelection` row created at all. Pairing both ids on the
+     * message fixes that at the source; see run-launch.ts's
+     * `launchBulkRunCreates` (producer) and run-create-consumer.ts
+     * (consumer dual-write) for the two ends of this.
+     */
+    modelSelections: Array<{ judgeModelVersionId: string; modelConfigId: string }>;
     triggeredById: string;
     protocol: 'pointwise';
   };

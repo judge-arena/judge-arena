@@ -81,7 +81,24 @@
  * `(judgeModelId, ordinal=1)`, ModelEndpoint by `(userId, judgeModelVersionId,
  * endpoint)`) — calling this twice for the same `ModelConfig` (or two
  * different `ModelConfig`s that resolve to the same (provider, modelId,
- * endpoint) triple) returns the same `versionId`. It does NOT resync an
+ * endpoint) triple) returns the same `versionId`.
+ *
+ * ── Concurrent first-use race (findOrCreateJudgeModel / findOrCreateVersion) ─
+ * The find-then-create in each of those two helpers is not atomic: two
+ * concurrent callers resolving the SAME brand-new (provider, modelId,
+ * endpoint) triple can both see "not found" and both attempt `create`. Both
+ * `JudgeModel.slug` and `JudgeModelVersion.(judgeModelId, ordinal)` are real
+ * DB unique constraints, so the loser doesn't silently duplicate — it gets a
+ * P2002 from Postgres. Both helpers catch that specifically and re-find
+ * once, returning the winner's row, so a concurrent first-use race resolves
+ * to the SAME identity for both callers instead of one of them surfacing a
+ * raw 500 to its caller (`launchSingleRun`/`launchBulkRunCreates`, and
+ * ultimately an HTTP request). `findOrCreateEndpoint` has no compound unique
+ * constraint (see its own comment) — it can't throw P2002, so this doesn't
+ * apply there; a concurrent race there creates two distinct `ModelEndpoint`
+ * rows instead, a pre-existing, disclosed, out-of-scope limitation.
+ *
+ * It does NOT resync an
  * already-created row if the source `ModelConfig` changes later (e.g. the
  * user edits their API key or endpoint after the first run) — the existing
  * `ModelEndpoint` wins. That drift is a known, accepted limitation of this
@@ -89,7 +106,14 @@
  * the whole ModelConfig-keyed path this drift could occur on.
  */
 import { createHash } from 'crypto';
-import type { JudgeClass, ModelConfig, PrismaClient, ServingBackend } from '@prisma/client';
+import { Prisma, type JudgeClass, type ModelConfig, type PrismaClient, type ServingBackend } from '@prisma/client';
+
+/** True iff `error` is a P2002 unique-constraint violation — used below to
+ * turn a concurrent find-or-create race into a re-find instead of a raw
+ * 500. See `findOrCreateJudgeModel`/`findOrCreateVersion`'s doc comments. */
+function isUniqueConstraintViolation(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+}
 
 /** Structural subset of `PrismaClient` this module needs — satisfied by
  * both the top-level `prisma` singleton and a `$transaction` callback's
@@ -153,18 +177,31 @@ async function findOrCreateJudgeModel(
   const existing = await client.judgeModel.findUnique({ where: { slug: args.slug } });
   if (existing) return existing.id;
 
-  const created = await client.judgeModel.create({
-    data: {
-      slug: args.slug,
-      name: args.name,
-      judgeClass: args.judgeClass,
-      scoringMechanism: 'critique_generative',
-      // Diverges from the importer — see module doc §1: this IS the
-      // literal provider model id here, unlike the importer's v1 data.
-      baseModel: args.baseModel,
-    },
-  });
-  return created.id;
+  try {
+    const created = await client.judgeModel.create({
+      data: {
+        slug: args.slug,
+        name: args.name,
+        judgeClass: args.judgeClass,
+        scoringMechanism: 'critique_generative',
+        // Diverges from the importer — see module doc §1: this IS the
+        // literal provider model id here, unlike the importer's v1 data.
+        baseModel: args.baseModel,
+      },
+    });
+    return created.id;
+  } catch (error) {
+    // Concurrent first-use race on `slug` (see module doc) — another
+    // caller's create for the same triple won between our findUnique and
+    // our create. Re-find once and return the winner's row rather than
+    // surfacing the raw P2002 as a 500; this is a find-or-create, not a
+    // create-or-fail, so losing the race is not an error condition here.
+    if (isUniqueConstraintViolation(error)) {
+      const winner = await client.judgeModel.findUnique({ where: { slug: args.slug } });
+      if (winner) return winner.id;
+    }
+    throw error;
+  }
 }
 
 async function findOrCreateVersion(
@@ -176,21 +213,33 @@ async function findOrCreateVersion(
   });
   if (existing) return existing.id;
 
-  const created = await client.judgeModelVersion.create({
-    data: {
-      judgeModelId: args.judgeModelId,
-      ordinal: 1,
-      quantization: 'none',
-      servingBackend: args.servingBackend,
-      endpointClass: args.endpointClass,
-      protocolSupport: { pointwise: ['score'] },
-      // Same literal defaults as the importer — both v1 call sites
-      // (src/lib/llm/anthropic.ts, src/lib/llm/openai-compatible.ts) use
-      // this exact { temperature, max_tokens } pair.
-      samplingDefaults: { temperature: 0.3, max_tokens: 4096 },
-    },
-  });
-  return created.id;
+  try {
+    const created = await client.judgeModelVersion.create({
+      data: {
+        judgeModelId: args.judgeModelId,
+        ordinal: 1,
+        quantization: 'none',
+        servingBackend: args.servingBackend,
+        endpointClass: args.endpointClass,
+        protocolSupport: { pointwise: ['score'] },
+        // Same literal defaults as the importer — both v1 call sites
+        // (src/lib/llm/anthropic.ts, src/lib/llm/openai-compatible.ts) use
+        // this exact { temperature, max_tokens } pair.
+        samplingDefaults: { temperature: 0.3, max_tokens: 4096 },
+      },
+    });
+    return created.id;
+  } catch (error) {
+    // Concurrent first-use race on `(judgeModelId, ordinal)` (see module
+    // doc) — same re-find-once treatment as findOrCreateJudgeModel above.
+    if (isUniqueConstraintViolation(error)) {
+      const winner = await client.judgeModelVersion.findUnique({
+        where: { judgeModelId_ordinal: { judgeModelId: args.judgeModelId, ordinal: 1 } },
+      });
+      if (winner) return winner.id;
+    }
+    throw error;
+  }
 }
 
 async function findOrCreateEndpoint(
