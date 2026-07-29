@@ -7,6 +7,9 @@ import { Sidebar } from '@/components/layout/sidebar';
 import { KeyboardShortcutsDialog } from '@/components/layout/keyboard-shortcuts-dialog';
 import { Toaster } from 'sonner';
 
+// '/register' is retired as a sign-up flow (1b Task 13) but stays public —
+// it now renders an invite-only info page (src/app/register/page.tsx) for
+// anyone following a stale link, rather than bouncing them to /login.
 const publicPaths = ['/', '/login', '/register'];
 
 export function AppShell({ children }: { children: React.ReactNode }) {

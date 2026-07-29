@@ -126,7 +126,7 @@ describe('importRuns (DB)', () => {
       const ids = await importArtifacts(ctx, owners);
       await importRuns(ctx, owners, ids, judges);
 
-      const archiveUser = await db.user.findUnique({ where: { email: ARCHIVE_USER_EMAIL } });
+      const archiveUser = await db.user.findFirst({ where: { email: ARCHIVE_USER_EMAIL } });
       const v2UserA = owners.get(f.userA.id)!;
 
       // ── Run 1: completed, terminal, triggeredById null (dropped triggerer) ──

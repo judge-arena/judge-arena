@@ -192,7 +192,7 @@ async function rowCountUser(ctx: ImportCtx): Promise<RowCount> {
   const [v1, v2, archiveUser] = await Promise.all([
     ctx.v1.user.count(),
     ctx.v2.user.count(),
-    ctx.v2.user.findUnique({ where: { email: ARCHIVE_USER_EMAIL } }),
+    ctx.v2.user.findFirst({ where: { email: ARCHIVE_USER_EMAIL } }),
   ]);
 
   const expectedV2 = mappedKeys.size + (archiveUser ? 1 : 0);
@@ -561,7 +561,7 @@ async function spotCheckNoOwnerLeakage(ctx: ImportCtx): Promise<SpotCheck> {
           select: { id: true },
         })
       : Promise.resolve([]),
-    ctx.v2.user.findUnique({ where: { email: ARCHIVE_USER_EMAIL } }),
+    ctx.v2.user.findFirst({ where: { email: ARCHIVE_USER_EMAIL } }),
   ]);
 
   const droppedEmails = allV1Users

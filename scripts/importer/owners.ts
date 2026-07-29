@@ -80,7 +80,12 @@ async function resolveMappedUser(ctx: ImportCtx, mapping: MappedOwner): Promise<
  * most one archive User.
  */
 export async function resolveArchiveUser(ctx: ImportCtx): Promise<string> {
-  const existing = await ctx.v2.user.findUnique({ where: { email: ARCHIVE_USER_EMAIL } });
+  // findFirst, not findUnique: User.email is no longer DB-unique (1b Task
+  // 13 — OIDC identity is (oidcIssuer, oidcSubject) only, never email). The
+  // archive user is still a de-facto singleton in practice (only this
+  // function ever creates a row with ARCHIVE_USER_EMAIL), so the first
+  // match is always the right one.
+  const existing = await ctx.v2.user.findFirst({ where: { email: ARCHIVE_USER_EMAIL } });
   if (existing) {
     ctx.report.add('User', 'skipped');
     return existing.id;

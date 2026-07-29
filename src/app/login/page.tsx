@@ -4,7 +4,6 @@ import React, { useState, useEffect } from 'react';
 import { signIn } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { BrandIcon } from '@/components/ui/brand-icon';
-import Link from 'next/link';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -59,9 +58,31 @@ export default function LoginPage() {
           </p>
         </div>
 
+        <div className="bg-white rounded-xl border border-surface-200 shadow-sm p-6 space-y-4 dark:bg-surface-800 dark:border-surface-700">
+          {/* Authentik OIDC (1b Task 13) — the primary sign-in path for
+              invited users; group membership in Authentik is the actual
+              access gate (see docs/runbooks/authentik-oidc-setup.md). Shown
+              unconditionally: if AUTHENTIK_* isn't configured on this
+              deployment, next-auth surfaces its own configuration-error page
+              on click rather than silently failing here. */}
+          <button
+            type="button"
+            onClick={() => signIn('authentik', { callbackUrl })}
+            className="w-full rounded-lg border border-surface-300 dark:border-surface-600 px-4 py-2 text-sm font-medium text-surface-700 dark:text-surface-200 hover:bg-surface-50 dark:hover:bg-surface-700 focus:outline-none focus:ring-2 focus:ring-brand-500 transition-colors"
+          >
+            Sign in with Authentik
+          </button>
+
+          <div className="flex items-center gap-3">
+            <div className="h-px flex-1 bg-surface-200 dark:bg-surface-700" />
+            <span className="text-xs text-surface-400 dark:text-surface-500">or</span>
+            <div className="h-px flex-1 bg-surface-200 dark:bg-surface-700" />
+          </div>
+        </div>
+
         <form
           onSubmit={handleSubmit}
-          className="bg-white rounded-xl border border-surface-200 shadow-sm p-6 space-y-4 dark:bg-surface-800 dark:border-surface-700"
+          className="mt-4 bg-white rounded-xl border border-surface-200 shadow-sm p-6 space-y-4 dark:bg-surface-800 dark:border-surface-700"
         >
           {error && (
             <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700 dark:bg-red-950/30 dark:border-red-800 dark:text-red-400">
@@ -115,14 +136,12 @@ export default function LoginPage() {
             {loading ? 'Signing in...' : 'Sign In'}
           </button>
 
+          {/* Accounts are invite-only (1b Task 13) — no self-service
+              registration link here. Admin-created credentials users sign in
+              above; Authentik-invited users use their organization's
+              identity provider. */}
           <p className="text-center text-sm text-surface-500 dark:text-surface-400">
-            Don&apos;t have an account?{' '}
-            <Link
-              href="/register"
-              className="text-brand-600 hover:text-brand-700 font-medium"
-            >
-              Register
-            </Link>
+            Need access? Contact your administrator.
           </p>
         </form>
       </div>

@@ -120,23 +120,19 @@ export async function requireAuth(): Promise<AuthSession | NextResponse> {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
+  // Session -> User resolution is by the token's user-id claim ONLY (spec
+  // §7 non-destructive-v5 condition (c)) — no email fallback. The old
+  // fallback silently re-linked a session to whichever User row happened to
+  // have a matching email when the id lookup missed, which is exactly the
+  // "linking hazard" OIDC's (issuer, sub) identity model closes (see
+  // src/lib/oidc-user.ts). A missing id-match now means the caller signs
+  // out and back in — never a guess.
   const sessionUserId = (session.user as any).id as string;
-  const sessionEmail = session.user.email ?? null;
 
-  const dbUserById = await prisma.user.findUnique({
+  const resolvedUser = await prisma.user.findUnique({
     where: { id: sessionUserId },
     select: { id: true, email: true, name: true, role: true },
   });
-
-  let resolvedUser = dbUserById;
-
-  if (!resolvedUser && sessionEmail) {
-    const dbUserByEmail = await prisma.user.findUnique({
-      where: { email: sessionEmail },
-      select: { id: true, email: true, name: true, role: true },
-    });
-    resolvedUser = dbUserByEmail;
-  }
 
   if (!resolvedUser) {
     return NextResponse.json(
@@ -150,7 +146,7 @@ export async function requireAuth(): Promise<AuthSession | NextResponse> {
       id: resolvedUser.id,
       email: resolvedUser.email,
       name: resolvedUser.name ?? null,
-      role: resolvedUser.role ?? (session.user as any).role ?? 'user',
+      role: resolvedUser.role ?? 'user',
     },
     // No apiKeyScopes — session auth has full access (governed by role)
   };

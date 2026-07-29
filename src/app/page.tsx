@@ -121,21 +121,15 @@ export default function LandingPage() {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
               </Link>
             ) : (
-              <>
-                <Link
-                  href="/login"
-                  className="rounded-lg px-4 py-2 text-sm font-medium text-surface-300 hover:text-white transition-colors"
-                >
-                  Sign In
-                </Link>
-                <Link
-                  href="/register"
-                  className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 transition-colors"
-                >
-                  Get Started
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
-                </Link>
-              </>
+              // Invite-only (1b Task 13): a single Sign In entry point —
+              // no self-service "Get Started" registration CTA.
+              <Link
+                href="/login"
+                className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 transition-colors"
+              >
+                Sign In
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
+              </Link>
             )}
           </div>
         </div>
@@ -166,21 +160,16 @@ export default function LandingPage() {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
               </Link>
             ) : (
-              <>
-                <Link
-                  href="/register"
-                  className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-brand-500 transition-colors shadow-lg shadow-brand-600/25"
-                >
-                  Deploy Your Instance
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
-                </Link>
-                <Link
-                  href="/login"
-                  className="inline-flex items-center gap-2 rounded-lg border border-white/10 backdrop-blur-md bg-white/[0.04] px-6 py-2.5 text-sm font-medium text-surface-300 hover:text-white hover:bg-white/[0.08] transition-all"
-                >
-                  Sign In
-                </Link>
-              </>
+              // Invite-only (1b Task 13): "Sign In" is the sole CTA — the
+              // old primary "Deploy Your Instance" self-registration button
+              // is gone along with the register route it pointed to.
+              <Link
+                href="/login"
+                className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-brand-500 transition-colors shadow-lg shadow-brand-600/25"
+              >
+                Sign In
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
+              </Link>
             )}
           </div>
 
@@ -255,10 +244,10 @@ export default function LandingPage() {
             </p>
             {!isAuth && (
               <Link
-                href="/register"
+                href="/login"
                 className="inline-flex items-center gap-2 mt-6 rounded-lg bg-brand-600 px-5 py-2 text-sm font-medium text-white hover:bg-brand-700 transition-colors"
               >
-                Get Started
+                Sign In
               </Link>
             )}
           </div>
@@ -407,10 +396,10 @@ export default function LandingPage() {
             </p>
             <div className="mt-6 flex items-center justify-center gap-3">
               <Link
-                href="/register"
+                href="/login"
                 className="inline-flex items-center gap-2 rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-brand-500 transition-colors shadow-lg shadow-brand-600/25"
               >
-                Get Started
+                Sign In
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
               </Link>
             </div>

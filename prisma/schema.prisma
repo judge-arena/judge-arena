@@ -86,7 +86,16 @@ enum Visibility {
 
 model User {
   id                String            @id @default(cuid())
-  email             String            @unique
+  // NOT globally unique (see spec §7 non-destructive-v5 condition / the
+  // "linking hazard" finding): OIDC identity is (oidcIssuer, oidcSubject)
+  // ONLY. Two distinct Users MAY share an email — e.g. a rogue/second OIDC
+  // identity presenting an email that collides with an existing account
+  // must be able to resolve to its own distinct User row rather than being
+  // silently linked to (or blocked by) the existing one. Indexed (not
+  // unique) for lookup performance; credentials login and the invite-claim
+  // path (src/lib/oidc-user.ts) both filter further (passwordHash shape /
+  // invitePending) to disambiguate when more than one row shares an email.
+  email             String
   name              String?
   passwordHash      String
   role              String            @default("user") // "user" | "admin"
@@ -96,6 +105,14 @@ model User {
   resetTokenExpiry  DateTime?
   oidcIssuer        String?
   oidcSubject       String?
+  // Set by the admin invite CLI (scripts/admin/create-user.ts) for an
+  // OIDC-pending invite: a User row created with a real email but no
+  // oidcIssuer/oidcSubject yet. The ONE email-adjacent path in OIDC sign-in
+  // (see src/lib/oidc-user.ts's resolveOidcUser) is gated strictly on
+  // `invitePending: true` AND `oidcSubject: null` — it claims the invite
+  // (stamps issuer/sub, flips this back to false) rather than doing general
+  // email-based account linking. Never read anywhere else.
+  invitePending     Boolean           @default(false)
   projects          Project[]
   rubrics           Rubric[]
   modelConfigs      ModelConfig[]
@@ -112,6 +129,7 @@ model User {
   updatedAt         DateTime          @updatedAt
 
   @@unique([oidcIssuer, oidcSubject])
+  @@index([email])
 }
 
 // ─── Domain ─────────────────────────────────────────────────────────────────

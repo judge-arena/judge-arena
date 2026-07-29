@@ -26,6 +26,7 @@
     "db:generate": "npx prisma generate",
     "db:generate:v1": "prisma generate --schema prisma/v1/schema.v1.prisma",
     "import:v1": "tsx scripts/importer/cli.ts",
+    "admin:create-user": "tsx scripts/admin/create-user.ts",
     "db:push": "npx prisma db push",
     "db:reset": "npx prisma db push --force-reset",
     "db:migrate": "npx prisma migrate dev",

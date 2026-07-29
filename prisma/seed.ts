@@ -14,32 +14,42 @@ async function main() {
   const adminPw = process.env.SEED_ADMIN_PASSWORD || 'admin123';
   const demoPw = process.env.SEED_DEMO_PASSWORD || 'demo1234';
 
-  // Create admin user
+  // Create admin user. findFirst + create (not upsert): User.email is no
+  // longer DB-unique (1b Task 13 — OIDC identity is (oidcIssuer,
+  // oidcSubject) only), so `upsert({ where: { email } })` no longer
+  // typechecks. Seeding only ever runs against a fresh/dev database, so
+  // "first row with this email, if any" is an acceptable find.
   const adminPassword = await bcrypt.hash(adminPw, 12);
-  const adminUser = await prisma.user.upsert({
+  const existingAdmin = await prisma.user.findFirst({
     where: { email: 'admin@judgearena.local' },
-    update: {},
-    create: {
-      email: 'admin@judgearena.local',
-      name: 'Admin',
-      passwordHash: adminPassword,
-      role: 'admin',
-    },
   });
+  const adminUser =
+    existingAdmin ??
+    (await prisma.user.create({
+      data: {
+        email: 'admin@judgearena.local',
+        name: 'Admin',
+        passwordHash: adminPassword,
+        role: 'admin',
+      },
+    }));
   console.log(`  ✓ Created admin user: ${adminUser.email}`);
 
   // Create demo user
   const demoPassword = await bcrypt.hash(demoPw, 12);
-  const demoUser = await prisma.user.upsert({
+  const existingDemo = await prisma.user.findFirst({
     where: { email: 'demo@judgearena.local' },
-    update: {},
-    create: {
-      email: 'demo@judgearena.local',
-      name: 'Demo User',
-      passwordHash: demoPassword,
-      role: 'user',
-    },
   });
+  const demoUser =
+    existingDemo ??
+    (await prisma.user.create({
+      data: {
+        email: 'demo@judgearena.local',
+        name: 'Demo User',
+        passwordHash: demoPassword,
+        role: 'user',
+      },
+    }));
   console.log(`  ✓ Created demo user: ${demoUser.email}`);
 
   // Create default rubric

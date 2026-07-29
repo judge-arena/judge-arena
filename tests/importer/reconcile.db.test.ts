@@ -523,7 +523,7 @@ describe('reconcile (DB)', () => {
       // Report mode never writes — real v2 tables stay empty.
       expect(await db.evaluationRun.count()).toBe(0);
       expect(await db.modelJudgment.count()).toBe(0);
-      expect(await db.user.findUnique({ where: { email: ARCHIVE_USER_EMAIL } })).toBeNull();
+      expect(await db.user.findFirst({ where: { email: ARCHIVE_USER_EMAIL } })).toBeNull();
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }

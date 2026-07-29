@@ -121,7 +121,7 @@ describe('importArtifacts (DB)', () => {
       expect(v2Child).toMatchObject({ version: 2, parentId: v2Root!.id });
 
       // ── Default/leaderboard project: archived + made public ──
-      const archiveUser = await db.user.findUnique({ where: { email: ARCHIVE_USER_EMAIL } });
+      const archiveUser = await db.user.findFirst({ where: { email: ARCHIVE_USER_EMAIL } });
       const v2DefaultProject = await db.project.findUnique({ where: { id: ids.project.get(defaultProject.id)! } });
       expect(v2DefaultProject).toMatchObject({
         isDefault: true,
@@ -265,7 +265,7 @@ describe('importArtifacts (DB)', () => {
     const ids = await importArtifacts(ctx, owners);
     expect(ids.evaluation.has(evaluation.id)).toBe(true);
 
-    const archiveUser = await db.user.findUnique({ where: { email: ARCHIVE_USER_EMAIL } });
+    const archiveUser = await db.user.findFirst({ where: { email: ARCHIVE_USER_EMAIL } });
     const v2Evaluation = await db.evaluation.findUnique({ where: { id: ids.evaluation.get(evaluation.id)! } });
     expect(v2Evaluation!.userId).toBe(archiveUser!.id);
   });
@@ -288,7 +288,7 @@ describe('importArtifacts (DB)', () => {
 
     const ids = await importArtifacts(ctx, owners);
 
-    const archiveUser = await db.user.findUnique({ where: { email: ARCHIVE_USER_EMAIL } });
+    const archiveUser = await db.user.findFirst({ where: { email: ARCHIVE_USER_EMAIL } });
 
     // isDefault + KEPT owner: public, and still attributed to the live mapped user (not archive).
     const v2KeptDefault = await db.project.findUnique({ where: { id: ids.project.get(keptDefaultProject.id)! } });
@@ -320,7 +320,7 @@ describe('importArtifacts (DB)', () => {
 
     const ids = await importArtifacts(ctx, owners);
 
-    const archiveUser = await db.user.findUnique({ where: { email: ARCHIVE_USER_EMAIL } });
+    const archiveUser = await db.user.findFirst({ where: { email: ARCHIVE_USER_EMAIL } });
     expect(ids.dataset.get(publicDataset.id)).toBeTruthy();
     const v2PublicDataset = await db.dataset.findUnique({ where: { id: ids.dataset.get(publicDataset.id)! } });
     expect(v2PublicDataset!.userId).toBe(archiveUser!.id);
