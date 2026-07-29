@@ -3,7 +3,11 @@ import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { compare, hash } from 'bcryptjs';
 import { db, truncateAll, mkUser } from './helpers';
-import { resolveOidcUser, OIDC_MANAGED_PASSWORD_HASH } from '../../src/lib/oidc-user';
+import {
+  resolveOidcUser,
+  OIDC_MANAGED_PASSWORD_HASH,
+  type OidcUserClient,
+} from '../../src/lib/oidc-user';
 import { authOptions } from '../../src/lib/auth';
 
 /**
@@ -155,39 +159,152 @@ describe('OIDC user resolution (issuer, sub) — spec §7 non-destructive-v5 con
     expect(claimed?.role).toBe('admin'); // untouched by the claim
   });
 
-  it('two concurrent sign-ins for the SAME invited email (different subs) race safely: exactly one claims, the other is denied — never both bound to the same userId (TOCTOU fix)', async () => {
+  // ─── Invite-claim TOCTOU guard ──────────────────────────────────────────
+  //
+  // A previous version of this file asserted the TOCTOU fix via
+  // `Promise.all([resolveOidcUser(...), resolveOidcUser(...)])` against a
+  // live Postgres connection pool. That looked like a race test but wasn't
+  // one in practice: Node's event loop + Prisma's connection acquisition
+  // serialize the two calls' query round-trips closely enough that the
+  // second call's `findFirst` almost always runs *after* the first call's
+  // write has already landed — so the second call never even sees the row
+  // as claimable, and the test passes for a reason that has nothing to do
+  // with the `updateMany` WHERE-clause guard. Proof: reverting
+  // `resolveOidcUser`'s claim step to the pre-fix `findFirst` + unconditional
+  // `update({where:{id}})` still passed that test — the bug it was meant to
+  // catch was invisible to it.
+  //
+  // The two tests below replace it with deterministic reproductions of the
+  // race OUTCOME instead of hoping to schedule the race itself:
+  //   1. A sequential-call test — establishes that a second, different sub
+  //      is denied and can never displace a claim that has already fully
+  //      landed. (This exercises the same "never re-claimable" behavior as
+  //      the WHERE-clause's `invitePending: true` matching nothing once
+  //      that's false — but, being fully sequential, does NOT exercise the
+  //      atomic guard itself, since the first call's write is complete
+  //      before the second call ever reads. Note this alone would still
+  //      pass against the buggy pre-fix code, for the same reason the old
+  //      Promise.all test did — see the guard test below for the one that
+  //      actually distinguishes them.)
+  //   2. The atomic-claim GUARD test — manufactures the exact TOCTOU
+  //      window deterministically: a second caller's `findFirst` is rigged
+  //      to return a STALE pre-claim snapshot of the invite row (exactly
+  //      what a real second racer's read would return had it landed before
+  //      the first racer's write), while every other call
+  //      (`findUnique`/`update`/`updateMany`) hits the real, already-updated
+  //      database. This proves the atomicity comes from the WRITE's WHERE
+  //      clause re-evaluating current row state — not from anything the
+  //      read observed — which is precisely the property the fix depends
+  //      on and the property a revert to unconditional `update({where:{id}})`
+  //      would violate.
+
+  it('a second, different sub can never displace a claim that has already landed (sequential, non-racing)', async () => {
     const invite = await db.user.create({
       data: {
-        email: 'race@test.local',
+        email: 'sequential-claim@test.local',
         passwordHash: OIDC_MANAGED_PASSWORD_HASH,
         invitePending: true,
         role: 'user',
       },
     });
 
-    // Both calls share the same read-then-write window resolveOidcUser used
-    // to have between its findFirst and its (formerly unconditional)
-    // update — Promise.all fires them close enough together to exercise
-    // that window for real against a live Postgres connection pool, not
-    // just simulate it.
-    const [outcomeA, outcomeB] = await Promise.all([
-      resolveOidcUser(db, { issuer: ISSUER, sub: 'sub-race-a', email: 'race@test.local', name: 'Racer A' }),
-      resolveOidcUser(db, { issuer: ISSUER, sub: 'sub-race-b', email: 'race@test.local', name: 'Racer B' }),
-    ]);
-    const outcomes = [outcomeA, outcomeB];
+    // Step 2: the first sign-in claims it — happy path, same shape as the
+    // dedicated "is CLAIMED" test above.
+    const winner = await resolveOidcUser(db, {
+      issuer: ISSUER,
+      sub: 'sub-seq-s1',
+      email: 'sequential-claim@test.local',
+      name: 'Racer S1',
+    });
+    expect(winner).toMatchObject({ status: 'ok', created: false, claimedInvite: true });
+    expect((winner as { userId: string }).userId).toBe(invite.id);
 
-    const claimed = outcomes.filter((r) => r.status === 'ok');
-    const denied = outcomes.filter((r) => r.status === 'denied');
-    expect(claimed).toHaveLength(1);
-    expect(denied).toHaveLength(1);
-    expect((claimed[0] as { userId: string }).userId).toBe(invite.id);
+    // Step 3: a second, different sub presenting the same email, called
+    // strictly after the first has fully committed. Must NOT return the
+    // claimed row's userId — with autoprovision off (default, see
+    // beforeEach), it must be denied outright.
+    const loser = await resolveOidcUser(db, {
+      issuer: ISSUER,
+      sub: 'sub-seq-s2',
+      email: 'sequential-claim@test.local',
+      name: 'Racer S2',
+    });
+    expect(loser).toEqual({ status: 'denied', reason: 'no_match_autoprovision_disabled' });
 
-    // Exactly one row exists, permanently bound to whichever sub won the
-    // race — never two rows, never both subs, never a partial write.
-    expect(await db.user.count()).toBe(1);
     const row = await db.user.findUniqueOrThrow({ where: { id: invite.id } });
+    expect(row.oidcSubject).toBe('sub-seq-s1'); // never overwritten to the second sub
     expect(row.invitePending).toBe(false);
-    expect(['sub-race-a', 'sub-race-b']).toContain(row.oidcSubject);
+    expect(await db.user.count()).toBe(1);
+  });
+
+  it('ATOMIC-CLAIM GUARD: a stale claimable read racing a real committed write must not let a second sub overwrite the winner (reverting to unconditional update fails this test — see report)', async () => {
+    const invite = await db.user.create({
+      data: {
+        email: 'atomic-guard@test.local',
+        passwordHash: OIDC_MANAGED_PASSWORD_HASH,
+        invitePending: true,
+        role: 'user',
+      },
+    });
+
+    // Snapshot the row exactly as a second racer's `findFirst` would have
+    // seen it — BEFORE the first racer's write lands. This is the "read"
+    // half of the TOCTOU window, captured deterministically instead of
+    // relying on real scheduling to land two round-trips inside it.
+    const staleSnapshot = { ...invite };
+
+    // The first racer really claims it — a genuine, uncontested write
+    // against live Postgres.
+    const winner = await resolveOidcUser(db, {
+      issuer: ISSUER,
+      sub: 'sub-guard-winner',
+      email: 'atomic-guard@test.local',
+      name: 'Winner',
+    });
+    expect(winner).toMatchObject({
+      status: 'ok',
+      created: false,
+      claimedInvite: true,
+      userId: invite.id,
+    });
+
+    // The second racer's resolveOidcUser call, but with `findFirst` rigged
+    // to return the STALE pre-claim snapshot — reproducing exactly what a
+    // second racer would have read had its query landed inside the TOCTOU
+    // window, before the winner's write. `findUnique`/`update`/`updateMany`
+    // are the real bound Prisma delegate methods and hit the REAL,
+    // already-updated database — only the read is stale.
+    const staleReadClient: OidcUserClient = {
+      user: {
+        findUnique: db.user.findUnique.bind(db.user),
+        findFirst: async () => staleSnapshot,
+        update: db.user.update.bind(db.user),
+        updateMany: db.user.updateMany.bind(db.user),
+        create: db.user.create.bind(db.user),
+      },
+    } as unknown as OidcUserClient;
+
+    const loser = await resolveOidcUser(staleReadClient, {
+      issuer: ISSUER,
+      sub: 'sub-guard-loser',
+      email: 'atomic-guard@test.local',
+      name: 'Loser',
+    });
+
+    // THE INVARIANT: the second racer must never be told it claimed
+    // `invite.id`, no matter what its (stale) read observed. The fixed
+    // code's `updateMany({where:{id, invitePending:true, oidcSubject:null},
+    // ...})` re-evaluates that WHERE against the REAL current row — which
+    // the winner already flipped to invitePending:false — so it matches
+    // ZERO rows, count is 0, and resolveOidcUser falls through to
+    // re-resolve-by-identity-or-deny. Never bound to invite.id, never
+    // "ok".
+    expect(loser).toEqual({ status: 'denied', reason: 'no_match_autoprovision_disabled' });
+
+    const row = await db.user.findUniqueOrThrow({ where: { id: invite.id } });
+    expect(row.oidcSubject).toBe('sub-guard-winner'); // NOT overwritten to the loser's sub
+    expect(row.invitePending).toBe(false);
+    expect(await db.user.count()).toBe(1);
   });
 
   it('normalizes the OIDC profile email (lowercase+trim) before invite-claim matching, so IdP casing differences never miss the invite', async () => {
