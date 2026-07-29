@@ -336,6 +336,52 @@ describe('worker claim idempotency (src/worker/claim.ts, judgment-consumer.ts, r
     expect(persisted.overallScore).toBe(8);
   });
 
+  it('Task 10 metadata capture: full claim -> provider -> persist -> DB round-trip persists every call-metadata field to the right column (guards field-name transposition tsc cannot catch)', async () => {
+    const fixture = await createFixture();
+    const judgment = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId);
+
+    // Every metadata field `persistSuccess`/`commonSuccessUpdateData`
+    // (src/worker/judgment-consumer.ts) is responsible for writing,
+    // deliberately given DISTINCT values so a transposition (e.g.
+    // `inputTokens`/`outputTokens` swapped, or `servedModelId` written
+    // into `finishReason`) shows up as a wrong assertion rather than
+    // silently matching.
+    const metadataOverrides = {
+      servedModelId: 'gpt-4o-mini-2026-07-18',
+      finishReason: 'stop',
+      inputTokens: 321,
+      outputTokens: 654,
+      parseMode: 'fallback' as const,
+      samplingParamsUsed: { temperature: 0.42, max_tokens: 999 },
+    };
+
+    const calls: RunProviderJudgmentInput[] = [];
+    const consumer = createJudgmentConsumer({ provider: fakeProvider(calls, metadataOverrides) });
+    const msg: JudgmentExecuteMsg = { judgmentId: judgment.id, runId: fixture.run.id, attempt: 1 };
+    const ch = fakeChannel();
+
+    await consumer.handle(fakeMessage(msg), ch);
+
+    expect(calls).toHaveLength(1);
+    expect(ch.ackCalls).toHaveLength(1);
+    expect(ch.nackCalls).toHaveLength(0);
+
+    // Re-read from the DB — not the in-memory result — so this actually
+    // guards the persist path, not just the fake provider's return value.
+    const persisted = await prisma.modelJudgment.findUniqueOrThrow({ where: { id: judgment.id } });
+    expect(persisted.status).toBe('completed');
+    expect(persisted.servedModelId).toBe(metadataOverrides.servedModelId);
+    expect(persisted.finishReason).toBe(metadataOverrides.finishReason);
+    expect(persisted.inputTokens).toBe(metadataOverrides.inputTokens);
+    expect(persisted.outputTokens).toBe(metadataOverrides.outputTokens);
+    expect(persisted.parseMode).toBe(metadataOverrides.parseMode);
+    expect(persisted.samplingParams).toEqual(metadataOverrides.samplingParamsUsed);
+    // combinedTokenCount (judgment-consumer.ts) prefers the inputTokens +
+    // outputTokens split over the fake provider's default `tokenCount:
+    // 100` whenever either is set — pins that derivation too.
+    expect(persisted.tokenCount).toBe(metadataOverrides.inputTokens + metadataOverrides.outputTokens);
+  });
+
   it('claim then abandon: a redelivery within the lease is treated as a duplicate — ack, no provider call, no reclaim', async () => {
     const fixture = await createFixture();
     const judgment = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId);

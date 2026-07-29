@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { renderJudgmentSystemPrompt, buildJudgmentUserPrompt, renderJudgmentPrompt } from '@/lib/llm/render';
 import { V1_LEGACY_JUDGMENT_SYSTEM_PROMPT } from '../../prisma/seed-prompt-templates';
 import type { RubricCriterionView } from '@/types';
@@ -157,6 +160,76 @@ describe('render: renderJudgmentSystemPrompt — v1-legacy golden byte-parity', 
         { name: 'x', description: undefined, criteria: [] }
       )
     ).toThrow(/unsupported PromptTemplate protocol "pairwise"/);
+  });
+});
+
+describe('render: evalTemplateLiteral safety — Task 10 review CRITICAL fix (no more `new Function`)', () => {
+  it('CRITICAL: a raw-backtick breakout payload throws at parse time and never executes (no side effect)', () => {
+    // Mirrors the exact shape that broke out of the OLD
+    // `new Function(...argNames, \`return \\\`${source}\\\`;\`)` construction:
+    // an unescaped backtick in the DB `body` used to close the surrounding
+    // template-literal string early, splicing everything after it in as
+    // real, fully-privileged JS statements — here, a `require('fs')` call
+    // that writes a marker file. If this payload ever actually executed,
+    // `markerPath` would exist on disk afterward; asserted absent below.
+    // The new parser has no `eval`/`new Function` to break out of AND
+    // rejects a bare top-level backtick outright (see render.ts's module
+    // doc) — this throws immediately after the leading `${rubricName}`,
+    // before the injected `require(...)` text is ever inspected.
+    const markerPath = path.join(
+      os.tmpdir(),
+      `render-rce-marker-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    );
+    const malicious = `\${rubricName}\` + require('fs').writeFileSync(${JSON.stringify(markerPath)}, 'PWNED') + \``;
+
+    expect(() =>
+      renderJudgmentSystemPrompt(
+        { body: malicious, protocol: 'pointwise' },
+        { name: 'x', description: undefined, criteria: [] }
+      )
+    ).toThrow(/PromptTemplate body/);
+
+    expect(fs.existsSync(markerPath)).toBe(false);
+  });
+
+  it('throws for an unknown `${identifier}` not in the renderer\'s whitelist', () => {
+    expect(() =>
+      renderJudgmentSystemPrompt(
+        { body: '${totallyUnknownIdentifier}', protocol: 'pointwise' },
+        { name: 'x', description: undefined, criteria: [] }
+      )
+    ).toThrow(/unknown identifier/);
+  });
+
+  it('throws for an unknown identifier used as a ternary condition too', () => {
+    expect(() =>
+      renderJudgmentSystemPrompt(
+        { body: "${notWhitelisted ? `yes` : 'no'}", protocol: 'pointwise' },
+        { name: 'x', description: undefined, criteria: [] }
+      )
+    ).toThrow(/unknown identifier/);
+  });
+
+  it('throws for an unsupported construct inside a `${...}` slot (neither a bare identifier nor the one supported ternary shape)', () => {
+    expect(() =>
+      renderJudgmentSystemPrompt(
+        { body: '${rubricName.toUpperCase()}', protocol: 'pointwise' },
+        { name: 'x', description: undefined, criteria: [] }
+      )
+    ).toThrow(/PromptTemplate body/);
+  });
+
+  it('the real v1-legacy body renders byte-identical to the golden oracle across all 3 rubricDescription branches (present/undefined/empty)', () => {
+    const branches: Array<string | undefined> = ['A multi-line\ndescription', undefined, ''];
+    for (const description of branches) {
+      const expected = goldenBuildJudgmentSystemPrompt('Pinned Rubric', description, makeCriteria());
+      const actual = renderJudgmentSystemPrompt(v1LegacyTemplate, {
+        name: 'Pinned Rubric',
+        description,
+        criteria: makeCriteria(),
+      });
+      expect(actual).toBe(expected);
+    }
   });
 });
 
