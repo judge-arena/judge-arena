@@ -32,9 +32,9 @@ import { prisma } from '@/lib/db';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
-import { generateSlug } from '@/lib/config';
 import { encryptIfNeeded } from '@/lib/crypto';
 import { logger } from '@/lib/logger';
+import { createCustomJudgeModel } from '@/lib/model-catalog';
 import { modelEndpointInclude, modelEndpointToWireShape } from './shared';
 
 const JUDGE_CLASSES = [
@@ -94,13 +94,6 @@ export async function GET() {
   }
 }
 
-async function uniqueJudgeModelSlug(name: string): Promise<string> {
-  const base = generateSlug(name);
-  const existing = await prisma.judgeModel.findUnique({ where: { slug: base }, select: { id: true } });
-  if (!existing) return base;
-  return `${base}-${Date.now().toString(36).slice(-4)}`;
-}
-
 // POST /api/models — select an existing catalog version, or add a custom model
 export async function POST(request: Request) {
   const session = await requireAuth();
@@ -113,7 +106,7 @@ export async function POST(request: Request) {
     const data = createModelSchema.parse(body);
     const encryptedApiKey = data.apiKey ? encryptIfNeeded(data.apiKey) : null;
 
-    let judgeModelVersionId: string;
+    let endpointId: string;
 
     if (data.mode === 'catalog') {
       const version = await prisma.judgeModelVersion.findUnique({
@@ -126,43 +119,42 @@ export async function POST(request: Request) {
       if (version.retiredAt || version.judgeModel.retiredAt) {
         return NextResponse.json({ error: 'This judge model version has been retired' }, { status: 400 });
       }
-      judgeModelVersionId = version.id;
-    } else {
-      const slug = await uniqueJudgeModelSlug(data.name);
-      const judgeModel = await prisma.judgeModel.create({
-        data: {
-          name: data.name,
-          slug,
-          judgeClass: data.judgeClass,
-          scoringMechanism: data.scoringMechanism,
-          baseModel: data.baseModel,
-        },
-      });
-      const version = await prisma.judgeModelVersion.create({
-        data: {
-          judgeModelId: judgeModel.id,
-          ordinal: 1,
-          servingBackend: data.servingBackend,
-          protocolSupport: { pointwise: ['score'] },
-        },
-      });
-      judgeModelVersionId = version.id;
-    }
 
-    const created = await prisma.modelEndpoint.create({
-      data: {
-        userId: session.user.id,
-        judgeModelVersionId,
-        endpoint: data.endpoint || null,
+      const created = await prisma.modelEndpoint.create({
+        data: {
+          userId: session.user.id,
+          judgeModelVersionId: version.id,
+          endpoint: data.endpoint || null,
+          apiKeyEnc: encryptedApiKey,
+          isActive: data.isActive,
+          verifiedAt: null,
+          verificationError: 'Not tested yet',
+        },
+      });
+      endpointId = created.id;
+    } else {
+      // Shared with POST /api/config/import's model-import path (Task 12
+      // review fix) — see src/lib/model-catalog.ts's module doc.
+      const created = await createCustomJudgeModel(prisma, session.user.id, {
+        name: data.name,
+        judgeClass: data.judgeClass,
+        scoringMechanism: data.scoringMechanism,
+        servingBackend: data.servingBackend,
+        baseModel: data.baseModel,
+        endpoint: data.endpoint,
         apiKeyEnc: encryptedApiKey,
         isActive: data.isActive,
-        verifiedAt: null,
         verificationError: 'Not tested yet',
-      },
+      });
+      endpointId = created.modelEndpointId;
+    }
+
+    const endpointWithVersion = await prisma.modelEndpoint.findUniqueOrThrow({
+      where: { id: endpointId },
       include: modelEndpointInclude,
     });
 
-    return NextResponse.json(modelEndpointToWireShape(created), { status: 201 });
+    return NextResponse.json(modelEndpointToWireShape(endpointWithVersion), { status: 201 });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: 'Validation failed', details: error.errors }, { status: 400 });

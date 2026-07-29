@@ -90,6 +90,39 @@ describe('config', () => {
     it('should throw on invalid YAML', () => {
       expect(() => deserializeConfig('version: 2.0')).toThrow();
     });
+
+    // Task 12 review fix: config export now emits the model's REAL
+    // ServingBackend (src/app/api/config/export/route.ts), not the legacy
+    // 3-value ModelConfig.provider string — the model's `provider` field
+    // must accept the full set so a catalog+endpoint-domain export
+    // round-trips through import without failing validation.
+    it('should round-trip a model with a real (non-legacy) ServingBackend provider value', () => {
+      const config = {
+        version: '1.0' as const,
+        exportedAt: '2025-01-01T00:00:00Z',
+        projects: [],
+        rubrics: [],
+        models: [
+          { slug: 'self-hosted-judge', name: 'Self-Hosted Judge', provider: 'vllm', modelId: 'meta-llama/Llama-3-70b-Instruct', isActive: true },
+        ],
+        datasets: [],
+      };
+
+      const yaml = serializeConfig(config);
+      const parsed = deserializeConfig(yaml);
+      expect(parsed.models[0].provider).toBe('vllm');
+    });
+
+    it('should still accept the legacy "local" provider value (backward-compat with pre-fix exports)', () => {
+      const result = configDocumentSchema.safeParse({
+        version: '1.0',
+        exportedAt: '2025-01-01',
+        models: [
+          { slug: 'legacy-local', name: 'Legacy Local Judge', provider: 'local', modelId: 'local-model', isActive: true },
+        ],
+      });
+      expect(result.success).toBe(true);
+    });
   });
 
   describe('configDocumentSchema', () => {

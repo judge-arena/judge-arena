@@ -565,6 +565,49 @@ describe('worker claim idempotency (src/worker/claim.ts, judgment-consumer.ts, r
     expect(run.finalizedAt).not.toBeNull();
   });
 
+  // ── Cross-user endpoint borrow removal (Task 12) ─────────────────────────
+  // resolveEndpoint() in judgment-consumer.ts now ALWAYS scopes to the run's
+  // triggeredBy user's own ModelEndpoint — the pre-Task-12 "any active
+  // endpoint for the version, regardless of owner" fallback is gone. This
+  // regression test proves that directly at the worker layer: user A
+  // (triggeredById) has NO endpoint for the judge version a judgment
+  // targets, while user B DOES — the judgment must error out rather than
+  // silently running against user B's endpoint (and, worse, user B's key).
+  it('a judgment whose triggeredById user has no endpoint for the version errors out even though ANOTHER user does — the other user\'s endpoint/key is never touched', async () => {
+    const userA = await mkUser(); // triggers the run; owns NO endpoint for the version
+    const userB = await mkUser(); // owns an active endpoint for the SAME version
+    const project = await mkProject(userA.id);
+    const evaluation = await mkEvaluation(project.id, userA.id);
+    const rubric = await mkRubric(userA.id);
+    const { version } = await mkJudgeModelVersion();
+    const bEndpoint = await mkEndpoint(userB.id, version.id); // must never be resolved/used by this run
+    const promptTemplate = await seedPromptTemplates(prisma);
+    const run = await mkEvaluationRun(evaluation.id, userA.id, rubric.id);
+    const judgment = await mkJudgment(run.id, version.id, promptTemplate.id);
+
+    const calls: RunProviderJudgmentInput[] = [];
+    const consumer = createJudgmentConsumer({ provider: fakeProvider(calls) });
+    const msg: JudgmentExecuteMsg = { judgmentId: judgment.id, runId: run.id, attempt: 1 };
+    const ch = fakeChannel();
+
+    await consumer.handle(fakeMessage(msg), ch);
+
+    // The provider seam is never invoked — no call is made through user B's
+    // endpoint/key on user A's behalf.
+    expect(calls).toHaveLength(0);
+    expect(ch.ackCalls).toHaveLength(1);
+    expect(ch.nackCalls).toHaveLength(0);
+
+    const persisted = await prisma.modelJudgment.findUniqueOrThrow({ where: { id: judgment.id } });
+    expect(persisted.status).toBe('error');
+    expect(persisted.error).toBe(`No active ModelEndpoint configured for JudgeModelVersion ${version.id}`);
+
+    // User B's endpoint is untouched — never consulted, never marked
+    // verified/used by a run it has nothing to do with.
+    const bEndpointAfter = await prisma.modelEndpoint.findUniqueOrThrow({ where: { id: bEndpoint.id } });
+    expect(bEndpointAfter).toEqual(bEndpoint);
+  });
+
   // ── Retry/DLQ disposition + persist-failure/within-lease hardening ──────
   // (Task 7 review follow-up: disposition scope, strand-proof duplicates,
   // attempt-cap integrity — see judgment-consumer.ts / claim.ts docstrings.)

@@ -122,29 +122,48 @@ export async function GET(request: Request) {
     }
 
     // ── Models (no secrets) ──
+    // Task 12 review fix: sourced from the JudgeModel/JudgeModelVersion/
+    // ModelEndpoint catalog+endpoint domain, NOT the retired `ModelConfig`
+    // table — exporting from ModelConfig would emit rows the runtime no
+    // longer writes/reads and that `POST /api/config/import` no longer
+    // creates, breaking the export/import round-trip.
+    //
+    // `JudgeModel.slug` is globally unique (unlike the old per-user
+    // `ModelConfig.slug`) and always set at creation, so — unlike the other
+    // sections above — there's no "backfill a missing slug" step here. A
+    // slug collision can still happen in the EXPORTED document if this user
+    // has more than one ModelEndpoint against the same JudgeModel (e.g. one
+    // active, one retired key) — disambiguated the same way the other
+    // sections dedupe an auto-generated slug, with the endpoint's own id.
     if (sections.includes('models')) {
       const where = admin ? undefined : { userId };
-      const models = await prisma.modelConfig.findMany({
+      const endpoints = await prisma.modelEndpoint.findMany({
         where,
-        orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
+        include: { judgeModelVersion: { include: { judgeModel: true } } },
+        orderBy: [{ isActive: 'desc' }, { createdAt: 'asc' }],
       });
 
-      // Auto-generate slugs
       const slugs: string[] = [];
-      for (const model of models) {
-        if (!model.slug) {
-          const slug = generateSlug(model.name);
-          const uniqueSlug = slugs.includes(slug) ? `${slug}-${model.id.slice(0, 6)}` : slug;
-          await prisma.modelConfig.update({
-            where: { id: model.id },
-            data: { slug: uniqueSlug },
-          });
-          model.slug = uniqueSlug;
-        }
-        slugs.push(model.slug);
-      }
+      config.models = endpoints.map((endpoint) => {
+        const judgeModel = endpoint.judgeModelVersion.judgeModel;
+        const slug = slugs.includes(judgeModel.slug)
+          ? `${judgeModel.slug}-${endpoint.id.slice(0, 6)}`
+          : judgeModel.slug;
+        slugs.push(slug);
 
-      config.models = models.map(dbModelToConfig);
+        return dbModelToConfig({
+          slug,
+          name: judgeModel.name,
+          // The REAL servingBackend, not collapsed to the legacy 3-value
+          // provider string — see `modelSchema`'s doc in src/lib/config.ts
+          // for why the config format's `provider` field now accepts the
+          // full ServingBackend set.
+          provider: endpoint.judgeModelVersion.servingBackend,
+          modelId: judgeModel.baseModel ?? '',
+          endpoint: endpoint.endpoint,
+          isActive: endpoint.isActive,
+        });
+      });
     }
 
     // ── Datasets ──

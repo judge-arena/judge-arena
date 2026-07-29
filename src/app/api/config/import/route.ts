@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import type { JudgeClass, ServingBackend } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { requireAuth, requireScope } from '@/lib/auth-guard';
 import {
@@ -7,7 +8,47 @@ import {
   type ImportDiffReport,
   deserializeConfig,
 } from '@/lib/config';
+import { legacyProviderToBackend } from '@/lib/llm';
+import { createCustomJudgeModel } from '@/lib/model-catalog';
 import { logger, serializeError } from '@/lib/logger';
+
+/** Old config exports (pre Task 12 review fix) only ever wrote one of the
+ * three legacy `ModelConfig.provider` values — translate those the same
+ * way the v1->v2 importer does (scripts/importer/judges.ts's
+ * classifyProvider). Config exported AFTER this fix writes the real
+ * `ServingBackend` value directly (see config/export/route.ts), so this is
+ * a passthrough for those — safe because `configDocumentSchema`'s
+ * `modelSchema.provider` enum only admits the legacy 3 plus the real 5
+ * ServingBackend values (which overlap on 'anthropic'/'openai'). */
+const LEGACY_MODEL_PROVIDERS = new Set(['anthropic', 'openai', 'local']);
+
+function resolveServingBackend(provider: string): ServingBackend {
+  if (LEGACY_MODEL_PROVIDERS.has(provider)) {
+    return legacyProviderToBackend(provider);
+  }
+  return provider as ServingBackend;
+}
+
+/** judgeClass default for an imported model — the config format never
+ * carried one. Same split as scripts/importer/judges.ts's classifyProvider
+ * (anthropic/openai -> prompted_api, local -> prompted_open_weight),
+ * extended to the two other real-backend cases the v1 importer never had
+ * to handle (openrouter is a hosted-API aggregator like anthropic/openai;
+ * vllm/ollama are self-hosted open-weight runtimes like 'local'). Computed
+ * off the RAW config provider string, before `resolveServingBackend`
+ * collapses 'local' onto the 'openai' backend — collapsing first would
+ * misclassify a self-hosted 'local' model as `prompted_api`.
+ */
+function judgeClassForImportedProvider(provider: string): JudgeClass {
+  switch (provider) {
+    case 'anthropic':
+    case 'openai':
+    case 'openrouter':
+      return 'prompted_api';
+    default: // 'local' | 'vllm' | 'ollama'
+      return 'prompted_open_weight';
+  }
+}
 
 /**
  * POST /api/config/import
@@ -20,10 +61,15 @@ import { logger, serializeError } from '@/lib/logger';
  * Body: raw YAML or JSON string (Content-Type: text/yaml or application/json)
  *
  * Import semantics:
- *   - Match by slug (userId + slug).
+ *   - Match by slug (userId + slug) for projects/rubrics/datasets.
+ *   - Models match by `JudgeModel.slug` (globally unique — not scoped by
+ *     userId, since the catalog is shared) + this user owning an endpoint
+ *     against it; see the "Models" section below for why "update" there is
+ *     narrower than the other sections (catalog identity is immutable).
  *   - If slug exists → update if changed, skip if identical.
  *   - If slug doesn't exist → create new entity.
- *   - API keys are NEVER imported (model configs are created without keys).
+ *   - API keys are NEVER imported (imported models get a keyless
+ *     ModelEndpoint, same as every other field in this file).
  *   - Dataset samples are imported if present in the config.
  *   - Projects referenced by datasets are resolved by slug.
  *   - Returns a diff report showing what was/would be created, updated, or skipped.
@@ -189,31 +235,69 @@ export async function POST(request: Request) {
     }
 
     // ── Models (never import apiKey) ──
+    // Task 12 review fix: migrated off the retired `ModelConfig` write path
+    // onto the JudgeModel/JudgeModelVersion/ModelEndpoint catalog+endpoint
+    // domain (see src/lib/model-catalog.ts's module doc).
+    //
+    // `JudgeModel`/`JudgeModelVersion` are immutable once created anywhere
+    // in this app — there is no write path that mutates an EXISTING
+    // catalog entry's identity fields (name/servingBackend/baseModel). So
+    // "update" here can only ever apply to the two fields that actually
+    // live on the per-user, mutable `ModelEndpoint` row: `endpoint` (URL)
+    // and `isActive`. If an imported model's identity fields differ from
+    // what's already on the matched `JudgeModel`, that's still reported as
+    // a diff (so the user SEES it in the preview) but is NOT applied — a
+    // genuine identity change needs a new catalog entry (a different slug),
+    // not a mutation of an existing, possibly-shared judge identity.
+    //
+    // "Existing" is resolved via `JudgeModel.slug` (globally unique, unlike
+    // the old per-user `ModelConfig.slug`) + this user having an endpoint
+    // against some version of that JudgeModel — matches what
+    // `config/export/route.ts` now emits (the real `JudgeModel.slug`), so a
+    // re-import of a previously-exported config finds its own rows. If a
+    // JudgeModel with that slug exists but belongs to a DIFFERENT user's
+    // import (no endpoint of this user's points at it), this falls to the
+    // create branch below — `createCustomJudgeModel`'s own slug-collision
+    // suffixing (see src/lib/model-catalog.ts) then gives this user's new
+    // JudgeModel a distinct slug rather than colliding on the taken one.
+    // Disclosed tradeoff, not a bug: import never tries to detect/share an
+    // unrelated user's catalog entry, only this user's own prior import.
     for (const configModel of config.models) {
       const slug = configModel.slug;
-      const existing = await prisma.modelConfig.findFirst({
-        where: { userId, slug },
-      });
+      const servingBackend = resolveServingBackend(configModel.provider);
+      const judgeClass = judgeClassForImportedProvider(configModel.provider);
 
-      if (existing) {
+      const existingJudgeModel = await prisma.judgeModel.findUnique({ where: { slug } });
+      const existingEndpoint = existingJudgeModel
+        ? await prisma.modelEndpoint.findFirst({
+            where: { userId, judgeModelVersion: { judgeModelId: existingJudgeModel.id } },
+            include: { judgeModelVersion: true },
+            orderBy: { createdAt: 'asc' },
+          })
+        : null;
+
+      if (existingJudgeModel && existingEndpoint) {
         const changes: string[] = [];
-        if (existing.name !== configModel.name) changes.push(`name: "${existing.name}" → "${configModel.name}"`);
-        if (existing.provider !== configModel.provider) changes.push(`provider: ${existing.provider} → ${configModel.provider}`);
-        if (existing.modelId !== configModel.modelId) changes.push(`modelId: ${existing.modelId} → ${configModel.modelId}`);
-        if ((existing.endpoint ?? '') !== (configModel.endpoint ?? '')) changes.push('endpoint updated');
-        if (existing.isActive !== configModel.isActive) changes.push(`isActive: ${existing.isActive} → ${configModel.isActive}`);
+        if (existingJudgeModel.name !== configModel.name) {
+          changes.push(`name: "${existingJudgeModel.name}" → "${configModel.name}" (catalog identity is immutable — not applied)`);
+        }
+        if (existingEndpoint.judgeModelVersion.servingBackend !== servingBackend) {
+          changes.push(`provider: ${existingEndpoint.judgeModelVersion.servingBackend} → ${servingBackend} (catalog identity is immutable — not applied)`);
+        }
+        if ((existingJudgeModel.baseModel ?? '') !== configModel.modelId) {
+          changes.push(`modelId: ${existingJudgeModel.baseModel ?? ''} → ${configModel.modelId} (catalog identity is immutable — not applied)`);
+        }
+        if ((existingEndpoint.endpoint ?? '') !== (configModel.endpoint ?? '')) changes.push('endpoint updated');
+        if (existingEndpoint.isActive !== configModel.isActive) changes.push(`isActive: ${existingEndpoint.isActive} → ${configModel.isActive}`);
 
         if (changes.length === 0) {
           items.push({ type: 'model', slug, name: configModel.name, action: 'skip' });
         } else {
           items.push({ type: 'model', slug, name: configModel.name, action: 'update', changes });
           if (!dryRun) {
-            await prisma.modelConfig.update({
-              where: { id: existing.id },
+            await prisma.modelEndpoint.update({
+              where: { id: existingEndpoint.id },
               data: {
-                name: configModel.name,
-                provider: configModel.provider,
-                modelId: configModel.modelId,
                 endpoint: configModel.endpoint ?? null,
                 isActive: configModel.isActive,
               },
@@ -223,16 +307,17 @@ export async function POST(request: Request) {
       } else {
         items.push({ type: 'model', slug, name: configModel.name, action: 'create' });
         if (!dryRun) {
-          await prisma.modelConfig.create({
-            data: {
-              name: configModel.name,
-              slug,
-              provider: configModel.provider,
-              modelId: configModel.modelId,
-              endpoint: configModel.endpoint ?? null,
-              isActive: configModel.isActive,
-              userId,
-            },
+          await createCustomJudgeModel(prisma, userId, {
+            name: configModel.name,
+            slug,
+            judgeClass,
+            scoringMechanism: 'critique_generative',
+            servingBackend,
+            baseModel: configModel.modelId,
+            endpoint: configModel.endpoint ?? null,
+            apiKeyEnc: null, // API keys are NEVER imported (see module doc above)
+            isActive: configModel.isActive,
+            verificationError: 'Not tested yet',
           });
         }
       }

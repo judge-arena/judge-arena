@@ -142,7 +142,15 @@ const rubricSchema = z.object({
 const modelSchema = z.object({
   slug: z.string().min(1),
   name: z.string().min(1),
-  provider: z.enum(['anthropic', 'openai', 'local']),
+  // `'anthropic' | 'openai' | 'local'` are the legacy `ModelConfig.provider`
+  // values (still accepted on import for backward-compat with configs
+  // exported before Task 12's review fix — see
+  // `src/app/api/config/import/route.ts`'s `resolveServingBackend`, which
+  // runs those three through `legacyProviderToBackend`). `'openrouter' |
+  // 'vllm' | 'ollama'` are real `ServingBackend` values the catalog/endpoint
+  // domain added — config export (post-fix) writes the real backend
+  // directly, so round-tripping an export needs the wider set here too.
+  provider: z.enum(['anthropic', 'openai', 'local', 'openrouter', 'vllm', 'ollama']),
   modelId: z.string().min(1),
   endpoint: z.string().optional(),
   isActive: z.boolean().default(true),
