@@ -96,12 +96,18 @@ describe('classify()', () => {
   });
 
   describe('abort/timeout (no HTTP status)', () => {
-    it('AbortError by .name → retryable', () => {
+    it('AbortError by .name → retryable, timeout: true', () => {
       const err = new Error('The operation was aborted');
       err.name = 'AbortError';
       const result = classify(err, 'anthropic');
       expect(result.kind).toBe('retryable');
       expect(result.status).toBeUndefined();
+      // Task 10: distinguishable from an ordinary connection-level abort —
+      // see registry.ts's execute(), which raises its own timeout
+      // ProviderError with the same flag before this path is ever reached
+      // for a budget-driven timeout; this covers the case where a raw
+      // abort/timeout signal reaches classify() directly.
+      expect(result.timeout).toBe(true);
     });
   });
 

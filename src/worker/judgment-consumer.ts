@@ -13,22 +13,20 @@
  * `runProviderJudgment` is intentionally narrow: `{ judgment, run, rubric,
  * version, endpoint } -> JudgmentResult`. The default implementation
  * (`defaultRunProviderJudgment`) adapts a `JudgeModelVersion` +
- * `ModelEndpoint` pair into the EXISTING `ProviderConfig`/`executeJudgment`
- * mechanics from `src/lib/llm/index.ts` (Stage C of the 1a/1b provider
- * layer) — it does not introduce new provider-calling logic. Task 10 is
- * expected to replace `defaultRunProviderJudgment`'s internals (a real
- * per-`servingBackend` adapter, `samplingDefaults` actually threaded into
- * the call, `JudgeModel.baseModel` resolution hardened) without touching
- * this consumer's control flow, since every caller only ever sees the seam.
+ * `ModelEndpoint` (+ the judgment's resolved `PromptTemplate`) into
+ * `src/lib/llm/index.ts`'s registry-driven `executeJudgment` (Task 10: a
+ * real per-`servingBackend` descriptor dispatch — `src/lib/llm/registry.ts`
+ * — with `samplingDefaults` actually threaded into the call, DB-templated
+ * prompts via `src/lib/llm/render.ts`, and metadata capture) — this
+ * consumer's own control flow is unchanged from Task 9, since every caller
+ * only ever sees the seam.
  *
- * Known gap surfaced by wiring this seam for real: NOTHING today populates
- * `JudgeModel.baseModel` (not the 1a importer's `synthesizeJudges`, no seed
- * data) even though it's the only schema field that could hold the literal
- * provider model id (e.g. `"claude-sonnet-4-5-20250514"`) a `ProviderConfig`
- * needs. `defaultRunProviderJudgment` throws a `non_retryable` `ProviderError`
- * when it's unset rather than guessing from `slug`/`name` — a
- * misconfiguration should surface as a judgment error, not a request sent
- * with a garbage model id.
+ * `JudgeModel.baseModel` (the literal provider model id, e.g.
+ * `"claude-sonnet-4-5-20250514"`) is required for a call to resolve at all
+ * — `registry.ts`'s `runProviderJudgment`/`runProviderResponse` throw a
+ * `non_retryable` `ProviderError` when it's unset rather than guessing from
+ * `slug`/`name`, so a misconfiguration surfaces as a judgment error, not a
+ * request sent with a garbage model id.
  *
  * ── Respond mode (Task 9b — restored, not new) ──────────────────────────────
  * v1 (`evaluation-run-manager.ts`, deleted by Task 9) supported two run
@@ -45,11 +43,10 @@
  * seams:
  *   - `'judge'`   -> `runProviderJudgment` (existing, described above);
  *     rubric is REQUIRED (unchanged from Task 9).
- *   - `'respond'` -> `runProviderResponse` (new; default implementation
- *     `defaultRunProviderResponse` wraps `executeRespond` through the
- *     IDENTICAL `ProviderConfig`/`mapServingBackendToProvider` adapter and
- *     `callThroughResilience` — classify()/breaker/retry — machinery
- *     `executeJudgment` already goes through; nothing new is introduced).
+ *   - `'respond'` -> `runProviderResponse` (default implementation
+ *     `defaultRunProviderResponse` wraps `executeRespond`, which goes
+ *     through the SAME registry dispatch + `callThroughResilience` —
+ *     classify()/breaker/retry — machinery `executeJudgment` uses).
  *     Rubric is NOT required; `promptTemplateId` is `null` on every
  *     respond-mode `ModelJudgment` (set at creation time by
  *     `run-launch.ts`/`run-create-consumer.ts`, not here).
@@ -108,9 +105,9 @@
 import type { Channel, ConsumeMessage } from 'amqplib';
 import type { ModelEndpoint } from '@prisma/client';
 import { Prisma } from '@prisma/client';
+import type { CriteriaScore } from '@/types';
 import { prisma } from '@/lib/db';
 import { logger, serializeError } from '@/lib/logger';
-import { decryptSafe } from '@/lib/crypto';
 import { publishEvent, runTopic } from '@/lib/realtime/events';
 import {
   publishJudgmentRetry30s,
@@ -118,9 +115,15 @@ import {
   publishToDlq,
   type JudgmentExecuteMsg,
 } from '@/lib/queue/publish';
-import { classify, ProviderError } from '@/lib/llm/errors';
+import { classify } from '@/lib/llm/errors';
 import { executeJudgment, executeRespond } from '@/lib/llm';
-import type { JudgmentRequest, JudgmentResponse, ProviderConfig, RespondRequest, RespondResponse } from '@/lib/llm';
+import type {
+  RunProviderJudgmentInput as RegistryJudgmentInput,
+  JudgmentResult as RegistryJudgmentResult,
+  RunProviderResponseInput as RegistryResponseInput,
+  RespondResult as RegistryRespondResult,
+  SamplingParams,
+} from '@/lib/llm';
 import { maybeFinalizeRun } from '@/lib/run-finalizer';
 import { deriveRunMode } from '@/lib/run-mode';
 import { claimJudgment } from './claim';
@@ -153,6 +156,10 @@ function judgmentContextQuery(judgmentId: string) {
         },
       },
       judgeModelVersion: { include: { judgeModel: true } },
+      // Task 10: the judge path renders its system prompt from this DB row
+      // (render.ts) instead of the old inline `buildJudgmentSystemPrompt` —
+      // see the guard below (`mode === 'judge' && !context.promptTemplate`).
+      promptTemplate: true,
     },
   });
 }
@@ -172,67 +179,62 @@ export interface RunProviderJudgmentInput {
   endpoint: ModelEndpoint;
 }
 
-/** What a provider call produces — alias of the existing `JudgmentResponse`
- * shape (see src/lib/llm/provider.ts); named `JudgmentResult` here to match
- * the seam's brief-specified interface. */
-export type JudgmentResult = JudgmentResponse;
+/**
+ * What a provider call produces. Deliberately a LOOSER local type than
+ * `src/lib/llm/registry.ts`'s own `JudgmentResult` (which requires
+ * `parseMode`/`samplingParamsUsed`, per the task brief verbatim) — the real
+ * default implementation (`defaultRunProviderJudgment`, below) always
+ * returns the full registry shape (a strict subtype, freely assignable
+ * here), but keeping these two fields optional on the SEAM's own type means
+ * every existing fake `ProviderFn` in the integration suites (which predate
+ * this task and don't set them) keeps compiling unchanged — "keep the seam
+ * signatures stable" per the task brief.
+ */
+export interface JudgmentResult {
+  overallScore: number;
+  reasoning: string;
+  criteriaScores: CriteriaScore[];
+  rawResponse: string;
+  latencyMs: number;
+  tokenCount?: number;
+  servedModelId?: string;
+  finishReason?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  parseMode?: 'structured' | 'fallback';
+  samplingParamsUsed?: SamplingParams;
+}
 
 export type ProviderFn = (input: RunProviderJudgmentInput) => Promise<JudgmentResult>;
 
-/**
- * `JudgeModelVersion.servingBackend` -> the provider registry key
- * `src/lib/llm/index.ts#getProvider` understands today (`anthropic` |
- * `openai` | `local`). `openrouter`/`vllm`/`ollama` are all reached as
- * OpenAI-compatible HTTP endpoints, so they route through the generic
- * `local` provider (custom `endpoint` + bearer key) until Task 10 gives
- * each `servingBackend` its own adapter.
- */
-function mapServingBackendToProvider(servingBackend: VersionWithJudgeModel['servingBackend']): string {
-  switch (servingBackend) {
-    case 'anthropic':
-      return 'anthropic';
-    case 'openai':
-      return 'openai';
-    case 'openrouter':
-    case 'vllm':
-    case 'ollama':
-    default:
-      return 'local';
-  }
-}
-
 /** Default `runProviderJudgment` — adapts a `JudgeModelVersion` +
- * `ModelEndpoint` into the existing `ProviderConfig`/`executeJudgment`
- * mechanics. See module doc for the `baseModel` gap this surfaces. */
+ * `ModelEndpoint` + the judgment's resolved `PromptTemplate` into
+ * `src/lib/llm/index.ts`'s registry-driven `executeJudgment`. `version`/
+ * `endpoint` are passed straight through (structurally compatible with
+ * `registry.ts`'s `JudgeVersionForExecution`/`EndpointCredentials` — no
+ * adapter object needed); `registry.ts`'s `runProviderJudgment` owns the
+ * `baseModel`-unset and key-resolution guards (moved there in Task 10, see
+ * module doc). */
 export const defaultRunProviderJudgment: ProviderFn = async (input) => {
-  const { run, rubric, version, endpoint } = input;
-  const providerName = mapServingBackendToProvider(version.servingBackend);
+  const { run, rubric, version, endpoint, judgment } = input;
 
-  const modelId = version.judgeModel.baseModel;
-  if (!modelId) {
-    throw new ProviderError(
-      `JudgeModel "${version.judgeModel.slug}" has no baseModel configured — cannot resolve a ` +
-        `provider model id for JudgeModelVersion ${version.id}`,
-      { kind: 'non_retryable', provider: providerName }
-    );
-  }
-
-  const config: ProviderConfig = {
-    modelId,
-    endpoint: endpoint.endpoint ?? undefined,
-    apiKey: endpoint.apiKeyEnc ? decryptSafe(endpoint.apiKeyEnc) : undefined,
+  const registryInput: RegistryJudgmentInput = {
+    judgeVersion: version,
+    endpoint,
+    // Guarded by the consumer's own `mode === 'judge' && !context.promptTemplate`
+    // check before this seam is ever called (see `handle()` below) — the
+    // non-null assertion documents that invariant rather than re-checking it.
+    template: judgment.promptTemplate!,
+    rubric: { name: rubric.name, description: rubric.description, criteria: rubric.criteria },
+    submission: {
+      inputText: run.evaluation.inputText,
+      promptText: run.evaluation.promptText ?? undefined,
+      responseText: run.evaluation.responseText ?? undefined,
+    },
   };
 
-  const request: JudgmentRequest = {
-    inputText: run.evaluation.inputText,
-    promptText: run.evaluation.promptText ?? undefined,
-    responseText: run.evaluation.responseText ?? undefined,
-    rubricCriteria: rubric.criteria,
-    rubricName: rubric.name,
-    rubricDescription: rubric.description ?? undefined,
-  };
-
-  return executeJudgment(providerName, request, config);
+  const result: RegistryJudgmentResult = await executeJudgment(registryInput);
+  return result;
 };
 
 // ─── The respond-mode provider seam (Task 9b) ────────────────────────────────
@@ -244,45 +246,40 @@ export interface RunProviderResponseInput {
   endpoint: ModelEndpoint;
 }
 
-/** What a respond provider call produces — alias of `RespondResponse` (see
- * src/lib/llm/provider.ts); named `RespondResult` to match
- * `RunProviderJudgmentInput`/`JudgmentResult`'s naming convention above. */
-export type RespondResult = RespondResponse;
+/** Respond-mode mirror of `JudgmentResult` above — same "looser local type,
+ * strict registry type is a subtype" rationale. */
+export interface RespondResult {
+  responseText: string;
+  rawResponse: string;
+  latencyMs: number;
+  tokenCount?: number;
+  servedModelId?: string;
+  finishReason?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  samplingParamsUsed?: SamplingParams;
+}
 
 export type RespondProviderFn = (input: RunProviderResponseInput) => Promise<RespondResult>;
 
 /** Default `runProviderResponse` — the respond-mode mirror of
  * `defaultRunProviderJudgment`: adapts a `JudgeModelVersion` +
- * `ModelEndpoint` pair into the existing `ProviderConfig`/`executeRespond`
- * mechanics (same `baseModel` guard, same `mapServingBackendToProvider`
- * routing, same `callThroughResilience`-wrapped resilience machinery
- * `executeJudgment` uses — see module doc's "Respond mode" section). Prompt
- * resolution mirrors v1's `evaluation-run-manager.ts` respond branch
- * exactly: `promptText` if set, else fall back to `inputText`. */
+ * `ModelEndpoint` pair into `executeRespond` (same registry dispatch, same
+ * `callThroughResilience`-wrapped resilience machinery `executeJudgment`
+ * uses — see module doc's "Respond mode" section). Prompt resolution
+ * mirrors v1's `evaluation-run-manager.ts` respond branch exactly:
+ * `promptText` if set, else fall back to `inputText`. */
 export const defaultRunProviderResponse: RespondProviderFn = async (input) => {
   const { run, version, endpoint } = input;
-  const providerName = mapServingBackendToProvider(version.servingBackend);
 
-  const modelId = version.judgeModel.baseModel;
-  if (!modelId) {
-    throw new ProviderError(
-      `JudgeModel "${version.judgeModel.slug}" has no baseModel configured — cannot resolve a ` +
-        `provider model id for JudgeModelVersion ${version.id}`,
-      { kind: 'non_retryable', provider: providerName }
-    );
-  }
-
-  const config: ProviderConfig = {
-    modelId,
-    endpoint: endpoint.endpoint ?? undefined,
-    apiKey: endpoint.apiKeyEnc ? decryptSafe(endpoint.apiKeyEnc) : undefined,
+  const registryInput: RegistryResponseInput = {
+    judgeVersion: version,
+    endpoint,
+    submission: { promptText: run.evaluation.promptText?.trim() || run.evaluation.inputText },
   };
 
-  const request: RespondRequest = {
-    promptText: run.evaluation.promptText?.trim() || run.evaluation.inputText,
-  };
-
-  return executeRespond(providerName, request, config);
+  const result: RegistryRespondResult = await executeRespond(registryInput);
+  return result;
 };
 
 // ─── Endpoint resolution ─────────────────────────────────────────────────────
@@ -324,6 +321,58 @@ async function markJudgmentError(judgmentId: string, message: string): Promise<v
   });
 }
 
+/**
+ * `tokenCount` back-compat: prefer the real call's `inputTokens`+
+ * `outputTokens` split (Task 10 metadata capture) when either is present;
+ * fall back to a fake provider's own `tokenCount` (pre-Task-10 test fixture
+ * shape, still valid — see `JudgmentResult`'s doc) otherwise. The
+ * run-detail UI (`model-judgment-card.tsx`) only ever reads the combined
+ * `tokenCount`, never the split.
+ */
+function combinedTokenCount(result: { tokenCount?: number; inputTokens?: number; outputTokens?: number }): number | undefined {
+  if (result.inputTokens !== undefined || result.outputTokens !== undefined) {
+    return (result.inputTokens ?? 0) + (result.outputTokens ?? 0);
+  }
+  return result.tokenCount;
+}
+
+/** Fields shared by `persistSuccess` (judge) and `persistRespondSuccess`
+ * (respond) — every metadata field that doesn't depend on which mode
+ * produced the result. Extracted so the two persist paths can't silently
+ * drift on a shared field (Task 10 review simplification). */
+interface CommonResultFields {
+  rawResponse: string;
+  latencyMs: number;
+  tokenCount?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  servedModelId?: string;
+  finishReason?: string;
+  samplingParamsUsed?: SamplingParams;
+}
+
+function commonSuccessUpdateData(result: CommonResultFields, version: VersionWithJudgeModel) {
+  return {
+    status: 'completed' as const,
+    error: null,
+    rawResponse: result.rawResponse,
+    latencyMs: result.latencyMs,
+    tokenCount: combinedTokenCount(result),
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    servedModelId: result.servedModelId,
+    finishReason: result.finishReason,
+    // Task 10: the EFFECTIVE sampling params a real call used
+    // (`result.samplingParamsUsed` — version defaults ?? registry defaults
+    // ?? per-call override, see registry.ts's `effectiveSamplingParams`)
+    // when present; falls back to `version.samplingDefaults` for
+    // pre-Task-10 test fixtures that don't set `samplingParamsUsed`.
+    samplingParams: (result.samplingParamsUsed ?? version.samplingDefaults ?? undefined) as Prisma.InputJsonValue | undefined,
+    reasoningEnabled:
+      version.reasoningMode === 'always' ? true : version.reasoningMode === 'none' ? false : null,
+  };
+}
+
 async function persistSuccess(
   judgmentId: string,
   result: JudgmentResult,
@@ -332,19 +381,11 @@ async function persistSuccess(
   await prisma.modelJudgment.update({
     where: { id: judgmentId },
     data: {
-      status: 'completed',
-      error: null,
+      ...commonSuccessUpdateData(result, version),
       overallScore: result.overallScore,
       reasoning: result.reasoning,
-      rawResponse: result.rawResponse,
       criteriaScores: result.criteriaScores as unknown as Prisma.InputJsonValue,
-      latencyMs: result.latencyMs,
-      tokenCount: result.tokenCount,
-      // Provenance capture only — not yet threaded into the actual provider
-      // call (see defaultRunProviderJudgment's doc / Task 10).
-      samplingParams: (version.samplingDefaults ?? undefined) as Prisma.InputJsonValue | undefined,
-      reasoningEnabled:
-        version.reasoningMode === 'always' ? true : version.reasoningMode === 'none' ? false : null,
+      parseMode: result.parseMode,
     },
   });
 }
@@ -369,20 +410,10 @@ async function persistRespondSuccess(
   await prisma.modelJudgment.update({
     where: { id: judgmentId },
     data: {
-      status: 'completed',
-      error: null,
+      ...commonSuccessUpdateData(result, version),
       overallScore: null,
       reasoning: result.responseText,
-      rawResponse: result.rawResponse,
       criteriaScores: Prisma.DbNull,
-      latencyMs: result.latencyMs,
-      tokenCount: result.tokenCount,
-      // Provenance capture — same as persistSuccess's judge-mode write;
-      // harmless/accurate for respond mode too (the version's own
-      // sampling/reasoning config, independent of which seam executed it).
-      samplingParams: (version.samplingDefaults ?? undefined) as Prisma.InputJsonValue | undefined,
-      reasoningEnabled:
-        version.reasoningMode === 'always' ? true : version.reasoningMode === 'none' ? false : null,
     },
   });
 }
@@ -604,6 +635,23 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
       return;
     }
 
+    // Task 10: the judge path renders its system prompt from the
+    // judgment's resolved `PromptTemplate` row (render.ts), loaded above by
+    // `judgmentContextQuery`. `run-launch.ts`/`run-create-consumer.ts`
+    // always resolve+require one for judge-mode runs at creation time (see
+    // module doc), so a missing one here means the row is corrupt/stale
+    // rather than a normal runtime condition — surfaced the same way the
+    // missing-rubric case above is.
+    if (mode === 'judge' && !context.promptTemplate) {
+      await markJudgmentError(
+        msg.judgmentId,
+        'ModelJudgment has no promptTemplateId set — cannot render a judgment prompt'
+      );
+      await safeFinalizeRun(msg.runId);
+      ch.ack(raw);
+      return;
+    }
+
     const endpoint = await resolveEndpoint(judgeModelVersion.id, context.run.triggeredById);
     if (!endpoint) {
       await markJudgmentError(
@@ -641,7 +689,12 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
         });
       }
     } catch (rawError) {
-      const providerError = classify(rawError, mapServingBackendToProvider(judgeModelVersion.servingBackend));
+      // `judgeModelVersion.servingBackend` (a real `ServingBackend` enum
+      // value) doubles as the descriptive provider label classify() wants —
+      // no legacy-string mapping needed now that registry.ts dispatches on
+      // ServingBackend directly (Task 10 removed the old
+      // `mapServingBackendToProvider` indirection).
+      const providerError = classify(rawError, judgeModelVersion.servingBackend);
 
       if (providerError.kind === 'non_retryable') {
         await markJudgmentError(msg.judgmentId, providerError.message);

@@ -50,6 +50,14 @@ export interface ProviderErrorOptions {
    * apply a different backoff than a normal retryable failure.
    */
   breakerOpen?: boolean;
+  /**
+   * Set when this error represents `registry.ts`'s `execute()` aborting a
+   * call once `EVALUATION_MODEL_TIMEOUT_MS` elapsed (Task 8 review carry:
+   * the timeout budget was never wired into an actual provider-call abort
+   * before Task 10) — distinguishes a deliberate budget timeout from an
+   * ordinary connection-level abort/timeout the SDK itself raised.
+   */
+  timeout?: boolean;
   /** The original error, preserved via the standard `Error.cause` chain. */
   cause?: unknown;
 }
@@ -61,6 +69,7 @@ export class ProviderError extends Error {
   readonly status?: number;
   readonly retryAfterMs?: number;
   readonly breakerOpen?: boolean;
+  readonly timeout?: boolean;
 
   constructor(message: string, opts: ProviderErrorOptions) {
     super(message, opts.cause !== undefined ? { cause: opts.cause } : undefined);
@@ -69,6 +78,7 @@ export class ProviderError extends Error {
     this.status = opts.status;
     this.retryAfterMs = opts.retryAfterMs;
     this.breakerOpen = opts.breakerOpen;
+    this.timeout = opts.timeout;
   }
 }
 
@@ -120,7 +130,13 @@ export function classify(err: unknown, provider: string): ProviderError {
   }
 
   if (isAbortOrTimeout(err)) {
-    return new ProviderError(describeError(err), { kind: 'retryable', provider, cause: err });
+    // Structural abort/timeout signal reaching classify() directly (not
+    // already a ProviderError — that case short-circuits above). Marked
+    // `timeout: true` for the same reason registry.ts's execute() marks its
+    // own budget-abort ProviderError that way: a distinguishable signal for
+    // callers that want to treat "the model may still be thinking" (a real
+    // timeout) differently from a plain dropped connection.
+    return new ProviderError(describeError(err), { kind: 'retryable', provider, timeout: true, cause: err });
   }
 
   const code = extractErrorCode(err);

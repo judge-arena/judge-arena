@@ -268,8 +268,12 @@ describe('ensureJudgeIdentityForModelConfig', () => {
     const user = await mkUser();
     const config = await mkModelConfig(user.id, { provider: 'not-a-real-provider' });
 
+    // Task 10: classifyProvider's servingBackend resolution now delegates to
+    // registry.ts's legacyProviderToBackend (the one place the legacy
+    // provider-string -> ServingBackend mapping lives), which throws first
+    // and carries this message instead.
     await expect(ensureJudgeIdentityForModelConfig(db, config)).rejects.toThrow(
-      /unrecognized ModelConfig.provider/
+      /legacyProviderToBackend: unrecognized legacy provider/
     );
   });
 

@@ -1,110 +1,43 @@
 /**
- * Anthropic Provider (Claude models)
+ * Anthropic backend (Claude models) — a plain, provider-agnostic call
+ * function. `registry.ts`'s `execute()` is the only caller: it resolves the
+ * API key, the effective sampling params, and the timeout `AbortSignal`
+ * before invoking this; this module owns nothing but the Anthropic SDK
+ * call shape itself.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
-import type {
-  JudgmentProvider,
-  JudgmentRequest,
-  JudgmentResponse,
-  RespondRequest,
-  RespondResponse,
-  ProviderConfig,
-} from './provider';
-import {
-  buildJudgmentSystemPrompt,
-  buildJudgmentUserPrompt,
-  buildRespondSystemPrompt,
-  buildRespondUserPrompt,
-  parseJudgmentResponse,
-} from './provider';
+import type { ProviderCallOptions, ProviderCallResult } from './provider';
 
-export class AnthropicProvider implements JudgmentProvider {
-  name = 'Anthropic';
+export async function callAnthropic(opts: ProviderCallOptions): Promise<ProviderCallResult> {
+  const client = new Anthropic({ apiKey: opts.apiKey, baseURL: opts.baseUrl || undefined });
 
-  async judge(
-    request: JudgmentRequest,
-    config: ProviderConfig
-  ): Promise<JudgmentResponse> {
-    const apiKey = config.apiKey || process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      throw new Error(
-        'Anthropic API key not configured. Set ANTHROPIC_API_KEY in environment or configure per-model.'
-      );
-    }
+  const startTime = Date.now();
 
-    const client = new Anthropic({ apiKey });
-    const systemPrompt = buildJudgmentSystemPrompt(
-      request.rubricName,
-      request.rubricDescription,
-      request.rubricCriteria
-    );
-    const userPrompt = buildJudgmentUserPrompt(request);
+  const response = await client.messages.create(
+    {
+      model: opts.modelId,
+      max_tokens: opts.samplingParams.max_tokens,
+      temperature: opts.samplingParams.temperature,
+      system: opts.systemPrompt,
+      messages: [{ role: 'user', content: opts.userPrompt }],
+    },
+    // Wires EVALUATION_MODEL_TIMEOUT_MS into a real request abort — see
+    // registry.ts's execute() module doc (Task 8 review carry).
+    { signal: opts.signal }
+  );
 
-    const startTime = Date.now();
+  const latencyMs = Date.now() - startTime;
 
-    const response = await client.messages.create({
-      model: config.modelId,
-      max_tokens: 4096,
-      temperature: 0.3,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
-    });
+  const firstBlock = response.content[0];
+  const text = firstBlock && firstBlock.type === 'text' ? firstBlock.text : '';
 
-    const latencyMs = Date.now() - startTime;
-
-    const firstBlock = response.content[0];
-    const rawText =
-      firstBlock && firstBlock.type === 'text' ? firstBlock.text : '';
-    const tokenCount =
-      (response.usage?.input_tokens || 0) +
-      (response.usage?.output_tokens || 0);
-
-    return parseJudgmentResponse(
-      rawText,
-      request.rubricCriteria,
-      latencyMs,
-      tokenCount
-    );
-  }
-
-  async respond(
-    request: RespondRequest,
-    config: ProviderConfig
-  ): Promise<RespondResponse> {
-    const apiKey = config.apiKey || process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      throw new Error(
-        'Anthropic API key not configured. Set ANTHROPIC_API_KEY in environment or configure per-model.'
-      );
-    }
-
-    const client = new Anthropic({ apiKey });
-    const systemPrompt = buildRespondSystemPrompt();
-    const userPrompt = buildRespondUserPrompt(request);
-    const startTime = Date.now();
-
-    const response = await client.messages.create({
-      model: config.modelId,
-      max_tokens: 4096,
-      temperature: 0.4,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
-    });
-
-    const latencyMs = Date.now() - startTime;
-    const firstBlock = response.content[0];
-    const rawText =
-      firstBlock && firstBlock.type === 'text' ? firstBlock.text : '';
-    const tokenCount =
-      (response.usage?.input_tokens || 0) +
-      (response.usage?.output_tokens || 0);
-
-    return {
-      responseText: rawText.trim(),
-      rawResponse: rawText,
-      latencyMs,
-      tokenCount,
-    };
-  }
+  return {
+    text,
+    servedModelId: response.model,
+    finishReason: response.stop_reason ?? undefined,
+    inputTokens: response.usage?.input_tokens,
+    outputTokens: response.usage?.output_tokens,
+    latencyMs,
+  };
 }

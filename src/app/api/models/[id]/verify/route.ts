@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { verifyModelConnection } from '@/lib/llm/verify';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
+import { decryptSafe } from '@/lib/crypto';
 
 const DEFAULT_CLAUDE_MODEL_IDS = new Set([
   'claude-sonnet-4-5-20250514',
@@ -32,11 +33,22 @@ export async function POST(_request: Request, props: { params: Promise<{ id: str
     }
 
     try {
+      // `model.apiKey` is stored encrypted (see the create/update routes'
+      // `encryptIfNeeded` calls) — decrypt before sending it to the
+      // provider. The old code passed the ciphertext straight through as
+      // if it were already the plaintext key (the "ciphertext-as-key"
+      // MAJOR this task closes): every verify call with a per-model key
+      // configured sent Postgres ciphertext as the API key, which the
+      // provider would reject as invalid, or — worse, for a custom
+      // endpoint expecting a bearer token with no format validation —
+      // silently accept as opaque bytes. `decryptSafe` is a no-op for a
+      // value that isn't actually tagged ciphertext, so this is safe
+      // regardless of migration state.
       await verifyModelConnection({
         provider: model.provider as 'anthropic' | 'openai' | 'local',
         modelId: model.modelId,
         endpoint: model.endpoint || undefined,
-        apiKey: model.apiKey || undefined,
+        apiKey: model.apiKey ? decryptSafe(model.apiKey) : undefined,
       });
     } catch (error) {
       const message =

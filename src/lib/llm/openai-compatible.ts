@@ -1,138 +1,51 @@
 /**
- * OpenAI-Compatible Provider
- *
- * Supports OpenAI API, as well as any OpenAI-compatible endpoint:
- * - Local models via Ollama (http://localhost:11434/v1)
- * - vLLM, llama.cpp, LM Studio, etc.
- * - Azure OpenAI
- * - Any OpenAI-compatible proxy
+ * OpenAI-compatible backend — a plain, provider-agnostic call function used
+ * for every `openai_compatible`-kind descriptor (real OpenAI, legacy
+ * `local` self-hosted endpoints, and — from Task 11 — OpenRouter/vLLM/
+ * Ollama). `registry.ts`'s `execute()` is the only caller: it resolves the
+ * API key, base URL, effective sampling params, and the timeout
+ * `AbortSignal` before invoking this; this module owns nothing but the
+ * `openai` SDK call shape itself.
  */
 
 import OpenAI from 'openai';
-import type {
-  JudgmentProvider,
-  JudgmentRequest,
-  JudgmentResponse,
-  RespondRequest,
-  RespondResponse,
-  ProviderConfig,
-} from './provider';
-import {
-  buildJudgmentSystemPrompt,
-  buildJudgmentUserPrompt,
-  buildRespondSystemPrompt,
-  buildRespondUserPrompt,
-  parseJudgmentResponse,
-} from './provider';
+import type { ProviderCallOptions, ProviderCallResult } from './provider';
 
-export class OpenAICompatibleProvider implements JudgmentProvider {
-  name: string;
+export async function callOpenAICompatible(opts: ProviderCallOptions): Promise<ProviderCallResult> {
+  const client = new OpenAI({
+    apiKey: opts.apiKey,
+    baseURL: opts.baseUrl || undefined,
+  });
 
-  constructor(name: string = 'OpenAI') {
-    this.name = name;
-  }
+  const startTime = Date.now();
 
-  async judge(
-    request: JudgmentRequest,
-    config: ProviderConfig
-  ): Promise<JudgmentResponse> {
-    const apiKey =
-      config.apiKey ||
-      process.env.OPENAI_API_KEY ||
-      (config.endpoint ? 'not-needed' : undefined);
-
-    if (!apiKey) {
-      throw new Error(
-        'API key not configured. Set OPENAI_API_KEY in environment or configure per-model.'
-      );
-    }
-
-    const client = new OpenAI({
-      apiKey,
-      baseURL: config.endpoint || undefined,
-    });
-
-    const systemPrompt = buildJudgmentSystemPrompt(
-      request.rubricName,
-      request.rubricDescription,
-      request.rubricCriteria
-    );
-    const userPrompt = buildJudgmentUserPrompt(request);
-
-    const startTime = Date.now();
-
-    const response = await client.chat.completions.create({
-      model: config.modelId,
-      max_tokens: 4096,
+  const response = await client.chat.completions.create(
+    {
+      model: opts.modelId,
+      max_tokens: opts.samplingParams.max_tokens,
+      temperature: opts.samplingParams.temperature,
       messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
+        { role: 'system', content: opts.systemPrompt },
+        { role: 'user', content: opts.userPrompt },
       ],
-      temperature: 0.3,
-    });
+    },
+    // Wires EVALUATION_MODEL_TIMEOUT_MS into a real request abort — see
+    // registry.ts's execute() module doc (Task 8 review carry). The `openai`
+    // SDK forwards this signal into its underlying `fetch()` call.
+    { signal: opts.signal }
+  );
 
-    const latencyMs = Date.now() - startTime;
+  const latencyMs = Date.now() - startTime;
 
-    const rawText = response.choices[0]?.message?.content || '';
-    const tokenCount = response.usage
-      ? (response.usage.prompt_tokens || 0) +
-        (response.usage.completion_tokens || 0)
-      : undefined;
+  const choice = response.choices[0];
+  const text = choice?.message?.content || '';
 
-    return parseJudgmentResponse(
-      rawText,
-      request.rubricCriteria,
-      latencyMs,
-      tokenCount
-    );
-  }
-
-  async respond(
-    request: RespondRequest,
-    config: ProviderConfig
-  ): Promise<RespondResponse> {
-    const apiKey =
-      config.apiKey ||
-      process.env.OPENAI_API_KEY ||
-      (config.endpoint ? 'not-needed' : undefined);
-
-    if (!apiKey) {
-      throw new Error(
-        'API key not configured. Set OPENAI_API_KEY in environment or configure per-model.'
-      );
-    }
-
-    const client = new OpenAI({
-      apiKey,
-      baseURL: config.endpoint || undefined,
-    });
-
-    const systemPrompt = buildRespondSystemPrompt();
-    const userPrompt = buildRespondUserPrompt(request);
-    const startTime = Date.now();
-
-    const response = await client.chat.completions.create({
-      model: config.modelId,
-      max_tokens: 4096,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      temperature: 0.4,
-    });
-
-    const latencyMs = Date.now() - startTime;
-    const rawText = response.choices[0]?.message?.content || '';
-    const tokenCount = response.usage
-      ? (response.usage.prompt_tokens || 0) +
-        (response.usage.completion_tokens || 0)
-      : undefined;
-
-    return {
-      responseText: rawText.trim(),
-      rawResponse: rawText,
-      latencyMs,
-      tokenCount,
-    };
-  }
+  return {
+    text,
+    servedModelId: response.model,
+    finishReason: choice?.finish_reason ?? undefined,
+    inputTokens: response.usage?.prompt_tokens,
+    outputTokens: response.usage?.completion_tokens,
+    latencyMs,
+  };
 }

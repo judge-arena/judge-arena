@@ -1,52 +1,52 @@
 /**
- * LLM Provider Registry
+ * ─── LLM Provider Entry Point ────────────────────────────────────────────────
  *
- * Central registry for all LLM providers. Resolves the correct provider
- * based on a model configuration's provider field.
+ * `executeJudgment`/`executeRespond` are the resilience-wrapped entry
+ * points: registry-driven (`./registry.ts`) provider calls run through the
+ * Redis-backed circuit breaker + taxonomy-driven retry (unchanged
+ * responsibility from before Task 10 — only what they wrap changed, from
+ * the old lowercase-string `providers` map of provider classes to the
+ * `ServingBackend`-keyed registry).
+ *
+ * Each of `executeJudgment`/`executeRespond` calls registry.ts's
+ * `prepare*Call` step FIRST, OUTSIDE `callThroughResilience` — a
+ * deliberate split (Task 10 review fix), not an oversight: `prepare*Call`
+ * only ever fails on a permanent CONFIGURATION problem (unset `baseModel`,
+ * no resolvable API key, an Ollama-backed judge, a malformed
+ * `PromptTemplate`), never on provider health. Only the resolved
+ * `execute*Call` step — the actual network call — runs inside the
+ * breaker/retry wrapper. Before this split, a single misconfigured
+ * `JudgeModelVersion` could trip the circuit breaker for its
+ * servingBackend+endpoint+model key purely from a config error with zero
+ * real requests sent, degrading every OTHER (correctly-configured) call
+ * sharing that same breaker key — including the other mode (judge vs.
+ * respond share the identical key formula).
  */
 
-import type { ModelProvider } from '@/types';
 import type {
-  JudgmentProvider,
-  JudgmentRequest,
-  JudgmentResponse,
-  RespondRequest,
-  RespondResponse,
-  ProviderConfig,
-} from './provider';
-import { AnthropicProvider } from './anthropic';
-import { OpenAICompatibleProvider } from './openai-compatible';
+  RunProviderJudgmentInput,
+  JudgmentResult,
+  RunProviderResponseInput,
+  RespondResult,
+} from './registry';
+import { prepareJudgmentCall, executeJudgmentCall, prepareRespondCall, executeRespondCall } from './registry';
 import { withRetry } from './resilience';
 import { classify, ProviderError } from './errors';
 import { getBreaker } from './breaker-redis';
 
-const providers: Record<string, JudgmentProvider> = {
-  anthropic: new AnthropicProvider(),
-  openai: new OpenAICompatibleProvider('OpenAI'),
-  local: new OpenAICompatibleProvider('Local Model'),
-};
-
-/**
- * Get the provider for a given provider name (case-insensitive)
- */
-export function getProvider(providerName: ModelProvider | string): JudgmentProvider {
-  const provider = providers[providerName.toLowerCase()];
-  if (!provider) {
-    throw new Error(`Unknown provider: ${providerName}. Available: ${Object.keys(providers).join(', ')}`);
-  }
-  return provider;
-}
-
 /**
  * Build the circuit breaker key. Aggregator granularity: distinct per
- * provider *and* endpoint *and* model — without the endpoint segment, a
- * failing local Ollama instance would open the circuit for all
+ * serving backend *and* endpoint *and* model — without the endpoint
+ * segment, a failing local Ollama instance would open the circuit for all
  * OpenAI-compatible endpoints including the real OpenAI API; without the
  * model segment, one bad model on a shared endpoint would trip every other
- * model routed through it.
+ * model routed through it. `modelId` is the ALREADY-RESOLVED, guaranteed-
+ * non-null model id from a successful `prepare*Call` (never the raw,
+ * possibly-null `JudgeModel.baseModel`) — by the time this is called,
+ * `requireBaseModel` has already thrown for any judge where it was unset.
  */
-function breakerKey(providerName: string, config: ProviderConfig): string {
-  return `${providerName}:${config.endpoint ?? 'default'}:${config.modelId}`;
+function breakerKey(servingBackend: string, endpoint: string | null, modelId: string): string {
+  return `${servingBackend}:${endpoint ?? 'default'}:${modelId}`;
 }
 
 /**
@@ -55,8 +55,8 @@ function breakerKey(providerName: string, config: ProviderConfig): string {
  *
  * - `allow() === 'open'` fails fast with a `ProviderError` (`kind:
  *   'retryable'`, `breakerOpen: true`) without attempting the call at all
- *   or touching the retry loop — the queue (Task 5+) uses `breakerOpen` to
- *   apply a longer nack-delay than an ordinary retryable failure.
+ *   or touching the retry loop — the queue uses `breakerOpen` to apply a
+ *   longer nack-delay than an ordinary retryable failure.
  * - `allow() === 'half_open_probe'` gets exactly one attempt
  *   (`maxAttempts: 1`): retrying internally here would send several
  *   requests to a service we're not yet sure has recovered, defeating the
@@ -67,9 +67,7 @@ function breakerKey(providerName: string, config: ProviderConfig): string {
  *   propagates to the caller are both properly-typed `ProviderError`s.
  * - The breaker only ever records ONE outcome per call to `executeJudgment`/
  *   `executeRespond` — the whole retry sequence counts as a single
- *   breaker failure (or success), same reasoning the old in-process
- *   breaker used ("if all retries fail, it counts as a single circuit
- *   breaker failure").
+ *   breaker failure (or success).
  */
 async function callThroughResilience<T>(
   providerName: string,
@@ -106,50 +104,42 @@ async function callThroughResilience<T>(
 }
 
 /**
- * Execute a judgment using the appropriate provider.
- * Wraps the call with retry + circuit breaker for resilience.
+ * Execute a judgment through the registry, wrapped with retry + circuit
+ * breaker for resilience. `prepareJudgmentCall` runs first and UNWRAPPED —
+ * see module doc — so a configuration error (bad template, missing key,
+ * unset baseModel, Ollama scoredRunsAllowed refusal) throws immediately
+ * without touching the breaker or the retry loop.
  */
-export async function executeJudgment(
-  providerName: string,
-  request: JudgmentRequest,
-  config: ProviderConfig
-): Promise<JudgmentResponse> {
-  const provider = getProvider(providerName);
-  return callThroughResilience(providerName, breakerKey(providerName, config), () =>
-    provider.judge(request, config)
-  );
+export async function executeJudgment(input: RunProviderJudgmentInput): Promise<JudgmentResult> {
+  const prepared = prepareJudgmentCall(input);
+  const key = breakerKey(input.judgeVersion.servingBackend, input.endpoint.endpoint, prepared.modelId);
+  return callThroughResilience(input.judgeVersion.servingBackend, key, () => executeJudgmentCall(prepared));
 }
 
 /**
- * Execute a respond call using the appropriate provider.
- * Wraps the call with retry + circuit breaker for resilience.
+ * Execute a respond-mode generation through the registry, wrapped with
+ * retry + circuit breaker for resilience. Same `prepare` split as
+ * `executeJudgment` above.
  */
-export async function executeRespond(
-  providerName: string,
-  request: RespondRequest,
-  config: ProviderConfig
-): Promise<RespondResponse> {
-  const provider = getProvider(providerName);
-  return callThroughResilience(providerName, breakerKey(providerName, config), () =>
-    provider.respond(request, config)
-  );
-}
-
-/**
- * List available providers
- */
-export function listProviders(): Array<{ id: string; name: string }> {
-  return Object.entries(providers).map(([id, p]) => ({
-    id,
-    name: p.name,
-  }));
+export async function executeRespond(input: RunProviderResponseInput): Promise<RespondResult> {
+  const prepared = prepareRespondCall(input);
+  const key = breakerKey(input.judgeVersion.servingBackend, input.endpoint.endpoint, prepared.modelId);
+  return callThroughResilience(input.judgeVersion.servingBackend, key, () => executeRespondCall(prepared));
 }
 
 export type {
-  JudgmentProvider,
-  JudgmentRequest,
-  JudgmentResponse,
-  RespondRequest,
-  RespondResponse,
-  ProviderConfig,
+  RunProviderJudgmentInput,
+  JudgmentResult,
+  RunProviderResponseInput,
+  RespondResult,
 };
+export {
+  getDescriptor,
+  legacyProviderToBackend,
+  resolveApiKey,
+  effectiveSamplingParams,
+  execute,
+  runProviderJudgment,
+  runProviderResponse,
+} from './registry';
+export type { ProviderDescriptor, SamplingParams, EndpointCredentials, JudgeVersionForExecution } from './registry';

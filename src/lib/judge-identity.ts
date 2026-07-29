@@ -107,6 +107,7 @@
  */
 import { createHash } from 'crypto';
 import { Prisma, type JudgeClass, type ModelConfig, type PrismaClient, type ServingBackend } from '@prisma/client';
+import { legacyProviderToBackend } from '@/lib/llm/registry';
 
 /** True iff `error` is a P2002 unique-constraint violation — used below to
  * turn a concurrent find-or-create race into a re-find instead of a raw
@@ -133,20 +134,30 @@ interface ProviderClassification {
 }
 
 /** Verbatim mirror of scripts/importer/judges.ts's classifyProvider — see
- * this module's doc for why the duplication is intentional/disclosed. */
+ * this module's doc for why the duplication is intentional/disclosed.
+ * `servingBackend` resolution itself is delegated to `registry.ts`'s
+ * `legacyProviderToBackend` (Task 10) — the ONE place the legacy
+ * `ModelConfig.provider` string -> `ServingBackend` mapping lives now,
+ * instead of a third independent copy of it here. */
 function classifyProvider(provider: string): ProviderClassification {
+  const servingBackend = legacyProviderToBackend(provider);
   switch (provider) {
     case 'anthropic':
-      return { judgeClass: 'prompted_api', servingBackend: 'anthropic', endpointClass: null };
+      return { judgeClass: 'prompted_api', servingBackend, endpointClass: null };
     case 'openai':
-      return { judgeClass: 'prompted_api', servingBackend: 'openai', endpointClass: null };
+      return { judgeClass: 'prompted_api', servingBackend, endpointClass: null };
     case 'local':
       return {
         judgeClass: 'prompted_open_weight',
-        servingBackend: 'openai',
+        servingBackend,
         endpointClass: 'v1-local-unknown',
       };
     default:
+      // Unreachable in practice — `legacyProviderToBackend` above already
+      // throws for anything outside {anthropic, openai, local}, so this
+      // never executes. Kept only because TS can't infer that guarantee
+      // from a function call (removing it would require restructuring
+      // this switch to satisfy exhaustiveness some other way).
       throw new Error(`ensureJudgeIdentityForModelConfig: unrecognized ModelConfig.provider "${provider}"`);
   }
 }
