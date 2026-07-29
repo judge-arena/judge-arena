@@ -23,12 +23,21 @@
  * attempt the strict structured parse. A descriptor with its own
  * `structuredRequestFields()` hook (vLLM — `backends/vllm.ts`) gets exactly
  * what that hook builds; every other structured-output-capable descriptor
- * (openai's/openrouter's `caps.structuredOutput: 'json_schema'`) gets the
- * plain OpenAI-standard `response_format` shape below by default — this
- * seam applying to real OpenAI too (not just OpenRouter/vLLM) is a
- * deliberate, natural consequence of finally CONSUMING the
- * `caps.structuredOutput` flag Task 10 already declared on that descriptor,
- * not scope creep.
+ * with no hook of its own (openrouter's `caps.structuredOutput:
+ * 'json_schema'`) gets the plain OpenAI-standard `response_format` shape
+ * below by default.
+ *
+ * 1b Task 11 review IMPORTANT fix: this seam used to also fire for the
+ * plain `openai` descriptor (Task 10 had declared `caps.structuredOutput:
+ * 'json_schema'` on it, and this seam was the first thing to actually
+ * CONSUME that flag) — but real OpenAI's Structured Outputs is MODEL-GATED,
+ * not universally supported, so sending `response_format:
+ * {type:'json_schema',...}` to gpt-3.5-turbo/gpt-4/gpt-4-turbo hard-400s
+ * instead of degrading gracefully. `registry.ts`'s plain `openai` descriptor
+ * now declares `caps.structuredOutput: 'none'` (per-model gating deferred
+ * to a future task), so this seam only ever fires for vLLM (guided
+ * decoding — server-enforced, model-agnostic) and OpenRouter (its own
+ * declared per-model pass-through support) — never for real OpenAI.
  */
 
 import OpenAI from 'openai';

@@ -186,6 +186,41 @@ describe('vLLM descriptor: guided-decoding structured-output request fields', ()
   });
 });
 
+describe('OpenAI descriptor: NO structured-output request fields (1b Task 11 review IMPORTANT fix)', () => {
+  // Real OpenAI's Structured Outputs is model-gated — sending
+  // `response_format: {type: 'json_schema', ...}` to gpt-3.5-turbo/gpt-4/
+  // gpt-4-turbo hard-400s instead of degrading gracefully. `registry.ts`'s
+  // plain `openai` descriptor now declares `caps.structuredOutput: 'none'`
+  // specifically so this never fires for real OpenAI judgment calls — only
+  // vLLM (guided decoding, server-enforced, model-agnostic) and OpenRouter
+  // (its own declared per-model pass-through support) emit these fields.
+  const baseCall = {
+    apiKey: 'sk-openai-test',
+    modelId: 'gpt-3.5-turbo',
+    systemPrompt: 'system',
+    userPrompt: 'user',
+    samplingParams: { temperature: 0.3, max_tokens: 100 },
+  };
+
+  beforeEach(() => {
+    OpenAIConstructorMock.mockClear();
+    openaiCreateMock.mockReset();
+    openaiCreateMock.mockResolvedValue(okChatResponse('ok', 'gpt-3.5-turbo'));
+  });
+
+  it('a judgment-mode call against the plain openai descriptor sends NEITHER response_format NOR guided_json', async () => {
+    await execute(getDescriptor('openai'), { ...baseCall, mode: 'judgment' });
+
+    const [params] = openaiCreateMock.mock.calls[0];
+    expect(params.response_format).toBeUndefined();
+    expect(params.guided_json).toBeUndefined();
+  });
+
+  it('caps.structuredOutput on the openai descriptor is "none"', () => {
+    expect(getDescriptor('openai').caps.structuredOutput).toBe('none');
+  });
+});
+
 describe('Structured-output parse seam: parseMode "structured" vs "fallback"', () => {
   const criteria = [{ id: 'c1', rubricId: 'r1', name: 'Accuracy', description: 'desc', maxScore: 10, weight: 1, order: 0 }];
 
@@ -271,6 +306,37 @@ describe('Structured-output parse seam: parseMode "structured" vs "fallback"', (
     });
 
     expect(result.parseMode).toBe('structured');
+  });
+
+  it('1b Task 11 review IMPORTANT fix: a well-formed, unwrapped-JSON response from a plain openai-backed judge still parses as "fallback" — structured output was never requested, so the strict path is never attempted', async () => {
+    openaiCreateMock.mockResolvedValue(
+      okChatResponse(
+        JSON.stringify({
+          overallScore: 8,
+          reasoning: 'solid',
+          criteriaScores: [{ criterionId: 'c1', criterionName: 'Accuracy', score: 9, maxScore: 10 }],
+        }),
+        'gpt-3.5-turbo'
+      )
+    );
+
+    const result = await runProviderJudgment({
+      ...baseInput,
+      judgeVersion: {
+        servingBackend: 'openai' as ServingBackend,
+        samplingDefaults: null,
+        judgeModel: { baseModel: 'gpt-3.5-turbo', slug: 'gpt35-openai-judge' },
+      },
+      endpoint: { apiKeyEnc: 'sk-openai-test', endpoint: null },
+    });
+
+    // No response_format/guided_json was ever sent on the outgoing request.
+    const [params] = openaiCreateMock.mock.calls[0];
+    expect(params.response_format).toBeUndefined();
+    expect(params.guided_json).toBeUndefined();
+
+    expect(result.parseMode).toBe('fallback');
+    expect(result.overallScore).toBe(8);
   });
 });
 

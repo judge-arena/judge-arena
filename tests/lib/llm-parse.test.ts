@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseJudgmentResponse } from '@/lib/llm/provider';
+import { parseJudgmentResponse, tryParseStructuredJudgment } from '@/lib/llm/provider';
 import { computeWeightedScore } from '@/lib/utils';
 import type { RubricCriterionView } from '@/types';
 
@@ -126,5 +126,68 @@ describe('parseJudgmentResponse: NaN normalization (1b correctness carry)', () =
 
   it('throws a clear error for genuinely unparseable text', () => {
     expect(() => parseJudgmentResponse('not json at all', criteria)).toThrow(/Failed to parse LLM judgment response/);
+  });
+});
+
+describe('tryParseStructuredJudgment: non-object criteriaScores elements never throw (1b Task 11 review MINOR fix)', () => {
+  // `tryParseStructuredJudgment`'s docstring claims "never throws", but a
+  // criteriaScores array containing a non-object element (e.g. `null`) used
+  // to reach `normalizeParsedJudgment`'s `cs.criterionId` property access on
+  // that element and throw an uncaught TypeError — `registry.ts`'s
+  // `executeJudgmentCall` has no try/catch around this call, so the whole
+  // judgment call would fail instead of degrading to the fallback parse it
+  // was designed to. These tests exercise the exact real-world composition
+  // registry.ts's `parseJudgmentText` uses on identical raw text:
+  // `tryParseStructuredJudgment(...) ?? parseJudgmentResponse(...)`.
+
+  it('a criteriaScores array containing null rejects the structured parse (returns undefined, does NOT throw) — the lenient fallback then succeeds on the identical raw text, parseMode "fallback"', () => {
+    const raw = JSON.stringify({
+      overallScore: 8,
+      reasoning: 'solid',
+      criteriaScores: [null],
+    });
+
+    expect(() => tryParseStructuredJudgment(raw, criteria)).not.toThrow();
+    expect(tryParseStructuredJudgment(raw, criteria)).toBeUndefined();
+
+    expect(() => parseJudgmentResponse(raw, criteria)).not.toThrow();
+    const fallback = parseJudgmentResponse(raw, criteria);
+    expect(fallback.parseMode).toBe('fallback');
+    expect(fallback.overallScore).toBe(8);
+    // The null element matched nothing — both criteria fall back to 0,
+    // exactly as if criteriaScores had been empty.
+    expect(fallback.criteriaScores.map((c) => c.score)).toEqual([0, 0]);
+  });
+
+  it('a criteriaScores array mixing a well-formed object with a non-object element ("notanobject") also rejects the structured parse and falls back cleanly, preserving the well-formed entry\'s score', () => {
+    const raw = JSON.stringify({
+      overallScore: 6,
+      reasoning: 'mixed',
+      criteriaScores: [{ criterionId: 'c1', criterionName: 'Accuracy', score: 9 }, 'notanobject'],
+    });
+
+    expect(() => tryParseStructuredJudgment(raw, criteria)).not.toThrow();
+    expect(tryParseStructuredJudgment(raw, criteria)).toBeUndefined();
+
+    const fallback = parseJudgmentResponse(raw, criteria);
+    expect(fallback.parseMode).toBe('fallback');
+    expect(fallback.criteriaScores.find((c) => c.criterionId === 'c1')!.score).toBe(9);
+    expect(fallback.criteriaScores.find((c) => c.criterionId === 'c2')!.score).toBe(0);
+  });
+
+  it('a conforming (all-record) criteriaScores array still parses via the strict path, unaffected by the new element check', () => {
+    const raw = JSON.stringify({
+      overallScore: 9,
+      reasoning: 'clean',
+      criteriaScores: [
+        { criterionId: 'c1', criterionName: 'Accuracy', score: 10 },
+        { criterionId: 'c2', criterionName: 'Clarity', score: 5 },
+      ],
+    });
+
+    const result = tryParseStructuredJudgment(raw, criteria);
+    expect(result).toBeDefined();
+    expect(result!.parseMode).toBe('structured');
+    expect(result!.overallScore).toBe(9);
   });
 });

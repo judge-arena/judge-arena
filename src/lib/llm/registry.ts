@@ -104,10 +104,12 @@ export interface ProviderDescriptor {
    * consulted by `callOpenAICompatible` when `caps.structuredOutput !==
    * 'none'` AND the call is a judgment (not respond) — see that module's
    * doc. A descriptor that declares a structured-output capability but has
-   * NO hook of its own (openai, openrouter — both `'json_schema'`) gets
-   * the plain OpenAI-standard `response_format` shape by default; this
-   * hook exists only for a backend (vLLM — `backends/vllm.ts`) that needs
-   * something ADDITIONAL to that default. */
+   * NO hook of its own (openrouter — `'json_schema'`) gets the plain
+   * OpenAI-standard `response_format` shape by default; this hook exists
+   * only for a backend (vLLM — `backends/vllm.ts`) that needs something
+   * ADDITIONAL to that default. (Plain `openai`'s `caps.structuredOutput`
+   * is `'none'` — see that descriptor's own doc in `DESCRIPTORS` below for
+   * why real OpenAI is deliberately excluded from this seam.) */
   structuredRequestFields?(schema: Record<string, unknown>): Record<string, unknown>;
   scoredRunsAllowed: boolean;
 }
@@ -141,7 +143,19 @@ const DESCRIPTORS: Record<ServingBackend, ProviderDescriptor> = {
     id: 'openai',
     kind: 'api',
     auth: 'bearer',
-    caps: { structuredOutput: 'json_schema', samplingParams: true, reasoningToggle: true },
+    // 1b Task 11 review IMPORTANT fix: was 'json_schema'. Real OpenAI's
+    // Structured Outputs (`response_format: {type: 'json_schema', ...}`) is
+    // MODEL-GATED, not universally supported — sending it to
+    // gpt-3.5-turbo/gpt-4/gpt-4-turbo (all still-valid `baseModel` choices
+    // for this descriptor) returns a hard 400, breaking the call entirely
+    // rather than degrading gracefully. Task 11's actual brief scope was
+    // OpenRouter + vLLM; the generic cap-driven seam in
+    // `openai-compatible.ts` swept plain OpenAI in as an unreviewed side
+    // effect of finally consuming this flag. Per-model structured-output
+    // gating for real OpenAI (checking `baseModel` against the actual set of
+    // Structured-Outputs-capable snapshots) is deferred to a future task —
+    // 'none' here is the safe default until that lands.
+    caps: { structuredOutput: 'none', samplingParams: true, reasoningToggle: true },
     scoredRunsAllowed: true,
   },
   openrouter: {
@@ -149,6 +163,17 @@ const DESCRIPTORS: Record<ServingBackend, ProviderDescriptor> = {
     kind: 'openai_compatible',
     defaultBaseUrl: 'https://openrouter.ai/api/v1',
     auth: 'bearer',
+    // 'json_schema' (no custom structuredRequestFields hook — gets the
+    // generic response_format default) is OpenRouter's own DECLARED
+    // support: OpenRouter passes response_format through to whichever
+    // underlying model is selected, and judge-arena's OpenRouter-routed
+    // judges are configured per-model by an operator (unlike the plain
+    // `openai` descriptor above, which has no equivalent per-model
+    // gating and had to be defused instead). Kept as-is rather than
+    // narrowed to 'none': tests/lib/backends.test.ts's "Structured-output
+    // parse seam" suite has a binding regression test asserting an
+    // OpenRouter judgment call parses via the structured path through this
+    // exact default-hook mechanism.
     caps: { structuredOutput: 'json_schema', samplingParams: true, reasoningToggle: false },
     // Task 11: attribution headers (HTTP-Referer/X-Title) — see
     // backends/openrouter.ts's doc. Breaker key granularity needs no

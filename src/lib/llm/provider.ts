@@ -216,8 +216,19 @@ function normalizeParsedJudgment(
   parsed: Record<string, unknown>,
   criteria: RubricCriterionView[]
 ): Omit<ParsedJudgment, 'parseMode'> {
-  // Validate and normalize criteria scores
-  const parsedScores = Array.isArray(parsed.criteriaScores) ? parsed.criteriaScores : [];
+  // Validate and normalize criteria scores. Non-record elements (e.g. a
+  // stray `null`/string in the array — 1b Task 11 review MINOR fix) are
+  // dropped rather than matched against: `cs.criterionId` on a non-object
+  // element throws, and this function is shared by BOTH
+  // `parseJudgmentResponse` (the lenient fallback) and
+  // `tryParseStructuredJudgment` (the strict path) — a malformed element
+  // used to crash whichever path reached it first. A dropped element is
+  // treated exactly like an absent/unmatched score for that criterion (same
+  // downstream 0-default as any other criterion nothing in the array
+  // matches).
+  const parsedScores = (Array.isArray(parsed.criteriaScores) ? parsed.criteriaScores : []).filter(
+    isRecord
+  ) as unknown as CriteriaScore[];
   const criteriaScores: CriteriaScore[] = criteria.map((criterion, index) => {
     // Match by ID, exact name, case-insensitive name, or array position
     const found = parsedScores.find(
@@ -307,6 +318,27 @@ export function parseJudgmentResponse(raw: string, criteria: RubricCriterionView
  * hard failure — some deployments silently ignore an unsupported
  * `response_format`/`guided_json` request field and just return ordinary
  * (possibly markdown-wrapped) free text.
+ *
+ * 1b Task 11 review MINOR fix: this docstring's "never throws" promise
+ * used to be false — a `criteriaScores` array containing a non-object
+ * element (e.g. `[null]`, or `[{...}, "notanobject"]`) reached
+ * `normalizeParsedJudgment`'s `cs.criterionId` property access on that
+ * element and threw a raw `TypeError`, uncaught, out of this function
+ * (`registry.ts`'s `executeJudgmentCall` has no try/catch around its call
+ * to this — the whole judgment call would fail instead of degrading to the
+ * fallback parse it was designed to). Two changes close this: (1) every
+ * `criteriaScores` element is now required to be a record — an array
+ * containing anything else is treated as NON-CONFORMING (same as a wrong
+ * top-level type), returned as `undefined` before `normalizeParsedJudgment`
+ * is ever called; (2) the `normalizeParsedJudgment` call itself is wrapped
+ * in try/catch as a backstop for any OTHER shape this function's explicit
+ * checks don't anticipate, keeping the "never throws" promise true in
+ * fact, not just for the one shape covered by (1). (`normalizeParsedJudgment`
+ * was separately hardened to drop non-record elements rather than crash on
+ * them at all — see its own doc — which is what lets the lenient
+ * `parseJudgmentResponse` fallback actually succeed on the identical raw
+ * text this function rejected, instead of hitting the same crash one level
+ * up.)
  */
 export function tryParseStructuredJudgment(raw: string, criteria: RubricCriterionView[]): ParsedJudgment | undefined {
   let parsed: unknown;
@@ -320,6 +352,11 @@ export function tryParseStructuredJudgment(raw: string, criteria: RubricCriterio
   if (typeof parsed.overallScore !== 'number' || !Number.isFinite(parsed.overallScore)) return undefined;
   if (typeof parsed.reasoning !== 'string') return undefined;
   if (!Array.isArray(parsed.criteriaScores)) return undefined;
+  if (!parsed.criteriaScores.every(isRecord)) return undefined;
 
-  return { ...normalizeParsedJudgment(parsed, criteria), parseMode: 'structured' };
+  try {
+    return { ...normalizeParsedJudgment(parsed, criteria), parseMode: 'structured' };
+  } catch {
+    return undefined;
+  }
 }
