@@ -204,3 +204,143 @@ export async function requireAuthWithScope(
 export function isAdmin(session: AuthSession): boolean {
   return session.user.role === 'admin';
 }
+
+/**
+ * Resolve the current session WITHOUT requiring one — never throws, never
+ * returns a NextResponse. Used by routes that serve both public
+ * (`visibility: 'public'`) and gated content (spec §7 D3: public research
+ * data defaults to open reads; see src/lib/serializers.ts + the access
+ * matrix in tests/db/access-matrix.test.ts): `null` means "anonymous
+ * caller", not an error condition the route needs to branch its error
+ * handling on.
+ *
+ * Delegates to `requireAuth()` so anonymous callers on these routes still
+ * benefit from its API-key resolution and shared rate-limit chokepoint —
+ * with one deliberate tradeoff: EVERY failure mode of `requireAuth()`
+ * (missing session, invalid/expired API key, and rate-limit-exceeded)
+ * collapses to `null` here, not just "no credentials presented". A
+ * request that's actually over the rate limit is therefore served as
+ * anonymous rather than getting a 429 on these specific routes. That's an
+ * accepted gap for this task (public-read routes were fully auth-gated,
+ * and therefore already covered by requireAuth()'s 429, before Task 14 —
+ * this only affects the newly-opened anonymous surface) — a caller
+ * presenting a BAD key on a public-read route degrades to "read the public
+ * view", it doesn't get blocked outright. Revisit if anonymous abuse of
+ * public-read routes becomes a real problem.
+ */
+export async function optionalAuth(): Promise<AuthSession | null> {
+  const result = await requireAuth();
+  return result instanceof NextResponse ? null : result;
+}
+
+/**
+ * Require an INTERACTIVE session — a signed-in cookie/OIDC session, never a
+ * developer API key — even one holding every scope. Used by the API-key
+ * lifecycle routes (POST/PATCH/DELETE, and GET for consistency, on
+ * /api/api-keys[/[id]]) to close the privilege-escalation finding from the
+ * T14 critique disposition table: those routes previously called bare
+ * `requireAuth()` with no `requireScope()` check at all (there is no
+ * `apikeys:*` scope in src/lib/permissions.ts), so ANY authenticated
+ * caller — including one holding a narrowly-scoped API key like
+ * `stats:read` only — could mint a brand-new key with every scope
+ * attached to their own account, or revoke/edit the caller's other keys.
+ * Requiring an interactive session here means a compromised or narrowly
+ * scoped API key can never be used to mint, escalate, or manage keys.
+ */
+export async function requireInteractiveSession(): Promise<AuthSession | NextResponse> {
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+  if (session.apiKeyScopes) {
+    return NextResponse.json(
+      {
+        error:
+          'API key management requires an interactive session (sign in via the web UI) — a developer API key cannot be used to create, update, or revoke API keys.',
+      },
+      { status: 403 }
+    );
+  }
+  return session;
+}
+
+export type ResourceAccess = 'owner' | 'public';
+
+/**
+ * Decide how a GET on a resource that CAN be public (visibility: 'public'
+ * rubrics/datasets/projects/golden-sets — spec §7 D3) should be served,
+ * given the resource's OWN `ownerId`/`isPublic` (already loaded by the
+ * caller — this never touches the DB itself):
+ *
+ *   - `{ access: 'owner' }`  — caller is the resource's owner or an admin:
+ *     serve the FULL (private-shape) representation.
+ *   - `{ access: 'public' }` — resource is public and the caller is
+ *     anonymous OR authenticated-but-not-the-owner: serve the PII-stripped
+ *     public representation (src/lib/serializers.ts). This check runs
+ *     AFTER the owner/admin check above, so the actual owner (or an
+ *     admin) always gets the full shape even on their own public
+ *     resource.
+ *   - `{ error }` — resource is private and inaccessible: 401 (no
+ *     session — "log in and this might work") or 403 (authenticated,
+ *     not the owner/admin — matches every pre-existing inline ownership
+ *     check's "Forbidden" convention in this codebase).
+ */
+export function resolveResourceAccess(
+  session: AuthSession | null,
+  ownerId: string | null,
+  isPublic: boolean
+): { access: ResourceAccess } | { error: NextResponse } {
+  const isOwnerOrAdmin =
+    !!session && (session.user.id === ownerId || isAdmin(session));
+  if (isOwnerOrAdmin) return { access: 'owner' };
+  if (isPublic) return { access: 'public' };
+  if (!session) {
+    return { error: NextResponse.json({ error: 'Unauthorized' }, { status: 401 }) };
+  }
+  return { error: NextResponse.json({ error: 'Forbidden' }, { status: 403 }) };
+}
+
+/** Models `requireOwnership` can check — every one keyed by `userId`
+ * except `goldenSet`, which uses `ownerId` (see prisma/schema.prisma). */
+const OWNERSHIP_MODELS = {
+  project: { model: 'project', field: 'userId' },
+  rubric: { model: 'rubric', field: 'userId' },
+  dataset: { model: 'dataset', field: 'userId' },
+  evaluation: { model: 'evaluation', field: 'userId' },
+  modelEndpoint: { model: 'modelEndpoint', field: 'userId' },
+  developerApiKey: { model: 'developerApiKey', field: 'userId' },
+  goldenSet: { model: 'goldenSet', field: 'ownerId' },
+} as const;
+
+export type OwnableEntity = keyof typeof OWNERSHIP_MODELS;
+
+/**
+ * Load an entity by id and verify `session` owns it (or is an admin) —
+ * the single DRY-up of the `findUnique` + `userId !== session.user.id &&
+ * !isAdmin(session)` pattern repeated across every mutation route
+ * (rubrics/datasets/projects/evaluations/models `[id]` PATCH/DELETE).
+ * Every CREATE path sets `userId: session.user.id` directly (never a
+ * client-supplied owner) — this helper is for the id-in-the-URL mutation
+ * case, closing the "ownerless-create" IDOR shape by construction: there
+ * is no code path here that lets a caller assert ownership of a row they
+ * don't already own.
+ *
+ * Returns `null` when the caller may proceed, or a 404 (no such row) /
+ * 403 (row exists, caller doesn't own it and isn't admin) NextResponse.
+ */
+export async function requireOwnership(
+  entity: OwnableEntity,
+  id: string,
+  session: AuthSession
+): Promise<NextResponse | null> {
+  const { model, field } = OWNERSHIP_MODELS[entity];
+  const delegate = (prisma as any)[model];
+  const row = await delegate.findUnique({ where: { id }, select: { [field]: true } });
+
+  if (!row) {
+    return NextResponse.json({ error: `${entity} not found` }, { status: 404 });
+  }
+  const ownerId = row[field] as string | null;
+  if (ownerId !== session.user.id && !isAdmin(session)) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  }
+  return null;
+}

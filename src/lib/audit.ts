@@ -12,6 +12,7 @@ export type AuditAction =
   | 'user.register'
   | 'user.login'
   | 'user.login.failed'
+  | 'user.invite_claimed'
   | 'apikey.create'
   | 'apikey.update'
   | 'apikey.delete'

@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin, optionalAuth } from '@/lib/auth-guard';
 import { generateSlug } from '@/lib/config';
 import {
   fetchDatasetMetadata,
@@ -10,6 +10,7 @@ import {
 } from '@/lib/huggingface';
 import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib/pagination';
 import { logger, serializeError } from '@/lib/logger';
+import { toPublicDataset } from '@/lib/serializers';
 
 const createDatasetSchema = z.object({
   name: z.string().min(1, 'Name is required').max(200),
@@ -41,10 +42,11 @@ const createDatasetSchema = z.object({
 // GET /api/datasets - List datasets visible to the current user
 // Supports ?limit=N&cursor=ID for pagination
 export async function GET(request: Request) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-  const scopeCheck = requireScope(session, 'datasets:read');
-  if (scopeCheck) return scopeCheck;
+  const session = await optionalAuth();
+  if (session) {
+    const scopeCheck = requireScope(session, 'datasets:read');
+    if (scopeCheck) return scopeCheck;
+  }
 
   const { searchParams } = new URL(request.url);
   const source = searchParams.get('source'); // 'local' | 'remote'
@@ -54,11 +56,14 @@ export async function GET(request: Request) {
   const pageArgs = buildPrismaPageArgs({ limit, cursor });
 
   try {
-    // Users see their own private datasets + all public datasets
-    // Admins see everything
+    // Anonymous callers see ONLY public datasets. Authenticated non-admins
+    // see their own (private + public) plus everyone else's public ones.
+    // Admins see everything.
     const where: any = {};
 
-    if (!isAdmin(session)) {
+    if (!session) {
+      where.visibility = 'public';
+    } else if (!isAdmin(session)) {
       where.OR = [
         { userId: session.user.id },
         { visibility: 'public' },
@@ -83,7 +88,15 @@ export async function GET(request: Request) {
       prisma.dataset.count({ where }),
     ]);
 
-    return paginatedJson(datasets, limit, total);
+    // Own (or, for an admin, every) dataset gets the full shape; a public
+    // dataset the caller doesn't own is PII-stripped (src/lib/serializers.ts)
+    // — this is the exact "dataset responses embed owner email" finding
+    // from the T14 critique disposition table, closed for the list route.
+    const isOwnerOrAdmin = (d: { userId: string }) =>
+      !!session && (session.user.id === d.userId || isAdmin(session));
+    const body = datasets.map((d) => (isOwnerOrAdmin(d) ? d : toPublicDataset(d)));
+
+    return paginatedJson(body, limit, total);
   } catch (error) {
     logger.error('Failed to fetch datasets', { error });
     return NextResponse.json(

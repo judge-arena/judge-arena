@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin, optionalAuth } from '@/lib/auth-guard';
 import { generateSlug } from '@/lib/config';
 import { logger, serializeError } from '@/lib/logger';
+import { toPublicRubric } from '@/lib/serializers';
 
 const criterionSchema = z.object({
   name: z.string().min(1),
@@ -19,15 +20,22 @@ const createRubricSchema = z.object({
   criteria: z.array(criterionSchema).min(1, 'At least one criterion is required'),
 });
 
-// GET /api/rubrics — only own rubrics (admin sees all)
+// GET /api/rubrics — public (visibility: public) rubrics + the caller's own
+// (admin sees all). Anonymous callers see only public rubrics. Access
+// matrix: tests/db/access-matrix.test.ts.
 export async function GET() {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-  const scopeCheck = requireScope(session, 'rubrics:read');
-  if (scopeCheck) return scopeCheck;
+  const session = await optionalAuth();
+  if (session) {
+    const scopeCheck = requireScope(session, 'rubrics:read');
+    if (scopeCheck) return scopeCheck;
+  }
 
   try {
-    const where = isAdmin(session) ? undefined : { userId: session.user.id };
+    const where = !session
+      ? { visibility: 'public' as const }
+      : isAdmin(session)
+        ? undefined
+        : { OR: [{ userId: session.user.id }, { visibility: 'public' as const }] };
 
     const rubrics = await prisma.rubric.findMany({
       where,
@@ -39,7 +47,14 @@ export async function GET() {
       orderBy: { updatedAt: 'desc' },
     });
 
-    return NextResponse.json(rubrics);
+    // Own (or, for an admin, every) rubric gets the full shape; a public
+    // rubric the caller doesn't own is PII-stripped (src/lib/serializers.ts)
+    // — never leaks another user's email in this list.
+    const isOwnerOrAdmin = (r: { userId: string }) =>
+      !!session && (session.user.id === r.userId || isAdmin(session));
+    const body = rubrics.map((r) => (isOwnerOrAdmin(r) ? r : toPublicRubric(r)));
+
+    return NextResponse.json(body);
   } catch (error) {
     logger.error('Failed to fetch rubrics', { error: serializeError(error) });
     return NextResponse.json(

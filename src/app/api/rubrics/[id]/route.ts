@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, optionalAuth, resolveResourceAccess, requireOwnership } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
+import { toPublicRubric } from '@/lib/serializers';
 
 const updateRubricSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -21,13 +22,15 @@ const updateRubricSchema = z.object({
     .optional(),
 });
 
-// GET /api/rubrics/[id]
+// GET /api/rubrics/[id] — public if visibility: 'public', else owner/admin
+// only. Access matrix: tests/db/access-matrix.test.ts.
 export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-  const scopeCheck = requireScope(session, 'rubrics:read');
-  if (scopeCheck) return scopeCheck;
+  const session = await optionalAuth();
+  if (session) {
+    const scopeCheck = requireScope(session, 'rubrics:read');
+    if (scopeCheck) return scopeCheck;
+  }
 
   try {
     const rubric = await prisma.rubric.findUnique({
@@ -43,11 +46,10 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
       return NextResponse.json({ error: 'Rubric not found' }, { status: 404 });
     }
 
-    if (rubric.userId !== session.user.id && !isAdmin(session)) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+    const decision = resolveResourceAccess(session, rubric.userId, rubric.visibility === 'public');
+    if ('error' in decision) return decision.error;
 
-    return NextResponse.json(rubric);
+    return NextResponse.json(decision.access === 'owner' ? rubric : toPublicRubric(rubric));
   } catch (error) {
     logger.error('Failed to fetch rubric', { error: serializeError(error) });
     return NextResponse.json(
@@ -66,11 +68,8 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
   if (scopeCheck) return scopeCheck;
 
   try {
-    const existing = await prisma.rubric.findUnique({ where: { id: params.id }, select: { userId: true } });
-    if (!existing) return NextResponse.json({ error: 'Rubric not found' }, { status: 404 });
-    if (existing.userId !== session.user.id && !isAdmin(session)) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+    const ownershipError = await requireOwnership('rubric', params.id, session);
+    if (ownershipError) return ownershipError;
 
     const body = await request.json();
     const data = updateRubricSchema.parse(body);
@@ -131,11 +130,8 @@ export async function DELETE(_request: Request, props: { params: Promise<{ id: s
   if (scopeCheck) return scopeCheck;
 
   try {
-    const existing = await prisma.rubric.findUnique({ where: { id: params.id }, select: { userId: true } });
-    if (!existing) return NextResponse.json({ error: 'Rubric not found' }, { status: 404 });
-    if (existing.userId !== session.user.id && !isAdmin(session)) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+    const ownershipError = await requireOwnership('rubric', params.id, session);
+    if (ownershipError) return ownershipError;
 
     await prisma.rubric.delete({ where: { id: params.id } });
     return NextResponse.json({ success: true });

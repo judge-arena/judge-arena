@@ -21,6 +21,7 @@
  */
 import type { JudgeClass, PrismaClient, ScoringMechanism, ServingBackend } from '@prisma/client';
 import { generateSlug } from '@/lib/config';
+import { audit } from '@/lib/audit';
 
 /** The subset of `PrismaClient` this module needs — satisfied by the global
  * `prisma` singleton (both callers use it directly today; no caller needs
@@ -126,6 +127,24 @@ export async function createCustomJudgeModel(
       isActive: fields.isActive,
       verifiedAt: null,
       verificationError: fields.verificationError ?? null,
+    },
+  });
+
+  // Single choke point for every "add a custom judge model" caller (POST
+  // /api/models mode: 'custom', and POST /api/config/import's model
+  // import path) — fire-and-forget via the global `prisma` singleton
+  // (src/lib/audit.ts), independent of the `client` param above (which may
+  // be a transaction client in a future caller).
+  audit({
+    userId,
+    action: 'model.create',
+    resource: 'judgeModel',
+    resourceId: judgeModel.id,
+    metadata: {
+      name: fields.name,
+      judgeModelVersionId: version.id,
+      modelEndpointId: endpoint.id,
+      servingBackend: fields.servingBackend,
     },
   });
 

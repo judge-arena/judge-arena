@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, optionalAuth, resolveResourceAccess, requireOwnership } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
+import { toPublicDataset } from '@/lib/serializers';
 
 const updateDatasetSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -13,13 +14,16 @@ const updateDatasetSchema = z.object({
   tags: z.array(z.string()).optional(),
 });
 
-// GET /api/datasets/[id] - Get a single dataset with samples
+// GET /api/datasets/[id] - Get a single dataset with samples. Public if
+// visibility: 'public' (PII-stripped — src/lib/serializers.ts), else
+// owner/admin only. Access matrix: tests/db/access-matrix.test.ts.
 export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-  const scopeCheck = requireScope(session, 'datasets:read');
-  if (scopeCheck) return scopeCheck;
+  const session = await optionalAuth();
+  if (session) {
+    const scopeCheck = requireScope(session, 'datasets:read');
+    if (scopeCheck) return scopeCheck;
+  }
 
   try {
     const dataset = await prisma.dataset.findUnique({
@@ -49,16 +53,22 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
       );
     }
 
-    // Visibility check: owner, admin, or public
-    if (
-      dataset.userId !== session.user.id &&
-      !isAdmin(session) &&
-      dataset.visibility !== 'public'
-    ) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    const decision = resolveResourceAccess(session, dataset.userId, dataset.visibility === 'public');
+    if ('error' in decision) return decision.error;
+
+    if (decision.access === 'owner') {
+      return NextResponse.json(dataset);
     }
 
-    return NextResponse.json(dataset);
+    // Public view: PII-stripped dataset core + the same samples/versions/
+    // parent sub-objects (none of which join user data, so they're already
+    // safe to pass through verbatim — see the GET include above).
+    return NextResponse.json({
+      ...toPublicDataset(dataset),
+      samples: dataset.samples,
+      versions: dataset.versions,
+      parent: dataset.parent,
+    });
   } catch (error) {
     logger.error('Failed to fetch dataset', { error: serializeError(error) });
     return NextResponse.json(
@@ -77,19 +87,8 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
   if (scopeCheck) return scopeCheck;
 
   try {
-    const existing = await prisma.dataset.findUnique({
-      where: { id: params.id },
-      select: { userId: true },
-    });
-    if (!existing) {
-      return NextResponse.json(
-        { error: 'Dataset not found' },
-        { status: 404 }
-      );
-    }
-    if (existing.userId !== session.user.id && !isAdmin(session)) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+    const ownershipError = await requireOwnership('dataset', params.id, session);
+    if (ownershipError) return ownershipError;
 
     const body = await request.json();
     const data = updateDatasetSchema.parse(body);
@@ -136,19 +135,8 @@ export async function DELETE(_request: Request, props: { params: Promise<{ id: s
   if (scopeCheck) return scopeCheck;
 
   try {
-    const existing = await prisma.dataset.findUnique({
-      where: { id: params.id },
-      select: { userId: true },
-    });
-    if (!existing) {
-      return NextResponse.json(
-        { error: 'Dataset not found' },
-        { status: 404 }
-      );
-    }
-    if (existing.userId !== session.user.id && !isAdmin(session)) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+    const ownershipError = await requireOwnership('dataset', params.id, session);
+    if (ownershipError) return ownershipError;
 
     await prisma.dataset.delete({ where: { id: params.id } });
     return NextResponse.json({ success: true });

@@ -1,21 +1,29 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, optionalAuth, resolveResourceAccess, requireOwnership } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
+import { toPublicProject } from '@/lib/serializers';
 
 const updateProjectSchema = z.object({
   name: z.string().min(1).max(200).optional(),
   description: z.string().max(2000).optional(),
 });
 
-// GET /api/projects/[id]
+// GET /api/projects/[id] — public if visibility: 'public' or isDefault
+// (the Leaderboard project predates the Visibility enum), else owner/admin
+// only. The public view is metadata-only (src/lib/serializers.ts's
+// toPublicProject): evaluations are user-created data (spec §7 D3 — never
+// part of the public-visibility set, regardless of the parent project's
+// visibility) and are only ever returned to the project's owner/admin, the
+// same as the owner's email on every other public serializer in this file.
 export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-  const scopeCheck = requireScope(session, 'projects:read');
-  if (scopeCheck) return scopeCheck;
+  const session = await optionalAuth();
+  if (session) {
+    const scopeCheck = requireScope(session, 'projects:read');
+    if (scopeCheck) return scopeCheck;
+  }
 
   try {
     const project = await prisma.project.findUnique({
@@ -108,16 +116,21 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
       return NextResponse.json({ error: 'Project not found' }, { status: 404 });
     }
 
-    // Ownership check: owner, admin, or default (Leaderboard) projects are visible to all
-    if (
-      project.userId !== session.user.id &&
-      !isAdmin(session) &&
-      !(project as any).isDefault
-    ) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    const isPublic = project.visibility === 'public' || project.isDefault;
+    const decision = resolveResourceAccess(session, project.userId, isPublic);
+    if ('error' in decision) return decision.error;
+
+    if (decision.access === 'owner') {
+      return NextResponse.json(project);
     }
 
-    return NextResponse.json(project);
+    return NextResponse.json({
+      ...toPublicProject(project),
+      // Only datasets that are THEMSELVES public — this select set
+      // (id/name/source/visibility/sampleCount/huggingFaceId) already
+      // carries no user join, so no further stripping is needed.
+      datasets: project.datasets.filter((d) => d.visibility === 'public'),
+    });
   } catch (error) {
     logger.error('Failed to fetch project', { error: serializeError(error) });
     return NextResponse.json(
@@ -136,11 +149,8 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
   if (scopeCheck) return scopeCheck;
 
   try {
-    const existing = await prisma.project.findUnique({ where: { id: params.id }, select: { userId: true } });
-    if (!existing) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
-    if (existing.userId !== session.user.id && !isAdmin(session)) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+    const ownershipError = await requireOwnership('project', params.id, session);
+    if (ownershipError) return ownershipError;
 
     const body = await request.json();
     const data = updateProjectSchema.parse(body);
@@ -178,11 +188,8 @@ export async function DELETE(_request: Request, props: { params: Promise<{ id: s
   if (scopeCheck) return scopeCheck;
 
   try {
-    const existing = await prisma.project.findUnique({ where: { id: params.id }, select: { userId: true } });
-    if (!existing) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
-    if (existing.userId !== session.user.id && !isAdmin(session)) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+    const ownershipError = await requireOwnership('project', params.id, session);
+    if (ownershipError) return ownershipError;
 
     await prisma.project.delete({ where: { id: params.id } });
     return NextResponse.json({ success: true });

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin, optionalAuth, resolveResourceAccess } from '@/lib/auth-guard';
 import { generateSlug } from '@/lib/config';
 import { logger, serializeError } from '@/lib/logger';
 import { createVersionSchema } from './schema';
@@ -145,8 +145,7 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
 // GET /api/datasets/[id]/versions — list all versions of a dataset
 export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
+  const session = await optionalAuth();
 
   try {
     const dataset = await prisma.dataset.findUnique({
@@ -161,13 +160,8 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
       );
     }
 
-    if (
-      dataset.userId !== session.user.id &&
-      !isAdmin(session) &&
-      dataset.visibility !== 'public'
-    ) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+    const decision = resolveResourceAccess(session, dataset.userId, dataset.visibility === 'public');
+    if ('error' in decision) return decision.error;
 
     // Find the root
     const rootId = dataset.parentId ?? dataset.id;

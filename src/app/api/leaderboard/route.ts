@@ -11,6 +11,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { logger, serializeError } from '@/lib/logger';
 import { resolveModelDisplay } from '@/lib/model-display';
+import { toPublicLeaderboardEntry } from '@/lib/serializers';
 
 interface ModelLeaderboardEntry {
   modelId: string;
@@ -179,6 +180,12 @@ export async function GET() {
     // Sort by avg score descending
     models.sort((a, b) => b.avgScore - a.avgScore);
 
+    // Route through the shared public serializer (src/lib/serializers.ts)
+    // — a no-op allow-list today (this response already carries no PII),
+    // but it names the public shape and keeps this route covered by the
+    // same serializer test suite as the visibility-gated public reads.
+    const publicModels = models.map(toPublicLeaderboardEntry);
+
     // Get the most recent judgment timestamp for "last updated" — derived
     // from the exact same population already fetched above (the latest
     // finalized run per evaluation), never a separately-scoped query that
@@ -199,7 +206,7 @@ export async function GET() {
         name: leaderboardProject.name,
         description: leaderboardProject.description,
       },
-      models,
+      models: publicModels,
       totalEvaluations,
       totalJudgments: judgments.length,
       lastUpdated,

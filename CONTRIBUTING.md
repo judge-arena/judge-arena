@@ -301,6 +301,54 @@ MyWidget.displayName = 'MyWidget';
 - Nested resource: `src/app/api/rubrics/[id]/versions/route.ts`
 - Complex workflow: `src/app/api/evaluations/[id]/judge/route.ts` (parallel LLM calls)
 
+### Access control — public reads vs. gated writes (Task 14)
+
+The access model (spec §7 D3): PUBLIC research data defaults to open
+**reads** — the leaderboard, and `visibility: 'public'` Rubrics/Datasets/
+Projects/GoldenSets. Everything else, and **every** mutation, is fully
+**gated** (ownership required, no anonymous access). Use the right
+helper from `src/lib/auth-guard.ts`:
+
+- **A resource that CAN be public** (has a `visibility` field): use
+  `optionalAuth()` instead of `requireAuth()` for `GET` — it resolves the
+  session if one exists but returns `null` instead of a 401 for an
+  anonymous caller. Then call `resolveResourceAccess(session, ownerId,
+  isPublic)`:
+  - `{ error }` → return it directly (401 anonymous+private, 403
+    authed-non-owner+private).
+  - `{ access: 'owner' }` → return the full row (owner or admin).
+  - `{ access: 'public' }` → return the row through the matching
+    `src/lib/serializers.ts` function (`toPublicRubric`/`toPublicDataset`/
+    `toPublicProject`/`toPublicGoldenSet`) — **never** the raw row with a
+    `user: { select: { email: true } }` join on this branch. Add a new
+    serializer there (allow-list shape, not a spread) if you add a new
+    public-eligible model.
+  - List endpoints: anonymous → `where: { visibility: 'public' }` only;
+    authed non-admin → `where: { OR: [{ userId }, { visibility: 'public' }] }`;
+    admin → everything. Map each row through the owner-vs-public check
+    per item (a list can mix your own private rows with someone else's
+    public ones).
+- **A resource that's NEVER public** (Evaluation, ModelEndpoint — no
+  `visibility` field; user-created/uploaded data, spec §7 D3): keep
+  `requireAuth()` on `GET` too, not `optionalAuth()`.
+- **Every mutation** (`POST`/`PATCH`/`DELETE`), on any resource: keep
+  `requireAuth()` (never `optionalAuth()`), and check ownership with
+  `requireOwnership(entityName, id, session)` — it 404s if the row
+  doesn't exist, 403s if `session` isn't the owner or an admin, and
+  `null`s (proceed) otherwise. On `POST`, set `userId: session.user.id`
+  directly from the resolved session — **never** trust a client-supplied
+  `userId`/`ownerId` field in the request body.
+- **API-key management routes** (anything that creates/edits/revokes a
+  `DeveloperApiKey`) additionally require `requireInteractiveSession()`
+  instead of `requireAuth()` — a developer API key, no matter its scopes,
+  must never be usable to mint/edit/revoke keys (see that function's doc
+  comment in `auth-guard.ts` for the privilege-escalation history).
+
+See `tests/db/access-matrix.test.ts` for the full table-driven matrix
+(every {resource × method × visibility × actor} combination this
+codebase currently implements) and `tests/lib/serializers.test.ts` for
+the PII-stripping assertions on each public serializer.
+
 ---
 
 ## Adding a New Page
@@ -562,6 +610,67 @@ defaults" finding; see `src/lib/run-launch.ts` and
 `evaluations:write`/`evaluations:run` scopes reading/writing the old
 `ModelConfig`-shaped fields. There is no back-compat shim — this is a
 breaking change, effective with this task's deploy.
+
+---
+
+## Content Security Policy (CSP) script nonces (Task 14)
+
+`src/middleware.ts` generates a fresh, random nonce on **every** request
+and uses it (instead of `'unsafe-inline'`) to allowlist scripts:
+
+```
+script-src 'self' 'nonce-<per-request-value>'   (production; no unsafe-inline, no unsafe-eval)
+script-src 'self' 'nonce-<per-request-value>' 'unsafe-eval'   (development; HMR needs unsafe-eval)
+style-src 'self' 'unsafe-inline'                (KEPT — see below)
+```
+
+This follows the official [Next.js 15 App Router CSP
+pattern](https://nextjs.org/docs/app/guides/content-security-policy):
+
+1. Middleware sets the nonce on **both** the `Content-Security-Policy`
+   response header (what the browser enforces) **and** an `x-nonce`
+   request header, propagated via `NextResponse.next({ request: {
+   headers } })` — not just the response headers object.
+2. Next.js's SSR pipeline reads the nonce back out of that request-header
+   CSP value and automatically stamps it onto every script it renders
+   itself: the React/Next runtime chunks, page bundles, and any
+   `next/script` component that's given a `nonce` prop. **No code is
+   needed for this part** — it's automatic once the request header is set
+   correctly.
+3. `src/app/layout.tsx` reads `(await headers()).get('x-nonce')` and
+   passes it to `<ThemeProvider nonce={nonce}>` — the ONE inline
+   (`dangerouslySetInnerHTML`) script this app ships is next-themes'
+   FOUC-prevention script (sets the light/dark class on `<html>` before
+   hydration), and next-themes accepts a `nonce` prop specifically for
+   this. If you ever add another genuinely inline script
+   (`dangerouslySetInnerHTML` or a literal `<script>` tag, as opposed to
+   `next/script src=...`), it needs the same `nonce={nonce}` treatment —
+   grep `layout.tsx` for the pattern.
+
+**Why `style-src` still has `'unsafe-inline'`:** CSP's `style-src` also
+governs the `style` attribute (not just `<style>` tags), and several
+components in `src/**` use inline `style={{...}}` attributes. Tailwind
+ships no CSS-in-JS `<style>` injection to nonce instead of allowlisting.
+Removing `unsafe-inline` from `style-src` was checked and explicitly
+deferred — it isn't part of this task's script-src fix and would need its
+own audit of every inline `style` usage.
+
+**Calling `headers()` in the root layout forces dynamic rendering** for
+the whole app (a nonce is meaningless on a page prerendered at build
+time — no per-request value exists then). This is not a new tradeoff:
+every route in `src/app/**` was already dynamically rendered before this
+change (session/DB-backed at request time; `next build`'s output shows
+every route as `ƒ (Dynamic)` except the static `/icon.svg`).
+
+**Verifying it isn't broken:** `npx next build && npx next start`, then
+either `curl -sD - <url>` and confirm the `Content-Security-Policy`
+header has `'nonce-...'` and no `unsafe-inline` in `script-src`, or
+(more conclusively) load a page in a real browser and check the console
+for CSP violation errors — a white-screened app from a wrong nonce
+usually shows as either a blank page or React hydration errors in the
+console, not an HTTP-level failure. See `tests/lib/csp-nonce.test.ts`
+for the header-shape unit tests (nonce present, no `unsafe-inline` in
+`script-src` in production, two requests get two different nonces).
 
 ---
 

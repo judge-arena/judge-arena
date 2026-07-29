@@ -1,16 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { requireInteractiveSession, isAdmin } from '@/lib/auth-guard';
 import { prisma } from '@/lib/db';
 import { validateScopes, ALL_SCOPES, type PermissionScope } from '@/lib/permissions';
+import { audit, getRequestContext } from '@/lib/audit';
 
 // ─── GET /api/api-keys/[id] ────────────────────────────────────────────────
-// Fetch a single API key by ID.
+// Fetch a single API key by ID. Interactive session required — same
+// reasoning as GET /api/api-keys.
 
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await requireAuth();
+  const session = await requireInteractiveSession();
   if (session instanceof NextResponse) return session;
 
   const { id } = await params;
@@ -48,13 +50,16 @@ export async function GET(
 }
 
 // ─── PATCH /api/api-keys/[id] ──────────────────────────────────────────────
-// Update an API key (name, scopes, isActive, expiresAt).
+// Update an API key (name, scopes, isActive, expiresAt). Interactive
+// session required — a developer API key must never be usable to widen
+// its own (or a sibling key's) scopes. Same privilege-escalation
+// reasoning as POST /api/api-keys.
 
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await requireAuth();
+  const session = await requireInteractiveSession();
   if (session instanceof NextResponse) return session;
 
   const { id } = await params;
@@ -152,6 +157,17 @@ export async function PATCH(
     },
   });
 
+  const { ip, userAgent } = getRequestContext(req);
+  audit({
+    userId: session.user.id,
+    action: 'apikey.update',
+    resource: 'apikey',
+    resourceId: updated.id,
+    metadata: { changed: Object.keys(updateData) },
+    ip,
+    userAgent,
+  });
+
   return NextResponse.json({
     ...updated,
     scopes: JSON.parse(updated.scopes || '[]'),
@@ -159,13 +175,14 @@ export async function PATCH(
 }
 
 // ─── DELETE /api/api-keys/[id] ─────────────────────────────────────────────
-// Revoke (delete) an API key permanently.
+// Revoke (delete) an API key permanently. Interactive session required —
+// same privilege-escalation reasoning as POST /api/api-keys.
 
 export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await requireAuth();
+  const session = await requireInteractiveSession();
   if (session instanceof NextResponse) return session;
 
   const { id } = await params;
@@ -184,6 +201,17 @@ export async function DELETE(
   }
 
   await prisma.developerApiKey.delete({ where: { id } });
+
+  const { ip, userAgent } = getRequestContext(req);
+  audit({
+    userId: session.user.id,
+    action: 'apikey.delete',
+    resource: 'apikey',
+    resourceId: existingKey.id,
+    metadata: { name: existingKey.name, revokedOwnerId: existingKey.userId },
+    ip,
+    userAgent,
+  });
 
   return NextResponse.json({ message: `API key "${existingKey.name}" has been revoked` });
 }

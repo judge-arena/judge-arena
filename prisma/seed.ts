@@ -176,16 +176,25 @@ async function main() {
 
   console.log(`  ✓ Created ${endpoints.length} catalog judge models + versions + admin endpoints`);
 
-  // Create the Leaderboard project (default, visible to all)
+  // Create the Leaderboard project (default, visible to all). Task 14:
+  // `visibility: 'public'` explicitly, not just `isDefault: true` — the
+  // API routes' public-read gate checks `visibility === 'public' ||
+  // isDefault` (isDefault kept as a belt-and-suspenders fallback for any
+  // pre-Task-14 deployment whose leaderboard project predates this field),
+  // but the visibility column is now the semantically correct signal for
+  // "this project is public research data" per spec §7 D3. `update` sets
+  // it too so a re-run of `prisma db seed` against an existing deployment
+  // (created before this field defaulted the row to 'private') corrects it.
   const leaderboard = await prisma.project.upsert({
     where: { id: 'leaderboard' },
-    update: {},
+    update: { visibility: 'public' },
     create: {
       id: 'leaderboard',
       name: 'Leaderboard',
       description:
         'Public leaderboard for evaluating models against standardized datasets. Compare model performance on well-known benchmarks.',
       isDefault: true,
+      visibility: 'public',
       userId: adminUser.id,
     },
   });

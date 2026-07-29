@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { requireScope, optionalAuth, resolveResourceAccess } from '@/lib/auth-guard';
 import {
   flattenDatasetSample,
   toCsv,
@@ -19,10 +19,11 @@ import { logger, serializeError } from '@/lib/logger';
  */
 export async function GET(request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-  const scopeCheck = requireScope(session, 'datasets:export');
-  if (scopeCheck) return scopeCheck;
+  const session = await optionalAuth();
+  if (session) {
+    const scopeCheck = requireScope(session, 'datasets:export');
+    if (scopeCheck) return scopeCheck;
+  }
 
   const { searchParams } = new URL(request.url);
   const format = (searchParams.get('format') ?? 'csv').toLowerCase();
@@ -46,14 +47,11 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
       return NextResponse.json({ error: 'Dataset not found' }, { status: 404 });
     }
 
-    // Access check: owner, admin, or public
-    if (
-      dataset.userId !== session.user.id &&
-      !isAdmin(session) &&
-      dataset.visibility !== 'public'
-    ) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+    // Sample rows carry no owner PII of their own — the export itself
+    // needs no separate serializer, just the same visibility gate as
+    // GET /api/datasets/[id].
+    const decision = resolveResourceAccess(session, dataset.userId, dataset.visibility === 'public');
+    if ('error' in decision) return decision.error;
 
     const rows = dataset.samples.map(flattenDatasetSample);
     const safeName = dataset.name.replace(/[^a-zA-Z0-9]+/g, '_').slice(0, 60);

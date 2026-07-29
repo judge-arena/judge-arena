@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { randomBytes, createHash } from 'crypto';
-import { requireAuth, isAdmin } from '@/lib/auth-guard';
+import { requireInteractiveSession, isAdmin } from '@/lib/auth-guard';
 import { prisma } from '@/lib/db';
 import { validateScopes, ALL_SCOPES, type PermissionScope } from '@/lib/permissions';
+import { audit, getRequestContext } from '@/lib/audit';
 
 const API_KEY_PREFIX = 'vgk_';
 
@@ -20,9 +21,15 @@ function hashKey(rawKey: string): string {
 // ─── GET /api/api-keys ─────────────────────────────────────────────────────
 // List all API keys for the current user (admin sees all).
 // Raw keys are NEVER returned — only prefix and metadata.
+//
+// Requires an INTERACTIVE session, not a developer API key — same
+// privilege-escalation reasoning as POST/PATCH/DELETE below (see
+// requireInteractiveSession's doc comment in src/lib/auth-guard.ts):
+// enumerating the account's OTHER keys is itself a capability a narrowly
+// scoped key shouldn't get "for free" through key-management routes.
 
 export async function GET() {
-  const session = await requireAuth();
+  const session = await requireInteractiveSession();
   if (session instanceof NextResponse) return session;
 
   const where = isAdmin(session) ? {} : { userId: session.user.id };
@@ -55,9 +62,20 @@ export async function GET() {
 
 // ─── POST /api/api-keys ────────────────────────────────────────────────────
 // Create a new API key. The raw key is returned ONCE in the response.
+//
+// Requires an INTERACTIVE session (requireInteractiveSession, NOT
+// requireAuth) — this closes the privilege-escalation finding from the T14
+// critique disposition table: this route previously called bare
+// requireAuth(), which also accepts a Bearer developer API key, and there
+// is no `apikeys:*` scope in src/lib/permissions.ts — so ANY authenticated
+// caller, including one holding an API key scoped to something as narrow
+// as `stats:read` only, could mint a brand-new key with EVERY scope
+// (`SCOPE_PRESETS`'s "Full Access") attached to their own account. A
+// developer API key can never be used to mint another key now, no matter
+// what scopes it holds.
 
 export async function POST(req: NextRequest) {
-  const session = await requireAuth();
+  const session = await requireInteractiveSession();
   if (session instanceof NextResponse) return session;
 
   let body: { name?: string; scopes?: string[]; expiresAt?: string };
@@ -133,6 +151,17 @@ export async function POST(req: NextRequest) {
       expiresAt: true,
       createdAt: true,
     },
+  });
+
+  const { ip, userAgent } = getRequestContext(req);
+  audit({
+    userId: session.user.id,
+    action: 'apikey.create',
+    resource: 'apikey',
+    resourceId: apiKey.id,
+    metadata: { name: apiKey.name, scopes: validScopes, prefix: apiKey.prefix },
+    ip,
+    userAgent,
   });
 
   return NextResponse.json(

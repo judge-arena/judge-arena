@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
+import { requireAuth, requireScope, isAdmin, optionalAuth, resolveResourceAccess } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
 import { createRubricVersion, RubricVersionConflictError } from '@/lib/rubric-versions';
 
@@ -19,11 +19,13 @@ const newVersionSchema = z.object({
   criteria: z.array(criterionSchema).min(1, 'At least one criterion is required'),
 });
 
-// GET /api/rubrics/[id]/versions
+// GET /api/rubrics/[id]/versions — same visibility rule as GET
+// /api/rubrics/[id]: public if the rubric is visibility: 'public', else
+// owner/admin only. This sub-resource carries no user/email join, so
+// there's no separate serializer step — the gate below IS the whole fix.
 export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
+  const session = await optionalAuth();
 
   try {
     const rubric = await prisma.rubric.findUnique({ where: { id: params.id } });
@@ -31,9 +33,8 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
       return NextResponse.json({ error: 'Rubric not found' }, { status: 404 });
     }
 
-    if (rubric.userId !== session.user.id && !isAdmin(session)) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+    const decision = resolveResourceAccess(session, rubric.userId, rubric.visibility === 'public');
+    if ('error' in decision) return decision.error;
 
     const rootId = rubric.parentId ?? rubric.id;
 

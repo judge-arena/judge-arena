@@ -11,6 +11,7 @@ import {
 import { legacyProviderToBackend } from '@/lib/llm';
 import { createCustomJudgeModel } from '@/lib/model-catalog';
 import { logger, serializeError } from '@/lib/logger';
+import { audit, getRequestContext } from '@/lib/audit';
 
 /** Old config exports (pre Task 12 review fix) only ever wrote one of the
  * three legacy `ModelConfig.provider` values — translate those the same
@@ -427,6 +428,18 @@ export async function POST(request: Request) {
         skip: items.filter((i) => i.action === 'skip').length,
       },
     };
+
+    if (!dryRun) {
+      const { ip, userAgent } = getRequestContext(request);
+      audit({
+        userId,
+        action: 'config.import',
+        resource: 'config',
+        metadata: { summary: report.summary },
+        ip,
+        userAgent,
+      });
+    }
 
     return NextResponse.json({
       dryRun,

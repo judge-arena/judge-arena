@@ -1,14 +1,37 @@
 import type { NextAuthOptions } from 'next-auth';
+import type { RequestInternal } from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
 import { compare } from 'bcryptjs';
 import { prisma } from '@/lib/db';
 import { resolveOidcUser } from '@/lib/oidc-user';
+import { audit } from '@/lib/audit';
 
 // Read once at module load, not per-request — matches this file's existing
 // `process.env.NEXTAUTH_SECRET` convention (auth.ts is excluded from
 // getEnv()'s zod schema surface; see src/lib/env.ts's docstring on why
 // auth/db/queue config is read directly rather than centrally validated).
 const AUTHENTIK_ISSUER = process.env.AUTHENTIK_ISSUER;
+
+/**
+ * NextAuth's `authorize(credentials, req)` hands back a `RequestInternal`
+ * (`req.headers?: Record<string, any>`), not a Web `Request` — so
+ * `src/lib/audit.ts`'s `getRequestContext(request: Request)` doesn't apply
+ * here. This is the same extraction, against the plain-object header shape
+ * NextAuth actually gives this callback.
+ */
+function authRequestContext(req: Pick<RequestInternal, 'headers'> | undefined): {
+  ip: string;
+  userAgent: string;
+} {
+  const headers = req?.headers ?? {};
+  const forwarded = headers['x-forwarded-for'];
+  const ip =
+    (typeof forwarded === 'string' ? forwarded.split(',')[0]?.trim() : undefined) ??
+    headers['x-real-ip'] ??
+    'unknown';
+  const userAgent = headers['user-agent'] ?? 'unknown';
+  return { ip, userAgent };
+}
 
 /**
  * Rows created with one of the app's unusable sentinel passwordHash values
@@ -43,14 +66,25 @@ export const authOptions: NextAuthOptions = {
         email: { label: 'Email', type: 'email' },
         password: { label: 'Password', type: 'password' },
       },
-      async authorize(credentials) {
+      async authorize(credentials, req) {
         if (!credentials?.email || !credentials?.password) return null;
 
-        const user = await findCredentialsUserByEmail(credentials.email.toLowerCase().trim());
-        if (!user) return null;
+        const normalizedEmail = credentials.email.toLowerCase().trim();
+        const { ip, userAgent } = authRequestContext(req);
+
+        const user = await findCredentialsUserByEmail(normalizedEmail);
+        if (!user) {
+          audit({ action: 'user.login.failed', metadata: { email: normalizedEmail, reason: 'no_match' }, ip, userAgent });
+          return null;
+        }
 
         const valid = await compare(credentials.password, user.passwordHash);
-        if (!valid) return null;
+        if (!valid) {
+          audit({ userId: user.id, action: 'user.login.failed', metadata: { reason: 'bad_password' }, ip, userAgent });
+          return null;
+        }
+
+        audit({ userId: user.id, action: 'user.login', metadata: { method: 'credentials' }, ip, userAgent });
 
         return {
           id: user.id,
@@ -102,12 +136,32 @@ export const authOptions: NextAuthOptions = {
         name: user.name,
       });
 
-      if (resolution.status === 'denied') return false;
+      if (resolution.status === 'denied') {
+        // No `req` on next-auth v4's typed `signIn` callback params (unlike
+        // `authorize`'s second arg) — ip/userAgent are omitted here rather
+        // than reached for via an untyped/internal escape hatch.
+        audit({
+          action: 'user.login.failed',
+          metadata: { method: 'oidc', reason: resolution.reason, email: user.email },
+        });
+        return false;
+      }
 
       // signIn() runs before jwt() on this same sign-in pass — stash OUR
       // resolved User.id on `user` so jwt() below puts it (never the raw
       // OIDC sub) in the token.
       (user as { id: string }).id = resolution.userId;
+
+      audit({
+        userId: resolution.userId,
+        action: resolution.created
+          ? 'user.register'
+          : resolution.claimedInvite
+            ? 'user.invite_claimed'
+            : 'user.login',
+        metadata: { method: 'oidc' },
+      });
+
       return true;
     },
     async jwt({ token, user }) {
