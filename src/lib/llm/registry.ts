@@ -64,24 +64,24 @@
 import type { ServingBackend } from '@prisma/client';
 import type { CriteriaScore } from '@/types';
 import { decryptSafe } from '@/lib/crypto';
+import { logger } from '@/lib/logger';
 import { ProviderError } from './errors';
 import { callAnthropic } from './anthropic';
 import { callOpenAICompatible } from './openai-compatible';
 import { renderJudgmentPrompt, type RenderRubric, type RenderSubmission, type RenderTemplate } from './render';
-import { buildRespondSystemPrompt, buildRespondUserPrompt, parseJudgmentResponse } from './provider';
-import type { ProviderCallResult } from './provider';
+import { buildRespondSystemPrompt, buildRespondUserPrompt, parseJudgmentResponse, tryParseStructuredJudgment } from './provider';
+import type { ProviderCallResult, ProviderHeaderConfig } from './provider';
+import { openRouterHeaders } from './backends/openrouter';
+import { vllmStructuredRequestFields } from './backends/vllm';
+
+// Re-exported so existing importers of `ProviderHeaderConfig` FROM
+// registry.ts (its original Task 10 home) keep working — the type itself
+// now lives in `./provider.ts` (Task 11: `DescriptorCallHints`, the
+// structural shape `callOpenAICompatible` consults, needed it in that
+// neutral, dependency-free module — see that file's doc for why).
+export type { ProviderHeaderConfig };
 
 // ─── Descriptor ──────────────────────────────────────────────────────────────
-
-/** Context handed to a descriptor's optional `headers()` hook — enough to
- * build attribution/auth headers without the hook needing the full request.
- * Unused by any descriptor today (OpenRouter's `HTTP-Referer`/`X-Title`
- * land in Task 11); the hook exists now so `execute()`'s dispatch shape
- * doesn't need to change when Task 11 starts using it. */
-export interface ProviderHeaderConfig {
-  apiKey?: string;
-  endpoint?: string;
-}
 
 export interface ProviderDescriptor {
   id: ServingBackend;
@@ -93,7 +93,22 @@ export interface ProviderDescriptor {
     samplingParams: boolean;
     reasoningToggle: boolean;
   };
+  /** Attribution/auth headers to merge into a call's own request headers —
+   * e.g. OpenRouter's `HTTP-Referer`/`X-Title` (`backends/openrouter.ts`).
+   * Consulted by `callOpenAICompatible` (`openai-compatible.ts`); unused
+   * for `id: 'anthropic'` (dispatches through `callAnthropic` instead). */
   headers?(cfg: ProviderHeaderConfig): Record<string, string>;
+  /** Task 11: builds the extra request-body fields a judgment call should
+   * carry to invoke this backend's native structured/guided decoding,
+   * given the shared judgment JSON schema (`judgment-schema.ts`). Only
+   * consulted by `callOpenAICompatible` when `caps.structuredOutput !==
+   * 'none'` AND the call is a judgment (not respond) — see that module's
+   * doc. A descriptor that declares a structured-output capability but has
+   * NO hook of its own (openai, openrouter — both `'json_schema'`) gets
+   * the plain OpenAI-standard `response_format` shape by default; this
+   * hook exists only for a backend (vLLM — `backends/vllm.ts`) that needs
+   * something ADDITIONAL to that default. */
+  structuredRequestFields?(schema: Record<string, unknown>): Record<string, unknown>;
   scoredRunsAllowed: boolean;
 }
 
@@ -135,6 +150,13 @@ const DESCRIPTORS: Record<ServingBackend, ProviderDescriptor> = {
     defaultBaseUrl: 'https://openrouter.ai/api/v1',
     auth: 'bearer',
     caps: { structuredOutput: 'json_schema', samplingParams: true, reasoningToggle: false },
+    // Task 11: attribution headers (HTTP-Referer/X-Title) — see
+    // backends/openrouter.ts's doc. Breaker key granularity needs no
+    // change here: llm/index.ts's breakerKey() is already
+    // servingBackend:endpoint:modelId (Task 4), so distinct OpenRouter-
+    // routed models already get independent circuits via the modelId
+    // segment alone.
+    headers: openRouterHeaders,
     scoredRunsAllowed: true,
   },
   vllm: {
@@ -142,6 +164,11 @@ const DESCRIPTORS: Record<ServingBackend, ProviderDescriptor> = {
     kind: 'openai_compatible',
     auth: 'bearer',
     caps: { structuredOutput: 'guided', samplingParams: true, reasoningToggle: false },
+    // Task 11: guided-decoding request fields (response_format +
+    // guided_json, both — see backends/vllm.ts's doc). `defaultBaseUrl` is
+    // NOT set here — see getDescriptor() below, which injects it from
+    // VLLM_BASE_URL dynamically, read fresh on every call.
+    structuredRequestFields: vllmStructuredRequestFields,
     scoredRunsAllowed: true,
   },
   ollama: {
@@ -149,6 +176,14 @@ const DESCRIPTORS: Record<ServingBackend, ProviderDescriptor> = {
     kind: 'openai_compatible',
     defaultBaseUrl: 'http://localhost:11434/v1',
     auth: 'bearer',
+    // `structuredOutput: 'none'` here is a SCORED-RUN restriction, not a
+    // technical one — Ollama's own `/api/chat` `format` parameter CAN
+    // constrain output to a JSON schema for the dev/interactive
+    // (`scoredRunsAllowed: false` already refuses judge runs against this
+    // descriptor entirely — see this const's module doc) respond-mode
+    // path. Deliberately left unwired (doc note only, per the task brief)
+    // — there is no trusted-scoring use case that would consume it, and
+    // wiring a capability nothing calls is pure speculative surface.
     caps: { structuredOutput: 'none', samplingParams: true, reasoningToggle: false },
     scoredRunsAllowed: false,
   },
@@ -159,6 +194,18 @@ export function getDescriptor(backend: ServingBackend): ProviderDescriptor {
   if (!descriptor) {
     throw new Error(`getDescriptor: unknown ServingBackend "${backend}"`);
   }
+
+  // vLLM's `defaultBaseUrl` is read from VLLM_BASE_URL on every call
+  // (like getTimeoutMs() below) rather than baked into the static
+  // DESCRIPTORS object at module load — self-hosted vLLM has no
+  // well-known host the way OpenRouter/real OpenAI/local Ollama do, so
+  // unlike ollama's hardcoded localhost default, this one must come from
+  // the deployment's own env config, and reading it fresh lets tests
+  // override it per-test without module-reset gymnastics.
+  if (backend === 'vllm') {
+    return { ...descriptor, defaultBaseUrl: process.env.VLLM_BASE_URL || undefined };
+  }
+
   return descriptor;
 }
 
@@ -308,6 +355,13 @@ export interface ExecuteRequest {
   systemPrompt: string;
   userPrompt: string;
   samplingParams: SamplingParams;
+  /** Task 11: `'judgment'` vs `'respond'` — threaded through to
+   * `callOpenAICompatible` so the structured-output seam only ever
+   * attaches the judgment JSON schema for `'judgment'` calls. Optional and
+   * defaults to "not a judgment call" so pre-Task-11 direct `execute()`
+   * callers (e.g. `tests/lib/llm-timeout.test.ts`) keep their exact prior
+   * behavior without needing to set it. */
+  mode?: 'judgment' | 'respond';
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -359,6 +413,11 @@ export async function execute(descriptor: ProviderDescriptor, request: ExecuteRe
       userPrompt: request.userPrompt,
       samplingParams: request.samplingParams,
       signal: controller.signal,
+      // Task 11: the descriptor itself + the judgment/respond mode — see
+      // provider.ts's ProviderCallOptions doc. callAnthropic ignores both
+      // (unused parameters); only callOpenAICompatible consults them.
+      descriptor,
+      mode: request.mode,
     });
   } catch (error) {
     if (controller.signal.aborted) {
@@ -574,6 +633,34 @@ export function prepareJudgmentCall(input: RunProviderJudgmentInput): PreparedJu
 }
 
 /**
+ * Task 11: resolve the parsed judgment for an already-executed raw call.
+ * When `raw.structuredOutputRequested` is set (the request attached a
+ * guided/structured-output schema — see `openai-compatible.ts`), try the
+ * strict `tryParseStructuredJudgment` first; a `descriptorId`-labeled
+ * warning is logged and the ordinary lenient `parseJudgmentResponse` takes
+ * over when the response doesn't actually conform despite that guidance
+ * (the provider silently ignored the schema, or returned it markdown-
+ * wrapped). Never attempted at all when structured output wasn't
+ * requested for this call (unchanged pre-Task-11 behavior).
+ */
+function parseJudgmentText(
+  descriptorId: ServingBackend,
+  modelId: string,
+  raw: ProviderCallResult,
+  criteria: RenderRubric['criteria']
+) {
+  if (raw.structuredOutputRequested) {
+    const structured = tryParseStructuredJudgment(raw.text, criteria);
+    if (structured) return structured;
+    logger.warn(
+      'Structured/guided decoding was requested but the response did not conform to the judgment schema — falling back to lenient parse',
+      { provider: descriptorId, modelId }
+    );
+  }
+  return parseJudgmentResponse(raw.text, criteria);
+}
+
+/**
  * The actual network call + response parsing for an already-`prepare`d
  * judge call — the ONLY part of a judge call that reflects real provider
  * health (a hung/erroring/malformed-JSON-returning provider), and
@@ -588,9 +675,10 @@ export async function executeJudgmentCall(prepared: PreparedJudgmentCall): Promi
     systemPrompt: prepared.systemPrompt,
     userPrompt: prepared.userPrompt,
     samplingParams: prepared.samplingParamsUsed,
+    mode: 'judgment',
   });
 
-  const parsed = parseJudgmentResponse(raw.text, prepared.criteria);
+  const parsed = parseJudgmentText(prepared.descriptor.id, prepared.modelId, raw, prepared.criteria);
 
   return {
     overallScore: parsed.overallScore,
@@ -693,6 +781,11 @@ export async function executeRespondCall(prepared: PreparedRespondCall): Promise
     systemPrompt: prepared.systemPrompt,
     userPrompt: prepared.userPrompt,
     samplingParams: prepared.samplingParamsUsed,
+    // Explicit (not just "omitted") — respond mode NEVER gets the
+    // structured-output schema attached, even for a descriptor that
+    // declares caps.structuredOutput !== 'none' (Task 11's seam gates on
+    // mode === 'judgment' specifically).
+    mode: 'respond',
   });
 
   return {

@@ -20,6 +20,15 @@
  * because it is pure text-in/scores-out logic independent of which backend
  * produced the raw text, and because that's exactly the function this
  * task's NaN-rejection fix (1b correctness carry) needed to land in.
+ *
+ * Task 11 additions: `DescriptorCallHints`/`ProviderHeaderConfig` (the
+ * structural descriptor-hook shapes `callOpenAICompatible` consults for
+ * OpenRouter's attribution headers / vLLM's guided-decoding request
+ * fields — declared here, not imported from `registry.ts`, to keep this
+ * neutral module import-cycle-free; see `DescriptorCallHints`'s own doc)
+ * and `tryParseStructuredJudgment` (the strict structured-decoding parse
+ * counterpart to `parseJudgmentResponse`'s lenient one, sharing
+ * normalization via the private `normalizeParsedJudgment` helper).
  */
 
 import type { CriteriaScore, RubricCriterionView } from '@/types';
@@ -27,6 +36,40 @@ import { computeWeightedScore } from '@/lib/utils';
 
 export interface RespondRequest {
   promptText: string;
+}
+
+/** Context handed to a descriptor's optional `headers()` hook — enough to
+ * build attribution/auth headers without the hook needing the full
+ * request. Moved here (from `registry.ts`, where it originated in Task 10)
+ * so `DescriptorCallHints` below can reference it without `registry.ts`
+ * needing to be imported into this neutral module. */
+export interface ProviderHeaderConfig {
+  apiKey?: string;
+  endpoint?: string;
+}
+
+/**
+ * Structural subset of `registry.ts`'s real `ProviderDescriptor` that
+ * `callOpenAICompatible` needs to consult for descriptor-level
+ * specialization (Task 11): OpenRouter's attribution headers
+ * (`backends/openrouter.ts`) and vLLM's guided-decoding request fields
+ * (`backends/vllm.ts`). Declared HERE, not imported from `registry.ts`, to
+ * keep this neutral, dependency-free module import-cycle-free —
+ * `registry.ts` imports the call FUNCTIONS (`callAnthropic`/
+ * `callOpenAICompatible`) from this module's sibling files, so a type
+ * import back from `registry.ts` into one of those siblings would be
+ * circular. TypeScript's structural typing means `registry.ts`'s actual
+ * `ProviderDescriptor` (which has strictly MORE fields, e.g. `id`/`kind`/
+ * `auth`/`scoredRunsAllowed`, and a narrower `caps` type) is assignable
+ * here without either module importing the other — `registry.ts`'s
+ * `execute()` passes its full descriptor straight through.
+ */
+export interface DescriptorCallHints {
+  headers?(cfg: ProviderHeaderConfig): Record<string, string>;
+  structuredRequestFields?(schema: Record<string, unknown>): Record<string, unknown>;
+  caps: {
+    structuredOutput: 'json_schema' | 'tool_use' | 'guided' | 'none';
+  };
 }
 
 /**
@@ -59,6 +102,20 @@ export interface ProviderCallOptions {
    * review: the timeout budget was never wired into an actual request
    * before this task). */
   signal: AbortSignal;
+  /** Task 11: the resolved descriptor for this call, so
+   * `callOpenAICompatible` can consult its `headers()`/
+   * `structuredRequestFields()` hooks and `caps.structuredOutput` without a
+   * forked per-backend call path. Optional — `callAnthropic` never reads
+   * it (Anthropic's own structured-output path, `caps.structuredOutput:
+   * 'tool_use'`, is untouched by this task). */
+  descriptor?: DescriptorCallHints;
+  /** Task 11: `'judgment'` vs `'respond'` — the structured-output seam
+   * only ever attaches the judgment JSON schema for `'judgment'` calls;
+   * respond mode is free-form text generation with no schema to guide.
+   * Optional (defaults to "not a judgment call, don't attach anything") so
+   * pre-Task-11 call sites/tests that never set it keep their exact prior
+   * behavior. */
+  mode?: 'judgment' | 'respond';
 }
 
 /** Raw call metadata, captured before any judge-mode score parsing. */
@@ -73,6 +130,17 @@ export interface ProviderCallResult {
   inputTokens?: number;
   outputTokens?: number;
   latencyMs: number;
+  /** Task 11: true when `callOpenAICompatible` attached a structured/
+   * guided-decoding schema to the OUTGOING request for this call (never
+   * set by `callAnthropic`, so an anthropic-backed judgment always parses
+   * via the ordinary lenient path, unchanged from before this task). This
+   * is a REQUEST-side signal only — it does not mean the provider actually
+   * honored the guidance. `registry.ts`'s `executeJudgmentCall` uses it to
+   * decide whether to attempt the strict structured parse first, falling
+   * back to the lenient `parseJudgmentResponse` (+ `parseMode: 'fallback'`
+   * + a logged warning) when the response didn't conform despite the
+   * request-side guidance. */
+  structuredOutputRequested?: boolean;
 }
 
 export function buildRespondSystemPrompt(): string {
@@ -98,10 +166,14 @@ export interface ParsedJudgment {
   overallScore: number;
   reasoning: string;
   criteriaScores: CriteriaScore[];
-  /** How the raw text was turned into scores. Always `'fallback'` today
-   * (lenient JSON-in-markdown parsing) — `'structured'` is recorded once a
-   * backend's native structured-output mode (tool_use/json_schema/guided)
-   * actually drove the response, landing in Task 11. */
+  /** How the raw text was turned into scores. `'fallback'` — lenient
+   * JSON-in-markdown parsing, `parseJudgmentResponse` — is the ordinary
+   * path every backend used exclusively before Task 11. `'structured'` is
+   * recorded when a backend's native structured/guided-decoding mode
+   * (`caps.structuredOutput`: `json_schema`/`guided` — `tool_use`
+   * (Anthropic) is untouched by this task) actually drove the response,
+   * via `tryParseStructuredJudgment` below — see `registry.ts`'s
+   * `executeJudgmentCall` for the strict-then-lenient decision. */
   parseMode: 'structured' | 'fallback';
 }
 
@@ -113,41 +185,37 @@ function finiteNumberOrUndefined(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
 /**
- * Parse the LLM response into a structured judgment.
- * Handles cases where the model wraps JSON in markdown code blocks.
+ * Shared normalization: given an already-parsed judgment-shaped object —
+ * `parseJudgmentResponse`'s lenient, markdown-stripped `JSON.parse` output,
+ * or `tryParseStructuredJudgment`'s strict, direct `JSON.parse` output —
+ * plus the rubric criteria, build the score/reasoning fields common to
+ * both (score clamping, criteria matching, weighted-score recompute for a
+ * missing/non-finite `overallScore`). Extracted (Task 11) so both parse
+ * paths apply IDENTICAL normalization, differing only in `parseMode` and
+ * in how permissively they accept the raw text before reaching this point.
  *
- * NaN-normalization fix (1b correctness carry): a non-finite (`NaN`,
- * `Infinity`) or otherwise non-numeric `score`/`overallScore` in the raw
- * JSON is treated as ABSENT rather than passed through — the old
- * `found.score ?? 0` only caught `null`/`undefined` (`??` doesn't match
- * `NaN`), so a model emitting `"score": NaN`-shaped JSON (or any junk that
- * survives `JSON.parse` as a non-finite number) corrupted the stored score
- * with `NaN` (which then poisons every downstream average). A missing/
- * non-finite `overallScore` is recomputed from `criteriaScores` weights via
- * `computeWeightedScore` (src/lib/utils.ts) rather than defaulting to 0 —
- * the same fix Task 11 (1a plan) applied to the human-judgment route,
- * ported here for the LLM judge path.
+ * NaN-normalization fix (1b correctness carry, preserved verbatim by this
+ * extraction): a non-finite (`NaN`, `Infinity`) or otherwise non-numeric
+ * `score`/`overallScore` in the raw JSON is treated as ABSENT rather than
+ * passed through — the old `found.score ?? 0` only caught `null`/
+ * `undefined` (`??` doesn't match `NaN`), so a model emitting `"score":
+ * NaN`-shaped JSON (or any junk that survives `JSON.parse` as a non-finite
+ * number) corrupted the stored score with `NaN` (which then poisons every
+ * downstream average). A missing/non-finite `overallScore` is recomputed
+ * from `criteriaScores` weights via `computeWeightedScore`
+ * (src/lib/utils.ts) rather than defaulting to 0 — the same fix Task 11
+ * (1a plan) applied to the human-judgment route, ported here for the LLM
+ * judge path.
  */
-export function parseJudgmentResponse(raw: string, criteria: RubricCriterionView[]): ParsedJudgment {
-  // Extract JSON from markdown code blocks if present
-  let jsonStr = raw.trim();
-  const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (codeBlockMatch) {
-    jsonStr = codeBlockMatch[1].trim();
-  }
-
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(jsonStr);
-  } catch (parseError) {
-    const preview = jsonStr.length > 200 ? jsonStr.slice(0, 200) + '...' : jsonStr;
-    throw new Error(
-      `Failed to parse LLM judgment response as JSON: ${parseError instanceof Error ? parseError.message : parseError}. ` +
-      `Response preview: ${preview}`
-    );
-  }
-
+function normalizeParsedJudgment(
+  parsed: Record<string, unknown>,
+  criteria: RubricCriterionView[]
+): Omit<ParsedJudgment, 'parseMode'> {
   // Validate and normalize criteria scores
   const parsedScores = Array.isArray(parsed.criteriaScores) ? parsed.criteriaScores : [];
   const criteriaScores: CriteriaScore[] = criteria.map((criterion, index) => {
@@ -189,6 +257,69 @@ export function parseJudgmentResponse(raw: string, criteria: RubricCriterionView
     overallScore,
     reasoning: (parsed.reasoning as string) || '',
     criteriaScores,
-    parseMode: 'fallback',
   };
+}
+
+/**
+ * Parse the LLM response into a structured judgment.
+ * Handles cases where the model wraps JSON in markdown code blocks.
+ *
+ * The ordinary, lenient path — always `parseMode: 'fallback'`. See
+ * `tryParseStructuredJudgment` below for the strict, guided-decoding
+ * counterpart (Task 11).
+ */
+export function parseJudgmentResponse(raw: string, criteria: RubricCriterionView[]): ParsedJudgment {
+  // Extract JSON from markdown code blocks if present
+  let jsonStr = raw.trim();
+  const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) {
+    jsonStr = codeBlockMatch[1].trim();
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch (parseError) {
+    const preview = jsonStr.length > 200 ? jsonStr.slice(0, 200) + '...' : jsonStr;
+    throw new Error(
+      `Failed to parse LLM judgment response as JSON: ${parseError instanceof Error ? parseError.message : parseError}. ` +
+      `Response preview: ${preview}`
+    );
+  }
+
+  return { ...normalizeParsedJudgment(parsed, criteria), parseMode: 'fallback' };
+}
+
+/**
+ * Task 11: attempt a STRICT structured-decoding parse. Guided/structured
+ * decoding constrains a model's token sampling to the schema by
+ * construction, so a genuinely-conforming response should always be pure
+ * JSON (no markdown-fence wrapping needed — unlike `parseJudgmentResponse`,
+ * this does NOT strip ```json fences) with `overallScore`/`reasoning`/
+ * `criteriaScores` all present and correctly typed, matching
+ * `JUDGMENT_JSON_SCHEMA` (`./judgment-schema.ts`).
+ *
+ * Returns `undefined` (never throws) when the response doesn't conform —
+ * signaling the caller (`registry.ts`'s `executeJudgmentCall`) to fall
+ * back to the lenient `parseJudgmentResponse` path instead, per Task 11's
+ * requirement that a provider "returning non-conforming despite guidance"
+ * degrades to `parseMode: 'fallback'` (+ a logged warning) rather than a
+ * hard failure — some deployments silently ignore an unsupported
+ * `response_format`/`guided_json` request field and just return ordinary
+ * (possibly markdown-wrapped) free text.
+ */
+export function tryParseStructuredJudgment(raw: string, criteria: RubricCriterionView[]): ParsedJudgment | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw.trim());
+  } catch {
+    return undefined;
+  }
+
+  if (!isRecord(parsed)) return undefined;
+  if (typeof parsed.overallScore !== 'number' || !Number.isFinite(parsed.overallScore)) return undefined;
+  if (typeof parsed.reasoning !== 'string') return undefined;
+  if (!Array.isArray(parsed.criteriaScores)) return undefined;
+
+  return { ...normalizeParsedJudgment(parsed, criteria), parseMode: 'structured' };
 }
