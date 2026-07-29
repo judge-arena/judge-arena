@@ -70,6 +70,13 @@ export async function resolveOidcUser(
   client: OidcUserClient,
   profile: OidcProfileInput
 ): Promise<OidcResolution> {
+  // Normalize the IdP-supplied email the same way the credentials and CLI
+  // paths do (src/lib/auth.ts's findCredentialsUserByEmail,
+  // scripts/admin/create-user.ts's parseArgs) — Authentik's `email` claim
+  // casing isn't guaranteed to match what the admin invite CLI stored, and
+  // the invite-claim match below is an exact string compare.
+  const email = profile.email.toLowerCase().trim();
+
   // 1. Known (issuer, sub) -> same user, every time. The only path that
   //    runs on every subsequent login for an already-provisioned identity.
   const existing = await client.user.findUnique({
@@ -89,11 +96,20 @@ export async function resolveOidcUser(
   //    null` filter is what actually gates the claim, not "matched by
   //    email" alone.
   const invite = await client.user.findFirst({
-    where: { email: profile.email, invitePending: true, oidcSubject: null },
+    where: { email, invitePending: true, oidcSubject: null },
   });
   if (invite) {
-    const claimed = await client.user.update({
-      where: { id: invite.id },
+    // TOCTOU fix: this read and the claim write below are two separate
+    // round-trips, so two concurrent sign-ins for the same invited email
+    // (different subs) can both reach this point having read the SAME
+    // claimable row. Making the write itself conditional on the exact state
+    // we just read — via the UPDATE's WHERE clause, not a second read —
+    // is what makes the claim atomic: Postgres re-evaluates WHERE against
+    // the row's current, locked values, so at most one of two racing
+    // `updateMany` calls can ever affect a row. There is no "read row,
+    // decide, then write" gap for a second caller to land in.
+    const { count } = await client.user.updateMany({
+      where: { id: invite.id, invitePending: true, oidcSubject: null },
       data: {
         oidcIssuer: profile.issuer,
         oidcSubject: profile.sub,
@@ -103,7 +119,28 @@ export async function resolveOidcUser(
         name: invite.name ?? profile.name ?? null,
       },
     });
-    return { status: 'ok', userId: claimed.id, created: false, claimedInvite: true };
+
+    if (count === 1) {
+      return { status: 'ok', userId: invite.id, created: false, claimedInvite: true };
+    }
+
+    // count === 0: lost the race — some other sign-in claimed this exact
+    // invite row between our read and our write. Re-resolve strictly by
+    // (issuer, sub): if THIS identity ended up bound to a row (e.g. a
+    // retried request racing itself), that's a genuine, idempotent success.
+    // Otherwise the invite went to a different `sub` and this identity has
+    // no claim left on it — deny rather than falling through to
+    // autoprovision-create, which would hand the race loser a brand-new,
+    // unrelated account instead of surfacing that the invite is spent.
+    const byIdentity = await client.user.findUnique({
+      where: {
+        oidcIssuer_oidcSubject: { oidcIssuer: profile.issuer, oidcSubject: profile.sub },
+      },
+    });
+    if (byIdentity) {
+      return { status: 'ok', userId: byIdentity.id, created: false, claimedInvite: false };
+    }
+    return { status: 'denied', reason: 'no_match_autoprovision_disabled' };
   }
 
   // 3. No (issuer, sub) match, no claimable invite. Deny unless
@@ -115,7 +152,7 @@ export async function resolveOidcUser(
   }
 
   const createData: Prisma.UserUncheckedCreateInput = {
-    email: profile.email,
+    email,
     name: profile.name ?? null,
     oidcIssuer: profile.issuer,
     oidcSubject: profile.sub,

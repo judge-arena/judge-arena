@@ -412,6 +412,7 @@ gate would pass clean today. Currently one case:
 | Migration | What's really there | Why `schema.prisma` can't say it |
 |---|---|---|
 | `20260728215410_v2b_idempotency_tighten` | `ModelJudgment_runId_judgeModelVersionId_pairOrder_key` recreated `NULLS NOT DISTINCT` (real pointwise idempotency, 1b Task 6) | `@@unique([runId, judgeModelVersionId, pairOrder])` has no Prisma DSL syntax for `NULLS NOT DISTINCT` (PG15+) |
+| `20260729180000_v2b_email_partial_unique` | `User_email_credentials_key`, a unique index on `User(email)` restricted to `WHERE "passwordHash" NOT LIKE '!%'` (real-credentials rows only, 1b Task 13 review fix) | Prisma's schema DSL has no syntax for a partial index (`WHERE` clause) at all — not specific to this predicate |
 
 The real hazard is the opposite direction from "drift tooling nags you to
 revert it": because `schema.prisma` can never re-declare this attribute,

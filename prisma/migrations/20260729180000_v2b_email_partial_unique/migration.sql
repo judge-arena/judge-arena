@@ -1,0 +1,39 @@
+-- v2b: partial unique index on User.email for real-credentials rows only
+-- (1b Task 13 code-review fix — IMPORTANT #2)
+--
+-- HAND-WRITTEN — no `prisma migrate diff` counterpart. Prisma's schema DSL
+-- has no syntax for a partial index (`WHERE` clause) at all, so
+-- `prisma/schema.prisma` cannot declare this and is left UNCHANGED; see
+-- CONTRIBUTING.md's "Known migrate-diff pseudo-drift" section (this is a
+-- second case in the same category as 20260728215410_v2b_idempotency_tighten's
+-- `NULLS NOT DISTINCT` index — verify empirically, don't assume, per that
+-- section's own correction note).
+--
+-- 20260729170000_v2b_oidc_identity_schema dropped `User_email_key` (the
+-- plain `@unique` on email) so two DISTINCT OIDC identities (different
+-- (oidcIssuer, oidcSubject)) can legitimately share an email — see that
+-- migration's comment and src/lib/oidc-user.ts's module doc. That's
+-- correct for OIDC/invite rows, but it also silently removed the ONLY
+-- DB-level guarantee that TWO REAL CREDENTIALS accounts can't share an
+-- email: "one credentials row per email" was left as an application-layer
+-- check (src/lib/auth.ts's findCredentialsUserByEmail /
+-- scripts/admin/create-user.ts's findFirst-then-create), and check-then-act
+-- is racy — two concurrent admin-CLI invocations for the same email can
+-- both pass their `findFirst` read before either `create` write commits.
+--
+-- bcrypt hashes always start with `$2`; every unusable sentinel this app
+-- writes starts with `!` (src/lib/oidc-user.ts's OIDC_MANAGED_PASSWORD_HASH
+-- = '!oidc-managed'; scripts/importer/owners.ts's '!imported-oidc-only' /
+-- '!archive-system-user') — so `"passwordHash" NOT LIKE '!%'` is exactly
+-- "this is a real credentials row" and can never misclassify a genuine
+-- bcrypt hash. Real-credentials rows are now DB-uniquely keyed on email;
+-- OIDC and invite-pending rows (sentinel-prefixed passwordHash) are NOT
+-- covered by this index and may still share an email freely, as intended
+-- — this closes the invariant the app's find-then-create logic already
+-- assumes, at the DB level, without reopening the OIDC linking hazard.
+--
+-- The plain (non-unique) `User_email_idx` added by the prior migration is
+-- kept as-is — this partial index is additive, not a replacement, and the
+-- plain index still serves OIDC-row lookups by email (the invite-claim
+-- path in src/lib/oidc-user.ts's resolveOidcUser).
+CREATE UNIQUE INDEX "User_email_credentials_key" ON "User"("email") WHERE "passwordHash" NOT LIKE '!%';

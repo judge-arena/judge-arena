@@ -95,6 +95,12 @@ model User {
   // unique) for lookup performance; credentials login and the invite-claim
   // path (src/lib/oidc-user.ts) both filter further (passwordHash shape /
   // invitePending) to disambiguate when more than one row shares an email.
+  // A SEPARATE partial unique index (Prisma DSL can't express a WHERE
+  // clause — see prisma/migrations/20260729180000_v2b_email_partial_unique
+  // and CONTRIBUTING.md's "Known migrate-diff pseudo-drift" section) DOES
+  // enforce "at most one real-credentials row per email" at the DB level;
+  // it deliberately excludes OIDC/invite rows (sentinel `!`-prefixed
+  // passwordHash), which remain free to share an email as described above.
   email             String
   name              String?
   passwordHash      String

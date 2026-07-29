@@ -155,6 +155,72 @@ describe('OIDC user resolution (issuer, sub) — spec §7 non-destructive-v5 con
     expect(claimed?.role).toBe('admin'); // untouched by the claim
   });
 
+  it('two concurrent sign-ins for the SAME invited email (different subs) race safely: exactly one claims, the other is denied — never both bound to the same userId (TOCTOU fix)', async () => {
+    const invite = await db.user.create({
+      data: {
+        email: 'race@test.local',
+        passwordHash: OIDC_MANAGED_PASSWORD_HASH,
+        invitePending: true,
+        role: 'user',
+      },
+    });
+
+    // Both calls share the same read-then-write window resolveOidcUser used
+    // to have between its findFirst and its (formerly unconditional)
+    // update — Promise.all fires them close enough together to exercise
+    // that window for real against a live Postgres connection pool, not
+    // just simulate it.
+    const [outcomeA, outcomeB] = await Promise.all([
+      resolveOidcUser(db, { issuer: ISSUER, sub: 'sub-race-a', email: 'race@test.local', name: 'Racer A' }),
+      resolveOidcUser(db, { issuer: ISSUER, sub: 'sub-race-b', email: 'race@test.local', name: 'Racer B' }),
+    ]);
+    const outcomes = [outcomeA, outcomeB];
+
+    const claimed = outcomes.filter((r) => r.status === 'ok');
+    const denied = outcomes.filter((r) => r.status === 'denied');
+    expect(claimed).toHaveLength(1);
+    expect(denied).toHaveLength(1);
+    expect((claimed[0] as { userId: string }).userId).toBe(invite.id);
+
+    // Exactly one row exists, permanently bound to whichever sub won the
+    // race — never two rows, never both subs, never a partial write.
+    expect(await db.user.count()).toBe(1);
+    const row = await db.user.findUniqueOrThrow({ where: { id: invite.id } });
+    expect(row.invitePending).toBe(false);
+    expect(['sub-race-a', 'sub-race-b']).toContain(row.oidcSubject);
+  });
+
+  it('normalizes the OIDC profile email (lowercase+trim) before invite-claim matching, so IdP casing differences never miss the invite', async () => {
+    // Invite stored lowercase+trimmed — the CLI's own normalization
+    // (scripts/admin/create-user.ts's parseArgs: `email.toLowerCase().trim()`)
+    // means real invites are always stored this way. Authentik's `email`
+    // claim casing is not guaranteed to match; resolveOidcUser must
+    // normalize its own side the same way the CLI and credentials login
+    // (src/lib/auth.ts's authorize()) already do, or a same-person sign-in
+    // can silently miss its own invite over a casing/whitespace mismatch.
+    const invite = await db.user.create({
+      data: {
+        email: 'user@x.com',
+        passwordHash: OIDC_MANAGED_PASSWORD_HASH,
+        invitePending: true,
+        role: 'user',
+      },
+    });
+
+    const resolution = await resolveOidcUser(db, {
+      issuer: ISSUER,
+      sub: 'sub-casing',
+      email: '  User@X.com  ',
+      name: 'Cased User',
+    });
+
+    expect(resolution).toMatchObject({ status: 'ok', created: false, claimedInvite: true });
+    expect((resolution as { userId: string }).userId).toBe(invite.id);
+
+    const claimed = await db.user.findUniqueOrThrow({ where: { id: invite.id } });
+    expect(claimed).toMatchObject({ oidcSubject: 'sub-casing', invitePending: false });
+  });
+
   it('a claimed invite is never claimable again by a second, different sub', async () => {
     const invite = await db.user.create({
       data: {

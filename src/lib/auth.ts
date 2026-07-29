@@ -119,11 +119,41 @@ export const authOptions: NextAuthOptions = {
         // next-auth's internal token shape.
         token.uid = (user as { id: string }).id;
       }
+      // next-auth v4 pre-populates `token.email`/`token.name`/`token.picture`
+      // straight from the signed-in `user` object BEFORE this callback ever
+      // runs (its internal "defaultToken" merge on `trigger: "signIn" |
+      // "signUp"`) — the `if (user)` branch above doesn't put them there,
+      // and simply not re-adding them isn't enough to keep them out. Strip
+      // them explicitly on every call (idempotent on subsequent calls,
+      // where they're already gone) so the JWT/session cookie never carries
+      // PII beyond the opaque id claim. `token.sub` (next-auth's own OIDC
+      // `sub` claim convention) is left alone — nothing here depends on it,
+      // but next-auth's internals may.
+      delete token.email;
+      delete token.name;
+      delete token.picture;
       return token;
     },
     async session({ session, token }) {
       if (session.user) {
-        (session.user as any).id = token.uid as string;
+        const userId = token.uid as string | undefined;
+        (session.user as any).id = userId;
+
+        // email/name are no longer on the token (stripped in jwt() above),
+        // so they have to be resolved fresh from the User table here —
+        // same "never trust a value that could go stale inside a 24h
+        // token" posture as auth-guard's requireAuth(). This keeps
+        // client-side consumers of `useSession()` (sidebar, dashboard)
+        // working exactly as before: they still see session.user.email/
+        // name, just DB-sourced instead of token-cached.
+        const dbUser = userId
+          ? await prisma.user.findUnique({
+              where: { id: userId },
+              select: { email: true, name: true },
+            })
+          : null;
+        session.user.email = dbUser?.email ?? null;
+        session.user.name = dbUser?.name ?? null;
       }
       return session;
     },
