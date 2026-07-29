@@ -151,6 +151,22 @@
 - [ ] Step 4: Verify all suites; grep: no `activeIds`, no module-level `queue` arrays anywhere.
 - [ ] Step 5: Commit `feat(1b): web tier publishes to RabbitMQ; in-process run engine retired`.
 
+### Task 9b: Respond-mode queue path (Trijeet decision 2026-07-29 — restore, not retire)
+
+**Files:** Modify `src/lib/run-launch.ts` (drop both 501 blocks), `src/worker/{judgment-consumer,run-create-consumer}.ts`, `src/lib/llm/index.ts` (executeRespond back on the live path), `tests/integration/respond-mode.test.ts` (new).
+
+**Interfaces:**
+- Mode derivation (worker) mirrors v1 + the 1a-fixed server rule: `run.evaluation.responseText?.trim() ? 'judge' : 'respond'`.
+- Respond runs: `rubricId` null allowed (run-create-consumer drops its rubric requirement for respond evaluations; judgment-consumer's rubric load becomes mode-conditional); `promptTemplateId` null on respond judgments (no rubric template).
+- Provider seam gains `runProviderResponse(input) → { responseText, rawResponse, latencyMs, tokens }`; consumer persists mirroring v1's executeRespond judgment shape (inspect `git show 2610871:src/lib/evaluation-run-manager.ts` + llm/index.ts for the exact fields — generated text lands in the judgment row the way v1 stored it; overallScore stays null; status completed).
+- Finalization unchanged: respond runs land `needs_human` (completed generation awaiting best-model selection); human-judgment respond path (1a Task 11) completes them via `markRunCompleted`.
+- Retry/DLQ/claims machinery identical — respond calls flow through the same claim/lease/disposition code.
+
+- [ ] Step 1 (TDD): integration — single respond run end-to-end (fake provider): judgments completed with generated text persisted, run `needs_human`; bulk respond dataset launch → accepted + consumer expansion without rubric; judge-mode runs unaffected (regression); human best-model selection completes the run.
+- [ ] Step 2–3: Implement; delete the RESPOND_MODE_UNSUPPORTED 501 machinery.
+- [ ] Step 4: Verify all suites + build.
+- [ ] Step 5: Commit `feat(1b): respond-mode restored as a queue path`.
+
 ## Stage C — Providers
 
 ### Task 10: Descriptor registry + metadata capture + template rendering
