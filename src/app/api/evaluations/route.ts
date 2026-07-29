@@ -3,12 +3,7 @@ import { prisma } from '@/lib/db';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
-import {
-  createEvaluationRun,
-  enqueueEvaluationRunCreation,
-  enqueueRunProcessing,
-  toHttpError,
-} from '@/lib/evaluation-run-manager';
+import { launchSingleRun, launchBulkRunCreates, toRunLaunchHttpError } from '@/lib/run-launch';
 import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib/pagination';
 import { logger } from '@/lib/logger';
 import { fetchNRows, fetchDatasetMetadata } from '@/lib/huggingface';
@@ -257,18 +252,32 @@ export async function POST(request: Request) {
       });
 
       if (shouldRunImmediately) {
-        const run = await createEvaluationRun({
+        const launch = await launchSingleRun({
           evaluationId: evaluation.id,
           triggeredById: session.user.id,
         });
-        enqueueRunProcessing(run.id);
+
+        if (launch.publishFailed) {
+          return NextResponse.json(
+            {
+              ...evaluation,
+              mode: evaluationMode,
+              runMode: 'create_and_run',
+              runQueued: false,
+              runId: launch.run.id,
+              error: `Run created but failed to queue judgments: ${launch.publishError}`,
+            },
+            { status: 502 }
+          );
+        }
+
         return NextResponse.json(
           {
             ...evaluation,
             mode: evaluationMode,
             runMode: 'create_and_run',
             runQueued: true,
-            runId: run.id,
+            runId: launch.run.id,
           },
           { status: 201 }
         );
@@ -430,33 +439,38 @@ export async function POST(request: Request) {
       );
 
       if (shouldRunImmediately) {
-        for (const evaluation of evaluations) {
-          enqueueEvaluationRunCreation(evaluation.id, session.user.id);
-        }
+        const { accepted, failed } = await launchBulkRunCreates(
+          evaluations.map((e: any) => e.id),
+          session.user.id
+        );
+
+        return NextResponse.json(
+          {
+            mode: 'dataset',
+            runMode: 'create_and_run',
+            datasetId: dataset.id,
+            datasetName: dataset.name,
+            evaluationsCreated: evaluations.length,
+            evaluationIds: evaluations.map((e: any) => e.id),
+            accepted,
+            failed,
+            source: 'huggingface',
+            huggingFaceId: remoteData.huggingFaceId,
+          },
+          { status: 202 }
+        );
       }
 
       return NextResponse.json(
-        shouldRunImmediately
-          ? {
-              mode: 'dataset',
-              runMode: 'create_and_run',
-              datasetId: dataset.id,
-              datasetName: dataset.name,
-              evaluationsCreated: evaluations.length,
-              evaluationIds: evaluations.map((e: any) => e.id),
-              runsQueued: evaluations.length,
-              source: 'huggingface',
-              huggingFaceId: remoteData.huggingFaceId,
-            }
-          : {
-              mode: 'dataset',
-              datasetId: dataset.id,
-              datasetName: dataset.name,
-              evaluationsCreated: evaluations.length,
-              evaluationIds: evaluations.map((e: any) => e.id),
-              source: 'huggingface',
-              huggingFaceId: remoteData.huggingFaceId,
-            },
+        {
+          mode: 'dataset',
+          datasetId: dataset.id,
+          datasetName: dataset.name,
+          evaluationsCreated: evaluations.length,
+          evaluationIds: evaluations.map((e: any) => e.id),
+          source: 'huggingface',
+          huggingFaceId: remoteData.huggingFaceId,
+        },
         { status: 201 }
       );
     }
@@ -511,35 +525,40 @@ export async function POST(request: Request) {
       )
     );
 
+    // Return summary — don't load full includes for potentially thousands of evaluations
     if (shouldRunImmediately) {
-      for (const evaluation of evaluations) {
-        enqueueEvaluationRunCreation(evaluation.id, session.user.id);
-      }
+      const { accepted, failed } = await launchBulkRunCreates(
+        evaluations.map((e: any) => e.id),
+        session.user.id
+      );
+
+      return NextResponse.json(
+        {
+          mode: 'dataset',
+          runMode: 'create_and_run',
+          datasetId: dataset.id,
+          datasetName: dataset.name,
+          evaluationsCreated: evaluations.length,
+          evaluationIds: evaluations.map((e: any) => e.id),
+          accepted,
+          failed,
+        },
+        { status: 202 }
+      );
     }
 
-    // Return summary — don't load full includes for potentially thousands of evaluations
     return NextResponse.json(
-      shouldRunImmediately
-        ? {
-            mode: 'dataset',
-            runMode: 'create_and_run',
-            datasetId: dataset.id,
-            datasetName: dataset.name,
-            evaluationsCreated: evaluations.length,
-            evaluationIds: evaluations.map((e: any) => e.id),
-            runsQueued: evaluations.length,
-          }
-        : {
+      {
         mode: 'dataset',
         datasetId: dataset.id,
         datasetName: dataset.name,
         evaluationsCreated: evaluations.length,
         evaluationIds: evaluations.map((e: any) => e.id),
-          },
+      },
       { status: 201 }
     );
   } catch (error) {
-    const httpError = toHttpError(error);
+    const httpError = toRunLaunchHttpError(error);
     if (httpError) {
       return NextResponse.json({ error: httpError.message }, { status: httpError.status });
     }

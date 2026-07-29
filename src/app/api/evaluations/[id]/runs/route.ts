@@ -2,12 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
-import {
-  createEvaluationRun,
-  enqueueRunProcessing,
-  runDetailIncludeConfig,
-  toHttpError,
-} from '@/lib/evaluation-run-manager';
+import { launchSingleRun, runDetailInclude, toRunLaunchHttpError } from '@/lib/run-launch';
 import { judgeLimiter } from '@/lib/rate-limit-redis';
 import { rateLimitHeaders, JUDGE_LIMIT } from '@/lib/rate-limit';
 import { getClientIp } from '@/lib/client-ip';
@@ -17,8 +12,6 @@ const createRunSchema = z.object({
   rubricId: z.string().optional(),        // override; defaults to evaluation.rubricId
   modelConfigIds: z.array(z.string()).max(10).optional(), // override; defaults to evaluation.modelSelections
 });
-
-const runDetailInclude = runDetailIncludeConfig;
 
 // GET /api/evaluations/[id]/runs — list all runs for a template
 export async function GET(_request: Request, props: { params: Promise<{ id: string }> }) {
@@ -83,17 +76,27 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
     if (evaluation.userId !== session.user.id && !isAdmin(session)) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
-    const run = await createEvaluationRun({
+
+    const launch = await launchSingleRun({
       evaluationId: params.id,
       triggeredById: session.user.id,
       rubricId: data.rubricId,
       modelConfigIds: data.modelConfigIds,
     });
-    enqueueRunProcessing(run.id);
 
-    return NextResponse.json(run, { status: 201 });
+    if (launch.publishFailed) {
+      return NextResponse.json(
+        {
+          ...launch.run,
+          error: `Run created but failed to queue judgments: ${launch.publishError}`,
+        },
+        { status: 502 }
+      );
+    }
+
+    return NextResponse.json(launch.run, { status: 201 });
   } catch (error) {
-    const httpError = toHttpError(error);
+    const httpError = toRunLaunchHttpError(error);
     if (httpError) {
       return NextResponse.json({ error: httpError.message }, { status: httpError.status });
     }

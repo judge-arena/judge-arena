@@ -31,9 +31,29 @@
  * (dev, test) default to `amqp://guest:guest@localhost:5672` so
  * contributors don't need to set RABBITMQ_URL just to run the app or the
  * test suite locally.
+ *
+ * ── Web-side lazy topology assertion (Task 9) ───────────────────────────────
+ * The worker (`src/worker/main.ts`) declares the full topology
+ * (`assertTopology()`) once at boot. Before Task 9, the web tier never
+ * asserted topology itself — it only ever published through
+ * `src/lib/queue/publish.ts`'s `getRabbit()`-backed channel. On a fresh
+ * deploy where the web process's first publish happens to race ahead of the
+ * worker's own boot-time `assertTopology()` call (container start order is
+ * not guaranteed), that publish would go out on a channel with no
+ * `judge.direct` exchange (or no bound queue) declared yet — the broker
+ * either errors the publish (exchange doesn't exist) or, worse, silently
+ * drops it (exchange exists from a prior deploy, binding doesn't yet).
+ * `getRabbit()` now piggybacks `assertTopology()` onto the first successful
+ * connection/channel resolution in EVERY process that calls it (web or
+ * worker), guarded by `topologyAsserted` below so it only runs once per
+ * live channel — `assertTopology()` is idempotent/cheap (see topology.ts's
+ * doc), so the worker's own explicit `assertTopology()` call in main.ts
+ * becomes a harmless redundant no-op rather than something that needs
+ * removing.
  */
 
 import amqp, { type ChannelModel, type ConfirmChannel } from 'amqplib';
+import { assertTopology } from './topology';
 
 /**
  * Thrown by `getRabbit()` in production when RABBITMQ_URL is not
@@ -71,6 +91,16 @@ let intentionalClose = false;
 // getRabbit() call that initiates a connection).
 let connectAttempts = 0;
 
+// Guards the web-side lazy topology assertion (see module doc). `false`
+// until `assertTopology()` has successfully resolved once against the
+// CURRENT live channel; reset in `clearState()` so a reconnect (fresh
+// connection, fresh channel) re-asserts too — cheap, and defends against the
+// esoteric case of a broker that lost its declarations across an outage
+// (durable declarations normally survive a broker restart, but this costs
+// nothing to redo).
+let topologyAsserted = false;
+let topologyAssertPromise: Promise<void> | null = null;
+
 export function resolveRabbitUrl(): string {
   const url = process.env.RABBITMQ_URL;
   if (url) return url;
@@ -91,6 +121,32 @@ function clearState(): void {
   confirmChannel = null;
   connectPromise = null;
   channelPromise = null;
+  topologyAsserted = false;
+  topologyAssertPromise = null;
+}
+
+/**
+ * Assert the queue topology on `ch` exactly once (de-duplicated across
+ * concurrent callers, same `*Promise` singleton pattern as
+ * `connectPromise`/`channelPromise` above). A rejected attempt clears the
+ * in-flight promise so the NEXT `getRabbit()` caller retries rather than
+ * permanently wedging every future publish behind one failed assert.
+ */
+function ensureTopologyAsserted(ch: ConfirmChannel): Promise<void> {
+  if (topologyAsserted) return Promise.resolve();
+
+  if (!topologyAssertPromise) {
+    topologyAssertPromise = assertTopology(ch)
+      .then(() => {
+        topologyAsserted = true;
+      })
+      .catch((error) => {
+        topologyAssertPromise = null;
+        throw error;
+      });
+  }
+
+  return topologyAssertPromise;
 }
 
 function scheduleReconnect(): void {
@@ -189,7 +245,7 @@ async function createConnection(): Promise<{ conn: ChannelModel; confirmChannel:
  * `RabbitConfigError` in production if RABBITMQ_URL is unset — see module
  * docstring.
  */
-export async function getRabbit(): Promise<{ conn: ChannelModel; confirmChannel: ConfirmChannel }> {
+async function resolveConnection(): Promise<{ conn: ChannelModel; confirmChannel: ConfirmChannel }> {
   if (conn && confirmChannel) {
     return { conn, confirmChannel };
   }
@@ -208,6 +264,18 @@ export async function getRabbit(): Promise<{ conn: ChannelModel; confirmChannel:
   }
 
   return connectPromise;
+}
+
+/**
+ * Public entry point every producer/consumer in this codebase calls to get
+ * a live `{ conn, confirmChannel }`. Wraps `resolveConnection()` with the
+ * web-side lazy topology assertion (see module doc) — every caller, web or
+ * worker, is guaranteed the topology exists before it gets a channel back.
+ */
+export async function getRabbit(): Promise<{ conn: ChannelModel; confirmChannel: ConfirmChannel }> {
+  const resolved = await resolveConnection();
+  await ensureTopologyAsserted(resolved.confirmChannel);
+  return resolved;
 }
 
 /**

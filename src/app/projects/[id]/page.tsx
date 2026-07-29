@@ -543,9 +543,21 @@ export default function ProjectDetailPage() {
 
         if (result.mode === 'dataset') {
           if (runMode === 'create_and_run') {
-            toast.success(
-              `Created ${result.evaluationsCreated} evaluations and queued ${result.runsQueued ?? result.evaluationsCreated} run${(result.runsQueued ?? result.evaluationsCreated) === 1 ? '' : 's'} from dataset "${result.datasetName}"`
-            );
+            // 202 response shape: { accepted: string[], failed: {evaluationId,reason}[] }
+            // — each run.create publish is awaited/reported individually, so a
+            // partial failure never gets silently rolled into a single count.
+            const acceptedCount = result.accepted?.length ?? result.evaluationsCreated;
+            const failedCount = result.failed?.length ?? 0;
+            if (failedCount > 0) {
+              toast.error(
+                `Created ${result.evaluationsCreated} evaluations from dataset "${result.datasetName}": ` +
+                  `${acceptedCount} run${acceptedCount === 1 ? '' : 's'} queued, ${failedCount} failed to queue`
+              );
+            } else {
+              toast.success(
+                `Created ${result.evaluationsCreated} evaluations and queued ${acceptedCount} run${acceptedCount === 1 ? '' : 's'} from dataset "${result.datasetName}"`
+              );
+            }
           } else {
             toast.success(`Created ${result.evaluationsCreated} evaluations from dataset "${result.datasetName}"`);
           }

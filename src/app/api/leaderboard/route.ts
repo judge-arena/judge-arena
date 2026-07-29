@@ -28,24 +28,19 @@ interface ModelLeaderboardEntry {
 // leaderboard aggregate. A run's judgments only become "final" once its
 // automatic judging pass has finished:
 //   - 'needs_human': every model judgment has been attempted (see
-//     processRun in evaluation-run-manager.ts, which sets this once the
-//     per-model loop completes with at least one 'completed' judgment) —
-//     the run may still be awaiting a human judgment, but its ModelJudgment
+//     maybeFinalizeRun in src/lib/run-finalizer.ts, which sets this once no
+//     judgments remain pending/running and at least one completed) — the
+//     run may still be awaiting a human judgment, but its ModelJudgment
 //     rows are already final and won't change.
 //   - 'completed': the same, plus a human judgment has since been recorded
 //     on top (needs_human -> completed transition in the human-judgment
 //     route) — ModelJudgment rows are unchanged by that transition.
 //   - 'pending' / 'judging' are pre-finalization (no judgments yet, or the
 //     automatic pass is still in flight) — correctly excluded.
-//   - 'error' is set via two paths in processRun (evaluation-run-manager.ts):
-//     Primary: `completedCount === 0 && errorCount > 0` (no judgments attempted
-//     successfully). Secondary (crash window): outer catch after completed
-//     judgments already persisted — if the final status update fails, we retry
-//     with 'error' while judgments remain. This is excluded here as a deliberate
-//     conservative choice — 1b's reaper/finalization rework closes the crash
-//     window. The primary-path invariant (mixed results → needs_human, pure error
-//     → error) is what we rely on; excluding 'error' avoids accidentally counting
-//     crash-window runs with partial results.
+//   - 'error' is set by maybeFinalizeRun (src/lib/run-finalizer.ts) when no
+//     judgments remain pending/running and none completed (all errored, or
+//     zero judgments at all). Excluded here as a deliberate conservative
+//     choice — an all-error run has no usable scores to aggregate anyway.
 const FINALIZED_RUN_STATUSES = ['completed', 'needs_human'] as const;
 
 export async function GET() {
