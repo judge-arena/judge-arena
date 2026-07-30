@@ -1,11 +1,21 @@
-# ─── Judge Arena — CI/CD Pipeline ──────────────────────────────────────────
+# ─── Judge Arena — GitHub mirror-status CI ─────────────────────────────────
 #
-# Triggers:
-#   - On push to main: lint → type-check → test → build → deploy
-#   - On pull request: lint → type-check → test → build (no deploy)
+# GitHub is a MIRROR of this repo (per the 1b repo-shape decision — Gitea is
+# canonical CI, see .gitea/workflows/ci.yml). This workflow is deliberately
+# thin: lint + typecheck + unit tests (DB-free) + build, on every push/PR.
+# No deploy, no Docker build/push, no DB-backed suites (test:db/
+# test:integration need live Postgres/Redis/RabbitMQ — that's Gitea's job,
+# with the full pipeline and its own coverage gate). This file's only
+# purpose is a fast green/red signal on the mirror; it is not a release
+# gate for anything.
 #
+# GitHub-hosted `ubuntu-latest` runners DO have Docker + Node preinstalled,
+# so this one (unlike .gitea/workflows/ci.yml) can safely use the standard
+# `actions/*` JS actions — the "no JS actions" constraint is specific to the
+# homelab's Gitea runner (host-mode act_runner, no Node.js baked in — see
+# the Gitea workflow's header comment), not GitHub's.
 
-name: CI/CD
+name: CI (mirror)
 
 on:
   push:
@@ -17,9 +27,8 @@ env:
   NODE_VERSION: '22'
 
 jobs:
-  # ─── Lint & Type Check ──────────────────────────────────────────────────
-  quality:
-    name: Code Quality
+  mirror-check:
+    name: Lint, typecheck, unit tests, build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,8 +41,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Generate Prisma client
-        run: npx prisma generate
+      # tsc --noEmit below needs this — scripts/importer/** and tests/
+      # importer/helpers.ts import '@prisma/v1-client' directly, which is
+      # generated-only (never checked into git; package.json's
+      # `postinstall` only generates the default v2 client). See the Gitea
+      # workflow's equivalent step for the full explanation.
+      - name: Generate v1 (importer) Prisma client
+        run: npm run db:generate:v1
 
       - name: Lint
         run: npm run lint
@@ -41,111 +55,16 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
-  # ─── Unit & Integration Tests ───────────────────────────────────────────
-  test:
-    name: Tests
-    runs-on: ubuntu-latest
-    needs: quality
-
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: test
-          POSTGRES_PASSWORD: test
-          POSTGRES_DB: judgearena_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-
-    env:
-      DATABASE_URL: postgresql://test:test@localhost:5432/judgearena_test
-      NEXTAUTH_SECRET: test-secret-minimum-16-chars
-      NEXTAUTH_URL: http://localhost:3000
-      ENCRYPTION_KEY: test-encryption-key-minimum-16-chars
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Generate Prisma client
-        run: npx prisma generate
-
-      - name: Push schema to test database
-        run: npx prisma db push --skip-generate
-
-      - name: Run tests
-        run: npm test -- --coverage
-
-      - name: Upload coverage
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: coverage/
-          retention-days: 7
-
-  # ─── Build ──────────────────────────────────────────────────────────────
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    needs: test
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
+      # DB-free by design — see vitest.config.ts's own comment for why
+      # tests/db/**, tests/integration/**, and the importer's *.db.test.ts
+      # are excluded here on purpose (they need live Postgres/Redis/
+      # RabbitMQ this runner doesn't have; that's Gitea's job).
+      - name: Unit tests
+        run: npm test
 
       - name: Build
         env:
           DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
-          NEXTAUTH_SECRET: build-time-placeholder-secret
+          NEXTAUTH_SECRET: build-time-placeholder-secret-16
           NEXTAUTH_URL: http://localhost:3000
         run: npm run build
-
-  # ─── Docker Build & Push ────────────────────────────────────────────────
-  docker:
-    name: Docker Image
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ secrets.DOCKER_REGISTRY }}
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ secrets.DOCKER_REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/judge-arena:latest
-            ${{ secrets.DOCKER_REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/judge-arena:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max

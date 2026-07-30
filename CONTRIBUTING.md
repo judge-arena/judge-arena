@@ -18,6 +18,7 @@ Thanks for your interest! This guide covers the repo layout, conventions, and co
 10. [Modifying the Rubric / Evaluation Flow](#modifying-the-rubric--evaluation-flow)
 11. [Adding a Keyboard Shortcut](#adding-a-keyboard-shortcut)
 12. [Deployment: Docker Compose v2](#deployment-docker-compose-v2-task-16)
+13. [Continuous Integration](#continuous-integration-task-17)
 
 ---
 
@@ -848,6 +849,163 @@ Three things worth knowing if you're touching either file:
    k8s deployment target — see `docs/superpowers/specs/` for that
    architecture). Recompute the sum; don't just bump one service's limit
    in isolation.
+
+---
+
+## Continuous Integration (Task 17)
+
+Two CI files, two different jobs:
+
+| File | Role |
+|---|---|
+| `.gitea/workflows/ci.yml` | **Canonical.** Full pipeline: lint, typecheck, migrations, all 3 test suites (with coverage gates on 2 of them), build, and a stubbed Docker/Harbor stage. Raw shell only (see below). |
+| `.github/workflows/ci.yml` | **Mirror-status only.** Lint + typecheck + unit tests (DB-free) + build. No deploy, no Docker, no DB-backed suites. GitHub is a mirror of this repo, not a release gate — see the repo-shape decision this task's plan documents. |
+
+### Why the Gitea workflow is raw shell, and what "CI green" means today
+
+This repo is not hosted on Gitea yet — that migration is Phase 2 of the 1b
+plan. `.gitea/workflows/ci.yml` is authored ahead of that migration, against
+the **real, already-provisioned** homelab Gitea Actions runner
+(`act_runner`, host mode — see `homelab-setup`'s
+`apps/internal/gitea-runner/{deployment.yaml,image/Containerfile}`), which
+has two hard constraints baked into every step of that file:
+
+1. **No JavaScript actions.** The runner executes workflow steps directly
+   on its own Alpine 3.20 host (no per-job container, no Docker socket) —
+   `uses: actions/checkout@v4`, `actions/setup-node@v4`, etc. all require a
+   JS-action runtime this runner doesn't have. Every step is a plain
+   `run:` shell block; checkout is a raw `git clone` over SSH (matching
+   every other first-party repo's `.gitea/workflows/*.yaml` in this
+   homelab — job-ops, homeview, personal-feed).
+
+2. **No Node.js, no container engine, at all, on the runner image.** Node
+   22 is installed at the START of every run (a musl-static tarball from
+   `unofficial-builds.nodejs.org` — Alpine's own `apk` repos at the pinned
+   3.20 release don't carry Node 22 yet, and official nodejs.org builds
+   are glibc-only). More importantly, there is **no Docker/Podman/Buildah
+   binary on the runner at all** — real OCI builds in this homelab spawn
+   ephemeral kaniko `Job`s in the cluster via `kubectl`, never `docker
+   build` inline on the runner. That means the workflow's `services:`
+   block (postgres:16 + redis:7 + rabbitmq:3.13-management) and its
+   `docker compose up --scale` step are **authored to spec but not
+   provably executable on the runner as currently provisioned** — see the
+   long comment at the top of `.gitea/workflows/ci.yml` for the full
+   detail and the two concrete unblockers (Docker-mode runner group, or
+   spawning the 3 services as ephemeral k8s Pods the same way kaniko
+   builds already are).
+
+Because of both of the above, **`scripts/ci-local.sh` is what "CI green"
+means** until this repo actually lands on Gitea and the runner-capability
+gap closes. It runs the exact same shell sequence as the workflow, step
+for step, against already-running local podman services (see
+`docker-compose.yml` / the Development Setup section above for how to
+start postgres/redis/rabbitmq on `localhost`):
+
+```bash
+bash scripts/ci-local.sh
+```
+
+It fails fast with a clear message if a service isn't reachable, and
+prints `CI-local: ALL GREEN` only if lint, typecheck, `prisma migrate
+deploy`, the v1-scratch-DB seed, all 3 test suites (with their coverage
+gates), and `npm run build` all pass — in that order, matching
+`.gitea/workflows/ci.yml` exactly (minus the Docker/Kaniko stage, which is
+CI-only and stubbed there regardless).
+
+### Two non-obvious prerequisites this task's authoring surfaced
+
+Both were true before Task 17 (nothing here changes application behavior)
+but had never been exercised from a genuinely clean `npm ci` before — CI
+authoring is what surfaced them:
+
+- **The importer's `@prisma/v1-client` needs its own generate step.**
+  `package.json`'s `postinstall` (`npx prisma generate`) only generates
+  the default (v2) client. `scripts/importer/{context,artifacts,runs}.ts`
+  and `tests/importer/helpers.ts` import `@prisma/v1-client` directly — a
+  *second*, independently-generated client from
+  `prisma/v1/schema.v1.prisma`'s custom `output`. Without running `npm run
+  db:generate:v1` first, `tsc --noEmit` fails outright with `TS2307:
+  Cannot find module '@prisma/v1-client'` in exactly those files
+  (reproduced and verified at Task 17 authoring time). Both
+  `scripts/ci-local.sh` and `.gitea/workflows/ci.yml` run this
+  immediately after `npm ci`, before lint/typecheck.
+
+- **The v1 scratch database needs its own seed step.** `tests/importer/
+  *.db.test.ts` (part of the 281-test `test:db` suite) needs a second
+  database (`V1_DATABASE_URL`, seeded with the frozen v1 schema) — `prisma
+  migrate reset` (which `npm run test:db` runs internally) only touches
+  `DATABASE_URL`/the v2 schema, per `.env.test`'s own comment. The fix is
+  `npm run db:push:v1` (a new script,
+  `prisma db push --schema prisma/v1/schema.v1.prisma`), run once before
+  `test:db`. `prisma db push` auto-creates the target database if it
+  doesn't exist yet (verified at authoring time by dropping and
+  recreating it), and no-ops cleanly (`already in sync`) on repeat runs —
+  safe to always run, in CI or locally.
+
+### Test coverage
+
+`npm run test:coverage` (`vitest run --coverage`, `vitest.config.ts`) and
+`npm run test:db:coverage` (same, `vitest.db.config.ts`) both gate on
+`coverage.thresholds` — a real regression in either run fails the command
+(and therefore `scripts/ci-local.sh` / the Gitea `ci` job). `test:integration`
+does **not** carry a coverage gate (see "What isn't measured" below).
+
+**Why 3 separate numbers, not one.** The 3 suites (unit/db/integration)
+are 3 separate vitest configs with 3 separate processes — `@vitest/
+coverage-v8` doesn't merge coverage across separate CLI invocations, and
+merging the raw v8/istanbul JSON output across runs is more tooling than
+this task's scope justifies. Instead, coverage is measured **per run**,
+against whatever that run's `coverage.include` says, with thresholds set
+to that run's own actuals. This isn't a compromise so much as it's the
+more informative shape: a given source file's "real" coverage depends on
+*which kind of test exercises it* — DB-free unit tests can't touch
+anything requiring a live Postgres/Redis/RabbitMQ connection, so a file
+that's 0% in the unit run but 95% in the db run is not a gap, it's the
+DB-free run correctly reporting that it never touched that file.
+
+**What each run measures** (Task 17 broadened both from the 1a-era
+`src/lib/**/*.ts`-only include to also cover `src/worker/**` and
+`scripts/importer/**` — the 1b-rewritten subsystems: queue, worker,
+providers/llm, auth-guard, importer, realtime):
+
+| Run | `coverage.include` | Where the *rewritten subsystems* actually land |
+|---|---|---|
+| `test:coverage` (unit, DB-free) | `src/lib/**`, `src/worker/**`, `scripts/importer/**` | `src/lib/llm/**` (heavily unit-tested, ~94% stmts/lines), `src/lib/queue/connection.ts` (unit-tested), `src/lib/realtime/ownership.ts` (unit-tested), `src/worker/dispatch-failure.ts` (unit-tested). Everything else in those 3 directories needs a live service and shows near-0% here — expected, not a regression. |
+| `test:db:coverage` (`vitest.db.config.ts`) | same include | `src/lib/auth-guard.ts` (~86%, exercised transitively through real API route handlers under a live DB — `tests/db/access-matrix.test.ts`) and `scripts/importer/**` (~96%, the `*.db.test.ts` files that need both the v1 scratch DB and the v2 test DB). |
+| `test:integration` (no coverage gate) | n/a | `src/worker/{claim,main,reaper,run-create-consumer,judgment-consumer}.ts`, `src/lib/queue/{publish,topology}.ts`, and most of `src/lib/realtime/**` (`bus.ts`, `redis-bus.ts`, `factory.ts`, `in-memory-bus.ts`, `events.ts`) run almost exclusively here (RabbitMQ consumers, SSE over real Redis). Pass/fail-verified by `test:integration`'s 73 tests, but genuinely **not coverage-gated** — see below. |
+
+Per-directory thresholds (vitest's glob-keyed `coverage.thresholds` — see
+`vitest.config.ts` / `vitest.db.config.ts`) are set **at or a hair below**
+each glob's actual measured number as of Task 17 (2026-07-30), so today's
+numbers pass and a real regression in that specific subsystem fails —
+rather than only being caught (or masked) by the blended, repo-wide
+aggregate. The top-level `lines/functions/branches/statements` keys in
+each config are a **separate, additional** aggregate check across every
+file the `include` glob matches (not a "leftover bucket" for files no
+per-directory glob covers) — both checks run independently.
+
+**What isn't measured, honestly.** `test:integration` has no `coverage`
+block at all. The subsystems that live almost entirely there (worker
+consumers, queue topology/publish, most of the realtime bus) are
+correctness-verified by that suite's 73 tests but have no regression gate
+on *how much* of their code those tests actually exercise. Adding a third
+coverage config was in scope for this task's "pragmatic" framing but
+judged not worth the added CI time/complexity for suites whose
+correctness is already RabbitMQ/Redis-timing-sensitive (see `vitest.
+integration.config.ts`'s `fileParallelism: false` comment) — revisit if
+`src/worker/**`/`src/lib/queue/**` coverage ever needs tightening beyond
+pass/fail.
+
+**Updating thresholds** after a real coverage change: run `npm run
+test:coverage` and/or `npm run test:db:coverage`, read the actual
+per-file/per-glob numbers from the printed report, and set the
+corresponding `coverage.thresholds` entry at or slightly below the new
+actual (never above — a threshold above current reality just breaks CI
+immediately). Vitest also supports `thresholds: { autoUpdate: true }` to
+have it rewrite the config file's numbers for you on a passing run; not
+enabled by default here (silently ratcheting thresholds up on every green
+run is a footgun for a lightly-staffed repo), but worth reaching for if
+this becomes tedious.
 
 ---
 
