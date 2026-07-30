@@ -8,6 +8,7 @@ node_modules
 .env
 .env.local
 .env.production
+.env.test
 .env.*.local
 
 # IDE
@@ -27,6 +28,23 @@ Thumbs.db
 # Documentation
 *.md
 LICENSE
+docs/
+.superpowers/
+
+# Tests — the built image never runs suites; they run against source in CI
+# (Task 17), not inside a container built from this Dockerfile.
+tests/
+coverage/
+vitest.config.ts
+vitest.db.config.ts
+vitest.integration.config.ts
+
+# CI / deploy control files — not app inputs, no need in the build context.
+.github/
+deploy/
+Dockerfile
+Dockerfile.*
+docker-compose*.yml
 
 # Misc
 scripts/

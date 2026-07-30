@@ -17,6 +17,7 @@ Thanks for your interest! This guide covers the repo layout, conventions, and co
 9. [API wire-format changes (v2, 1a)](#api-wire-format-changes-v2-1a)
 10. [Modifying the Rubric / Evaluation Flow](#modifying-the-rubric--evaluation-flow)
 11. [Adding a Keyboard Shortcut](#adding-a-keyboard-shortcut)
+12. [Deployment: Docker Compose v2](#deployment-docker-compose-v2-task-16)
 
 ---
 
@@ -776,6 +777,77 @@ Looking for something to work on? Here are high-impact areas:
 | **WebSocket for live updates** | Replace polling in `evaluate/[id]/page.tsx` with a WebSocket or Server-Sent Events stream when judgments complete. |
 | **Prompt versioning** | Version the system prompt independently of rubric criteria. Useful for A/B testing different judge instructions with the same rubric. |
 | **Additional LLM providers** | Google Gemini, Cohere, Mistral, AWS Bedrock — see [Adding a New LLM Provider](#adding-a-new-llm-provider). |
+
+---
+
+## Deployment: Docker Compose v2 (Task 16)
+
+`Dockerfile` builds one image with two long-running entrypoints — `server.js`
+(web) and `worker.js` (queue consumer, an esbuild bundle of
+`src/worker/main.ts`) — plus a third Dockerfile stage (`builder`) that
+`docker-compose.yml`'s `migrate` service targets directly for its full
+Prisma CLI + `prisma/migrations`. See the Dockerfile's own top-of-file
+comment for the three-stage rationale, and `docker-compose.yml`'s top
+comment for the service list and usage (`docker compose up -d`, or
+`docker compose up -d --scale app=2 --scale worker=2` for the scaled demo
+rig).
+
+Three things worth knowing if you're touching either file:
+
+1. **Migrations run exactly once**, in the `migrate` one-shot service — not
+   in any `app`/`worker` replica's CMD. Running `prisma migrate deploy` in
+   every replica's boot command was the pre-Task-16 shape, and it breaks
+   under `--scale app=N`: N replicas starting concurrently all race the
+   migration (Prisma's advisory lock serializes the *statements*, but
+   replicas can still fail/crash-loop on lock contention). `app`/`worker`
+   both `depends_on: migrate: condition: service_completed_successfully`
+   instead.
+
+2. **`app`/`worker` are scale-safe by construction**: no `container_name`
+   (compose refuses to scale a service with a fixed name — duplicate-name
+   error on the 2nd replica) and no static host-port publish (the 2nd
+   replica fails to bind the same host port). `nginx`
+   (`deploy/nginx-lb.conf`) is the only service that publishes a web-facing
+   host port; it round-robins across whatever `app` replicas exist at
+   nginx's own startup (Docker Compose's embedded DNS resolves `app` to
+   one A record per replica, and nginx's `upstream { server app:3000; }`
+   expands that into one peer per address — see that file's header for the
+   static-resolution caveat).
+
+3. **Prisma connection-pool budget** (spec §4 — the deps-build critique's
+   MAJOR finding: "Prisma connection pool unbounded per replica"). Prisma's
+   default pool size is `num_physical_cpus * 2 + 1` *per process* with no
+   cap — on any real host that's dozens of connections per replica, and it
+   scales with replica count, not with any deliberate budget. Every
+   `DATABASE_URL` in `docker-compose.yml` now carries an explicit
+   `connection_limit` + `pool_timeout=20` query param instead:
+
+   | Service | `connection_limit` | Why |
+   |---|---|---|
+   | `app` | `10` | Fixed — the web tier's per-request Prisma usage is short-lived (single query/transaction per API route handler), 10 concurrent connections comfortably covers request bursts without either starving other services or holding connections idle. |
+   | `worker` | `EVALUATION_MODEL_CONCURRENCY_PER_RUN × 2` (default `2 × 2 = 4`, via compose's `WORKER_DB_POOL_LIMIT`) | Sized to the worker's own concurrency knob — one connection per in-flight judgment's claim update, one headroom slot so the persist-result write doesn't serialize behind another in-flight claim on the same pool. Raise `EVALUATION_MODEL_CONCURRENCY_PER_RUN` → raise `WORKER_DB_POOL_LIMIT` to match. |
+   | `migrate` | `5` | One-shot, transient — Prisma's migration engine doesn't need much, and it never runs concurrently with itself. |
+
+   **The formula to check before scaling further** (also in
+   `docker-compose.yml`'s `app` service comment):
+
+   ```
+   (app replicas × app connection_limit)
+     + (worker replicas × worker connection_limit)
+     + migrate's connection_limit
+     + admin/psql headroom
+   < Postgres max_connections
+   ```
+
+   `postgres:16-alpine`'s unmodified default is `max_connections=100`. At
+   the defaults above, 4 app + 4 worker replicas budgets to
+   `4×10 + 4×4 + 5 + ~10 headroom = 71 < 100` — comfortable up to that
+   scale. Past it, either raise Postgres's own `max_connections` (`command:
+   postgres -c max_connections=<N>` on the `postgres` service) or front it
+   with a connection pooler (CNPG ships pgbouncer built in for the real
+   k8s deployment target — see `docs/superpowers/specs/` for that
+   architecture). Recompute the sum; don't just bump one service's limit
+   in isolation.
 
 ---
 
