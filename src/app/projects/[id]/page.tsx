@@ -28,6 +28,7 @@ import {
   getLatestRun,
   summarizeDatasetRunGroup,
 } from '@/lib/dataset-run-groups';
+import { deriveRunMode } from '@/lib/run-mode';
 
 function toList<T>(payload: unknown): T[] {
   if (Array.isArray(payload)) return payload as T[];
@@ -803,11 +804,11 @@ export default function ProjectDetailPage() {
                     const status = summary.aggregateStatus;
                     const needsBestSelectionCount = group.evaluations.filter((evaluation) => {
                       const latestRun = getLatestRun(evaluation);
-                      return latestRun?.status === 'needs_human' && !evaluation.responseText;
+                      return latestRun?.status === 'needs_human' && deriveRunMode(evaluation.responseText) === 'respond';
                     }).length;
                     const needsFeedbackCount = group.evaluations.filter((evaluation) => {
                       const latestRun = getLatestRun(evaluation);
-                      return latestRun?.status === 'needs_human' && !!evaluation.responseText;
+                      return latestRun?.status === 'needs_human' && deriveRunMode(evaluation.responseText) === 'judge';
                     }).length;
                     const statusVariant =
                       status === 'completed'
@@ -914,7 +915,7 @@ export default function ProjectDetailPage() {
                         {evaluation.title || 'Untitled Evaluation'}
                       </p>
                       <Badge variant="default" size="sm">
-                        {evaluation.responseText ? 'Judge' : 'Respond'}
+                        {deriveRunMode(evaluation.responseText) === 'judge' ? 'Judge' : 'Respond'}
                       </Badge>
                       {evaluation.datasetId && (
                         <Badge variant="info" size="sm">
@@ -946,7 +947,7 @@ export default function ProjectDetailPage() {
                     {(() => {
                       const latestRun = getLatestRun(evaluation);
                       const runCount = getEvaluationRunCount(evaluation);
-                      const mode: 'respond' | 'judge' = evaluation.responseText ? 'judge' : 'respond';
+                      const mode = deriveRunMode(evaluation.responseText);
                       const statusLabel = latestRun
                         ? latestRun.status === 'needs_human'
                           ? mode === 'respond'

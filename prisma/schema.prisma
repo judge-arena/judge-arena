@@ -548,9 +548,10 @@ model Dataset {
   name        String
   slug        String? // portable identifier for config export/import
   description String?
-  source      String  @default("local") // 'local' | 'remote'
-  visibility  String  @default("private") // 'private' | 'public'
-  inputType   String  @default("query-response") // 'query' | 'query-response'
+  source      String     @default("local") // 'local' | 'remote'
+  visibility  Visibility @default(private)
+  publishedAt DateTime?
+  inputType   String     @default("query-response") // 'query' | 'query-response'
 
   // ── Versioning ──
   version  Int       @default(1)
@@ -587,6 +588,7 @@ model Dataset {
   updatedAt DateTime @updatedAt
 
   @@unique([userId, slug])
+  @@unique([parentId, version])
   @@index([userId])
   @@index([projectId])
   @@index([parentId])
@@ -642,6 +644,14 @@ model GoldenSet {
   name            String
   description     String?
   visibility      Visibility       @default(private)
+  publishedAt     DateTime?
+  // Soft-delete: set instead of hard-deleting a private GoldenSet that a
+  // CalibrationRun still references (CalibrationRun.goldenSetId is
+  // `onDelete: Restrict` — see src/lib/account-deletion.ts). Row is kept so
+  // the calibration history it anchors stays intact; ownerId is left
+  // pointing at the (now-deleted) owner and resolves to null via its own
+  // `onDelete: SetNull`.
+  retiredAt       DateTime?
   ownerId         String?
   owner           User?            @relation(fields: [ownerId], references: [id], onDelete: SetNull)
   items           GoldenItem[]

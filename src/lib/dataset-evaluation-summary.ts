@@ -1,5 +1,6 @@
 import { prisma } from '@/lib/db';
 import { publishEvent, userTopic } from '@/lib/realtime/events';
+import { deriveRunMode } from '@/lib/run-mode';
 
 export interface DatasetEvaluationSummary {
   updatedAt: string;
@@ -54,16 +55,16 @@ function computeSummary(evaluations: EvaluationForSummary[]): DatasetEvaluationS
     }
 
     // Mode is derived from the evaluation itself (already joined in via the
-    // query above), matching the server derivation in
-    // src/app/api/evaluations/[id]/runs/[runId]/human-judgment/route.ts:
-    // `responseText?.trim() ? 'judge' : 'respond'`. Respond mode has no
-    // scoring concept — its HumanJudgment.overallScore is always the 0
-    // placeholder (see resolveHumanJudgmentScore in src/lib/utils.ts) and
-    // must be excluded here so it doesn't drag averageHumanScore toward 0.
-    // (selectedBestModelId — respond mode's actual signal — lives on the
-    // same row; this only affects the score average, not any best-model
-    // count, since no such aggregation exists in this module.)
-    const isJudgeMode = Boolean(evaluation.responseText?.trim());
+    // query above) via the shared `deriveRunMode` (src/lib/run-mode.ts) —
+    // same single source of truth the worker and human-judgment route use.
+    // Respond mode has no scoring concept — its HumanJudgment.overallScore
+    // is always the 0 placeholder (see resolveHumanJudgmentScore in
+    // src/lib/utils.ts) and must be excluded here so it doesn't drag
+    // averageHumanScore toward 0. (selectedBestModelId — respond mode's
+    // actual signal — lives on the same row; this only affects the score
+    // average, not any best-model count, since no such aggregation exists
+    // in this module.)
+    const isJudgeMode = deriveRunMode(evaluation.responseText) === 'judge';
     if (
       isJudgeMode &&
       latestRun.humanJudgment?.overallScore !== null &&

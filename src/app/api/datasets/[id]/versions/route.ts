@@ -2,9 +2,9 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin, optionalAuth, resolveResourceAccess, RateLimitedError } from '@/lib/auth-guard';
-import { generateSlug } from '@/lib/config';
 import { logger, serializeError } from '@/lib/logger';
 import { createVersionSchema } from './schema';
+import { createDatasetVersion, DatasetVersionConflictError } from '@/lib/dataset-versions';
 
 // POST /api/datasets/[id]/versions — create a new version from the current dataset
 export async function POST(request: Request, props: { params: Promise<{ id: string }> }) {
@@ -36,21 +36,13 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
     // Find the root dataset (original) for this version chain
     const rootId = existing.parentId ?? existing.id;
 
-    // Find the highest version number in this chain
-    const allVersions = await prisma.dataset.findMany({
-      where: {
-        OR: [
-          { id: rootId },
-          { parentId: rootId },
-        ],
-      },
-      select: { version: true },
-      orderBy: { version: 'desc' },
-    });
-    const nextVersion = (allVersions[0]?.version ?? 1) + 1;
-
-    // Optionally accept modified samples with the new version
-    let newSamples = existing.samples;
+    // Optionally accept modified samples with the new version; otherwise
+    // fall back to copying the prior version's samples verbatim.
+    let newSamples = existing.samples.map((s) => ({
+      input: s.input,
+      expected: s.expected,
+      metadata: s.metadata,
+    }));
     let body: unknown;
     try {
       body = await request.json();
@@ -65,65 +57,35 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
     if (body && typeof body === 'object' && !Array.isArray(body) && 'samples' in body) {
       const data = createVersionSchema.parse(body);
       if (data.samples) {
-        newSamples = data.samples.map((s, i) => ({
-          id: '',
-          datasetId: '',
-          index: i,
+        newSamples = data.samples.map((s) => ({
           input: s.input,
           expected: s.expected ?? null,
           metadata: s.metadata ? JSON.stringify(s.metadata) : null,
-          createdAt: new Date(),
         }));
       }
     }
 
-    // Generate a unique slug for version
-    const baseSlug = generateSlug(existing.name);
-    const versionSlug = `${baseSlug}-v${nextVersion}`;
-    const existingSlugs = (await prisma.dataset.findMany({
-      where: { userId: session.user.id },
-      select: { slug: true },
-    })).map((d) => d.slug).filter(Boolean) as string[];
-    const uniqueSlug = existingSlugs.includes(versionSlug)
-      ? `${versionSlug}-${Date.now().toString(36).slice(-4)}`
-      : versionSlug;
-
-    const newVersion = await prisma.dataset.create({
-      data: {
-        name: existing.name,
-        slug: uniqueSlug,
-        description: existing.description,
-        source: existing.source,
-        visibility: existing.visibility,
-        inputType: existing.inputType,
-        version: nextVersion,
-        parentId: rootId,
-        sourceUrl: existing.sourceUrl,
-        huggingFaceId: existing.huggingFaceId,
-        remoteMetadata: existing.remoteMetadata,
-        format: existing.format,
-        localData: existing.localData,
-        sampleCount: newSamples.length,
-        splits: existing.splits,
-        features: existing.features,
-        tags: existing.tags,
-        projectId: existing.projectId,
-        userId: session.user.id,
-        samples: {
-          create: newSamples.map((s, i) => ({
-            index: i,
-            input: s.input,
-            expected: s.expected,
-            metadata: s.metadata,
-          })),
-        },
-      },
-      include: {
-        user: { select: { id: true, name: true, email: true } },
-        project: { select: { id: true, name: true } },
-        samples: { orderBy: { index: 'asc' } },
-        _count: { select: { samples: true } },
-      },
+    // Transactional version numbering + retry lives in
+    // src/lib/dataset-versions.ts — mirrors createRubricVersion's fix for
+    // the same unguarded max-version-read-then-create race (1a flag M5).
+    const newVersion = await createDatasetVersion(prisma, {
+      rootDatasetId: rootId,
+      userId: session.user.id,
+      name: existing.name,
+      description: existing.description,
+      source: existing.source,
+      visibility: existing.visibility,
+      inputType: existing.inputType,
+      sourceUrl: existing.sourceUrl,
+      huggingFaceId: existing.huggingFaceId,
+      remoteMetadata: existing.remoteMetadata,
+      format: existing.format,
+      localData: existing.localData,
+      splits: existing.splits,
+      features: existing.features,
+      tags: existing.tags,
+      projectId: existing.projectId,
+      samples: newSamples,
     });
 
     return NextResponse.json(newVersion, { status: 201 });
@@ -132,6 +94,18 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
       return NextResponse.json(
         { error: 'Validation failed', details: error.errors },
         { status: 400 }
+      );
+    }
+    if (error instanceof DatasetVersionConflictError) {
+      logger.error('Dataset version conflict exhausted retries', {
+        error: serializeError(error),
+      });
+      return NextResponse.json(
+        {
+          error:
+            'Failed to create dataset version due to concurrent updates. Please try again.',
+        },
+        { status: 500 }
       );
     }
     logger.error('Failed to create dataset version', { error: serializeError(error) });

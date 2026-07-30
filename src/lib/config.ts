@@ -95,7 +95,9 @@ export interface ConfigDataset {
   name: string;
   description?: string;
   source: string;
-  visibility: string;
+  // Dataset.visibility is the `Visibility` enum as of Task 15 (was a raw
+  // String) — narrowed here to match, same as `datasetSchema` below.
+  visibility: 'private' | 'public';
   sourceUrl?: string;
   huggingFaceId?: string;
   tags?: string[];
@@ -168,7 +170,7 @@ const datasetSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   source: z.string().default('local'),
-  visibility: z.string().default('private'),
+  visibility: z.enum(['private', 'public']).default('private'),
   sourceUrl: z.string().optional(),
   huggingFaceId: z.string().optional(),
   tags: z.array(z.string()).optional(),

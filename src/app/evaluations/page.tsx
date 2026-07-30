@@ -10,6 +10,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn, formatDateTime, getScoreColor } from '@/lib/utils';
 import { resolveModelDisplay, judgmentIdentityKey } from '@/lib/model-display';
+import { deriveRunMode } from '@/lib/run-mode';
 import { toast } from 'sonner';
 
 // Evaluation run as returned nested inside templates from GET /api/evaluations
@@ -142,7 +143,7 @@ export default function EvaluationsPage() {
           for (const run of template.runs ?? []) {
             flat.push({
               ...run,
-              mode: template.responseText ? 'judge' : 'respond',
+              mode: deriveRunMode(template.responseText),
               evaluationTitle: template.title ?? null,
               projectId: template.project?.id ?? '',
               projectName: template.project?.name ?? '',

@@ -71,7 +71,11 @@ export async function GET(request: Request) {
     }
 
     if (source) where.source = source;
-    if (visibility) where.visibility = visibility;
+    // Dataset.visibility is the `Visibility` enum as of Task 15 — an
+    // arbitrary `?visibility=` value would previously just match zero rows
+    // (String column); now it would throw a Prisma validation error
+    // instead, so only apply the filter when it's a real enum member.
+    if (visibility === 'private' || visibility === 'public') where.visibility = visibility;
     if (projectId) where.projectId = projectId;
 
     const [datasets, total] = await Promise.all([

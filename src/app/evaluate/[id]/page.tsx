@@ -26,6 +26,7 @@ import {
   formatDateTime,
   getScoreColor,
 } from '@/lib/utils';
+import { deriveRunMode } from '@/lib/run-mode';
 import { toast } from 'sonner';
 
 const statusConfig: Record<string, { label: string; variant: 'default' | 'success' | 'warning' | 'error' | 'info' }> = {
@@ -117,7 +118,7 @@ export default function EvaluateTemplatePage() {
   };
 
   const launchRun = async () => {
-    const mode: 'respond' | 'judge' = evaluation?.responseText?.trim() ? 'judge' : 'respond';
+    const mode = deriveRunMode(evaluation?.responseText);
 
     if (mode === 'judge' && !runRubricId) {
       toast.error('Please select a rubric for this run');
@@ -199,7 +200,7 @@ export default function EvaluateTemplatePage() {
 
   const rubric = evaluation.rubric;
   const runs: any[] = evaluation.runs ?? [];
-  const evaluationMode: 'respond' | 'judge' = evaluation?.responseText?.trim() ? 'judge' : 'respond';
+  const evaluationMode = deriveRunMode(evaluation?.responseText);
   const needsHumanLabel =
     evaluationMode === 'respond' ? 'Select Best Response' : 'Needs Human Feedback';
 

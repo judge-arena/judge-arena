@@ -26,6 +26,14 @@
  *     versions (`onDelete: NoAction` on Rubric.parentId), can't be
  *     hard-deleted either — it's soft-retired (`retiredAt` set, row kept)
  *     instead.
+ *   - A private GoldenSet that a CalibrationRun still references
+ *     (`onDelete: Restrict` on CalibrationRun.goldenSetId) can't be
+ *     hard-deleted either, for the identical reason (1b-prereq (a), closed
+ *     by Task 15) — it's soft-retired (`retiredAt` set, row kept) instead.
+ *     Unlike Rubric.userId (`onDelete: Cascade`), GoldenSet.ownerId is
+ *     `onDelete: SetNull`, so a retired GoldenSet needs no ownership
+ *     reassignment to survive the final `user.delete()` — it resolves to
+ *     `ownerId: null` on its own.
  *
  * Order matters: private Projects are purged FIRST so their Evaluations/
  * Runs/Judgments/HumanJudgments are gone before we look at what's left
@@ -42,6 +50,29 @@ export interface DeleteUserAccountResult {
   purged: Record<string, number>;
   reassigned: Record<string, number>;
   retired: Record<string, number>;
+}
+
+// 1b-prereq (c): every category this function EVER tallies, shared by all
+// three result maps so a caller reading `result.retired.datasets` (say)
+// always gets `0` rather than `undefined` just because this particular run
+// never had anything to retire in that category — a category not
+// meaningful for a given map (e.g. `retired.user`) simply stays at its
+// initialized 0 forever, but the KEY is always there.
+const RESULT_CATEGORIES = [
+  'projects',
+  'evaluations',
+  'datasets',
+  'goldenSets',
+  'humanJudgments',
+  'rubrics',
+  'modelConfigs',
+  'user',
+] as const;
+
+function zeroedResultMap(): Record<string, number> {
+  const map: Record<string, number> = {};
+  for (const category of RESULT_CATEGORIES) map[category] = 0;
+  return map;
 }
 
 export async function deleteUserAccount(
@@ -63,9 +94,9 @@ export async function deleteUserAccount(
       throw new Error(`deleteUserAccount: archive user ${archiveUserId} does not exist`);
     }
 
-    const purged: Record<string, number> = {};
-    const reassigned: Record<string, number> = {};
-    const retired: Record<string, number> = {};
+    const purged = zeroedResultMap();
+    const reassigned = zeroedResultMap();
+    const retired = zeroedResultMap();
 
     // ── 1. Private Projects: hard-delete first ────────────────────────────
     // Cascades: Evaluation -> EvaluationRun -> ModelJudgment/HumanJudgment/
@@ -106,17 +137,49 @@ export async function deleteUserAccount(
     });
     reassigned.datasets = reassignedDatasets.count;
 
-    // ── 5. GoldenSets: private delete, public reassign owner ───────────────
-    const purgedGoldenSets = await tx.goldenSet.deleteMany({
-      where: { ownerId: userId, visibility: 'private' },
-    });
-    purged.goldenSets = purgedGoldenSets.count;
-
+    // ── 5. GoldenSets: private retire-or-delete, public reassign owner ─────
     const reassignedGoldenSets = await tx.goldenSet.updateMany({
       where: { ownerId: userId, visibility: 'public' },
       data: { ownerId: archiveUserId },
     });
     reassigned.goldenSets = reassignedGoldenSets.count;
+
+    // Private GoldenSets: hard-delete, UNLESS a CalibrationRun still
+    // references it (`onDelete: Restrict` on CalibrationRun.goldenSetId) —
+    // deleting through that would abort the transaction with a P2003
+    // (1b-prereq (a): this is the "account-deletion hard-deletes private
+    // GoldenSets but CalibrationRun.goldenSetId is Restrict -> tx abort"
+    // carry from 1a). Check first and soft-retire instead of hard-deleting,
+    // the same pattern step 7 below uses for Rubric. No ownership
+    // reassignment needed on the retired path — GoldenSet.ownerId is
+    // `onDelete: SetNull` (not Cascade like Rubric.userId), so leaving it
+    // pointed at the about-to-be-deleted user is fine; the final
+    // user.delete() nulls it out on its own.
+    const privateGoldenSets = await tx.goldenSet.findMany({
+      where: { ownerId: userId, visibility: 'private' },
+      select: { id: true },
+    });
+
+    let purgedGoldenSetCount = 0;
+    let retiredGoldenSetCount = 0;
+    for (const goldenSet of privateGoldenSets) {
+      const pinningCalibrationRunCount = await tx.calibrationRun.count({
+        where: { goldenSetId: goldenSet.id },
+      });
+
+      if (pinningCalibrationRunCount > 0) {
+        await tx.goldenSet.update({
+          where: { id: goldenSet.id },
+          data: { retiredAt: new Date() },
+        });
+        retiredGoldenSetCount += 1;
+      } else {
+        await tx.goldenSet.delete({ where: { id: goldenSet.id } });
+        purgedGoldenSetCount += 1;
+      }
+    }
+    purged.goldenSets = purgedGoldenSetCount;
+    retired.goldenSets = retiredGoldenSetCount;
 
     // GoldenLabel.annotatorId is `onDelete: SetNull` — anonymizes cleanly on
     // the final user.delete(); nothing to do here.

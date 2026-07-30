@@ -16,6 +16,7 @@ import {
   getLatestRun,
   summarizeDatasetRunGroup,
 } from '@/lib/dataset-run-groups';
+import { deriveRunMode } from '@/lib/run-mode';
 import { toast } from 'sonner';
 
 const statusVariantMap: Record<string, 'default' | 'success' | 'warning' | 'error' | 'info'> = {
@@ -107,12 +108,12 @@ export default function DatasetRunDetailPage() {
   const aggregateStatus = summary.aggregateStatus;
   const needsBestSelectionCount = group.evaluations.filter((evaluation) => {
     const latestRun = getLatestRun(evaluation);
-    const isRespondMode = !evaluation.responseText;
+    const isRespondMode = deriveRunMode(evaluation.responseText) === 'respond';
     return latestRun?.status === 'needs_human' && isRespondMode;
   }).length;
   const needsFeedbackCount = group.evaluations.filter((evaluation) => {
     const latestRun = getLatestRun(evaluation);
-    const isJudgeMode = !!evaluation.responseText;
+    const isJudgeMode = deriveRunMode(evaluation.responseText) === 'judge';
     return latestRun?.status === 'needs_human' && isJudgeMode;
   }).length;
 
@@ -203,7 +204,7 @@ export default function DatasetRunDetailPage() {
               const latestRun = getLatestRun(evaluation);
               const runCount = getEvaluationRunCount(evaluation);
               const modelAverage = getLatestModelAverage(evaluation);
-              const isRespondMode = !evaluation.responseText;
+              const isRespondMode = deriveRunMode(evaluation.responseText) === 'respond';
 
               const runStatusLabel = latestRun
                 ? latestRun.status === 'needs_human'

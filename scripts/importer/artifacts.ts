@@ -69,9 +69,11 @@
  * archive user, but on all three ownership paths above (a project doesn't
  * stop being the public leaderboard just because its owner is a live,
  * still-mapped user). Every non-default Project and every imported Rubric
- * gets the default `'private'`. Dataset's own `visibility` column is
- * untouched legacy `String` (never promoted to the enum), so it is carried
- * verbatim from v1 either way.
+ * gets the default `'private'`. Dataset's own `visibility` column — a raw
+ * `String` on v1, promoted to the `Visibility` enum on v2 by Task 15 — IS
+ * carried from v1's source column, normalized (`v1.visibility === 'public'
+ * ? 'public' : 'private'`) rather than passed through verbatim, since v1's
+ * column is untyped and the v2 column no longer accepts arbitrary strings.
  *
  * ── Idempotency (apply-mode re-run safety) ──────────────────────────────
  * Every entity here lacks a v1-id-shaped natural key (no schema changes are
@@ -409,7 +411,12 @@ async function findOrCreateDataset(
       slug: v1.slug,
       description: v1.description,
       source: v1.source,
-      visibility: v1.visibility,
+      // v1's `visibility` column is an untyped `String`; the v2 column is
+      // the `Visibility` enum (Task 15) — normalize rather than pass
+      // through verbatim (matches the `isPublic` check importDatasets
+      // already computes from this same column, just re-derived here since
+      // this function only receives the row, not that boolean).
+      visibility: v1.visibility === 'public' ? 'public' : 'private',
       inputType: v1.inputType,
       version: v1.version,
       parentId: v2ParentId,

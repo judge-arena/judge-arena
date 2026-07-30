@@ -111,9 +111,10 @@ export function toPublicRubric(rubric: RubricForPublicSerialize): PublicRubric {
 }
 
 // ─── Dataset ────────────────────────────────────────────────────────────────
-// Dataset.visibility is still a raw String (Task 15 migrates it to the
-// `Visibility` enum) — compared against the literal 'public' string
-// wherever it gates access, per this task's brief.
+// Dataset.visibility is the `Visibility` enum as of Task 15 (was a raw
+// String) — its values are still just the strings 'private'/'public', so
+// this serializer's `visibility: string` shape (and every 'public' compare
+// elsewhere gating access) is unaffected by that migration.
 
 export interface PublicDataset {
   id: string;
@@ -122,6 +123,7 @@ export interface PublicDataset {
   description: string | null;
   source: string;
   visibility: string;
+  publishedAt: Date | null;
   inputType: string;
   version: number;
   parentId: string | null;
@@ -145,6 +147,7 @@ export interface DatasetForPublicSerialize {
   description: string | null;
   source: string;
   visibility: string;
+  publishedAt: Date | null;
   inputType: string;
   version: number;
   parentId: string | null;
@@ -169,6 +172,7 @@ export function toPublicDataset(dataset: DatasetForPublicSerialize): PublicDatas
     description: dataset.description,
     source: dataset.source,
     visibility: dataset.visibility,
+    publishedAt: dataset.publishedAt,
     inputType: dataset.inputType,
     version: dataset.version,
     parentId: dataset.parentId,
@@ -264,6 +268,8 @@ export interface PublicGoldenSet {
   name: string;
   description: string | null;
   visibility: string;
+  publishedAt: Date | null;
+  retiredAt: Date | null;
   owner: PublicOwner | null;
   itemCount: number;
   createdAt: Date;
@@ -275,6 +281,8 @@ export interface GoldenSetForPublicSerialize {
   name: string;
   description: string | null;
   visibility: string;
+  publishedAt: Date | null;
+  retiredAt: Date | null;
   owner: { id: string; name: string | null } | null;
   _count: { items: number };
   createdAt: Date;
@@ -287,6 +295,8 @@ export function toPublicGoldenSet(goldenSet: GoldenSetForPublicSerialize): Publi
     name: goldenSet.name,
     description: goldenSet.description,
     visibility: goldenSet.visibility,
+    publishedAt: goldenSet.publishedAt,
+    retiredAt: goldenSet.retiredAt,
     owner: goldenSet.owner ? toPublicOwner(goldenSet.owner) : null,
     itemCount: goldenSet._count.items,
     createdAt: goldenSet.createdAt,

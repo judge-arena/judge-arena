@@ -10,6 +10,7 @@ import { ModelJudgmentCard } from '@/components/evaluation/model-judgment-card';
 import { HumanJudgmentForm } from '@/components/evaluation/human-judgment-form';
 import { getScoreColor, cn, formatDateTime } from '@/lib/utils';
 import { resolveModelDisplay, judgmentIdentityKey } from '@/lib/model-display';
+import { deriveRunMode } from '@/lib/run-mode';
 import { toast } from 'sonner';
 import type { CriteriaScore } from '@/types';
 
@@ -115,7 +116,7 @@ export default function RunDetailPage() {
   if (!run) return null;
 
   const evaluation = run.evaluation;
-  const evaluationMode: 'respond' | 'judge' = evaluation?.responseText?.trim() ? 'judge' : 'respond';
+  const evaluationMode = deriveRunMode(evaluation?.responseText);
   const rubric = run.rubric ?? null;
   const criteria = rubric?.criteria ?? [];
   const modelJudgments: any[] = run.modelJudgments ?? [];

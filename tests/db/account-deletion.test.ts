@@ -50,6 +50,31 @@ async function mkModelConfig(userId: string) {
   });
 }
 
+// A CalibrationRun needs a JudgeModelVersion; kept file-local per the
+// established "shared only once actually shared" convention — same shape as
+// tests/db/meta-eval.test.ts's own copy.
+let judgeModelCounter = 0;
+
+async function mkJudgeModelVersion() {
+  judgeModelCounter += 1;
+  const judgeModel = await db.judgeModel.create({
+    data: {
+      name: `fixture-judge-${judgeModelCounter}`,
+      slug: `fixture-judge-${judgeModelCounter}`,
+      judgeClass: 'prompted_api',
+      scoringMechanism: 'critique_generative',
+    },
+  });
+  return db.judgeModelVersion.create({
+    data: {
+      judgeModelId: judgeModel.id,
+      ordinal: 1,
+      servingBackend: 'openai',
+      protocolSupport: { pointwise: ['score'] },
+    },
+  });
+}
+
 describe('deleteUserAccount (P1.7 account deletion)', () => {
   beforeEach(async () => {
     await truncateAll();
@@ -330,4 +355,105 @@ describe('deleteUserAccount (P1.7 account deletion)', () => {
     expect(result.purged.goldenSets).toBe(1);
     expect(result.reassigned.goldenSets).toBe(1);
   });
+
+  it(
+    'soft-retires (sets retiredAt, keeps the row) a private GoldenSet a CalibrationRun still ' +
+      'references, and the user delete still completes (1b-prereq (a): a raw hard-delete would ' +
+      "abort the transaction on CalibrationRun.goldenSetId's Restrict FK)",
+    async () => {
+      const archiveUser = await mkUser();
+      const owner = await mkUser();
+      const goldenSet = await db.goldenSet.create({
+        data: { name: 'fixture-golden-set-with-run', ownerId: owner.id },
+      });
+      const judgeModelVersion = await mkJudgeModelVersion();
+      const calibrationRun = await db.calibrationRun.create({
+        data: { judgeModelVersionId: judgeModelVersion.id, goldenSetId: goldenSet.id },
+      });
+
+      const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
+
+      // user delete completed — this is the whole point: pre-fix, this
+      // would have thrown (P2003) and rolled back the entire transaction,
+      // leaving the user row (and everything else in it) undeleted.
+      expect(await db.user.findUnique({ where: { id: owner.id } })).toBeNull();
+
+      const survivedGoldenSet = await db.goldenSet.findUnique({ where: { id: goldenSet.id } });
+      expect(survivedGoldenSet).not.toBeNull();
+      expect(survivedGoldenSet?.retiredAt).not.toBeNull();
+      expect(survivedGoldenSet?.visibility).toBe('private');
+      // GoldenSet.ownerId is `onDelete: SetNull` (unlike Rubric.userId's
+      // Cascade) — no reassignment needed for the retired row to survive;
+      // it resolves to null on its own.
+      expect(survivedGoldenSet?.ownerId).toBeNull();
+
+      // the pinning calibration run is untouched
+      const survivedRun = await db.calibrationRun.findUnique({ where: { id: calibrationRun.id } });
+      expect(survivedRun?.goldenSetId).toBe(goldenSet.id);
+
+      expect(result.retired.goldenSets).toBe(1);
+      expect(result.purged.goldenSets ?? 0).toBe(0);
+    }
+  );
+
+  it('hard-deletes a private GoldenSet with no CalibrationRun referencing it', async () => {
+    const archiveUser = await mkUser();
+    const owner = await mkUser();
+    const goldenSet = await db.goldenSet.create({
+      data: { name: 'fixture-golden-set-no-run', ownerId: owner.id },
+    });
+
+    const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
+
+    expect(await db.goldenSet.findUnique({ where: { id: goldenSet.id } })).toBeNull();
+    expect(result.purged.goldenSets).toBe(1);
+    expect(result.retired.goldenSets ?? 0).toBe(0);
+  });
+
+  it(
+    '1b-prereq (c): purged/reassigned/retired result maps always carry the SAME full set of ' +
+      'keys, defaulted to 0 — never sparse just because a category had nothing to do',
+    async () => {
+      const archiveUser = await mkUser();
+      const owner = await mkUser();
+
+      // Deliberately minimal scenario: nothing but the user row itself.
+      // Every category this function ever tallies must still appear, at 0,
+      // in every map it doesn't touch — not merely `undefined`.
+      const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
+
+      const expectedKeys = [
+        'projects',
+        'evaluations',
+        'datasets',
+        'goldenSets',
+        'humanJudgments',
+        'rubrics',
+        'modelConfigs',
+        'user',
+      ].sort();
+
+      expect(Object.keys(result.purged).sort()).toEqual(expectedKeys);
+      expect(Object.keys(result.reassigned).sort()).toEqual(expectedKeys);
+      expect(Object.keys(result.retired).sort()).toEqual(expectedKeys);
+
+      // Every value is a number (0, not undefined) for every key, in every map.
+      for (const map of [result.purged, result.reassigned, result.retired]) {
+        for (const key of expectedKeys) {
+          expect(typeof map[key]).toBe('number');
+        }
+      }
+
+      // Categories this minimal scenario didn't touch are exactly 0, not
+      // merely present-but-undefined.
+      expect(result.reassigned.datasets).toBe(0);
+      expect(result.retired.datasets).toBe(0);
+      expect(result.retired.projects).toBe(0);
+      expect(result.retired.user).toBe(0);
+      expect(result.purged.evaluations).toBe(0);
+
+      // The one thing that DID happen in this scenario.
+      expect(result.purged.user).toBe(1);
+    }
+  );
 });

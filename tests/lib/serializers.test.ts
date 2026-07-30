@@ -84,6 +84,7 @@ describe('src/lib/serializers.ts — public (PII-stripped) serializers', () => {
       description: 'A dataset',
       source: 'local',
       visibility: 'public',
+      publishedAt: null,
       inputType: 'query-response',
       version: 1,
       parentId: null,
@@ -119,6 +120,13 @@ describe('src/lib/serializers.ts — public (PII-stripped) serializers', () => {
       expect(result.sampleTotal).toBe(10);
       expect(result.project).toEqual({ id: 'p1', name: 'Project One' });
       expect((result as any)._count).toBeUndefined();
+    });
+
+    it('carries publishedAt through (Task 15 — parity with Rubric/Project)', () => {
+      const published = new Date('2026-02-01');
+      const result = toPublicDataset({ ...input, publishedAt: published });
+      expect(result.publishedAt).toBe(published);
+      expect(toPublicDataset(input).publishedAt).toBeNull();
     });
 
     it('project: null passes through as null (dataset with no project)', () => {
@@ -178,6 +186,8 @@ describe('src/lib/serializers.ts — public (PII-stripped) serializers', () => {
       name: 'Golden Set One',
       description: null,
       visibility: 'public',
+      publishedAt: null,
+      retiredAt: null,
       owner: { id: 'owner-4', name: 'Golden Owner' },
       _count: { items: 3 },
       createdAt: new Date('2026-01-01'),
@@ -198,6 +208,14 @@ describe('src/lib/serializers.ts — public (PII-stripped) serializers', () => {
 
     it('flattens _count.items to itemCount', () => {
       expect(toPublicGoldenSet(input).itemCount).toBe(3);
+    });
+
+    it('carries publishedAt/retiredAt through (Task 15 — parity with Rubric; retiredAt is the new account-deletion soft-delete signal)', () => {
+      const published = new Date('2026-02-01');
+      const retired = new Date('2026-03-01');
+      const result = toPublicGoldenSet({ ...input, publishedAt: published, retiredAt: retired });
+      expect(result.publishedAt).toBe(published);
+      expect(result.retiredAt).toBe(retired);
     });
   });
 
