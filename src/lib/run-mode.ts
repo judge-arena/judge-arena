@@ -19,11 +19,12 @@
  * producer) and the worker (judgment-consumer, run-create-consumer) never
  * disagree about which mode a given run/evaluation is in. Before this
  * module existed, `responseText?.trim() ? 'judge' : 'respond'` was
- * duplicated inline in several places — this consolidates the two call
- * sites Task 9b's queue path depends on (the worker's judgment-consumer and
- * the human-judgment route); other pre-existing inline duplicates (several
- * `src/app/**\/page.tsx` UI files, `dataset-evaluation-summary.ts`) are
- * outside this task's file list and are left as-is.
+ * duplicated inline in several places — this is now the single call point
+ * for all of them: the queue path (worker judgment-consumer, human-judgment
+ * route) since Task 9b, and the former UI-side / summary duplicates
+ * (`src/app/**\/page.tsx`, `dataset-evaluation-summary.ts`) since Task 15's
+ * M3 sweep aligned them here. Any raw `responseText?.trim()` mode logic
+ * outside this module is a regression — route it through `deriveRunMode`.
  */
 export type RunMode = 'judge' | 'respond';
 

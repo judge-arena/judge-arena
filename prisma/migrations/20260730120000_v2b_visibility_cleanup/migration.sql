@@ -11,9 +11,11 @@
 -- retire-before-hard-delete path (src/lib/account-deletion.ts).
 --
 -- Guard-check (per this task's brief, before authoring the enum cast
--- below): `SELECT DISTINCT visibility FROM "Dataset";` against the dev DB
--- returned exactly one distinct value, 'public' — i.e. every existing row
--- is already a valid `Visibility` enum member, so the cast is lossless.
+-- below): `SELECT DISTINCT visibility FROM "Dataset";` was run against the
+-- dev DB and returned zero rows (the table was empty at author time). The
+-- app only ever wrote the literals 'private'/'public' to this String
+-- column, both of which are valid `Visibility` enum members, so the
+-- `USING visibility::"Visibility"` cast is lossless for any populated DB.
 -- (The dev DB was reset to the pre-Task-15 migration baseline immediately
 -- before this file was authored — see task-15-report.md — so by the time
 -- this migration itself runs the table is empty; the guard-check is
