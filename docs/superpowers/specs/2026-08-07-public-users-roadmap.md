@@ -35,6 +35,30 @@ limit is currently void because the limiter keys on a client-suppliable header.
 
 ---
 
+## The six phases at a glance
+
+| Phase | Goal | Effort | Gate in one line |
+|---|---|---|---|
+| **0. Unblock** | Make the core function work; prove one run | hours | An evaluation launched from the browser reaches a scored `ModelJudgment` |
+| **1. Door** | Identity plumbing for a public provider, sign-up still closed | ~1 day | A test GitHub account signs in unaided to an empty private workspace |
+| **2. Containment** | Close what a signed-up stranger could reach | 2–3 days | A scripted probe suite as a non-admin fails closed on every vector |
+| **3. Obligations** | Working deletion, a written policy, a reachable address | 1–2 days | A test account deletes itself correctly and leaves no email in `AuditLog` |
+| **4. Signal** | See it break before a user tells you | 2–3 days | Kill the worker mid-run → push within 10 min; Redis to 0 → leaderboard still 200 |
+| **5. Open** | Flip sign-up on at a cap and watch | hours + a week | 10+ strangers on their own keys; zero operator spend |
+
+**Dependency order is real, not cosmetic.** Phase 0 first because nothing downstream
+has a meaningful gate while the product cannot execute. Phase 1 before 2 because you
+need a second account to *test* containment with. **Phase 2 before any non-owner
+account exists** — invite-gating reduces volume, not capability. Phases 3 and 4 can
+overlap. Phase 5 is a decision, not work.
+
+The one hard ordering constraint: **`next-auth@4.24.15` must land before the second
+provider is added** (Phase 1), not after. GHSA-x445-f3h2-j279 is that OAuth
+state/nonce/PKCE cookies are not bound to the issuing provider — inert with one
+provider, exploitable with two.
+
+---
+
 ## Owner decisions
 
 | # | Question | Recommendation | Why |
@@ -203,6 +227,96 @@ scale Redis to 0 and the public leaderboard still returns 200.
 **Exit gate:** 10+ strangers hold accounts, each on their own provider key; the
 operator's Anthropic and OpenAI dashboards show **zero** spend attributable to the
 app; no cross-user visibility incident.
+
+---
+
+## Cluster infra to fix and watch
+
+The RabbitMQ sizing bug was not a one-off; it is an instance of a class. A resource
+is provisioned at or below its own operational threshold, the threshold lives in the
+software's defaults rather than in the manifest under review, and every probe measures
+reachability rather than usability — so the broken state is structurally invisible and
+only an alert could catch it. All three parts were true of entry 56.
+
+Everything below is verified read-only against the live cluster on 2026-08-07.
+
+### Fix — same defect, still live
+
+**`tenant-internal/bus` and `tenant-root/bus` RabbitMQ are both `size: 2Gi`.** Identical
+to what broke judge-arena. Verified: all three nodes alarmed on each, and
+`tenant-root/bus` reports 1.9155 GB free against a 2.0 GB watermark.
+
+```
+tenant-internal/bus         size=2Gi  replicas=3  v4.2   <- alarmed, unclearable
+tenant-root/bus             size=2Gi  replicas=3  v4.2   <- alarmed, unclearable
+tenant-public/judge-arena   size=4Gi  replicas=3  v4.2   <- fixed 2026-08-07
+```
+
+**Latent, not urgent** — `rabbitmqctl list_connections` returns empty on both, and no
+application manifest references them (the hits under `apps/` and `clusters/` are network
+policies and docs). But they are unusable *as provisioned*: the next app pointed at the
+shared bus gets silently blocked publishers, and will debug its own code first. Fix to
+`4Gi` the same way, or delete them if the shared-bus pattern is not going to be used.
+
+### Watch — judge-arena has one real single point of failure
+
+Every stateful and serving component sits on **one node**:
+
+```
+judge-arena-pg-1                w-gharial
+judge-arena-redis-…             w-gharial
+judge-arena-web-…               w-gharial
+judge-arena-worker-…            w-gharial
+rabbitmq-judge-arena-server-0   w-gharial
+rabbitmq-judge-arena-server-1   w-caiman     <- only spread component
+rabbitmq-judge-arena-server-2   w-kestrel
+```
+
+The irony is exact: **the only HA component is the one that was never the bottleneck.**
+The RabbitMQ quorum genuinely spans three physical machines and survives a node loss;
+Postgres, Redis, web and worker do not. Losing `w-gharial` is a total application
+outage regardless of how many broker replicas are running.
+
+This is deliberate for now — `web.replicas: 1` and `worker.replicas: 1` are the staged
+posture, and CNPG `instances: 1` is on the not-doing list. It becomes worth fixing at
+Phase 5, and the cheap part (web/worker to 2 with anti-affinity) is a values change.
+Note that `apps/managed/workload-spread/README.md` documents this trap already for
+`tenant-root/rabbitmq-bus`, whose three replicas all landed on `cp-caiman`, and warns
+that some node pairs are two nodes on **one machine** — so anti-affinity must key on
+`topology.kubernetes.io/zone`, not `hostname`, to mean anything here.
+
+### The generalisable rule
+
+Two Cozystack CRs cannot express a setting the underlying software requires in
+production — `Redis` cannot set `maxmemory-policy`, `RabbitMQ` cannot set
+`disk_free_limit` — and in both cases the rendered downstream resource is Helm-managed,
+so a manual edit reverts. **Where the sanctioned abstraction cannot express a mandatory
+setting, GitOps is not the source of truth for that setting, and the only remedy is to
+change a different number until the constraint is satisfied indirectly.** That is what
+`size: 4Gi` is: not a capacity decision, a workaround for an unreachable config key.
+Both instances are documented at their manifests and in the divergence log; a third
+occurrence should prompt asking whether these CRs are the right abstraction.
+
+### Checks worth having
+
+Static, cheap, CI-runnable — these would have caught entry 56 at review time:
+
+- Assert every RabbitMQ CR's `size` exceeds the broker's `disk_free_limit` (2GB default).
+- Assert every Redis intended for correctness declares `noeviction` (already true for
+  judge-arena only because it is a plain Deployment, not the CR).
+- Assert every stateful workload has a *completed* backup, not merely a schedule.
+
+And alerts, because these states are invisible to probes by construction:
+
+- **Broker resource alarm active** (`rabbitmq-diagnostics check_alarms`). Clears when the
+  alarm clears — not a ratchet.
+- **Redis `used_memory` / `maxmemory` > 0.8** under `noeviction`. Clears when memory
+  drops. The judge-arena stream-TTL fix removed the unbounded growth that would have
+  made this inevitable, but nothing enforces it.
+- **A Flux HelmChart on a stale `ChartVersion`.** judge-arena hit exactly this today: the
+  Kustomization and HelmRelease both reported Ready while nothing deployed, because the
+  default `ChartVersion` strategy only repackages on a `Chart.yaml` version change. The
+  tell is a packaged version with no `+<sha>` suffix in `kubectl get helmchart -A`.
 
 ---
 
