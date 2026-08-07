@@ -149,6 +149,48 @@ describe('RedisRealtimeEventBus: resume via XRANGE', () => {
   });
 });
 
+describe('RedisRealtimeEventBus: stream key expiry', () => {
+  // MAXLEN bounds entries within a stream; it does NOT bound the number of
+  // streams. There is one key per topic (one per run, one per user), so
+  // without a TTL the key count grows forever. That is a correctness bug and
+  // not merely a memory one: this Redis runs `noeviction` (the rate limiter,
+  // circuit breaker and reaper lock must never be evicted), so exhausting
+  // maxmemory refuses every write — and the rate limiter fails OPEN while the
+  // reaper's lock acquisition returns false, both silently, while PING still
+  // answers PONG so every probe stays green.
+  it('sets a sliding TTL on the stream key, and refreshes it on each publish', async () => {
+    const topic = runTopic(`ttl-${Date.now()}`);
+    const bus = new RedisRealtimeEventBus();
+    const client = await getConnectedRedis();
+    const key = `rt:stream:${topic}`;
+
+    await bus.publish(topic, {
+      type: 'judgment.completed',
+      payload: { runId: 'run-ttl', judgmentId: 'j-1', status: 'completed' },
+    });
+
+    // -1 means "no expiry set" — the pre-fix behaviour, and the thing that
+    // makes the key count unbounded.
+    const firstTtl = await client.pTTL(key);
+    expect(firstTtl).toBeGreaterThan(0);
+
+    // Wind the clock forward a little, then publish again: the TTL must go
+    // back UP, proving it slides rather than expiring a still-active topic.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const decayed = await client.pTTL(key);
+
+    await bus.publish(topic, {
+      type: 'judgment.completed',
+      payload: { runId: 'run-ttl', judgmentId: 'j-2', status: 'completed' },
+    });
+
+    const refreshed = await client.pTTL(key);
+    expect(refreshed).toBeGreaterThan(decayed);
+
+    await client.del(key);
+  });
+});
+
 describe('RedisRealtimeEventBus: publish failure propagation', () => {
   it('publish() throws (no silent local fallback) when Redis is unreachable, even under a production NODE_ENV stub', async () => {
     vi.mocked(getConnectedRedis).mockRejectedValueOnce(

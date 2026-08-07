@@ -5,6 +5,13 @@ import type { RealtimeEnvelope, RealtimeEvent, RealtimeListener } from './types'
 const STREAM_PREFIX = 'rt:stream:';
 const STREAM_MAXLEN = 1000;
 
+/** Sliding TTL on each `rt:stream:{topic}` key, refreshed on every publish.
+ * Bounds the NUMBER of stream keys, which MAXLEN does not — see the comment
+ * at the `pExpire` call in `publish()` for why an unbounded key count is a
+ * correctness problem and not just a memory one. Six hours comfortably
+ * outlives any client reconnect the resume path needs to serve. */
+const STREAM_TTL_MS = 6 * 60 * 60 * 1000;
+
 function streamKey(topic: string): string {
   return `${STREAM_PREFIX}${topic}`;
 }
@@ -186,12 +193,33 @@ export class RedisRealtimeEventBus implements RealtimeEventBus {
     // see publishEvent()'s docstring in events.ts.
     const client = await getConnectedRedis();
 
+    const key = streamKey(topic);
+
     const id = await client.xAdd(
-      streamKey(topic),
+      key,
       '*',
       { data: serializeWireEvent(event, timestamp) },
       { TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: STREAM_MAXLEN } }
     );
+
+    // MAXLEN bounds the entries WITHIN one stream; it does nothing about the
+    // number of streams. There is one key per topic — `run:{runId}` and
+    // `user:{userId}` — so without an expiry the key count grows by one per
+    // evaluation run and one per user, forever, and nothing ever reclaims it.
+    //
+    // That matters more than a normal leak because this Redis runs with
+    // `--maxmemory-policy noeviction` (a hard requirement: the rate limiter,
+    // circuit breaker and the reaper's cluster lock all live here and must
+    // not be evicted). Once used memory reaches maxmemory, every write is
+    // refused — and the two callers that matter swallow it: the rate limiter
+    // fails OPEN, and the reaper's lock acquisition returns false so no
+    // replica ever sweeps again. Both failures are silent, and PING still
+    // answers PONG, so /api/health and every probe stay green.
+    //
+    // A sliding TTL, refreshed on each publish, keeps live topics alive while
+    // letting finished runs and idle users age out. The replay window only has
+    // to outlive a client reconnect, so hours is generous.
+    await client.pExpire(key, STREAM_TTL_MS);
 
     const envelope: RealtimeEnvelope = {
       id,
