@@ -86,11 +86,49 @@ RUN npx esbuild src/worker/main.ts \
       --tsconfig=tsconfig.json \
       --log-level=warning
 
+# Admin CLI bundle (Phase 1c): same treatment as the worker above, for the
+# same reason — the runner ships no TypeScript toolchain, so `tsx` is not
+# available to run `scripts/admin/create-user.ts` in-cluster. This is the
+# break-glass account path: self-service registration is retired, so if
+# Authentik OIDC is misconfigured this CLI is the ONLY way in. It is
+# bundled via `create-user-entry.ts` rather than the script itself because
+# that script's `import.meta.url` direct-run guard cannot work under CJS
+# output (see that file's header).
+RUN npx esbuild scripts/admin/create-user-entry.ts \
+      --bundle \
+      --platform=node \
+      --target=node22 \
+      --outfile=.next/standalone/admin-create-user.js \
+      --external:@prisma/client \
+      --tsconfig=tsconfig.json \
+      --log-level=warning
+
+# ─── Stage 2b: Prisma CLI (isolated) ──────────────────────────────────────
+# A clean, self-consistent install of JUST the Prisma CLI, at a prefix that
+# cannot collide with the app's node_modules. The runner needs `migrate
+# deploy` (the chart runs it from a Helm hook Job), but the CLI's dependency
+# closure spans several @prisma/* packages, and lifting them piecemeal out
+# of `deps` both misses transitive deps and risks clobbering the GENERATED
+# @prisma/client that `next build` traced into the standalone output.
+#
+# Pinned to the exact version of `prisma`/`@prisma/client` in package.json —
+# the migration engine and the client must not drift apart.
+FROM node:22-alpine AS prisma-cli
+
+WORKDIR /opt/prisma-cli
+
+RUN npm init -y > /dev/null \
+ && npm install --no-audit --no-fund --save-exact prisma@6.19.2
+
 # ─── Stage 3: Production Runner ───────────────────────────────────────────
-# Minimal: standalone output only. No dev node_modules (no typescript,
-# eslint, vitest, tailwindcss, prisma CLI — none of that ships here).
-# NO migrations run from this stage/image — see docker-compose.yml's
-# `migrate` one-shot service (built off the `builder` stage above).
+# Standalone output, plus exactly two additions beyond it (Phase 1c):
+#   1. the Prisma CLI + `prisma/` (schema + migrations), so the SAME image
+#      can run `migrate deploy` from the chart's post-install/post-upgrade
+#      hook Job. The shared kaniko build template passes no `--target`, so
+#      only this final stage is ever published — a `builder`-stage migrate
+#      image (what docker-compose.yml uses) is unbuildable in-cluster.
+#   2. `admin-create-user.js`, the break-glass account CLI (see above).
+# Still no dev toolchain: no typescript, eslint, vitest or tailwindcss.
 FROM node:22-alpine AS runner
 
 WORKDIR /app
@@ -111,7 +149,32 @@ COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-USER nextjs
+# Migration toolchain (Phase 1c). `prisma/` supplies schema.prisma and the
+# checked-in migrations; the CLI itself comes from the isolated
+# `prisma-cli` stage at /opt/prisma-cli.
+#
+# Why a separate tree instead of copying into ./node_modules: the CLI's
+# real dependency closure is wider than it looks (@prisma/debug, config,
+# get-platform, fetch-engine, engines-version — a hand-picked subset fails
+# at runtime with "Cannot find module '@prisma/debug'", verified), and
+# copying the whole @prisma scope from `deps` would OVERWRITE
+# node_modules/@prisma/client with the un-generated copy that `npm ci
+# --ignore-scripts` left behind, breaking the app at runtime. An isolated
+# prefix cannot collide with the standalone output's generated client.
+#
+# Two migrations contain hand-written SQL that Prisma's DSL cannot express
+# (a NULLS NOT DISTINCT unique index and a partial unique index), so they
+# exist ONLY as migration files — `db push` would silently drop them.
+# Applying migrations, not pushing the schema, is therefore load-bearing
+# for correctness, not just for history.
+COPY --from=prisma-cli --chown=nextjs:nodejs /opt/prisma-cli /opt/prisma-cli
+COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
+
+# Numeric UID, not `USER nextjs`: kubelet resolves `runAsNonRoot: true` by
+# inspecting the image's configured user, and it cannot verify a NAME —
+# a named user makes the pod fail to start with
+# "container has runAsNonRoot and image has non-numeric user".
+USER 1001
 
 EXPOSE 3000
 

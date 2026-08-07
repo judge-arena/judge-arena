@@ -47,6 +47,25 @@ Dockerfile.*
 docker-compose*.yml
 
 # Misc
-scripts/
+# `scripts/` stays out of the image EXCEPT `scripts/admin/`, which the
+# builder stage bundles with esbuild (see Dockerfile). That directory holds
+# the invite / break-glass account CLI: self-service registration is
+# retired, so if Authentik OIDC is misconfigured this is the ONLY way to
+# create an account — it has to be reachable from the deployed image.
+#
+# `scripts/importer/` deliberately stays excluded. Its modules import
+# `@prisma/v1-client`, a SECOND Prisma client generated on demand from
+# `prisma/v1/schema.v1.prisma` (`npm run db:generate:v1`) and absent from
+# the image build — and because `next build` type-checks everything in the
+# tsconfig include set, re-including it fails the build outright with
+# "Cannot find module '@prisma/v1-client'". It also could not run in-cluster
+# without a v1 dump to read. Generating the v1 client in the builder stage
+# is the only way to ship it, and there is currently nothing for it to
+# import.
+#
+# The `**` form matters: Docker applies every pattern and takes the last
+# match, so the negation has to be able to match the nested paths.
+scripts/**
+!scripts/admin/**
 .eslintrc*
 .prettierrc*
