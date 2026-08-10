@@ -34,6 +34,7 @@ enum ServingBackend {
   openrouter
   vllm
   ollama
+  llamacpp
 }
 
 enum Quantization {

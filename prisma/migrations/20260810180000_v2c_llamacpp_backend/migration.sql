@@ -1,0 +1,12 @@
+-- Add `llamacpp` to ServingBackend.
+--
+-- A llama.cpp server speaks the OpenAI-compatible wire format but constrains
+-- output via `response_format: {type: 'json_schema'}` rather than vLLM's
+-- `guided_json`, so it needs its own descriptor (see
+-- src/lib/llm/backends/llamacpp.ts for why reusing `vllm` or `openai` is
+-- wrong in each direction).
+--
+-- `ALTER TYPE ... ADD VALUE` inside Prisma's migration transaction is safe on
+-- PostgreSQL 12+ provided the new value is not USED in the same transaction.
+-- It is not: no row references it here. Prod is 16.4.
+ALTER TYPE "ServingBackend" ADD VALUE 'llamacpp';

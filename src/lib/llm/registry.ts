@@ -79,6 +79,7 @@ import { buildRespondSystemPrompt, buildRespondUserPrompt, parseJudgmentResponse
 import type { ProviderCallResult, ProviderHeaderConfig } from './provider';
 import { openRouterHeaders } from './backends/openrouter';
 import { vllmStructuredRequestFields } from './backends/vllm';
+import { llamacppStructuredRequestFields } from './backends/llamacpp';
 
 // Re-exported so existing importers of `ProviderHeaderConfig` FROM
 // registry.ts (its original Task 10 home) keep working — the type itself
@@ -204,6 +205,32 @@ const DESCRIPTORS: Record<ServingBackend, ProviderDescriptor> = {
     structuredRequestFields: vllmStructuredRequestFields,
     scoredRunsAllowed: true,
   },
+  llamacpp: {
+    id: 'llamacpp',
+    kind: 'openai_compatible',
+    auth: 'bearer',
+    // VERIFIED against a live server (192.168.1.164:8001, Qwen3.6-35B-A3B):
+    // `response_format: {type: 'json_schema'}` is honoured and returns
+    // schema-conformant JSON. So this is `json_schema` — NOT `guided` (that
+    // is vLLM's extension, which llama.cpp does not implement) and NOT
+    // `none` (which is what registering llama.cpp as the `openai` descriptor
+    // would silently give you, dropping every judgment to free-text parsing).
+    caps: { structuredOutput: 'json_schema', samplingParams: true, reasoningToggle: true },
+    structuredRequestFields: llamacppStructuredRequestFields,
+    // `defaultBaseUrl` deliberately absent — injected from LLAMACPP_BASE_URL
+    // in getDescriptor() below, for the same reason as vllm: a self-hosted
+    // server has no well-known host.
+    //
+    // scoredRunsAllowed: TRUE, and the contrast with `ollama` directly below
+    // is the point. Ollama is refused for scored runs because it cannot
+    // constrain output, so its verdicts are unparseable-by-construction.
+    // llama.cpp CAN constrain output (verified above), and it is
+    // admin-configured only (endpoint writes are admin-gated), so a scored
+    // run against it is as trustworthy as the operator who pointed at it.
+    // This is the descriptor that makes first-party dogfooding produce real
+    // evaluation data rather than dev-only scratch runs.
+    scoredRunsAllowed: true,
+  },
   ollama: {
     id: 'ollama',
     kind: 'openai_compatible',
@@ -237,6 +264,13 @@ export function getDescriptor(backend: ServingBackend): ProviderDescriptor {
   // override it per-test without module-reset gymnastics.
   if (backend === 'vllm') {
     return { ...descriptor, defaultBaseUrl: process.env.VLLM_BASE_URL || undefined };
+  }
+
+  // Same reasoning as vllm above: a self-hosted llama.cpp server has no
+  // well-known host, so its base URL comes from the deployment's env and is
+  // read fresh per call rather than baked in at module load.
+  if (backend === 'llamacpp') {
+    return { ...descriptor, defaultBaseUrl: process.env.LLAMACPP_BASE_URL || undefined };
   }
 
   return descriptor;
