@@ -30,6 +30,27 @@ jobs:
   mirror-check:
     name: Lint, typecheck, unit tests, build
     runs-on: ubuntu-latest
+    # ── Why this guard exists ──────────────────────────────────────────────
+    # Gitea Actions discovers workflows in BOTH `.gitea/workflows` AND
+    # `.github/workflows`, so pushing to the homelab Gitea
+    # (gitea.lab.asethi.com/trij/judge-arena) schedules this file too — where
+    # it fails on its very first step with:
+    #
+    #     actions/checkout@v4  ->  Cannot find: node in PATH
+    #
+    # The homelab's act_runner image ships no Node, so NO `uses:` JS action can
+    # execute there. That is exactly why the real pipeline in
+    # `.gitea/workflows/ci.yml` is RAW SHELL ONLY (see its header). This file
+    # is the GitHub mirror, where JS actions are fine — it simply must not be
+    # scheduled anywhere else.
+    #
+    # `github.server_url` is the host actually running the workflow: literally
+    # 'https://github.com' on GitHub, and the Gitea base URL under Gitea. So
+    # this skips cleanly on Gitea with no repo-level Actions configuration and
+    # no duplicated checks. Do not "fix" the failure by adding a Node setup
+    # step — that would run the mirror's checks a second time on every homelab
+    # push, for no benefit.
+    if: github.server_url == 'https://github.com'
     steps:
       - uses: actions/checkout@v4
 
