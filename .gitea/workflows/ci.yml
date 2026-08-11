@@ -51,12 +51,23 @@ on:
   pull_request:
     branches: [main]
   # Manual re-run. Earned its place on day one: a runner pod replaced
-  # mid-task (a rollout of the runner image, 2026-08-11) leaves the run
+  # mid-task (rolling the runner StatefulSet, 2026-08-11) leaves the run
   # wedged in `running` until Gitea's ZOMBIE_TASK_TIMEOUT, and this Gitea
   # exposes no rerun/cancel API endpoint — /actions/runs/{id}/rerun and
   # .../cancel both 404. Without this trigger the only way to retry is to
-  # push another commit, which means CI infrastructure problems get
-  # laundered into the source history.
+  # push another commit, which launders CI infrastructure problems into the
+  # source history.
+  #
+  # USE IT FROM THE GITEA WEB UI. The dispatch REST endpoint
+  # (POST /actions/workflows/{file}/dispatches) also 404s on this version, so
+  # this cannot be driven from a script or from an agent — verified
+  # 2026-08-11, after the trigger was added, by trying exactly that. The
+  # button works; the API does not.
+  #
+  # And the cause is worth avoiding rather than retrying: rolling the runners
+  # is never free, because a pod may be mid-task. Editing the runner's
+  # deployment.yaml — including things that LOOK like comments but sit inside
+  # the `args:` heredoc — rolls them. See homelab-setup divergence entry 63.
   workflow_dispatch:
 
 concurrency:
