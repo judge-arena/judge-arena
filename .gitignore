@@ -1,5 +1,9 @@
 # Dependencies
-node_modules/
+# No trailing slash, deliberately. `node_modules/` matches only a DIRECTORY, so a
+# SYMLINK named node_modules (the usual git-worktree trick for sharing one install
+# across worktrees) is not matched and `git add -A` sweeps it straight in — which
+# is exactly how an absolute-path symlink reached a commit on 2026-08-10.
+node_modules
 .pnp
 .pnp.js
 
