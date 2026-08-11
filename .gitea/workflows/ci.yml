@@ -212,7 +212,7 @@ jobs:
           fi
 
       # ─── 6. DB + integration suites — NOT RUN HERE, and why ───────────
-      # `test:db` (281 tests) and `test:integration` need postgres, redis and
+      # `test:db` (286 tests) and `test:integration` need postgres, redis and
       # rabbitmq. This runner is act_runner in host mode with no container
       # engine, so there is no way to start them from a `run:` step and no
       # way to use `services:` sidecars.
@@ -232,7 +232,9 @@ jobs:
       # Until then `scripts/ci-local.sh` is where these two suites run.
       - name: "DB + integration suites (not executed — no container engine)"
         run: |
-          echo "SKIPPED: test:db (281 tests) and test:integration."
+          echo "SKIPPED: test:db (286 tests) and test:integration."
+          echo "That includes the 5 seed guards in tests/db/seed.test.ts, which assert the"
+          echo "seeder creates no password accounts and no operator-funded ModelEndpoints."
           echo "Reason: runner is act_runner in host mode; postgres/redis/rabbitmq cannot be started."
           echo "These suites are NOT part of this pipeline's guarantee. Run scripts/ci-local.sh locally."
           echo "Fix path: ephemeral k8s Job with service sidecars — see the comment above this step."
