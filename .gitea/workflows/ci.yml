@@ -65,6 +65,18 @@ concurrency:
 
 env:
   NODE_VERSION: '22.23.1'
+  # V8 sizes its default old-space heap to ~half the cgroup limit, so on the
+  # runner's former 1Gi limit `tsc --noEmit` got ~512Mi and died at 508Mi with
+  # "Reached heap limit ... JavaScript heap out of memory" (2026-08-11). The
+  # runner limit is now 4Gi (homelab-setup apps/internal/gitea-runner); this
+  # states the heap explicitly rather than inheriting a heuristic that moves
+  # whenever that limit is retuned.
+  #
+  # Keep this comfortably BELOW the container limit. Asking V8 for more heap
+  # than the cgroup permits does not buy headroom — it just trades a clean V8
+  # abort for an OOMKill, which surfaces as a killed step with no JS error and
+  # is markedly harder to read.
+  NODE_OPTIONS: '--max-old-space-size=3072'
   # judge_arena/password/localhost:5432 matches .env.test exactly — same
   # values scripts/ci-local.sh sources locally, so a failure reproduces
   # identically in both places.
