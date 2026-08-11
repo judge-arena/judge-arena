@@ -125,9 +125,13 @@ export async function seedJudgeBench(
     // matching the Leaderboard project's reasoning. Ownership is NOT
     // re-asserted: account deletion reassigns public datasets to an archive
     // user on purpose, and stomping that every seed would undo it.
+    // `publishedAt` is NOT re-asserted here, deliberately: it records when
+    // this dataset was first published, and re-stamping it on every seed
+    // would walk that date forward forever. The create path below sets it
+    // once. Visibility and sampleCount ARE re-asserted, so a row that predates
+    // those fields (or was flipped private by hand) is corrected.
     update: {
       visibility: 'public',
-      publishedAt: new Date(),
       sampleCount: rows.length,
     },
     create: {
