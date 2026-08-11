@@ -103,6 +103,27 @@ RUN npx esbuild scripts/admin/create-user-entry.ts \
       --tsconfig=tsconfig.json \
       --log-level=warning
 
+# Seeder bundle (preflight Stage 2). Same treatment, same reason: the runner
+# ships no TypeScript toolchain, so `prisma/seed.ts` cannot execute in-cluster
+# and `prisma db seed` has no `prisma.seed` key to dispatch to anyway.
+# Bundling inlines ./seed-judgebench and ./seed-prompt-templates.
+#
+# The 620 JudgeBench rows are deliberately NOT bundled — seed-judgebench.ts
+# reads prisma/data/judgebench.json at RUNTIME. Importing that 2.8MB JSON into
+# TypeScript pushed `tsc --noEmit` from 504MB/1.5s to 918MB/5.9s, and CI heap
+# is a live constraint (divergence entry 62). The file needs no COPY of its
+# own: the runner stage already copies the whole prisma/ tree, and the
+# standalone output lands at /app, so /app/seed.js resolves
+# /app/prisma/data/judgebench.json.
+RUN npx esbuild prisma/seed.ts \
+      --bundle \
+      --platform=node \
+      --target=node22 \
+      --outfile=.next/standalone/seed.js \
+      --external:@prisma/client \
+      --tsconfig=tsconfig.json \
+      --log-level=warning
+
 # ─── Stage 2b: Prisma CLI (isolated) ──────────────────────────────────────
 # A clean, self-consistent install of JUST the Prisma CLI, at a prefix that
 # cannot collide with the app's node_modules. The runner needs `migrate
