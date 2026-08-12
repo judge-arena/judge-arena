@@ -171,4 +171,40 @@ describe('forkGoldenSet: versioning, lineage and deep copy', () => {
     // The source keeps all of its items.
     expect(await db.goldenItem.count({ where: { goldenSetId: root.id } })).toBe(3);
   });
+
+  it('candidates are deep-copied under each forked item with fresh ids and stable positions', async () => {
+    const owner = await mkUser();
+    const dataset = await mkDatasetWithSamples(owner.id, 2);
+    const root = await mkGoldenSet(
+      owner.id,
+      dataset.id,
+      dataset.samples.map((s) => s.id)
+    );
+
+    const v2 = await forkGoldenSet(db, forkInput(root.id, root.id, owner.id));
+
+    expect(v2.items).toHaveLength(2);
+    for (const [i, item] of v2.items.entries()) {
+      expect(item.candidates.map((c) => c.position)).toEqual([0, 1]);
+      expect(item.candidates.map((c) => c.responseText)).toEqual([
+        `answer-a-${i}`,
+        `answer-b-${i}`,
+      ]);
+      expect(item.candidates.map((c) => c.label)).toEqual(['A', 'B']);
+      for (const candidate of item.candidates) {
+        expect(candidate.goldenItemId).toBe(item.id);
+      }
+    }
+
+    // Source candidates are untouched — the fork added rows, it did not move
+    // them. 2 items x 2 candidates on each side.
+    const rootCandidates = await db.goldenCandidate.count({
+      where: { goldenItem: { goldenSetId: root.id } },
+    });
+    const forkCandidates = await db.goldenCandidate.count({
+      where: { goldenItem: { goldenSetId: v2.id } },
+    });
+    expect(rootCandidates).toBe(4);
+    expect(forkCandidates).toBe(4);
+  });
 });

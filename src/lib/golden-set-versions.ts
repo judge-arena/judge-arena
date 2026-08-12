@@ -112,6 +112,15 @@ export async function forkGoldenSet(
               protocol: true,
               expected: true,
               sourceDatasetSampleId: true,
+              candidates: {
+                orderBy: { position: 'asc' },
+                select: {
+                  position: true,
+                  promptText: true,
+                  responseText: true,
+                  label: true,
+                },
+              },
             },
           },
         },
@@ -159,6 +168,14 @@ export async function forkGoldenSet(
               protocol: item.protocol,
               expected: item.expected,
               sourceDatasetSampleId: item.sourceDatasetSampleId,
+              candidates: {
+                create: item.candidates.map((candidate) => ({
+                  position: candidate.position,
+                  promptText: candidate.promptText,
+                  responseText: candidate.responseText,
+                  label: candidate.label,
+                })),
+              },
             })),
           },
         },
