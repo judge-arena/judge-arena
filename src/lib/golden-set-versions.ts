@@ -121,6 +121,14 @@ export async function forkGoldenSet(
                   label: true,
                 },
               },
+              labels: {
+                select: {
+                  annotatorId: true,
+                  overallScore: true,
+                  criteriaScores: true,
+                  reasoning: true,
+                },
+              },
             },
           },
         },
@@ -174,6 +182,27 @@ export async function forkGoldenSet(
                   promptText: candidate.promptText,
                   responseText: candidate.responseText,
                   label: candidate.label,
+                })),
+              },
+              // Unconditional: forkGoldenSet applies no edits, so every
+              // copied item is content-identical to its source. The
+              // drop-on-edited-item half of decision #5 lives in
+              // PATCH /api/golden-sets/[id]/items — see module doc note 3.
+              labels: {
+                create: item.labels.map((label) => ({
+                  // Preserved, never re-attributed to the forking user:
+                  // nullable because GoldenLabel.annotator is onDelete:
+                  // SetNull, and a null must stay null.
+                  annotatorId: label.annotatorId,
+                  overallScore: label.overallScore,
+                  // A real Json? column (unlike DatasetSample.metadata, which
+                  // is JSON-in-a-String). DB NULL round-trips through
+                  // Prisma.DbNull, matching human-judgment/route.ts:133.
+                  criteriaScores:
+                    label.criteriaScores === null
+                      ? Prisma.DbNull
+                      : (label.criteriaScores as Prisma.InputJsonValue),
+                  reasoning: label.reasoning,
                 })),
               },
             })),

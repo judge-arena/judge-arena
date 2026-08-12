@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { Prisma } from '@prisma/client';
 import { db, truncateAll, mkUser } from './helpers';
 import { forkGoldenSet, ForkGoldenSetInput } from '@/lib/golden-set-versions';
 
@@ -206,5 +207,74 @@ describe('forkGoldenSet: versioning, lineage and deep copy', () => {
     });
     expect(rootCandidates).toBe(4);
     expect(forkCandidates).toBe(4);
+  });
+
+  it('labels are copied onto the forked items, preserving annotator, score, criteriaScores and reasoning', async () => {
+    const owner = await mkUser();
+    const annotatorA = await mkUser();
+    const annotatorB = await mkUser();
+    const dataset = await mkDatasetWithSamples(owner.id, 2);
+    const root = await mkGoldenSet(
+      owner.id,
+      dataset.id,
+      dataset.samples.map((s) => s.id)
+    );
+    const [item0, item1] = root.items;
+
+    await db.goldenLabel.create({
+      data: {
+        goldenItemId: item0.id,
+        annotatorId: annotatorA.id,
+        overallScore: 8.5,
+        criteriaScores: { accuracy: 9, tone: 8 },
+        reasoning: 'A is more accurate',
+      },
+    });
+    await db.goldenLabel.create({
+      data: {
+        goldenItemId: item0.id,
+        annotatorId: annotatorB.id,
+        overallScore: 6,
+        criteriaScores: Prisma.DbNull,
+        reasoning: null,
+      },
+    });
+    // annotatorId is nullable (`onDelete: SetNull` — a label survives its
+    // annotator's account deletion). That null must survive the fork too,
+    // rather than being silently re-attributed to the forking user.
+    await db.goldenLabel.create({
+      data: { goldenItemId: item1.id, annotatorId: null, overallScore: 3 },
+    });
+
+    const v2 = await forkGoldenSet(db, forkInput(root.id, root.id, owner.id));
+
+    const forkedLabels = await db.goldenLabel.findMany({
+      where: { goldenItem: { goldenSetId: v2.id } },
+      orderBy: [{ goldenItem: { index: 'asc' } }, { overallScore: 'desc' }],
+      include: { goldenItem: { select: { index: true } } },
+    });
+    expect(forkedLabels).toHaveLength(3);
+
+    expect(forkedLabels[0].goldenItem.index).toBe(0);
+    expect(forkedLabels[0].annotatorId).toBe(annotatorA.id);
+    expect(forkedLabels[0].overallScore).toBe(8.5);
+    expect(forkedLabels[0].criteriaScores).toEqual({ accuracy: 9, tone: 8 });
+    expect(forkedLabels[0].reasoning).toBe('A is more accurate');
+
+    expect(forkedLabels[1].goldenItem.index).toBe(0);
+    expect(forkedLabels[1].annotatorId).toBe(annotatorB.id);
+    expect(forkedLabels[1].overallScore).toBe(6);
+    expect(forkedLabels[1].criteriaScores).toBeNull();
+    expect(forkedLabels[1].reasoning).toBeNull();
+
+    expect(forkedLabels[2].goldenItem.index).toBe(1);
+    expect(forkedLabels[2].annotatorId).toBeNull();
+    expect(forkedLabels[2].overallScore).toBe(3);
+
+    // The source keeps its own labels — a fork copies, it does not move.
+    const rootLabels = await db.goldenLabel.count({
+      where: { goldenItem: { goldenSetId: root.id } },
+    });
+    expect(rootLabels).toBe(3);
   });
 });
