@@ -39,17 +39,45 @@ export default defineConfig({
         'src/lib/env.ts',
         'src/lib/logger.ts',
       ],
-      // Actuals as of Task 17 (2026-07-30): all-files 47.31/80.84/60.58/47.31
-      // (stmts/branch/funcs/lines), auth-guard.ts 86.15/80.95/91.66/86.15,
-      // scripts/importer/** 96.42/87.58/98.63/96.42 — thresholds below are
-      // each set at or a hair under those, per file/glob.
+      // ── THRESHOLD POLICY (2026-08-12) ──────────────────────────────────
+      // Floors sit BELOW the measured actual rather than at it: -2pp for the
+      // aggregate keys, -3pp for the per-glob entries.
+      //
+      // They previously sat AT the measured actuals, "a hair under". That
+      // left 0.15–0.65pp of headroom, which is not a gate — it is a tripwire
+      // on rounding. Adding one modestly-sized untested file to any of these
+      // globs moves the number by more than that, so the next person to
+      // touch this code would have hit a red CI with no regression in it and
+      // learned to edit the numbers to make it pass. A gate that gets edited
+      // to pass is worse than no gate, because it still reads as protection.
+      //
+      // The buffers differ because the denominators do. Measured on the unit
+      // run by deleting one test file: the aggregate moved 0.36pp while a
+      // three-file glob moved 1.15pp. Aggregates barely move; small globs
+      // swing. So the aggregate can afford a tighter floor than a glob can.
+      //
+      // BE HONEST ABOUT WHAT THESE CATCH. They catch a large untested landing
+      // or wholesale test removal. They do NOT reliably catch one deleted test
+      // file — that moves the aggregate by a third of a point, and no
+      // threshold can distinguish it from rounding without firing on rounding
+      // too. The guard for THAT is the test-count floor in
+      // .gitea/workflows/ci.yml, which asserts the suite actually ran.
+      //
+      // The ratchet is preserved by RE-BASELINING UPWARD when actuals rise
+      // materially — not by pinning to the last measurement.
+      //
+      // Actuals as of 2026-08-12 (stmts/branch/funcs/lines), measured on the
+      // run that added tests/db/background-writes.test.ts:
+      //   all-files            47.41 / 81.04 / 60.43 / 47.41
+      //   auth-guard.ts        86.36 / 80.95 / 91.66 / 86.36
+      //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
       thresholds: {
-        lines: 47,
-        functions: 60,
-        branches: 80,
-        statements: 47,
-        'src/lib/auth-guard.ts': { statements: 86, functions: 91, branches: 80, lines: 86 },
-        'scripts/importer/**': { statements: 96, functions: 98, branches: 87, lines: 96 },
+        lines: 45,
+        functions: 58,
+        branches: 79,
+        statements: 45,
+        'src/lib/auth-guard.ts': { statements: 83, functions: 88, branches: 77, lines: 83 },
+        'scripts/importer/**': { statements: 93, functions: 95, branches: 84, lines: 93 },
       },
     },
   },

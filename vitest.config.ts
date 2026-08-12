@@ -55,47 +55,82 @@ export default defineConfig({
         'src/lib/audit.ts',
       ],
       // Task 17 (1b): per-directory thresholds (vitest glob-keyed
-      // `coverage.thresholds`) for the subsystems 1a excluded, set to this
-      // run's actual measured coverage (see CONTRIBUTING.md) — tight enough
-      // that a regression fails CI, loose enough that today's numbers pass.
+      // `coverage.thresholds`) for the subsystems 1a excluded.
       // IMPORTANT: the top-level lines/functions/branches/statements keys
       // below are an AGGREGATE floor over every file matched by `include`
       // (not just files left over after the per-glob entries) — vitest
-      // checks both independently. Actuals as of Task 17 (2026-07-30):
-      // all-files 35.1/82.93/64.7/35.1 (stmts/branch/funcs/lines); the
-      // aggregate is dragged down by worker/importer/realtime/auth-guard,
-      // which are exercised by test:db/test:integration, not this DB-free
-      // unit run (see vitest.db.config.ts + CONTRIBUTING.md's "Test
-      // coverage" section for where those actually get measured).
+      // checks both independently. The aggregate is dragged down by
+      // worker/importer/realtime/auth-guard, which are exercised by
+      // test:db/test:integration, not this DB-free unit run (see
+      // vitest.db.config.ts + CONTRIBUTING.md's "Test coverage" section for
+      // where those actually get measured).
+      //
+      // ── THRESHOLD POLICY (2026-08-12) ──────────────────────────────────
+      // Floors sit BELOW the measured actual rather than at it: -2pp for the
+      // aggregate keys, -3pp for the per-glob entries. See vitest.db.config.ts
+      // for the full argument; the short version is that a sub-1pp margin is a
+      // tripwire on rounding, not a gate, and the predictable response to one
+      // is someone editing the number until it goes green.
+      //
+      // The two buffers differ because the denominators do. Measured, by
+      // deleting tests/lib/backends.test.ts and re-running: the AGGREGATE
+      // moved 0.36pp (35.20 -> 34.84) while src/lib/llm/** moved 1.15pp
+      // (93.97 -> 92.82). Aggregates over ~2k statements barely move; a glob
+      // of three files swings several points from one file.
+      //
+      // ── THE 100s BELOW ARE NOT COVERAGE. READ THIS BEFORE RAISING THEM ──
+      // `src/worker/**` reports branches 100 / functions 100 alongside
+      // statements 3.74. That is not a well-tested subsystem: those files are
+      // never IMPORTED by this DB-free unit run, so v8 reports no functions
+      // and no branches for them at all, and vitest scores 0/0 as 100%.
+      //
+      // Pinning a floor to that artifact inverts the incentive: the first
+      // real unit test that imports src/worker/reaper.ts would surface its
+      // genuine branch coverage (well under 100), drag the glob average down,
+      // and fail this gate — so the config would punish exactly the change it
+      // exists to encourage. The floors for those entries are therefore set
+      // deliberately low, and they are floors against gross regression only.
+      // The real coverage for worker/realtime/queue-publish lives in
+      // test:db and test:integration.
+      //
+      // Actuals as of 2026-08-12 (stmts/branch/funcs/lines):
+      //   all-files            35.20 / 83.06 / 65.00 / 35.20
+      //   src/lib/queue/**     47.30 / 84.37 / 73.33 / 47.30
+      //   src/worker/**         3.74 / 100   / 100   /  3.74   <- artifact
+      //   src/lib/llm/**       93.97 / 85.07 / 97.36 / 93.97
+      //   scripts/importer/**   6.15 / 83.87 / 10.29 /  6.15
+      //   src/lib/realtime/**   1.55 / 80    / 71.42 /  1.55
       thresholds: {
-        lines: 35,
-        functions: 64,
-        branches: 82,
-        statements: 35,
+        lines: 33,
+        functions: 63,
+        branches: 81,
+        statements: 33,
         // queue/connection.ts is unit-tested (tests/lib/queue-connection.test.ts);
         // publish.ts/topology.ts are exercised by test:integration/test:db
         // instead. Actual: 47.3/84.37/73.33/47.3.
-        'src/lib/queue/**': { statements: 46, functions: 72, branches: 84, lines: 46 },
+        'src/lib/queue/**': { statements: 44, functions: 70, branches: 81, lines: 44 },
         // Only dispatch-failure.ts is unit-tested; claim/main/reaper/*-consumer
-        // are integration-only (tests/integration/**). Actual: 3.77/100/100/3.77.
-        'src/worker/**': { statements: 3, functions: 100, branches: 100, lines: 3 },
+        // are integration-only (tests/integration/**). Actual: 3.74/100/100/3.74
+        // — where those two 100s are the not-imported artifact, not coverage.
+        'src/worker/**': { statements: 0, functions: 80, branches: 80, lines: 0 },
         // Provider backends + resilience/registry/render are heavily unit-tested.
-        // Actual: 93.91/84.96/97.36/93.91.
-        'src/lib/llm/**': { statements: 90, functions: 95, branches: 80, lines: 90 },
+        // Actual: 93.97/85.07/97.36/93.97.
+        'src/lib/llm/**': { statements: 90, functions: 94, branches: 80, lines: 90 },
         // auth-guard.ts is exercised transitively through API route handlers
         // under a live DB (tests/db/access-matrix.test.ts) — not reachable
         // from this DB-free run at all. Real gate: vitest.db.config.ts
-        // (actual there: 86.15/80.95/91.66/86.15).
+        // (actual there: 86.36/80.95/91.66/86.36).
         'src/lib/auth-guard.ts': { statements: 0, functions: 0, branches: 0, lines: 0 },
         // Only cli.ts is unit-tested; owners/judges/runs/artifacts.ts need a
         // live v1 scratch DB + v2 test DB (tests/importer/*.db.test.ts,
         // vitest.db.config.ts — actual there: 96.42/87.58/98.63/96.42).
         // Actual here: 6.15/83.87/10.29/6.15.
-        'scripts/importer/**': { statements: 6, functions: 10, branches: 83, lines: 6 },
+        'scripts/importer/**': { statements: 3, functions: 7, branches: 80, lines: 3 },
         // Only ownership.ts is unit-tested; bus/redis-bus/factory/in-memory-bus/
         // events/types are exercised by tests/integration/{realtime,sse-lifecycle}.test.ts.
-        // Actual: 1.57/80/71.42/1.57.
-        'src/lib/realtime/**': { statements: 1, functions: 70, branches: 79, lines: 1 },
+        // Actual: 1.55/80/71.42/1.55 — the 80/71.42 are mostly the same
+        // not-imported artifact as src/worker/**.
+        'src/lib/realtime/**': { statements: 0, functions: 68, branches: 77, lines: 0 },
       },
     },
     setupFiles: ['./tests/setup.ts'],

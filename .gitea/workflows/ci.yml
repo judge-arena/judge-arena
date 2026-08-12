@@ -414,9 +414,9 @@ jobs:
   # /bin/sh on every successful build (divergence entry 38), which is why
   # the k8s-Job pattern exists instead of a buildah-equipped runner image.
   #
-  # Separate job, not another step, for two reasons: it must not run on pull
-  # requests (a PR must never publish `:latest`), and it needs its own SSH
-  # setup that the test job has no business carrying.
+  # Separate job, not another step, for two reasons: it must not publish on
+  # pull requests (a PR must never publish `:latest`), and it needs its own
+  # SSH setup that the test job has no business carrying.
   build-push:
     runs-on: ubuntu-latest
     # Gates on db-tests as well as ci: publishing an image whose database
@@ -424,12 +424,50 @@ jobs:
     # judge-arena's deploy is a manual tag bump, so a bad :latest would sit
     # in Harbor looking deployable.
     needs: [ci, db-tests]
-    # Pushes to main only. `github.ref` is the branch ref for a push event;
-    # the event-name guard keeps a PR targeting main from matching.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    #
+    # ── NO JOB-LEVEL `if:` — deliberately, and this is not a loosening ─────
+    # It used to read `if: github.event_name == 'push' && github.ref ==
+    # 'refs/heads/main'`. Gitea creates a commit status for every job in the
+    # workflow when the run is queued, and on a PR it never transitioned this
+    # one out of `pending`: `needs` was satisfied, the `if` was false, and the
+    # status simply stayed "Blocked by required conditions" forever. Observed
+    # on PR #9 — `ci` and `db-tests` both green, overall commit status stuck
+    # `pending`, so the PR could never show green.
+    #
+    # That was cosmetic only while no branch protection required these checks.
+    # Turning required status checks on would have deadlocked every merge, and
+    # the failure would have looked like a broken pipeline rather than a
+    # skipped job that never resolved.
+    #
+    # So the job now always RUNS and the publish decision moved inside it. On
+    # a PR every step below no-ops and the job reports success in seconds,
+    # having published nothing.
+    #
+    # The "never publish from a PR" guarantee did NOT move to the step-level
+    # `if:` guards — those only avoid pointless work. It lives in the assert
+    # inside `Spawn kaniko build Job`, which is the only step that can publish
+    # anything and which re-derives the condition itself. A future edit that
+    # drops a step guard therefore cannot leak a publish; it fails loudly.
 
     steps:
+      - name: Decide whether this run publishes
+        id: gate
+        run: |
+          set -euo pipefail
+          # `github.ref` is the branch ref on a push event; the event-name
+          # check is what keeps a PR *targeting* main from matching it.
+          if [ "${{ github.event_name }}" = "push" ] \
+             && [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "push to refs/heads/main — this run builds and publishes"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "event=${{ github.event_name }} ref=${{ github.ref }}"
+            echo "not a push to main — this job will no-op and report success"
+          fi
+
       - name: Setup SSH (homelab-bot) — for both the checkout and the template clone
+        if: steps.gate.outputs.publish == 'true'
         env:
           BOT_KEY: ${{ secrets.HOMELAB_BOT_SSH_KEY }}
         run: |
@@ -445,6 +483,7 @@ jobs:
           ssh-keyscan -t ed25519,rsa 10.10.0.211 >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Checkout source via SSH
+        if: steps.gate.outputs.publish == 'true'
         run: |
           set -euo pipefail
           # Not github.event.repository.clone_url — that is this Gitea's HTTP
@@ -454,6 +493,7 @@ jobs:
           git checkout "${{ github.sha }}"
 
       - name: Compute tag
+        if: steps.gate.outputs.publish == 'true'
         id: tag
         run: |
           set -euo pipefail
@@ -462,12 +502,14 @@ jobs:
           echo "building sha-${short}"
 
       - name: Clone homelab-setup (for the build-job template)
+        if: steps.gate.outputs.publish == 'true'
         run: |
           set -euo pipefail
           rm -rf /tmp/homelab
           git clone --depth 1 ssh://git@10.10.0.211/trij/homelab.git /tmp/homelab
 
       - name: Spawn kaniko build Job
+        if: steps.gate.outputs.publish == 'true'
         env:
           COMPONENT: judge-arena
           # Dockerfile is at the repo root, so the kaniko context is `.`.
@@ -477,12 +519,33 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # ── The publish guard, re-derived rather than inherited ──────────
+          # This step is the ONLY one in this workflow that can put an image
+          # in Harbor, so it does not trust the `if:` above to have kept a PR
+          # out. The job-level `if:` was removed so the job always reports a
+          # terminal status (see the header on this job); the step guards that
+          # replaced it are ordinary conditions a future edit could drop while
+          # refactoring, and the cost of dropping THIS one is a PR publishing
+          # `:latest`. So assert it here, where it cannot be separated from
+          # the action it protects.
+          #
+          # Hard failure, not a silent skip: reaching this line on anything
+          # other than a push to main means a guard above is broken, and that
+          # is worth a red run rather than a quiet no-op.
+          if [ "${{ github.event_name }}" != "push" ] \
+             || [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::REFUSING TO PUBLISH — reached the kaniko spawn on"
+            echo "event=${{ github.event_name }} ref=${{ github.ref }}, which is"
+            echo "not a push to refs/heads/main. A step guard above is broken."
+            exit 1
+          fi
           job=$(envsubst < /tmp/homelab/templates/gitea-workflows/build-job.yaml.tmpl \
             | kubectl create -n tenant-builds -f - -o name)
           echo "JOB=$job" >> "$GITHUB_ENV"
           echo "spawned $job"
 
       - name: Wait for the build Job
+        if: steps.gate.outputs.publish == 'true'
         run: |
           set -euo pipefail
           # Heartbeat rather than `kubectl wait`. A silent wait longer than
@@ -524,6 +587,7 @@ jobs:
           exit 1
 
       - name: Report the pushed image
+        if: steps.gate.outputs.publish == 'true'
         run: |
           echo "pushed harbor.cluster.asethi.com/homelab/judge-arena:${{ steps.tag.outputs.tag }}"
           echo "pushed harbor.cluster.asethi.com/homelab/judge-arena:latest"
