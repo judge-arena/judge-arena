@@ -50,6 +50,26 @@ async function mkModelConfig(userId: string) {
   });
 }
 
+// A0: GoldenSet.datasetId is required and `onDelete: Restrict`. The corpus is
+// owned by a SEPARATE user and marked public, mirroring production (golden
+// sets may only be built over public platform-owned datasets) — deleteUserAccount
+// hard-deletes a departing user's PRIVATE datasets, which would abort on the
+// Restrict FK if the fixture put the corpus under the same owner.
+let goldenCorpusCounter = 0;
+
+async function mkGoldenCorpus() {
+  const platformUser = await mkUser();
+  goldenCorpusCounter += 1;
+  return db.dataset.create({
+    data: {
+      name: `fixture-golden-corpus-${goldenCorpusCounter}`,
+      userId: platformUser.id,
+      source: 'local',
+      visibility: 'public',
+    },
+  });
+}
+
 // A CalibrationRun needs a JudgeModelVersion; kept file-local per the
 // established "shared only once actually shared" convention — same shape as
 // tests/db/meta-eval.test.ts's own copy.
@@ -338,11 +358,25 @@ describe('deleteUserAccount (P1.7 account deletion)', () => {
   it('deletes a private GoldenSet but reassigns a public one', async () => {
     const archiveUser = await mkUser();
     const owner = await mkUser();
+    const corpus = await mkGoldenCorpus();
     const privateGoldenSet = await db.goldenSet.create({
-      data: { name: 'fixture-private-gs', ownerId: owner.id },
+      data: {
+        name: 'fixture-private-gs',
+        slug: 'fixture-private-gs',
+        ownerId: owner.id,
+        datasetId: corpus.id,
+        protocol: 'pointwise',
+      },
     });
     const publicGoldenSet = await db.goldenSet.create({
-      data: { name: 'fixture-public-gs', ownerId: owner.id, visibility: 'public' },
+      data: {
+        name: 'fixture-public-gs',
+        slug: 'fixture-public-gs',
+        ownerId: owner.id,
+        visibility: 'public',
+        datasetId: corpus.id,
+        protocol: 'pointwise',
+      },
     });
 
     const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
@@ -363,8 +397,15 @@ describe('deleteUserAccount (P1.7 account deletion)', () => {
     async () => {
       const archiveUser = await mkUser();
       const owner = await mkUser();
+      const corpus = await mkGoldenCorpus();
       const goldenSet = await db.goldenSet.create({
-        data: { name: 'fixture-golden-set-with-run', ownerId: owner.id },
+        data: {
+          name: 'fixture-golden-set-with-run',
+          slug: 'fixture-golden-set-with-run',
+          ownerId: owner.id,
+          datasetId: corpus.id,
+          protocol: 'pointwise',
+        },
       });
       const judgeModelVersion = await mkJudgeModelVersion();
       const calibrationRun = await db.calibrationRun.create({
@@ -399,8 +440,15 @@ describe('deleteUserAccount (P1.7 account deletion)', () => {
   it('hard-deletes a private GoldenSet with no CalibrationRun referencing it', async () => {
     const archiveUser = await mkUser();
     const owner = await mkUser();
+    const corpus = await mkGoldenCorpus();
     const goldenSet = await db.goldenSet.create({
-      data: { name: 'fixture-golden-set-no-run', ownerId: owner.id },
+      data: {
+        name: 'fixture-golden-set-no-run',
+        slug: 'fixture-golden-set-no-run',
+        ownerId: owner.id,
+        datasetId: corpus.id,
+        protocol: 'pointwise',
+      },
     });
 
     const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });

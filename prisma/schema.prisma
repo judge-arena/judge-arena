@@ -463,6 +463,9 @@ model ModelJudgment {
   reasoningEnabled    Boolean?
   pairOrder           String? // e.g. "AB" | "BA" for pairwise position-bias tracking
 
+  // A0 decision #4: what the model SAID, against the pairOrder it was shown
+  // ('A' | 'B' | 'tie'). Raw, never normalised — derive, never encode.
+  verdict        String?
   overallScore   Float?
   reasoning      String?
   rawResponse    String? // full LLM response, never truncated
@@ -584,6 +587,7 @@ model Dataset {
 
   samples     DatasetSample[]
   evaluations Evaluation[]
+  goldenSets  GoldenSet[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -607,6 +611,7 @@ model DatasetSample {
   metadata  String? // JSON: any extra fields from the source
 
   evaluations Evaluation[]
+  goldenItems GoldenItem[]
   createdAt   DateTime     @default(now())
 
   @@unique([datasetId, index])
@@ -653,6 +658,26 @@ model GoldenSet {
   // pointing at the (now-deleted) owner and resolves to null via its own
   // `onDelete: SetNull`.
   retiredAt       DateTime?
+  // A0: distinct from retiredAt. `retiredAt` = out of circulation but still
+  // valid ground truth (a product verb); `tombstonedAt` = pending purge (an
+  // account-lifecycle verb). Purge itself is a later wave.
+  tombstonedAt    DateTime?
+
+  // ── A0: a golden set is the annotation layer over exactly ONE platform
+  // Dataset, imported at exactly ONE protocol. Restrict, so a Dataset with
+  // golden sets cannot be deleted. The set is homogeneous: letting its items
+  // disagree on protocol would make a single kappa uninterpretable.
+  datasetId       String
+  dataset         Dataset          @relation(fields: [datasetId], references: [id], onDelete: Restrict)
+  protocol        RunProtocol
+
+  // ── Versioning (A0: edit-after-freeze forks) ──
+  slug            String?
+  version         Int              @default(1)
+  parentId        String?
+  parent          GoldenSet?       @relation("GoldenSetVersions", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  versions        GoldenSet[]      @relation("GoldenSetVersions")
+
   ownerId         String?
   owner           User?            @relation(fields: [ownerId], references: [id], onDelete: SetNull)
   items           GoldenItem[]
@@ -660,22 +685,59 @@ model GoldenSet {
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
 
+  @@unique([parentId, version])
+  // Hand-edited to NULLS NOT DISTINCT in 20260812190000_v2d_golden_substrate —
+  // ownerId is nullable (onDelete: SetNull), and Postgres's default NULLS
+  // DISTINCT would let two ownerless sets share a slug. Prisma's DSL cannot
+  // express the option; the migration's raw SQL is the only record of it.
+  // Consequence: at most ONE slug-NULL set per owner. Every A0 write path
+  // assigns a slug (generateSlug never returns empty), so this only binds
+  // hand-written fixtures — give them slugs.
+  @@unique([ownerId, slug])
   @@index([ownerId])
+  @@index([parentId])
+  @@index([visibility])
+  @@index([datasetId])
 }
 
 model GoldenItem {
-  id           String        @id @default(cuid())
-  goldenSetId  String
-  goldenSet    GoldenSet     @relation(fields: [goldenSetId], references: [id], onDelete: Cascade)
-  index        Int
-  inputText    String
-  promptText   String?
-  responseText String?
-  protocol     RunProtocol   @default(pointwise)
-  expected     String?
-  labels       GoldenLabel[]
+  id                    String            @id @default(cuid())
+  goldenSetId           String
+  goldenSet             GoldenSet         @relation(fields: [goldenSetId], references: [id], onDelete: Cascade)
+  index                 Int
+  inputText             String
+  promptText            String?
+  responseText          String?
+  protocol              RunProtocol       @default(pointwise)
+  expected              String?
+  // ── A0 provenance: which DatasetSample this item was imported from.
+  // Restrict, so a sample a golden item annotates cannot be deleted — see
+  // the 409 guard on PUT /api/datasets/[id]/samples.
+  sourceDatasetSampleId String
+  sourceSample          DatasetSample     @relation(fields: [sourceDatasetSampleId], references: [id], onDelete: Restrict)
+  labels                GoldenLabel[]
+  candidates            GoldenCandidate[]
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
 
   @@unique([goldenSetId, index])
+  @@index([sourceDatasetSampleId])
+}
+
+// Discrete candidates (pairwise/listwise) attached to a golden item.
+// RunCandidate (schema.prisma:417-427) field-for-field, different parent:
+// the team already accepted this shape once, and A2 compares a golden item's
+// candidates against a run's candidates.
+model GoldenCandidate {
+  id           String     @id @default(cuid())
+  goldenItemId String
+  goldenItem   GoldenItem @relation(fields: [goldenItemId], references: [id], onDelete: Cascade)
+  position     Int
+  promptText   String?
+  responseText String?
+  label        String?
+
+  @@unique([goldenItemId, position])
 }
 
 model GoldenLabel {
@@ -708,6 +770,12 @@ model CalibrationRun {
   flipRateVsParent    Float?
   verdictCount        Int               @default(0)
   passed              Boolean?
+  // A0 decision #3: `passed` alone is uninterpretable a year later — record
+  // the threshold that was in force and what it was applied to.
+  passThreshold       Float?
+  thresholdMetric     String?
+  kappaVariant        String? // 'cohen' | 'fleiss'
+  kappaWeighting      String? // 'linear' | 'quadratic'
   startedAt           DateTime          @default(now())
   finishedAt          DateTime?
 

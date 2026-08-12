@@ -255,6 +255,35 @@ export async function PUT(request: Request, props: { params: Promise<{ id: strin
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
+    // A0 (20260812190000_v2d_golden_substrate): GoldenItem.sourceDatasetSampleId
+    // is `onDelete: Restrict`. This handler deletes every sample and recreates
+    // them with new ids, so once a golden set has annotated this dataset the
+    // replace MUST fail — a corpus somebody has annotated must not drift under
+    // the annotation. Refuse deliberately, naming the sets that pinned it,
+    // rather than letting Postgres raise a P2003 the catch below reports as a
+    // generic 500. Checked BEFORE the transaction so nothing is deleted.
+    // Not covered here: DELETE on this route can still surface a bare P2003
+    // for a pinned sampleId — recorded in the migration header, out of A0.
+    const pinningGoldenSets = await prisma.goldenSet.findMany({
+      where: { items: { some: { sourceSample: { datasetId: params.id } } } },
+      select: { id: true, name: true },
+      orderBy: { name: 'asc' },
+    });
+
+    if (pinningGoldenSets.length > 0) {
+      return NextResponse.json(
+        {
+          error:
+            'Cannot replace this dataset\'s samples: it is annotated by golden set(s) ' +
+            `${pinningGoldenSets.map((g) => g.name).join(', ')}. ` +
+            'Replacing samples would delete the rows those golden items were imported from. ' +
+            'Retire the golden set, or create a new dataset version instead.',
+          goldenSets: pinningGoldenSets,
+        },
+        { status: 409 }
+      );
+    }
+
     const body = await request.json();
     const data = bulkReplaceSamplesSchema.parse(body);
 
