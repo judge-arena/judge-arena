@@ -277,4 +277,55 @@ describe('forkGoldenSet: versioning, lineage and deep copy', () => {
     });
     expect(rootLabels).toBe(3);
   });
+
+  it(
+    'concurrent forks both land on distinct versions and distinct slugs (looped 20x to force ' +
+      'the race — two callers can read the same max version AND derive the same ' +
+      '`${base}-v${n}` slug before either commits, so P2002 can surface on either index)',
+    async () => {
+      for (let i = 0; i < 20; i++) {
+        await truncateAll();
+        const owner = await mkUser();
+        const dataset = await mkDatasetWithSamples(owner.id, 2);
+        const root = await mkGoldenSet(
+          owner.id,
+          dataset.id,
+          dataset.samples.map((s) => s.id)
+        );
+
+        const [forkA, forkB] = await Promise.all([
+          forkGoldenSet(db, forkInput(root.id, root.id, owner.id)),
+          forkGoldenSet(db, forkInput(root.id, root.id, owner.id)),
+        ]);
+
+        // Both must succeed on distinct versions — never the same number (a
+        // silent duplicate) and never a P2002 bubbling out as a rejection.
+        const versions = [forkA.version, forkB.version].sort((a, b) => a - b);
+        expect(versions).toEqual([2, 3]);
+
+        // Same base name on both calls, so the slugs collide unless the
+        // retry recomputes them alongside the version.
+        expect(forkA.slug).not.toBeNull();
+        expect(forkB.slug).not.toBeNull();
+        expect(forkA.slug).not.toBe(forkB.slug);
+
+        const family = await db.goldenSet.findMany({
+          where: { OR: [{ id: root.id }, { parentId: root.id }] },
+          orderBy: { version: 'asc' },
+        });
+        expect(family.map((g) => g.version)).toEqual([1, 2, 3]);
+        expect(new Set(family.map((g) => g.version)).size).toBe(family.length);
+
+        // Each fork got its own items and candidates — no bleed, no
+        // half-committed transaction.
+        expect(forkA._count.items).toBe(2);
+        expect(forkB._count.items).toBe(2);
+        const candidateCount = await db.goldenCandidate.count({
+          where: { goldenItem: { goldenSet: { OR: [{ id: root.id }, { parentId: root.id }] } } },
+        });
+        expect(candidateCount).toBe(12); // 3 sets x 2 items x 2 candidates
+      }
+    },
+    60_000
+  );
 });

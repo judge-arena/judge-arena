@@ -64,6 +64,8 @@ import {
 } from '@prisma/client';
 import { generateSlug } from '@/lib/config';
 
+const MAX_ATTEMPTS = 3;
+
 export interface ForkGoldenSetInput {
   /** id of the root (v1) golden set of the family — the shared `parentId` for every version. */
   rootGoldenSetId: string;
@@ -85,6 +87,45 @@ export type GoldenSetVersionResult = GoldenSet & {
 };
 
 /**
+ * Thrown when every attempt (MAX_ATTEMPTS) collides on the
+ * `@@unique([parentId, version])` constraint — i.e. concurrent fork requests
+ * for the same golden-set family kept landing on the same next-version number
+ * even after retrying with a freshly recomputed max. Callers (routes) should
+ * map this to a 500 with a clear message; it is not a validation error and
+ * not expected in normal operation.
+ */
+export class GoldenSetVersionConflictError extends Error {
+  readonly attempts: number;
+
+  constructor(attempts: number) {
+    super(
+      `Failed to fork golden set after ${attempts} attempt(s): concurrent fork requests kept colliding on the same version number`
+    );
+    this.name = 'GoldenSetVersionConflictError';
+    this.attempts = attempts;
+  }
+}
+
+/**
+ * True iff `error` is a P2002 this retry loop can actually fix by recomputing
+ * and trying again: either `[parentId, version]` (the core race) or
+ * `[ownerId, slug]` (a SECOND symptom of the same race, not a different one —
+ * two concurrent forks of the same family with the same name both read
+ * `existingSlugs` before either commits, both derive the identical
+ * `${baseSlug}-v${nextVersion}`, and Postgres reports whichever unique index
+ * it checks first). Both get the identical fix: recompute the version AND the
+ * slug in a fresh transaction. A P2002 on any OTHER constraint is not
+ * retryable here and surfaces as-is.
+ */
+function isRetryableVersionConflict(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+    return false;
+  }
+  const target = (error.meta as { target?: unknown } | undefined)?.target;
+  return Array.isArray(target) && (target.includes('version') || target.includes('slug'));
+}
+
+/**
  * Forks a golden set to the next version of its family. Wraps the source
  * read, the max-version read, slug derivation, the `create` and its nested
  * item/candidate/label creates in a single transaction.
@@ -95,128 +136,133 @@ export async function forkGoldenSet(
 ): Promise<GoldenSetVersionResult> {
   const { rootGoldenSetId, sourceGoldenSetId, ownerId, name, description } = input;
 
-  return client.$transaction(
-    async (tx) => {
-      const source = await tx.goldenSet.findUniqueOrThrow({
-        where: { id: sourceGoldenSetId },
-        select: {
-          datasetId: true,
-          protocol: true,
-          items: {
-            orderBy: { index: 'asc' },
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      return await client.$transaction(
+        async (tx) => {
+          // ── unchanged transaction body: source read, max-version read,
+          //    slug derivation, create with nested items/candidates/labels ──
+          const source = await tx.goldenSet.findUniqueOrThrow({
+            where: { id: sourceGoldenSetId },
             select: {
-              index: true,
-              inputText: true,
-              promptText: true,
-              responseText: true,
+              datasetId: true,
               protocol: true,
-              expected: true,
-              sourceDatasetSampleId: true,
-              candidates: {
-                orderBy: { position: 'asc' },
+              items: {
+                orderBy: { index: 'asc' },
                 select: {
-                  position: true,
+                  index: true,
+                  inputText: true,
                   promptText: true,
                   responseText: true,
-                  label: true,
-                },
-              },
-              labels: {
-                select: {
-                  annotatorId: true,
-                  overallScore: true,
-                  criteriaScores: true,
-                  reasoning: true,
+                  protocol: true,
+                  expected: true,
+                  sourceDatasetSampleId: true,
+                  candidates: {
+                    orderBy: { position: 'asc' },
+                    select: {
+                      position: true,
+                      promptText: true,
+                      responseText: true,
+                      label: true,
+                    },
+                  },
+                  labels: {
+                    select: {
+                      annotatorId: true,
+                      overallScore: true,
+                      criteriaScores: true,
+                      reasoning: true,
+                    },
+                  },
                 },
               },
             },
-          },
-        },
-      });
+          });
 
-      const familyVersions = await tx.goldenSet.findMany({
-        where: { OR: [{ id: rootGoldenSetId }, { parentId: rootGoldenSetId }] },
-        select: { version: true },
-        orderBy: { version: 'desc' },
-      });
-      const nextVersion = (familyVersions[0]?.version ?? 0) + 1;
+          const familyVersions = await tx.goldenSet.findMany({
+            where: { OR: [{ id: rootGoldenSetId }, { parentId: rootGoldenSetId }] },
+            select: { version: true },
+            orderBy: { version: 'desc' },
+          });
+          const nextVersion = (familyVersions[0]?.version ?? 0) + 1;
 
-      // Slug derivation lives here (not passed in) — see module doc: it
-      // depends on nextVersion, so it must be recomputed on every retry to
-      // stay truthful to whichever version this attempt lands on.
-      const baseSlug = generateSlug(name);
-      const versionSlug = `${baseSlug}-v${nextVersion}`;
-      const existingSlugs = (
-        await tx.goldenSet.findMany({ where: { ownerId }, select: { slug: true } })
-      )
-        .map((g) => g.slug)
-        .filter(Boolean) as string[];
-      const uniqueSlug = existingSlugs.includes(versionSlug)
-        ? `${versionSlug}-${Date.now().toString(36).slice(-4)}`
-        : versionSlug;
+          const baseSlug = generateSlug(name);
+          const versionSlug = `${baseSlug}-v${nextVersion}`;
+          const existingSlugs = (
+            await tx.goldenSet.findMany({ where: { ownerId }, select: { slug: true } })
+          )
+            .map((g) => g.slug)
+            .filter(Boolean) as string[];
+          const uniqueSlug = existingSlugs.includes(versionSlug)
+            ? `${versionSlug}-${Date.now().toString(36).slice(-4)}`
+            : versionSlug;
 
-      return tx.goldenSet.create({
-        data: {
-          name,
-          slug: uniqueSlug,
-          description,
-          // Never inherited from the source — see module doc note 4.
-          visibility: 'private',
-          version: nextVersion,
-          parentId: rootGoldenSetId,
-          ownerId,
-          datasetId: source.datasetId,
-          protocol: source.protocol,
-          items: {
-            create: source.items.map((item) => ({
-              index: item.index,
-              inputText: item.inputText,
-              promptText: item.promptText,
-              responseText: item.responseText,
-              protocol: item.protocol,
-              expected: item.expected,
-              sourceDatasetSampleId: item.sourceDatasetSampleId,
-              candidates: {
-                create: item.candidates.map((candidate) => ({
-                  position: candidate.position,
-                  promptText: candidate.promptText,
-                  responseText: candidate.responseText,
-                  label: candidate.label,
+          return tx.goldenSet.create({
+            data: {
+              name,
+              slug: uniqueSlug,
+              description,
+              visibility: 'private',
+              version: nextVersion,
+              parentId: rootGoldenSetId,
+              ownerId,
+              datasetId: source.datasetId,
+              protocol: source.protocol,
+              items: {
+                create: source.items.map((item) => ({
+                  index: item.index,
+                  inputText: item.inputText,
+                  promptText: item.promptText,
+                  responseText: item.responseText,
+                  protocol: item.protocol,
+                  expected: item.expected,
+                  sourceDatasetSampleId: item.sourceDatasetSampleId,
+                  candidates: {
+                    create: item.candidates.map((candidate) => ({
+                      position: candidate.position,
+                      promptText: candidate.promptText,
+                      responseText: candidate.responseText,
+                      label: candidate.label,
+                    })),
+                  },
+                  labels: {
+                    create: item.labels.map((label) => ({
+                      annotatorId: label.annotatorId,
+                      overallScore: label.overallScore,
+                      criteriaScores:
+                        label.criteriaScores === null
+                          ? Prisma.DbNull
+                          : (label.criteriaScores as Prisma.InputJsonValue),
+                      reasoning: label.reasoning,
+                    })),
+                  },
                 })),
               },
-              // Unconditional: forkGoldenSet applies no edits, so every
-              // copied item is content-identical to its source. The
-              // drop-on-edited-item half of decision #5 lives in
-              // PATCH /api/golden-sets/[id]/items — see module doc note 3.
-              labels: {
-                create: item.labels.map((label) => ({
-                  // Preserved, never re-attributed to the forking user:
-                  // nullable because GoldenLabel.annotator is onDelete:
-                  // SetNull, and a null must stay null.
-                  annotatorId: label.annotatorId,
-                  overallScore: label.overallScore,
-                  // A real Json? column (unlike DatasetSample.metadata, which
-                  // is JSON-in-a-String). DB NULL round-trips through
-                  // Prisma.DbNull, matching human-judgment/route.ts:133.
-                  criteriaScores:
-                    label.criteriaScores === null
-                      ? Prisma.DbNull
-                      : (label.criteriaScores as Prisma.InputJsonValue),
-                  reasoning: label.reasoning,
-                })),
+            },
+            include: {
+              items: {
+                orderBy: { index: 'asc' },
+                include: { candidates: { orderBy: { position: 'asc' } } },
               },
-            })),
-          },
+              _count: { select: { items: true } },
+            },
+          });
         },
-        include: {
-          items: {
-            orderBy: { index: 'asc' },
-            include: { candidates: { orderBy: { position: 'asc' } } },
-          },
-          _count: { select: { items: true } },
-        },
-      });
-    },
-    { maxWait: 10_000, timeout: 60_000 }
-  );
+        { maxWait: 10_000, timeout: 60_000 }
+      );
+    } catch (error) {
+      lastError = error;
+      if (isRetryableVersionConflict(error)) {
+        if (attempt < MAX_ATTEMPTS) continue;
+        throw new GoldenSetVersionConflictError(MAX_ATTEMPTS);
+      }
+      throw error;
+    }
+  }
+
+  // Unreachable — the loop above always returns or throws — but keeps the
+  // function's control flow explicit for TypeScript.
+  throw lastError instanceof Error ? lastError : new GoldenSetVersionConflictError(MAX_ATTEMPTS);
 }
