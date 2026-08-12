@@ -209,6 +209,29 @@ describe('POST /api/golden-sets — source gating', () => {
     expect(body._count.items).toBe(3);
   });
 
+  it('ownerId comes from the SESSION, never the request body — a forged ownerId in the body is silently ignored', async () => {
+    const { dataset } = await mkPlatformDataset(2);
+    const user = await mkUser();
+    const someoneElse = await mkUser();
+    mockSessionFor(user);
+
+    const res = await createGoldenSet(
+      jsonRequest('http://localhost/api/golden-sets', 'POST', {
+        datasetId: dataset.id,
+        protocol: 'pairwise',
+        name: 'Forged owner',
+        ownerId: someoneElse.id,
+      })
+    );
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.ownerId).toBe(user.id);
+    expect(body.ownerId).not.toBe(someoneElse.id);
+
+    const created = await db.goldenSet.findUniqueOrThrow({ where: { id: body.id } });
+    expect(created.ownerId).toBe(user.id);
+  });
+
   it('403s on a dataset that is NOT owned by the platform user, even a public one (A0 restricts creation to platform corpora)', async () => {
     const someoneElse = await mkUser();
     const dataset = await db.dataset.create({

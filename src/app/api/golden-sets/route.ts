@@ -183,58 +183,69 @@ export async function POST(request: Request) {
     // Set + items + candidates in ONE transaction, and via createMany rather
     // than 620 sequential creates: an interactive transaction's default 5s
     // timeout will not survive 620 round trips.
-    const goldenSet = await prisma.$transaction(async (tx) => {
-      const created = await tx.goldenSet.create({
-        data: {
-          name: data.name,
-          slug: uniqueSlug,
-          description: data.description,
-          ownerId: session.user.id,
-          datasetId: dataset.id,
-          protocol: data.protocol,
-        },
-        select: { id: true },
-      });
+    //
+    // The 5s default is not relied on even so: JudgeBench measures at
+    // 350-520ms today, but this route exists to grow into corpora an order
+    // of magnitude larger (MMLU-Pro, LiveBench, ...), where the default
+    // margin would be thin. `{ maxWait: 10_000, timeout: 60_000 }` is a
+    // considered ceiling, not decoration — matching the other bulk-write
+    // path in this feature, `forkGoldenSet`'s transaction
+    // (src/lib/golden-set-versions.ts:253), so the two agree.
+    const goldenSet = await prisma.$transaction(
+      async (tx) => {
+        const created = await tx.goldenSet.create({
+          data: {
+            name: data.name,
+            slug: uniqueSlug,
+            description: data.description,
+            ownerId: session.user.id,
+            datasetId: dataset.id,
+            protocol: data.protocol,
+          },
+          select: { id: true },
+        });
 
-      await tx.goldenItem.createMany({
-        data: items.map((item) => ({
-          goldenSetId: created.id,
-          index: item.index,
-          inputText: item.inputText,
-          promptText: item.promptText,
-          responseText: item.responseText,
-          protocol: item.protocol,
-          expected: item.expected,
-          sourceDatasetSampleId: item.sourceDatasetSampleId,
-        })),
-      });
+        await tx.goldenItem.createMany({
+          data: items.map((item) => ({
+            goldenSetId: created.id,
+            index: item.index,
+            inputText: item.inputText,
+            promptText: item.promptText,
+            responseText: item.responseText,
+            protocol: item.protocol,
+            expected: item.expected,
+            sourceDatasetSampleId: item.sourceDatasetSampleId,
+          })),
+        });
 
-      // createMany returns no ids, so read them back by the index we just
-      // assigned (unique per set) to attach candidates.
-      const persisted = await tx.goldenItem.findMany({
-        where: { goldenSetId: created.id },
-        select: { id: true, index: true },
-      });
-      const idByIndex = new Map(persisted.map((p) => [p.index, p.id]));
+        // createMany returns no ids, so read them back by the index we just
+        // assigned (unique per set) to attach candidates.
+        const persisted = await tx.goldenItem.findMany({
+          where: { goldenSetId: created.id },
+          select: { id: true, index: true },
+        });
+        const idByIndex = new Map(persisted.map((p) => [p.index, p.id]));
 
-      const candidateRows = items.flatMap((item) =>
-        item.candidates.map((c) => ({
-          goldenItemId: idByIndex.get(item.index)!,
-          position: c.position,
-          promptText: c.promptText,
-          responseText: c.responseText,
-          label: c.label,
-        }))
-      );
-      if (candidateRows.length > 0) {
-        await tx.goldenCandidate.createMany({ data: candidateRows });
-      }
+        const candidateRows = items.flatMap((item) =>
+          item.candidates.map((c) => ({
+            goldenItemId: idByIndex.get(item.index)!,
+            position: c.position,
+            promptText: c.promptText,
+            responseText: c.responseText,
+            label: c.label,
+          }))
+        );
+        if (candidateRows.length > 0) {
+          await tx.goldenCandidate.createMany({ data: candidateRows });
+        }
 
-      return tx.goldenSet.findUniqueOrThrow({
-        where: { id: created.id },
-        include: goldenSetInclude,
-      });
-    });
+        return tx.goldenSet.findUniqueOrThrow({
+          where: { id: created.id },
+          include: goldenSetInclude,
+        });
+      },
+      { maxWait: 10_000, timeout: 60_000 }
+    );
 
     return NextResponse.json(goldenSet, { status: 201 });
   } catch (error) {
