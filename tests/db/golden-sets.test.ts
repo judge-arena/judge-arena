@@ -3,6 +3,11 @@ import { getServerSession } from 'next-auth';
 import { db, truncateAll, mkUser } from './helpers';
 import { PLATFORM_OWNER_EMAIL } from '@/lib/golden-sets';
 import { GET as listGoldenSets, POST as createGoldenSet } from '@/app/api/golden-sets/route';
+import {
+  GET as getGoldenSet,
+  PATCH as patchGoldenSet,
+  DELETE as deleteGoldenSet,
+} from '@/app/api/golden-sets/[id]/route';
 
 vi.mock('next-auth', () => ({ getServerSession: vi.fn() }));
 vi.mock('next/headers', () => ({ headers: vi.fn(async () => new Headers()) }));
@@ -301,5 +306,197 @@ describe('POST /api/golden-sets — source gating', () => {
     );
     expect(bad.status).toBe(400);
     expect((await bad.json()).error).toBe('Validation failed');
+  });
+});
+
+/** A CalibrationRun is what freezes a set. It needs a JudgeModelVersion. */
+async function mkCalibrationRun(goldenSetId: string) {
+  const judgeModel = await db.judgeModel.create({
+    data: {
+      name: 'Fixture Judge',
+      slug: uniq('fixture-judge'),
+      judgeClass: 'prompted_api',
+      scoringMechanism: 'critique_generative',
+      baseModel: 'fixture-base-model',
+    },
+  });
+  const version = await db.judgeModelVersion.create({
+    data: {
+      judgeModelId: judgeModel.id,
+      ordinal: 1,
+      servingBackend: 'anthropic',
+      protocolSupport: { pointwise: ['score'] },
+    },
+  });
+  return db.calibrationRun.create({
+    data: { judgeModelVersionId: version.id, goldenSetId },
+  });
+}
+
+describe('GET /api/golden-sets/[id]', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('the owner gets the raw row with items and their candidates ordered', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+
+    mockSessionFor(owner);
+    const res = await getGoldenSet(new Request(`http://localhost/api/golden-sets/${goldenSet.id}`), {
+      params: Promise.resolve({ id: goldenSet.id }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.items).toHaveLength(3);
+    expect(body.items.map((i: any) => i.index)).toEqual([0, 1, 2]);
+    expect(body.items[0].candidates.map((c: any) => c.position)).toEqual([0, 1]);
+    expect(body.datasetId).toBeDefined();
+  });
+
+  it('an anonymous caller on a PUBLIC set gets the PII-stripped projection, still carrying items', async () => {
+    const owner = await mkUser({ email: 'owner-secret-pii@test.local' });
+    const { goldenSet } = await mkGoldenSet(owner.id, { visibility: 'public' });
+
+    (getServerSession as unknown as Mock).mockResolvedValue(null);
+    const res = await getGoldenSet(new Request(`http://localhost/api/golden-sets/${goldenSet.id}`), {
+      params: Promise.resolve({ id: goldenSet.id }),
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toContain('owner-secret-pii@test.local');
+    const body = JSON.parse(text);
+    expect(body.itemCount).toBe(3);
+    expect(body.items).toHaveLength(3);
+    expect(body.protocol).toBe('pairwise');
+  });
+
+  it('404s a retired or tombstoned set unless ?includeRetired=true', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+    await db.goldenSet.update({ where: { id: goldenSet.id }, data: { retiredAt: new Date() } });
+
+    mockSessionFor(owner);
+    const hidden = await getGoldenSet(
+      new Request(`http://localhost/api/golden-sets/${goldenSet.id}`),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(hidden.status).toBe(404);
+
+    const shown = await getGoldenSet(
+      new Request(`http://localhost/api/golden-sets/${goldenSet.id}?includeRetired=true`),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(shown.status).toBe(200);
+  });
+});
+
+describe('PATCH /api/golden-sets/[id] — freeze guard on content fields only', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('renaming a CALIBRATED set still works — name/description/visibility are not what a calibration run measured', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+    await mkCalibrationRun(goldenSet.id);
+
+    mockSessionFor(owner);
+    const res = await patchGoldenSet(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}`, 'PATCH', {
+        name: 'Typo fixed',
+        visibility: 'public',
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.name).toBe('Typo fixed');
+    expect(body.visibility).toBe('public');
+  });
+
+  it('409s a datasetId or protocol change on a CALIBRATED set and offers the fork url, writing nothing', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+    await mkCalibrationRun(goldenSet.id);
+
+    mockSessionFor(owner);
+    const res = await patchGoldenSet(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}`, 'PATCH', {
+        protocol: 'pointwise',
+        name: 'Should not land either',
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.goldenSetId).toBe(goldenSet.id);
+    expect(body.forkUrl).toBe(`/api/golden-sets/${goldenSet.id}/fork`);
+
+    const after = await db.goldenSet.findUniqueOrThrow({ where: { id: goldenSet.id } });
+    expect(after.protocol).toBe('pairwise');
+    expect(after.name).toBe(goldenSet.name);
+  });
+
+  it('a protocol change on an UNcalibrated set lands', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+
+    mockSessionFor(owner);
+    const res = await patchGoldenSet(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}`, 'PATCH', {
+        protocol: 'listwise',
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).protocol).toBe('listwise');
+  });
+});
+
+describe('DELETE /api/golden-sets/[id] — tombstone, never a row delete', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('stamps tombstonedAt, keeps the row and its items, and makes the set invisible to subsequent reads', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+
+    mockSessionFor(owner);
+    const res = await deleteGoldenSet(
+      new Request(`http://localhost/api/golden-sets/${goldenSet.id}`, { method: 'DELETE' }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true, tombstoned: true });
+
+    const row = await db.goldenSet.findUnique({ where: { id: goldenSet.id } });
+    expect(row).not.toBeNull();
+    expect(row!.tombstonedAt).not.toBeNull();
+    await expect(db.goldenItem.count({ where: { goldenSetId: goldenSet.id } })).resolves.toBe(3);
+
+    const after = await getGoldenSet(
+      new Request(`http://localhost/api/golden-sets/${goldenSet.id}`),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(after.status).toBe(404);
+  });
+
+  it('tombstones a CALIBRATED set too — nothing is destroyed, so the Restrict on CalibrationRun.goldenSetId cannot abort', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+    await mkCalibrationRun(goldenSet.id);
+
+    mockSessionFor(owner);
+    const res = await deleteGoldenSet(
+      new Request(`http://localhost/api/golden-sets/${goldenSet.id}`, { method: 'DELETE' }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(200);
+    await expect(db.calibrationRun.count({ where: { goldenSetId: goldenSet.id } })).resolves.toBe(1);
   });
 });
