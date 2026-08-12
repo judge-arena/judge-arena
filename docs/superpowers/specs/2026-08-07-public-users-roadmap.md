@@ -1,6 +1,8 @@
 # Roadmap: from one admin to real public users
 
-**Date:** 2026-08-07 · **Status:** proposed, awaiting owner decisions
+**Date:** 2026-08-07 · **Status:** SUPERSEDED by
+`2026-08-08-north-star-rebaseline-design.md` — the verified facts below remain reliable and
+are cited by the rebaseline; the phase sequencing and decision 7 are replaced.
 **Context:** Judge Arena went live in-cluster today (see the v2 program design and
 `docs/runbooks/authentik-oidc-setup.md`). Exactly one account exists: the owner's.
 
