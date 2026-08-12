@@ -185,6 +185,17 @@ describe('mapSampleToGoldenItem — a corrupt source row fails loudly', () => {
       mapSampleToGoldenItem(SAMPLE, 'ranked' as unknown as Parameters<typeof mapSampleToGoldenItem>[1], 0)
     ).toThrow(/unsupported protocol/);
   });
+
+  it('pairwise: throws on a garbage preference label (not A>B or B>A)', () => {
+    expect(() =>
+      mapSampleToGoldenItem({ ...SAMPLE, expected: 'A=B' }, 'pairwise', 0)
+    ).toThrow(/dataset sample sample-1 has expected "A=B", which is not an allowed preference label/);
+  });
+
+  it('pairwise: null expected passes through without error', () => {
+    const item = mapSampleToGoldenItem({ ...SAMPLE, expected: null }, 'pairwise', 0);
+    expect(item.expected).toBeNull();
+  });
 });
 
 describe('PLATFORM_OWNER_EMAIL', () => {

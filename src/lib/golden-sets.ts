@@ -96,10 +96,16 @@ export interface SourceSample {
 }
 
 /**
- * The preference vocabulary a listwise ranking can be derived from. A Map,
+ * The preference vocabulary that can be imported for any protocol. A Map,
  * not an object literal: `{}['constructor']` is a function rather than
  * undefined, so an object lookup keyed on untrusted `expected` text has a
  * prototype hole a Map does not.
+ */
+const ALLOWED_PREFERENCE_LABELS = new Set<string>(['A>B', 'B>A']);
+
+/**
+ * The mapping from preference labels to listwise rankings. Subset of
+ * ALLOWED_PREFERENCE_LABELS with computed values.
  */
 const LISTWISE_RANKING_BY_PREFERENCE = new Map<string, string>([
   ['A>B', '0,1'],
@@ -146,6 +152,17 @@ function readPairResponses(sample: SourceSample): PairResponses {
   return { responseA, responseB };
 }
 
+function validatePreferenceLabel(sample: SourceSample): void {
+  if (sample.expected === null) return;
+  if (!ALLOWED_PREFERENCE_LABELS.has(sample.expected)) {
+    throw new Error(
+      `mapSampleToGoldenItem: dataset sample ${sample.id} has expected ` +
+        `${JSON.stringify(sample.expected)}, which is not an allowed preference label (known ` +
+        `labels: ${[...ALLOWED_PREFERENCE_LABELS].join(', ')})`
+    );
+  }
+}
+
 function toListwiseRanking(sample: SourceSample): string | null {
   if (sample.expected === null) return null;
   const ranking = LISTWISE_RANKING_BY_PREFERENCE.get(sample.expected);
@@ -189,6 +206,7 @@ export function mapSampleToGoldenItem(
   }
 
   if (protocol === 'pairwise') {
+    validatePreferenceLabel(sample);
     return {
       ...base,
       expected: sample.expected,
