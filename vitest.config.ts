@@ -94,12 +94,15 @@ export default defineConfig({
       // test:db and test:integration.
       //
       // Actuals as of 2026-08-12 (stmts/branch/funcs/lines) — updated in
-      // Task 10 (a0) after judgment-schema.ts grew PAIRWISE_JUDGMENT_JSON_SCHEMA
-      // + tryParsePairwiseJudgment, both fully unit-tested (100/100/100/100):
-      //   all-files            36.88 / 84.33 / 66.66 / 36.88
+      // Task 11 (a0) after render.ts grew buildPairwiseUserPrompt/candidateText
+      // and registry.ts grew executePairwiseCall, all unit-tested in
+      // tests/lib/render-pairwise.test.ts + tests/lib/pairwise-execution.test.ts
+      // (the latter driving the real callOpenAICompatible against a mocked
+      // `openai` client, same interception point as tests/lib/backends.test.ts):
+      //   all-files            37.57 / 84.84 / 67.18 / 37.57
       //   src/lib/queue/**     47.30 / 84.37 / 73.33 / 47.30
       //   src/worker/**         3.74 / 100   / 100   /  3.74   <- artifact
-      //   src/lib/llm/**       94.19 / 85.85 / 97.43 / 94.19
+      //   src/lib/llm/**       94.50 / 86.60 / 97.56 / 94.50
       //   scripts/importer/**   6.15 / 83.87 / 10.29 /  6.15
       //   src/lib/realtime/**   1.55 / 80    / 71.42 /  1.55
       thresholds: {
@@ -116,8 +119,9 @@ export default defineConfig({
         // — where those two 100s are the not-imported artifact, not coverage.
         'src/worker/**': { statements: 0, functions: 80, branches: 80, lines: 0 },
         // Provider backends + resilience/registry/render are heavily unit-tested.
-        // Actual: 94.19/85.85/97.43/94.19 (Task 10: judgment-schema.ts's new
-        // pairwise schema + parser landed at 100/100/100/100).
+        // Actual: 94.50/86.60/97.56/94.50 (Task 11: render.ts's pairwise user-
+        // prompt builder + registry.ts's executePairwiseCall, both unit-tested
+        // against the real callOpenAICompatible via a mocked `openai` client).
         'src/lib/llm/**': { statements: 90, functions: 94, branches: 80, lines: 90 },
         // auth-guard.ts is exercised transitively through API route handlers
         // under a live DB (tests/db/access-matrix.test.ts) — not reachable

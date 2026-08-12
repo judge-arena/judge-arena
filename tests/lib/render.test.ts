@@ -153,13 +153,13 @@ describe('render: renderJudgmentSystemPrompt — v1-legacy golden byte-parity', 
     ).toThrow(/PromptTemplate body/);
   });
 
-  it('throws a clear error for a non-pointwise template protocol (not yet implemented)', () => {
+  it('throws a clear error for a listwise template protocol (storable in A0, not runnable)', () => {
     expect(() =>
       renderJudgmentSystemPrompt(
-        { body: V1_LEGACY_JUDGMENT_SYSTEM_PROMPT, protocol: 'pairwise' },
+        { body: V1_LEGACY_JUDGMENT_SYSTEM_PROMPT, protocol: 'listwise' },
         { name: 'x', description: undefined, criteria: [] }
       )
-    ).toThrow(/unsupported PromptTemplate protocol "pairwise"/);
+    ).toThrow(/unsupported PromptTemplate protocol "listwise"/);
   });
 });
 

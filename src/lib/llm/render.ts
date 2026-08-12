@@ -76,10 +76,28 @@ export interface RenderRubric {
   criteria: RubricCriterionView[];
 }
 
+/**
+ * One candidate in a pairwise/listwise comparison set — the render-side
+ * mirror of `RunCandidate` (prisma/schema.prisma:417-427) and A0's new
+ * `GoldenCandidate`. `position` is the STORED ordinal; which letter a
+ * position is presented as is `buildPairwiseUserPrompt`'s decision, driven
+ * by `ModelJudgment.pairOrder` — A0 emits `'AB'` only, so presentation is
+ * ascending `position`.
+ */
+export interface RenderCandidate {
+  position: number;
+  promptText?: string | null;
+  responseText?: string | null;
+  label?: string | null;
+}
+
 export interface RenderSubmission {
   inputText?: string;
   promptText?: string;
   responseText?: string;
+  /** Pairwise/listwise only — the ordered candidate set. Ignored entirely
+   * by the pointwise `buildJudgmentUserPrompt`. */
+  candidates?: RenderCandidate[];
 }
 
 export interface RenderTemplate {
@@ -449,17 +467,21 @@ function buildCriteriaList(criteria: RubricCriterionView[]): string {
  * provider.ts's module doc; nothing references it after this switch).
  */
 export function renderJudgmentSystemPrompt(template: RenderTemplate, rubric: RenderRubric): string {
-  // Protocol-scoped: the rubric+criteria-list context this renderer builds
-  // only makes sense for a pointwise (single-submission, per-criterion
-  // scoring) template. Pairwise/listwise templates need a different
-  // context shape entirely (e.g. two submissions + a selection, not one
-  // submission + scores) — out of scope until a later task actually ships
-  // a pairwise/listwise run path; failing clearly here beats silently
-  // rendering a pointwise-shaped prompt for a protocol it was never
-  // designed for.
-  if (template.protocol !== 'pointwise') {
+  // Protocol-scoped. `pointwise` and `pairwise` share the SAME whitelisted
+  // `TemplateContext` (rubricName / rubricDescription / criteriaList): what
+  // separates them is the stored `PromptTemplate.body` (the seeded
+  // `v1-legacy` row vs. A0's `v1-pairwise` row) and the USER prompt shape
+  // (`buildJudgmentUserPrompt` vs. `buildPairwiseUserPrompt`) — not the set
+  // of identifiers a body is allowed to reference. Widening the protocol
+  // gate therefore needs no new context shape and no new grammar.
+  //
+  // `listwise` still fails loudly. A0 makes listwise golden sets storable
+  // and annotatable but NOT runnable (design doc, "Pairwise execution"), and
+  // silently rendering a two-candidate prompt for a three-plus-candidate
+  // protocol would produce a judgment that looks fine and measures nothing.
+  if (template.protocol === 'listwise') {
     throw new Error(
-      `renderJudgmentSystemPrompt: unsupported PromptTemplate protocol "${template.protocol}" — only "pointwise" is implemented`
+      `renderJudgmentSystemPrompt: unsupported PromptTemplate protocol "${template.protocol}" — only "pointwise" and "pairwise" are implemented`
     );
   }
 
@@ -536,8 +558,71 @@ ${escapeSubmissionDelimiter(inputText)}
 Respond with your evaluation in the specified JSON format.`;
 }
 
+/** The text a candidate contributes to the comparison: `responseText`
+ * first (what an imported JudgeBench pair actually carries), falling back
+ * to `promptText` for a candidate that only has one. */
+function candidateText(candidate: RenderCandidate): string {
+  return (candidate.responseText ?? candidate.promptText ?? '').trim();
+}
+
+/**
+ * Build the user prompt for a PAIRWISE comparison: one question plus
+ * exactly two candidates, presented as "Response A" and "Response B",
+ * inside the same `<submission>` wrapper (and behind the same
+ * `escapeSubmissionDelimiter` prompt-injection guard) the pointwise builder
+ * uses.
+ *
+ * Presentation order follows `position` ascending, which IS the
+ * `pairOrder: 'AB'` that `run-launch.ts` writes on every pairwise
+ * `ModelJudgment`. A0 emits that one order; the `BA` sweep (A2, where
+ * `positionBias` lives) presents position 1 as A and is a second ORDERING
+ * through this same function, not a second prompt shape.
+ *
+ * Exactly two candidates, not "at least two": a third candidate silently
+ * dropped is a listwise item being judged as a pair, and the run would look
+ * successful while measuring the wrong thing.
+ */
+export function buildPairwiseUserPrompt(submission: RenderSubmission): string {
+  const candidates = [...(submission.candidates ?? [])].sort((a, b) => a.position - b.position);
+  if (candidates.length !== 2) {
+    throw new Error(
+      `Cannot build a pairwise judgment prompt: exactly 2 candidates are required, got ${candidates.length}`
+    );
+  }
+
+  const question = submission.inputText?.trim() || submission.promptText?.trim();
+  if (!question) {
+    throw new Error('Cannot build a pairwise judgment prompt: no inputText or promptText provided');
+  }
+
+  const responseA = candidateText(candidates[0]);
+  const responseB = candidateText(candidates[1]);
+  if (!responseA || !responseB) {
+    throw new Error('Cannot build a pairwise judgment prompt: both candidates must carry response text');
+  }
+
+  return `Please compare the two responses below according to the rubric criteria provided.
+
+<submission>
+## Prompt (Input)
+${escapeSubmissionDelimiter(question)}
+
+## Response A
+${escapeSubmissionDelimiter(responseA)}
+
+## Response B
+${escapeSubmissionDelimiter(responseB)}
+</submission>
+
+Decide which response better satisfies the rubric criteria overall.
+Answer "A" if Response A is better, "B" if Response B is better, or "tie" if neither is clearly better.
+Respond with your verdict in the specified JSON format.`;
+}
+
 /** Convenience wrapper producing both prompt halves in one call — what
- * `registry.ts`'s `runProviderJudgment` actually needs. */
+ * `registry.ts`'s `prepareJudgmentCall` actually needs. The protocol branch
+ * lives HERE rather than at the call site, so `prepareJudgmentCall` is
+ * shared verbatim by the pointwise and pairwise execution paths. */
 export function renderJudgmentPrompt(
   template: RenderTemplate,
   rubric: RenderRubric,
@@ -545,6 +630,9 @@ export function renderJudgmentPrompt(
 ): { systemPrompt: string; userPrompt: string } {
   return {
     systemPrompt: renderJudgmentSystemPrompt(template, rubric),
-    userPrompt: buildJudgmentUserPrompt(submission),
+    userPrompt:
+      template.protocol === 'pairwise'
+        ? buildPairwiseUserPrompt(submission)
+        : buildJudgmentUserPrompt(submission),
   };
 }

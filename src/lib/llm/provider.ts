@@ -116,6 +116,14 @@ export interface ProviderCallOptions {
    * pre-Task-11 call sites/tests that never set it keep their exact prior
    * behavior. */
   mode?: 'judgment' | 'respond';
+  /** A0: the JSON schema the structured-output seam should attach for a
+   * `'judgment'`-mode call. Defaults (in `callOpenAICompatible`) to the
+   * pointwise `JUDGMENT_JSON_SCHEMA`; a PAIRWISE call passes
+   * `PAIRWISE_JUDGMENT_JSON_SCHEMA` instead, so a guided-decoding backend
+   * constrains sampling to `{verdict, reasoning}` rather than to a
+   * pointwise score shape the judge was never asked for — which would make
+   * every pairwise run against vLLM/llama.cpp unparseable by construction. */
+  jsonSchema?: Record<string, unknown>;
 }
 
 /** Raw call metadata, captured before any judge-mode score parsing. */

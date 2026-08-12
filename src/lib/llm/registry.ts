@@ -80,6 +80,7 @@ import type { ProviderCallResult, ProviderHeaderConfig } from './provider';
 import { openRouterHeaders } from './backends/openrouter';
 import { vllmStructuredRequestFields } from './backends/vllm';
 import { llamacppStructuredRequestFields } from './backends/llamacpp';
+import { PAIRWISE_JUDGMENT_JSON_SCHEMA, tryParsePairwiseJudgment } from './judgment-schema';
 
 // Re-exported so existing importers of `ProviderHeaderConfig` FROM
 // registry.ts (its original Task 10 home) keep working — the type itself
@@ -432,6 +433,10 @@ export interface ExecuteRequest {
    * callers (e.g. `tests/lib/llm-timeout.test.ts`) keep their exact prior
    * behavior without needing to set it. */
   mode?: 'judgment' | 'respond';
+  /** A0: overrides the schema the structured-output seam attaches for a
+   * `'judgment'`-mode call — see provider.ts's `ProviderCallOptions`.
+   * Unset means the pointwise `JUDGMENT_JSON_SCHEMA`. */
+  jsonSchema?: Record<string, unknown>;
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -488,6 +493,7 @@ export async function execute(descriptor: ProviderDescriptor, request: ExecuteRe
       // (unused parameters); only callOpenAICompatible consults them.
       descriptor,
       mode: request.mode,
+      jsonSchema: request.jsonSchema,
     });
   } catch (error) {
     if (controller.signal.aborted) {
@@ -776,6 +782,79 @@ export async function executeJudgmentCall(prepared: PreparedJudgmentCall): Promi
  */
 export async function runProviderJudgment(input: RunProviderJudgmentInput): Promise<JudgmentResult> {
   return executeJudgmentCall(prepareJudgmentCall(input));
+}
+
+/**
+ * A0's pairwise result — deliberately NOT a variant of `JudgmentResult`.
+ * A pairwise judge emits a PREFERENCE, not a score: `overallScore` and
+ * `criteriaScores` have no meaning for it, and `ModelJudgment.overallScore`
+ * is left NULL for a pairwise judgment rather than filled with a fabricated
+ * number that every downstream average would then quietly consume. Same
+ * "separate non-scoring result type" shape as `RespondResult` below.
+ */
+export interface PairwiseResult {
+  verdict: 'A' | 'B' | 'tie';
+  reasoning: string;
+  rawResponse: string;
+  servedModelId?: string;
+  finishReason?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  latencyMs: number;
+  samplingParamsUsed: SamplingParams;
+}
+
+/**
+ * The network half of a PAIRWISE judge call, for an already-`prepare`d
+ * call. Shares `prepareJudgmentCall` VERBATIM: that step renders through
+ * `render.ts`'s protocol branch, so a `template.protocol === 'pairwise'`
+ * row already yields the pairwise system+user prompt pair. There is no
+ * second prepare path and no second breaker key formula.
+ *
+ * Two differences from `executeJudgmentCall`:
+ * - The structured-output seam is handed `PAIRWISE_JUDGMENT_JSON_SCHEMA`.
+ *   Guided decoding must constrain to `{verdict, reasoning}`; handed the
+ *   pointwise schema, a vLLM/llama.cpp judge would be forced to emit scores
+ *   and no verdict at all.
+ * - ONE parse path. `tryParsePairwiseJudgment` is already fence-tolerant,
+ *   so there is no strict-then-lenient demotion and no `parseMode` to
+ *   persist. A response carrying no usable verdict is `non_retryable`:
+ *   re-asking the same model the same question is not a provider-health
+ *   signal, and classifying it retryable would burn the 3-attempt budget,
+ *   DLQ the judgment, and count three failures against a breaker shared
+ *   with every other correctly-behaving call on the same endpoint+model.
+ */
+export async function executePairwiseCall(prepared: PreparedJudgmentCall): Promise<PairwiseResult> {
+  const raw = await execute(prepared.descriptor, {
+    apiKey: prepared.apiKey,
+    baseUrl: prepared.baseUrl,
+    modelId: prepared.modelId,
+    systemPrompt: prepared.systemPrompt,
+    userPrompt: prepared.userPrompt,
+    samplingParams: prepared.samplingParamsUsed,
+    mode: 'judgment',
+    jsonSchema: PAIRWISE_JUDGMENT_JSON_SCHEMA as unknown as Record<string, unknown>,
+  });
+
+  const parsed = tryParsePairwiseJudgment(raw.text);
+  if (!parsed) {
+    throw new ProviderError(
+      `Pairwise judge response did not contain a usable {verdict, reasoning} object (model "${prepared.modelId}")`,
+      { kind: 'non_retryable', provider: prepared.descriptor.id }
+    );
+  }
+
+  return {
+    verdict: parsed.verdict,
+    reasoning: parsed.reasoning,
+    rawResponse: raw.text,
+    servedModelId: raw.servedModelId,
+    finishReason: raw.finishReason,
+    inputTokens: raw.inputTokens,
+    outputTokens: raw.outputTokens,
+    latencyMs: raw.latencyMs,
+    samplingParamsUsed: prepared.samplingParamsUsed,
+  };
 }
 
 export interface RunProviderResponseInput {
