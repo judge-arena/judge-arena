@@ -29,6 +29,7 @@ import { assertTopology, QUEUE_JUDGMENT_EXECUTE, QUEUE_RUN_CREATE } from '@/lib/
 import { publishJudgmentRetry30s } from '@/lib/queue/publish';
 import { redisHealthy } from '@/lib/redis';
 import { prisma } from '@/lib/db';
+import { flushBackgroundWrites, pendingBackgroundWrites } from '@/lib/background-writes';
 import { logger, serializeError } from '@/lib/logger';
 import { createJudgmentConsumer } from './judgment-consumer';
 import { createRunCreateConsumer } from './run-create-consumer';
@@ -171,6 +172,18 @@ async function main(): Promise<void> {
 
     await new Promise<void>((resolve) => healthServer.close(() => resolve()));
     await closeRabbit();
+
+    // Fire-and-forget writes (audit records, API-key lastUsedAt) are not
+    // awaited by their callers, so without this a write still in flight here
+    // is destroyed by the $disconnect() below — silently, since both call
+    // sites swallow their own errors. Dropping audit records at exactly the
+    // moment a process is being terminated is the worst time to drop them.
+    const pending = pendingBackgroundWrites();
+    if (pending > 0) {
+      logger.info(`flushing ${pending} background write(s) before disconnect`);
+    }
+    await flushBackgroundWrites();
+
     await prisma.$disconnect();
 
     logger.info('worker drained, exiting');

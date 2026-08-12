@@ -4,6 +4,7 @@ import { headers } from 'next/headers';
 import { createHash } from 'crypto';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/db';
+import { trackBackgroundWrite } from '@/lib/background-writes';
 import type { PermissionScope } from '@/lib/permissions';
 import { getClientIp } from '@/lib/client-ip';
 import { apiLimiter } from '@/lib/rate-limit-redis';
@@ -64,10 +65,18 @@ async function authenticateApiKey(): Promise<AuthSession | NextResponse | null> 
     return NextResponse.json({ error: 'API key has expired' }, { status: 403 });
   }
 
-  // Update lastUsedAt (fire-and-forget, don't block the request)
-  prisma.developerApiKey
-    .update({ where: { id: apiKey.id }, data: { lastUsedAt: new Date() } })
-    .catch(() => {}); // Silently ignore update failures
+  // Update lastUsedAt (fire-and-forget, don't block the request).
+  // Registered with the background-write registry so a shutdown or a test
+  // truncate can wait for it rather than deadlock against it — this update
+  // takes a row lock on DeveloperApiKey and an FK check on User, which is
+  // exactly the cycle TRUNCATE ... CASCADE closes. Note the `.catch(() => {})`
+  // below discards the error, so unlike audit() a deadlock here would leave
+  // no trace at all; that is the reason it is tracked and not merely logged.
+  trackBackgroundWrite(
+    prisma.developerApiKey
+      .update({ where: { id: apiKey.id }, data: { lastUsedAt: new Date() } })
+      .catch(() => {}) // Silently ignore update failures
+  );
 
   const scopes: PermissionScope[] = JSON.parse(apiKey.scopes || '[]');
 

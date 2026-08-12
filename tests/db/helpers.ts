@@ -1,4 +1,5 @@
 import { Prisma, PrismaClient } from '@prisma/client';
+import { flushBackgroundWrites } from '@/lib/background-writes';
 
 export const db = new PrismaClient({
   datasources: { db: { url: process.env.TEST_DATABASE_URL } },
@@ -45,6 +46,17 @@ export async function mkRubric(
  * `prisma migrate reset` between tests.
  */
 export async function truncateAll(): Promise<void> {
+  // Drain fire-and-forget writes BEFORE taking TRUNCATE's locks. `audit()`
+  // and auth-guard's `lastUsedAt` bump are not awaited by their callers, so
+  // one can still be in flight when the next test's beforeEach runs. TRUNCATE
+  // ... CASCADE takes an AccessExclusiveLock on every table while that INSERT
+  // holds AuditLog and waits on a User FK check — a lock cycle, and Postgres
+  // kills one side of it (40P01). Which side is Postgres's choice: when it
+  // picks the write, the error is swallowed and the suite stays green; when
+  // it picks the TRUNCATE, this function rejects and an unrelated test goes
+  // red. Observed on the DB-backed CI Job's second run, not its first.
+  await flushBackgroundWrites();
+
   const tables = await db.$queryRaw<Array<{ tablename: string }>>`
     SELECT tablename FROM pg_tables
     WHERE schemaname = 'public' AND tablename != '_prisma_migrations'

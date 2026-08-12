@@ -7,6 +7,7 @@
 
 import { prisma } from '@/lib/db';
 import { logger } from '@/lib/logger';
+import { trackBackgroundWrite } from '@/lib/background-writes';
 
 export type AuditAction =
   | 'user.register'
@@ -48,7 +49,10 @@ export interface AuditEntry {
  * Record an audit log entry. Fire-and-forget — does not throw.
  */
 export function audit(entry: AuditEntry): void {
-  prisma.auditLog
+  // Registered, not awaited. The caller still returns immediately; the
+  // registry is what lets a shutdown or a truncate wait for this write
+  // instead of racing it. See src/lib/background-writes.ts.
+  const write = prisma.auditLog
     .create({
       data: {
         userId: entry.userId ?? null,
@@ -66,6 +70,8 @@ export function audit(entry: AuditEntry): void {
         error: error instanceof Error ? error.message : String(error),
       });
     });
+
+  trackBackgroundWrite(write);
 }
 
 /**
