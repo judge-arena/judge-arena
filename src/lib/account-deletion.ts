@@ -30,6 +30,11 @@
  *     (`onDelete: Restrict` on CalibrationRun.goldenSetId) can't be
  *     hard-deleted either, for the identical reason (1b-prereq (a), closed
  *     by Task 15) — it's soft-retired (`retiredAt` set, row kept) instead.
+ *     That "is anything still referencing it" test is the golden-set FREEZE
+ *     PREDICATE, and it has exactly one definition — `isGoldenSetFrozen` in
+ *     src/lib/golden-sets.ts — shared with the golden-set route guards so
+ *     the account-lifecycle path and the product path cannot drift into
+ *     disagreeing about what "frozen" means (A0, "Freeze and fork").
  *     Unlike Rubric.userId (`onDelete: Cascade`), GoldenSet.ownerId is
  *     `onDelete: SetNull`, so a retired GoldenSet needs no ownership
  *     reassignment to survive the final `user.delete()` — it resolves to
@@ -45,6 +50,7 @@
  */
 
 import { prisma } from '@/lib/db';
+import { isGoldenSetFrozen } from '@/lib/golden-sets';
 
 export interface DeleteUserAccountResult {
   purged: Record<string, number>;
@@ -163,11 +169,13 @@ export async function deleteUserAccount(
     let purgedGoldenSetCount = 0;
     let retiredGoldenSetCount = 0;
     for (const goldenSet of privateGoldenSets) {
-      const pinningCalibrationRunCount = await tx.calibrationRun.count({
-        where: { goldenSetId: goldenSet.id },
-      });
-
-      if (pinningCalibrationRunCount > 0) {
+      // Shared predicate — see src/lib/golden-sets.ts. `tx` is passed
+      // through rather than the singleton so this count and the update or
+      // delete that follows it stay in ONE transaction: a CalibrationRun
+      // that starts between them would otherwise pin a set this loop has
+      // already decided to hard-delete, and the delete aborts the whole
+      // account deletion on a P2003.
+      if (await isGoldenSetFrozen(tx, goldenSet.id)) {
         await tx.goldenSet.update({
           where: { id: goldenSet.id },
           data: { retiredAt: new Date() },

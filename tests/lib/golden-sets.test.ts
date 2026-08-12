@@ -1,6 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import type { Prisma } from '@prisma/client';
 import {
+  GoldenSetFrozenError,
   PLATFORM_OWNER_EMAIL,
+  isGoldenSetFrozen,
   mapSampleToGoldenItem,
   type SourceSample,
 } from '@/lib/golden-sets';
@@ -195,6 +198,45 @@ describe('mapSampleToGoldenItem — a corrupt source row fails loudly', () => {
   it('pairwise: null expected passes through without error', () => {
     const item = mapSampleToGoldenItem({ ...SAMPLE, expected: null }, 'pairwise', 0);
     expect(item.expected).toBeNull();
+  });
+});
+
+/** A transaction client that answers exactly one question, so the predicate's
+ *  shape can be asserted without a database (tests/db/golden-set-freeze.test.ts
+ *  asserts it against the real FK). */
+function stubTx(calibrationRunCount: number) {
+  const count = vi.fn().mockResolvedValue(calibrationRunCount);
+  return { tx: { calibrationRun: { count } } as unknown as Prisma.TransactionClient, count };
+}
+
+describe('isGoldenSetFrozen', () => {
+  it('is false when no calibration run references the set', async () => {
+    const { tx, count } = stubTx(0);
+
+    expect(await isGoldenSetFrozen(tx, 'gs-1')).toBe(false);
+    // The where clause is the whole predicate, and `finishedAt` is
+    // deliberately absent from it: CalibrationRun has no status enum, only
+    // startedAt/finishedAt, so "still running" and "crashed" are the same
+    // state — excluding unfinished runs would let a crashed run's set drift
+    // underneath the numbers it already produced.
+    expect(count).toHaveBeenCalledWith({ where: { goldenSetId: 'gs-1' } });
+  });
+
+  it('is true as soon as one calibration run references the set', async () => {
+    const { tx } = stubTx(1);
+    expect(await isGoldenSetFrozen(tx, 'gs-1')).toBe(true);
+  });
+});
+
+describe('GoldenSetFrozenError', () => {
+  it('carries the golden set id, names itself, and points at the fork', () => {
+    const error = new GoldenSetFrozenError('gs-1');
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.name).toBe('GoldenSetFrozenError');
+    expect(error.goldenSetId).toBe('gs-1');
+    expect(error.message).toContain('gs-1');
+    expect(error.message).toMatch(/fork/i);
   });
 });
 

@@ -55,7 +55,7 @@
  * perfectly well-formed set.
  */
 
-import type { RunProtocol } from '@prisma/client';
+import type { Prisma, RunProtocol } from '@prisma/client';
 
 /**
  * Owner of every corpus a golden set may be built from. Duplicated from
@@ -226,4 +226,59 @@ export function mapSampleToGoldenItem(
   // from an unvalidated caller, which must not silently get a listwise item.
   const unsupported: never = protocol;
   throw new Error(`mapSampleToGoldenItem: unsupported protocol ${String(unsupported)}`);
+}
+
+/**
+ * ─── Freeze ────────────────────────────────────────────────────────────────
+ *
+ * A golden set is frozen iff any CalibrationRun references it:
+ *
+ *     frozen(goldenSetId) := calibrationRun.count({ where: { goldenSetId } }) > 0
+ *
+ * WHAT FREEZES is item content — items, candidates, `protocol`, `expected`,
+ * and the set's `datasetId`. WHAT DOES NOT is `name`, `description`,
+ * `visibility`, `retiredAt`: renaming a set changes nothing a calibration run
+ * measured, and refusing a typo fix is hostile and buys nothing.
+ *
+ * `finishedAt` IS NOT CONSULTED. CalibrationRun has no status enum, only
+ * `startedAt`/`finishedAt`, so "still running" and "crashed" are the same
+ * state; excluding unfinished runs would let a crashed run's set drift
+ * underneath the numbers it already produced.
+ *
+ * IT TAKES THE CALLER'S TRANSACTION CLIENT, deliberately. The count and the
+ * mutation it guards must commit or roll back together — separated, a
+ * calibration run that starts between them measures a set that changed
+ * underneath it, and nothing logs.
+ *
+ * ONE DEFINITION, TWO CALLERS. `src/lib/account-deletion.ts` had this
+ * predicate inline first (its golden-set branch, closing 1b-prereq (a)); it
+ * now calls this function, so the account-lifecycle path and the golden-set
+ * write-guards cannot drift into disagreeing about what "frozen" means.
+ */
+
+export async function isGoldenSetFrozen(
+  tx: Prisma.TransactionClient,
+  goldenSetId: string
+): Promise<boolean> {
+  const pinningCalibrationRunCount = await tx.calibrationRun.count({ where: { goldenSetId } });
+  return pinningCalibrationRunCount > 0;
+}
+
+/**
+ * Thrown by a write-guard that refused to change the content of a frozen set.
+ * Routes map it to a 409 whose body points at POST /api/golden-sets/[id]/fork
+ * — the whole point of decision #6 is that editing a measured set is not
+ * forbidden, it is redirected to a new version.
+ */
+export class GoldenSetFrozenError extends Error {
+  readonly goldenSetId: string;
+
+  constructor(goldenSetId: string) {
+    super(
+      `Golden set ${goldenSetId} is frozen: a calibration run has already measured it. ` +
+        'Fork it to a new version to change its items.'
+    );
+    this.name = 'GoldenSetFrozenError';
+    this.goldenSetId = goldenSetId;
+  }
 }
