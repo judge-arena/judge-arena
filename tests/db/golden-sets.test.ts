@@ -8,6 +8,11 @@ import {
   PATCH as patchGoldenSet,
   DELETE as deleteGoldenSet,
 } from '@/app/api/golden-sets/[id]/route';
+import {
+  GET as getItems,
+  PATCH as patchItems,
+  DELETE as deleteItems,
+} from '@/app/api/golden-sets/[id]/items/route';
 
 vi.mock('next-auth', () => ({ getServerSession: vi.fn() }));
 vi.mock('next/headers', () => ({ headers: vi.fn(async () => new Headers()) }));
@@ -498,5 +503,224 @@ describe('DELETE /api/golden-sets/[id] — tombstone, never a row delete', () =>
     );
     expect(res.status).toBe(200);
     await expect(db.calibrationRun.count({ where: { goldenSetId: goldenSet.id } })).resolves.toBe(1);
+  });
+});
+
+describe('/api/golden-sets/[id]/items', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('GET exists (unlike datasets/[id]/samples) and returns items with candidates in the {data, pagination} envelope', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 5 });
+
+    mockSessionFor(owner);
+    const res = await getItems(
+      new Request(`http://localhost/api/golden-sets/${goldenSet.id}/items`),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.data).toHaveLength(5);
+    expect(body.pagination.total).toBe(5);
+    expect(body.data.map((i: any) => i.index)).toEqual([0, 1, 2, 3, 4]);
+    expect(body.data[0].candidates).toHaveLength(2);
+  });
+
+  it('GET on a PUBLIC set is readable anonymously; on a PRIVATE set it is 401', async () => {
+    const owner = await mkUser();
+    const { goldenSet: pub } = await mkGoldenSet(owner.id, { visibility: 'public' });
+    const { goldenSet: priv } = await mkGoldenSet(owner.id, { visibility: 'private' });
+
+    (getServerSession as unknown as Mock).mockResolvedValue(null);
+    const open = await getItems(new Request(`http://localhost/api/golden-sets/${pub.id}/items`), {
+      params: Promise.resolve({ id: pub.id }),
+    });
+    expect(open.status).toBe(200);
+
+    const closed = await getItems(new Request(`http://localhost/api/golden-sets/${priv.id}/items`), {
+      params: Promise.resolve({ id: priv.id }),
+    });
+    expect(closed.status).toBe(401);
+  });
+
+  it('PATCH updates per-item expected on an uncalibrated set', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 2 });
+    const items = await db.goldenItem.findMany({
+      where: { goldenSetId: goldenSet.id },
+      orderBy: { index: 'asc' },
+    });
+
+    mockSessionFor(owner);
+    const res = await patchItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'PATCH', {
+        items: [
+          { id: items[0].id, expected: 'B>A' },
+          { id: items[1].id, expected: null, inputText: 'edited question' },
+        ],
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).updated).toBe(2);
+
+    const after = await db.goldenItem.findMany({
+      where: { goldenSetId: goldenSet.id },
+      orderBy: { index: 'asc' },
+    });
+    expect(after[0].expected).toBe('B>A');
+    expect(after[1].expected).toBeNull();
+    expect(after[1].inputText).toBe('edited question');
+  });
+
+  it('PATCH drops an item\'s GoldenLabel rows when its content actually changes, but a same-value field leaves labels alone', async () => {
+    // Task 4's forkGoldenSet (src/lib/golden-set-versions.ts) copies
+    // GoldenLabel rows unconditionally and names THIS handler as the owner
+    // of decision #5's "copy, except on edited items" clause: an annotator's
+    // score must never end up attached to text they did not see.
+    const owner = await mkUser();
+    const annotator = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 2 });
+    const items = await db.goldenItem.findMany({
+      where: { goldenSetId: goldenSet.id },
+      orderBy: { index: 'asc' },
+    });
+    const label0 = await db.goldenLabel.create({
+      data: { goldenItemId: items[0].id, annotatorId: annotator.id, overallScore: 7 },
+    });
+    const label1 = await db.goldenLabel.create({
+      data: { goldenItemId: items[1].id, annotatorId: annotator.id, overallScore: 5 },
+    });
+
+    mockSessionFor(owner);
+    const res = await patchItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'PATCH', {
+        items: [
+          { id: items[0].id, inputText: 'a genuinely different question' },
+          { id: items[1].id, expected: items[1].expected }, // restates the current value: not a change
+        ],
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(200);
+
+    // Item 0's content changed -> its label is dropped.
+    await expect(db.goldenLabel.findUnique({ where: { id: label0.id } })).resolves.toBeNull();
+    // Item 1's payload restated its existing value -> not a content change -> label survives.
+    await expect(db.goldenLabel.findUnique({ where: { id: label1.id } })).resolves.not.toBeNull();
+  });
+
+  it('PATCH 409s on a CALIBRATED set and writes nothing', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 2 });
+    await mkCalibrationRun(goldenSet.id);
+    const items = await db.goldenItem.findMany({
+      where: { goldenSetId: goldenSet.id },
+      orderBy: { index: 'asc' },
+    });
+
+    mockSessionFor(owner);
+    const res = await patchItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'PATCH', {
+        items: [{ id: items[0].id, expected: 'B>A' }],
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(409);
+    expect((await res.json()).forkUrl).toBe(`/api/golden-sets/${goldenSet.id}/fork`);
+
+    const after = await db.goldenItem.findUniqueOrThrow({ where: { id: items[0].id } });
+    expect(after.expected).toBe(items[0].expected);
+  });
+
+  it('PATCH 400s on an item id belonging to a DIFFERENT golden set', async () => {
+    const owner = await mkUser();
+    const { goldenSet: a } = await mkGoldenSet(owner.id, { itemCount: 1 });
+    const { goldenSet: b } = await mkGoldenSet(owner.id, { itemCount: 1 });
+    const foreign = await db.goldenItem.findFirstOrThrow({ where: { goldenSetId: b.id } });
+
+    mockSessionFor(owner);
+    const res = await patchItems(
+      jsonRequest(`http://localhost/api/golden-sets/${a.id}/items`, 'PATCH', {
+        items: [{ id: foreign.id, expected: 'B>A' }],
+      }),
+      { params: Promise.resolve({ id: a.id }) }
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it('DELETE re-indexes the survivors 0..n-1 inside the transaction — @@unique([goldenSetId, index]) makes a gap a bug, not cosmetic', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 5 });
+    const items = await db.goldenItem.findMany({
+      where: { goldenSetId: goldenSet.id },
+      orderBy: { index: 'asc' },
+    });
+
+    mockSessionFor(owner);
+    const res = await deleteItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'DELETE', {
+        itemIds: [items[0].id, items[2].id],
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ deleted: 2, remaining: 3 });
+
+    const after = await db.goldenItem.findMany({
+      where: { goldenSetId: goldenSet.id },
+      orderBy: { index: 'asc' },
+    });
+    expect(after.map((i) => i.index)).toEqual([0, 1, 2]);
+    expect(after.map((i) => i.id)).toEqual([items[1].id, items[3].id, items[4].id]);
+
+    // GoldenCandidate cascades off GoldenItem.
+    await expect(
+      db.goldenCandidate.count({ where: { goldenItemId: { in: [items[0].id, items[2].id] } } })
+    ).resolves.toBe(0);
+  });
+
+  it('DELETE 409s on a CALIBRATED set, deleting nothing', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 3 });
+    await mkCalibrationRun(goldenSet.id);
+    const items = await db.goldenItem.findMany({ where: { goldenSetId: goldenSet.id } });
+
+    mockSessionFor(owner);
+    const res = await deleteItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'DELETE', {
+        itemIds: [items[0].id],
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(409);
+    await expect(db.goldenItem.count({ where: { goldenSetId: goldenSet.id } })).resolves.toBe(3);
+  });
+
+  it('a stranger cannot PATCH or DELETE items on someone else\'s set', async () => {
+    const owner = await mkUser();
+    const stranger = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 2 });
+    const item = await db.goldenItem.findFirstOrThrow({ where: { goldenSetId: goldenSet.id } });
+
+    mockSessionFor(stranger);
+    const patched = await patchItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'PATCH', {
+        items: [{ id: item.id, expected: 'B>A' }],
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(patched.status).toBe(403);
+
+    const deleted = await deleteItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'DELETE', {
+        itemIds: [item.id],
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(deleted.status).toBe(403);
   });
 });
