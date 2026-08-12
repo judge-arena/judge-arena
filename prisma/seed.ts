@@ -18,6 +18,22 @@ import { seedAll } from './seed-core';
  * entry: there is no `prisma.seed` key in package.json, the deployed runner
  * has no TypeScript toolchain, and the Prisma CLI lives at an isolated prefix
  * (/opt/prisma-cli) that cannot see the app's modules.
+ *
+ * ── RUNNING IT AGAINST THE DEPLOYED CLUSTER ───────────────────────────────
+ * Nothing invokes this automatically. The chart runs `migrate deploy` from a
+ * pre-install/pre-upgrade Helm hook, but there is no seed hook, so seeding is
+ * an explicit operator action:
+ *
+ *     kubectl -n tenant-public exec deploy/judge-arena-web -- node /app/seed.js
+ *
+ * It is idempotent, so a second run is safe and reports zero new rows. It
+ * needs an image built from this commit or later — check /app/seed.js exists
+ * before assuming an older pod can do it.
+ *
+ * Deliberately manual for now. A post-install/post-upgrade hook would seed on
+ * every chart upgrade, which is safe given idempotency but means a catalog
+ * change ships silently with an unrelated deploy. That is a decision worth
+ * making explicitly rather than inheriting from this file.
  */
 const prisma = new PrismaClient();
 
