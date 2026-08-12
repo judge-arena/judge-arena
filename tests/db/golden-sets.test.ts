@@ -13,6 +13,8 @@ import {
   PATCH as patchItems,
   DELETE as deleteItems,
 } from '@/app/api/golden-sets/[id]/items/route';
+import { POST as forkRoute } from '@/app/api/golden-sets/[id]/fork/route';
+import { POST as retireRoute } from '@/app/api/golden-sets/[id]/retire/route';
 
 vi.mock('next-auth', () => ({ getServerSession: vi.fn() }));
 vi.mock('next/headers', () => ({ headers: vi.fn(async () => new Headers()) }));
@@ -722,5 +724,168 @@ describe('/api/golden-sets/[id]/items', () => {
       { params: Promise.resolve({ id: goldenSet.id }) }
     );
     expect(deleted.status).toBe(403);
+  });
+});
+
+describe('POST /api/golden-sets/[id]/fork', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('forks a CALIBRATED set to version 2 under the same root, inheriting datasetId and protocol', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 3 });
+    await mkCalibrationRun(goldenSet.id);
+
+    mockSessionFor(owner);
+    const res = await forkRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/fork`, 'POST', {}),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(201);
+    const body = await res.json();
+
+    expect(body.version).toBe(2);
+    expect(body.parentId).toBe(goldenSet.id);
+    expect(body.datasetId).toBe(goldenSet.datasetId);
+    expect(body.protocol).toBe(goldenSet.protocol);
+    expect(body.ownerId).toBe(owner.id);
+    expect(body._count.items).toBe(3);
+    expect(body.items).toHaveLength(3);
+    expect(body.items[0].candidates).toHaveLength(2);
+
+    // The original is untouched — a fork is additive.
+    const original = await db.goldenSet.findUniqueOrThrow({ where: { id: goldenSet.id } });
+    expect(original.version).toBe(1);
+    await expect(db.goldenItem.count({ where: { goldenSetId: goldenSet.id } })).resolves.toBe(3);
+  });
+
+  it('forking a v2 keeps the ROOT as parentId (existing.parentId ?? existing.id) rather than chaining', async () => {
+    const owner = await mkUser();
+    const { goldenSet: root } = await mkGoldenSet(owner.id, { itemCount: 2 });
+
+    mockSessionFor(owner);
+    const first = await forkRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${root.id}/fork`, 'POST', {}),
+      { params: Promise.resolve({ id: root.id }) }
+    );
+    const v2 = await first.json();
+
+    const second = await forkRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${v2.id}/fork`, 'POST', {}),
+      { params: Promise.resolve({ id: v2.id }) }
+    );
+    expect(second.status).toBe(201);
+    const v3 = await second.json();
+    expect(v3.version).toBe(3);
+    expect(v3.parentId).toBe(root.id);
+  });
+
+  it('accepts an overriding name/description, and works with no request body at all', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 1 });
+
+    mockSessionFor(owner);
+    const named = await forkRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/fork`, 'POST', {
+        name: 'Renamed fork',
+        description: 'why I forked',
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    const namedBody = await named.json();
+    expect(namedBody.name).toBe('Renamed fork');
+    expect(namedBody.description).toBe('why I forked');
+
+    const bodyless = await forkRoute(
+      new Request(`http://localhost/api/golden-sets/${goldenSet.id}/fork`, { method: 'POST' }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(bodyless.status).toBe(201);
+    expect((await bodyless.json()).name).toBe(goldenSet.name);
+  });
+
+  it('is 404 on an unknown id and 403 for a stranger', async () => {
+    const owner = await mkUser();
+    const stranger = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 1 });
+
+    mockSessionFor(owner);
+    const missing = await forkRoute(
+      jsonRequest('http://localhost/api/golden-sets/nope/fork', 'POST', {}),
+      { params: Promise.resolve({ id: 'nope' }) }
+    );
+    expect(missing.status).toBe(404);
+
+    mockSessionFor(stranger);
+    const forbidden = await forkRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/fork`, 'POST', {}),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(forbidden.status).toBe(403);
+  });
+});
+
+describe('POST /api/golden-sets/[id]/retire', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('stamps retiredAt and takes the set out of the list, and retire is NOT freeze-guarded', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+    await mkCalibrationRun(goldenSet.id);
+
+    mockSessionFor(owner);
+    const res = await retireRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/retire`, 'POST', {}),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).retiredAt).not.toBeNull();
+
+    const listed = await listGoldenSets(new Request('http://localhost/api/golden-sets'));
+    expect((await listed.json()).data).toHaveLength(0);
+  });
+
+  it('retired: false un-retires — the reader and the writer agree', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+    await db.goldenSet.update({ where: { id: goldenSet.id }, data: { retiredAt: new Date() } });
+
+    mockSessionFor(owner);
+    const res = await retireRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/retire`, 'POST', {
+        retired: false,
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).retiredAt).toBeNull();
+
+    const listed = await listGoldenSets(new Request('http://localhost/api/golden-sets'));
+    expect((await listed.json()).data.map((g: any) => g.id)).toEqual([goldenSet.id]);
+  });
+
+  it('a stranger gets 403 and an anonymous caller 401', async () => {
+    const owner = await mkUser();
+    const stranger = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+
+    mockSessionFor(stranger);
+    const forbidden = await retireRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/retire`, 'POST', {}),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(forbidden.status).toBe(403);
+
+    (getServerSession as unknown as Mock).mockResolvedValue(null);
+    const anon = await retireRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/retire`, 'POST', {}),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(anon.status).toBe(401);
   });
 });
