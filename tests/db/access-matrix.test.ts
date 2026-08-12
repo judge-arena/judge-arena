@@ -1117,4 +1117,85 @@ describe('Access matrix — golden-set sub-routes (/fork, /retire) and list', ()
     });
     expect(res.status).toBe(403);
   });
+
+  // ── golden-sets:write scope on the two mutation sub-routes ──────────────
+  // A session-authenticated caller never exercises requireScope (session
+  // auth has no apiKeyScopes, so requireScope short-circuits to "allowed"
+  // regardless of the scope name passed) — only a developer API key can
+  // prove the 'golden-sets:write' check on fork/route.ts and retire/route.ts
+  // is real and not dead code. The key's OWNER is the target set's owner in
+  // both rejection tests below, so ownership would otherwise pass; only the
+  // missing scope can be what turns these into 403s.
+
+  it('a scoped key holding golden-sets:read but NOT golden-sets:write is 403 on POST fork, even though its owner OWNS the target set', async () => {
+    const target = await mkGoldenSet(ctx.ownerId, 'public');
+    const rawKey = `vgk_${Buffer.from(uniq('gs-scoped-fork-noread')).toString('base64url')}`;
+    const keyHash = createHash('sha256').update(rawKey).digest('hex');
+    await db.developerApiKey.create({
+      data: {
+        userId: ctx.ownerId, // the set's actual owner — ownership alone would pass
+        name: 'Read-Only Golden-Set Key',
+        prefix: rawKey.slice(0, 12),
+        keyHash,
+        scopes: JSON.stringify(['golden-sets:read']), // deliberately NOT golden-sets:write
+      },
+    });
+    (headers as unknown as Mock).mockImplementation(
+      async () => new Headers({ authorization: `Bearer ${rawKey}` })
+    );
+
+    const res = await forkGoldenSetRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${target.id}/fork`, 'POST', {}),
+      { params: Promise.resolve({ id: target.id }) }
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it('a scoped key holding golden-sets:read but NOT golden-sets:write is 403 on POST retire, even though its owner OWNS the target set', async () => {
+    const target = await mkGoldenSet(ctx.ownerId, 'public');
+    const rawKey = `vgk_${Buffer.from(uniq('gs-scoped-retire-noread')).toString('base64url')}`;
+    const keyHash = createHash('sha256').update(rawKey).digest('hex');
+    await db.developerApiKey.create({
+      data: {
+        userId: ctx.ownerId, // the set's actual owner — ownership alone would pass
+        name: 'Read-Only Golden-Set Key',
+        prefix: rawKey.slice(0, 12),
+        keyHash,
+        scopes: JSON.stringify(['golden-sets:read']), // deliberately NOT golden-sets:write
+      },
+    });
+    (headers as unknown as Mock).mockImplementation(
+      async () => new Headers({ authorization: `Bearer ${rawKey}` })
+    );
+
+    const res = await retireGoldenSetRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${target.id}/retire`, 'POST', {}),
+      { params: Promise.resolve({ id: target.id }) }
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it('a scoped key holding golden-sets:write DOES succeed on POST fork — the scope check above rejects on the missing scope specifically, not every API key', async () => {
+    const target = await mkGoldenSet(ctx.ownerId, 'public');
+    const rawKey = `vgk_${Buffer.from(uniq('gs-scoped-fork-write')).toString('base64url')}`;
+    const keyHash = createHash('sha256').update(rawKey).digest('hex');
+    await db.developerApiKey.create({
+      data: {
+        userId: ctx.ownerId,
+        name: 'Write-Scoped Golden-Set Key',
+        prefix: rawKey.slice(0, 12),
+        keyHash,
+        scopes: JSON.stringify(['golden-sets:write']),
+      },
+    });
+    (headers as unknown as Mock).mockImplementation(
+      async () => new Headers({ authorization: `Bearer ${rawKey}` })
+    );
+
+    const res = await forkGoldenSetRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${target.id}/fork`, 'POST', {}),
+      { params: Promise.resolve({ id: target.id }) }
+    );
+    expect(res.status).toBe(201);
+  });
 });
