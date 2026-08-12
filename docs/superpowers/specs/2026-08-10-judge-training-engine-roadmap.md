@@ -1,8 +1,9 @@
 # Roadmap A: the judge training engine
 
 **Date:** 2026-08-10 · **Last verified against the live cluster:** 2026-08-12
-**Status:** preflight cleared; A0 unblocked pending one deploy + seed. Six owner decisions open, two
-of which (#3, #6) should be settled before A0 is written.
+**Status:** preflight cleared, DB-backed CI live. A0 unblocked pending one deploy + seed. Four owner
+decisions remain open; **#3 and #6, the two that gate A0, were settled 2026-08-12** — weighted kappa
+with the threshold stored as data, and golden sets immutable once a `CalibrationRun` references them.
 **Scope:** labelling, entry, human verification, and distillation — everything whose purpose is
 **producing a stronger judge.**
 **Sibling:** `2026-08-10-benchmark-sharing-roadmap.md` (Roadmap B) measures and publishes the
@@ -104,7 +105,7 @@ building Roadmap A end to end? Everything below is verified, not inferred.
 | 8 | WAL archiving + rehearsed restore (T2) | **done** — 6/6 exit gate verified, RTO measured |
 | 9 | `lanEgress` declares the dev endpoint | **done** |
 | — | **Deploy + seed the built image** | **OPEN — this is the only thing between here and A0** |
-| — | **CI cannot run the DB or integration suites** | **OPEN — the largest unlisted risk** |
+| — | CI cannot run the DB or integration suites | **done 2026-08-12** — ephemeral Job with service sidecars; 286 DB + 74 integration tests green in CI, `build-push` gates on it |
 | 7 | RabbitMQ scrape/alerts/cap (T5) | **OPEN — gates A2** |
 | 4,5,6 | `startedAt`, format-compliance, token rollup | OPEN — needed during A |
 | 11 | Golden sets absent from round-trip coverage | OPEN — A0's own exit gate |
@@ -207,13 +208,41 @@ the first is larger than several that were.
     the suite CI cannot run. Unit tests + typecheck will stay green while a uniqueness constraint or
     an aggregation window is wrong.
 
-    **The fix is designed and cheap relative to the exposure:** spawn ONE ephemeral k8s Job in
-    `tenant-builds` whose pod carries postgres/redis/rabbitmq as **sidecar containers** alongside a
-    `node:22-alpine` main container. Sidecars in a pod share a network namespace, so `localhost:5432`
-    works exactly as the `services:` block intended, and it reuses the kaniko spawn + heartbeat-wait
-    pattern already in `build-push`. The runner can already create Jobs in `tenant-builds` and read
-    their logs (verified) — but **not** bare Pods, so it must be a Job. Do this *before* A0, not
-    after: the difference is 24 days of DB code with tests versus without.
+    > **CLEARED 2026-08-12 (preflight Stage 6).** One ephemeral k8s Job in `tenant-builds` whose pod
+    > carries postgres/redis/rabbitmq alongside a `node:22-alpine` test container. Containers in a pod
+    > share a network namespace, so `localhost:5432` works exactly as the `services:` block intended.
+    > Shipped as `templates/gitea-workflows/db-test-job.yaml.tmpl` in homelab-setup plus a `db-tests`
+    > job in `.gitea/workflows/ci.yml`; `build-push` gates on it. The runner can create Jobs in
+    > `tenant-builds` but **not** bare Pods (verified), so it had to be a Job.
+    >
+    > **The word "sidecar" was doing more work than it looked.** They must be `initContainers` with
+    > `restartPolicy: Always` — k8s *native* sidecars, GA in 1.33, and this cluster is v1.34.3. As
+    > plain `containers:` entries the Job never reaches `Complete`, because that requires every
+    > `containers:` entry to terminate and postgres never exits: the run would hang to
+    > `activeDeadlineSeconds` and report `DeadlineExceeded` **whether or not the tests passed**. Red
+    > on success, on the one suite this item exists to make trustworthy.
+    >
+    > **Verified by running it, not by dry-run:** against `fc788e1`, Job `Complete` in **100 seconds**,
+    > **286/286** DB tests (26 files) and **74/74** integration tests (9 files).
+    >
+    > **And "available" was not the same as "works".** `linstor-scheduler-admission` fires on every Pod
+    > CREATE cluster-wide, is compiled against `k8s.io/api v0.25.6`, and JSON-patch-diffs the pod
+    > through that old struct — so it emits a `remove` op for `initContainers[N].restartPolicy` and
+    > silently turns native sidecars back into ordinary init containers, wedging the pod at `Init:1/5`.
+    > The pod template needs `admission.homelab.asethi.com/skip-linstor-scheduler: "true"`. This is
+    > homelab divergence **#24**, already fixed in-repo with a scoping patch and an admission probe —
+    > and nothing in this roadmap or the preflight plan found it, because every surface a reader would
+    > check says the feature is on: version v1.34.3, schema documents it, feature gate reports enabled,
+    > and the Job stores the field. Only the Pod strips it. Same lesson as the barman deprecation.
+    >
+    > Three smaller corrections worth carrying: it reuses `templates/gitea-workflows/test-job.yaml.tmpl`
+    > (PR #635), not the kaniko template — that file already settled the clone/scrub/token posture;
+    > **two** databases are required, because `vitest.db.config.ts` also includes
+    > `tests/importer/**/*.db.test.ts` which reads `V1_DATABASE_URL` → `judge_arena_v1`; and
+    > `envsubst` must be given an explicit variable list, or it expands the shell variables inside the
+    > template and disables the guard that keeps `prisma migrate reset --force` pointed at localhost.
+    > Plus: `capabilities.drop: [ALL]` crash-loops all three service images, whose entrypoints chown as
+    > root before dropping privileges — `baseline` permits the default capability set, `restricted` does not.
 
 13. **`judge-arena-pg` is `instances: 1`, and its PDB permits zero disruptions.** Verified
     2026-08-12: `judge-arena-pg-primary` reports ALLOWED DISRUPTIONS **0**. Two consequences that
@@ -587,8 +616,8 @@ its supporting metrics are recorded.
 
 | Decision | Gates | Why it cannot wait |
 |---|---|---|
-| **#3** canonical agreement statistic + threshold | **A0/A1** | A1's exit gate is literally "reports an agreement number **with a stated method**". Storing the threshold as data rather than a constant is a schema-adjacent choice A0 makes. |
-| **#6** golden set immutable once referenced | **A0** | Decides whether A0's CRUD needs a write-guard at all. `CalibrationRun.goldenSetId` is already `onDelete: Restrict`, so the schema is halfway there — finishing it later means migrating rows that were mutable. |
+| ~~**#3** canonical agreement statistic + threshold~~ | ~~A0/A1~~ | **RESOLVED 2026-08-12** — weighted kappa, threshold stored as data. See below. |
+| ~~**#6** golden set immutable once referenced~~ | ~~A0~~ | **RESOLVED 2026-08-12** — yes, immutable once a `CalibrationRun` references it. See below. |
 | **#5** who may annotate whose data | **A1** | Only once a second account exists — but the labelling UI's ownership checks are written in A1. |
 | **#4** `biasSensitivityRate` perturbation set | **A2/A3** | Its value is meaningless without its definition; needs versioning from the first run. |
 | **#7** PPI configuration | **A2/A3** | An interval is only worth computing if something acts on it. |
@@ -603,15 +632,37 @@ its supporting metrics are recorded.
    evaluations as a public good, and users may opt in to contribute theirs. This is better than the
    platform-owned-reference-judges design it replaces, because the corpus seeds itself from
    dogfooding and grows by consent instead of needing to be provisioned before the feature works.
-3. **Which agreement statistic is canonical**, and what is the pass threshold? Recommend a weighted
-   kappa for ordinal scores, with the threshold stored as data rather than a constant.
+3. **RESOLVED 2026-08-12 — weighted kappa, and the threshold is data, not a constant.** Scores are
+   ordinal, so an unweighted kappa treats "4 vs 5" as exactly as wrong as "1 vs 5" and understates
+   agreement; the weighted variant is the honest one. Two obligations follow, both on A0/A1:
+
+   - **A1 must name the method it used, per run.** Cohen's for two annotators, Fleiss's for more —
+     so the statistic actually computed depends on annotator count and cannot be assumed from the
+     column name. Record the variant and the weighting scheme (linear vs quadratic) alongside the
+     number, or a later reader cannot compare two `kappa` values.
+   - **The pass threshold is stored as a row, not a constant in code.** This is the schema-adjacent
+     part A0 decides. A judge that reached `trusted` under one threshold must stay re-derivable when
+     the threshold later moves, which is impossible if the value lived only in a released binary.
+     `CalibrationRun` should carry the threshold that was in force, the same way it will carry the
+     metrics it was judged on.
 4. **Define the `biasSensitivityRate` perturbation set.** It is a metric whose value depends
    entirely on its definition, so it needs versioning from the first run.
 5. **Who may annotate whose data**, once a second account exists?
-6. **Does a golden set become immutable once a `CalibrationRun` references it?** *Recommendation:
-   yes* — the same argument as rubrics, and `GoldenSet.retiredAt` already exists to express the
-   soft-retire half. Note `CalibrationRun.goldenSetId` is already `onDelete: Restrict`, so the
-   schema is halfway to enforcing it.
+6. **RESOLVED 2026-08-12 — yes, a golden set is immutable once a `CalibrationRun` references it.**
+   Same argument as rubrics: a retained score is only interpretable if what it measured cannot
+   drift, so retention *requires* the freeze — they are one change, not two. What A0 must build:
+
+   - **A write-guard at the API boundary** on `GoldenSet` and `GoldenItem` mutation, conditioned on
+     whether any `CalibrationRun` references the set. `CalibrationRun.goldenSetId` is already
+     `onDelete: Restrict`, so the schema enforces the *delete* half; this closes the *update* half.
+   - **Edit-after-freeze becomes a new version, not an error message.** Curation continues past the
+     first calibration run, so the affordance has to be "fork to a new set", or users will work
+     around the guard by never calibrating.
+   - **`GoldenSet.retiredAt` expresses the soft-retire half** and already exists; give it a writer
+     so a frozen set can leave circulation without being deleted.
+
+   Doing this in A0 rather than later is the cheap ordering: finishing it after rows exist means
+   migrating sets that were mutable, with no record of what they looked like when they were measured.
 
 7. **How is PPI configured** — what gold-sample size, and does the confidence interval gate anything
    (e.g. a distilled child may not be promoted unless its interval clears its parent's)? An estimate
