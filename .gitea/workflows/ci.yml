@@ -20,9 +20,11 @@
 # its coverage gate, and `next build`. On a push to main it then builds and
 # pushes the OCI image via an ephemeral kaniko Job in tenant-builds.
 #
-# ALSO RUNS FOR REAL, since 2026-08-12 (Stage 6): the DB suite (`test:db`,
-# including the 5 seed guards) and the integration suite, in the `db-tests`
-# job below. They need postgres/redis/rabbitmq, and this runner is act_runner
+# ALSO RUNS FOR REAL, since 2026-08-12 (Stage 6): the DB suite — run as
+# `test:db:coverage`, so vitest.db.config.ts's per-glob thresholds gate too,
+# and including the 5 seed guards — and the integration suite, in the
+# `db-tests` job below.
+# They need postgres/redis/rabbitmq, and this runner is act_runner
 # in HOST MODE with no container engine of any kind, so a Docker `services:`
 # block still cannot start anything here — the block that used to sit in this
 # file was deleted rather than left decorative, because YAML that cannot
@@ -212,11 +214,15 @@ jobs:
       # workflow previously died at `Setup Node` on every single run, which
       # rendered in the run list as one red step and was easy to read as a
       # flaky download — while the actual consequence was that NOTHING ran.
-      # A vitest invocation that silently matches zero test files exits 0 and
-      # would look identical to a green suite, so the count is asserted
-      # rather than trusted. The floor is deliberately well below the current
-      # total (367 at time of writing) so ordinary test churn does not trip
-      # it; it exists to catch "collected nothing", not to police the count.
+      # What this floor does and does NOT guard, stated precisely because the
+      # earlier wording here claimed more than is true. `passWithNoTests` is
+      # not set in any of the three configs and defaults to FALSE, so a run
+      # matching zero files exits 1 on its own — verified against the pinned
+      # vitest 3.2.4, not assumed. The uncovered case is NARROWING: a config
+      # or glob edit that drops 20 of 26 files still exits 0 and still reads
+      # green. That is what the count catches. The floor sits well below the
+      # current total (367 at time of writing) so ordinary churn does not
+      # trip it; it polices collapse, not the exact count.
       - name: Unit tests (+ coverage gate)
         run: |
           set -euo pipefail
@@ -297,7 +303,16 @@ jobs:
           REPO_SSH_URL: ssh://git@10.10.0.211/trij/judge-arena.git
           COMMIT_SHA: ${{ github.sha }}
           IMAGE: docker.io/library/node:22-alpine
-          TEST_CMD: npm run test:db && npm run test:integration
+          # `test:db:coverage`, not `test:db`. vitest.db.config.ts carries
+          # per-glob thresholds derived from measured actuals — auth-guard.ts
+          # at 86/91/80/86 and scripts/importer/** at 96/98/87/96 — and until
+          # now nothing in CI ran them, so they were documentation rather than
+          # a gate. This is the only run in which auth-guard.ts and
+          # scripts/importer/** execute at all (the DB-free unit run shows
+          # them near-0%), which makes it the only place those thresholds can
+          # be enforced. The coverage-db/ report itself is discarded with the
+          # pod; the gate is the point, not the artifact.
+          TEST_CMD: npm run test:db:coverage && npm run test:integration
         run: |
           set -euo pipefail
           # The variable list is MANDATORY. Bare `envsubst` would also expand
@@ -360,6 +375,36 @@ jobs:
           echo "[$(date -u +%H:%M:%S)] 25m deadline exceeded"
           kubectl describe -n tenant-builds "$JOB" || true
           exit 1
+
+      # ─── Reap the Job if we are leaving while it still runs ────────────
+      # `concurrency.cancel-in-progress: true` is set at the top of this
+      # file, so a second push to the same ref kills this workflow mid-wait
+      # — and the spawned Job does NOT die with it. It keeps a pod holding
+      # ~1.7Gi of memory requests plus 9.25Gi of ephemeral-storage ceilings
+      # in tenant-builds until activeDeadlineSeconds (30m) expires. Same
+      # applies to the 25m-deadline path above.
+      #
+      # ONLY reaps a Job that is still ACTIVE. A Job that finished — passed
+      # or failed — is left for ttlSecondsAfterFinished (1h) so its pod
+      # stays inspectable; the failure path above dumps logs, but a pod you
+      # can still `kubectl describe` is worth more than a log tail.
+      #
+      # `always()` rather than `failure()`: cancellation is the case this
+      # exists for, and a cancelled job runs neither `success()` nor
+      # `failure()` steps.
+      - name: Reap the DB-test Job if still running
+        if: always()
+        run: |
+          set -euo pipefail
+          [ -n "${JOB:-}" ] || { echo "no Job was spawned — nothing to reap"; exit 0; }
+          active=$(kubectl get -n tenant-builds "$JOB" \
+            -o jsonpath='{.status.active}' 2>/dev/null || true)
+          if [ "${active:-0}" -gt 0 ] 2>/dev/null; then
+            echo "$JOB still active — deleting so it does not outlive this run"
+            kubectl delete -n tenant-builds "$JOB" --wait=false || true
+          else
+            echo "$JOB is not active — leaving it for ttlSecondsAfterFinished"
+          fi
 
   # ─── Build + push the OCI image ────────────────────────────────────────
   # Real OCI builds in this homelab spawn an ephemeral kaniko Job in
