@@ -93,11 +93,13 @@ export default defineConfig({
       // The real coverage for worker/realtime/queue-publish lives in
       // test:db and test:integration.
       //
-      // Actuals as of 2026-08-12 (stmts/branch/funcs/lines):
-      //   all-files            35.20 / 83.06 / 65.00 / 35.20
+      // Actuals as of 2026-08-12 (stmts/branch/funcs/lines) — updated in
+      // Task 10 (a0) after judgment-schema.ts grew PAIRWISE_JUDGMENT_JSON_SCHEMA
+      // + tryParsePairwiseJudgment, both fully unit-tested (100/100/100/100):
+      //   all-files            36.88 / 84.33 / 66.66 / 36.88
       //   src/lib/queue/**     47.30 / 84.37 / 73.33 / 47.30
       //   src/worker/**         3.74 / 100   / 100   /  3.74   <- artifact
-      //   src/lib/llm/**       93.97 / 85.07 / 97.36 / 93.97
+      //   src/lib/llm/**       94.19 / 85.85 / 97.43 / 94.19
       //   scripts/importer/**   6.15 / 83.87 / 10.29 /  6.15
       //   src/lib/realtime/**   1.55 / 80    / 71.42 /  1.55
       thresholds: {
@@ -114,7 +116,8 @@ export default defineConfig({
         // — where those two 100s are the not-imported artifact, not coverage.
         'src/worker/**': { statements: 0, functions: 80, branches: 80, lines: 0 },
         // Provider backends + resilience/registry/render are heavily unit-tested.
-        // Actual: 93.97/85.07/97.36/93.97.
+        // Actual: 94.19/85.85/97.43/94.19 (Task 10: judgment-schema.ts's new
+        // pairwise schema + parser landed at 100/100/100/100).
         'src/lib/llm/**': { statements: 90, functions: 94, branches: 80, lines: 90 },
         // auth-guard.ts is exercised transitively through API route handlers
         // under a live DB (tests/db/access-matrix.test.ts) — not reachable

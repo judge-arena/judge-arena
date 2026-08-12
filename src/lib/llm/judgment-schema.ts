@@ -73,3 +73,100 @@ export const JUDGMENT_JSON_SCHEMA = {
   },
   required: ['overallScore', 'reasoning', 'criteriaScores'],
 } as const;
+
+/**
+ * ─── The Pairwise Verdict Schema (A0) ───────────────────────────────────────
+ *
+ * A pairwise judge does not score — it PREFERS. Its whole output is a
+ * choice between two candidate responses plus the rationale for that
+ * choice, so this schema requires `verdict` and `reasoning` and requires
+ * NEITHER `overallScore` nor `criteriaScores`: handing a pairwise call the
+ * pointwise `JUDGMENT_JSON_SCHEMA` above through a guided-decoding backend
+ * (vLLM, llama.cpp) would constrain the model's sampling to emit a score
+ * shape nobody asked it for, and no verdict at all.
+ *
+ * `verdict` is stored RAW on `ModelJudgment.verdict`, against the
+ * `ModelJudgment.pairOrder` the model was actually shown ('AB' for every
+ * judgment A0 emits). Which SAMPLE was preferred is derived from the pair
+ * (verdict, pairOrder) at read time — never encoded into the stored string
+ * (A0 design doc, decision #4). That is what makes A2's `BA` sweep additive
+ * with no backfill.
+ */
+export const PAIRWISE_JUDGMENT_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    verdict: {
+      type: 'string',
+      enum: ['A', 'B', 'tie'],
+      description:
+        'Which response is better: "A" for Response A, "B" for Response B, or "tie" if neither is clearly better.',
+    },
+    reasoning: {
+      type: 'string',
+      description: 'Brief rationale explaining the verdict.',
+    },
+  },
+  required: ['verdict', 'reasoning'],
+} as const;
+
+/** A parsed pairwise verdict — the output of `tryParsePairwiseJudgment`,
+ * before call metadata is merged in by `registry.ts`'s
+ * `executePairwiseCall`. */
+export interface ParsedPairwiseJudgment {
+  verdict: 'A' | 'B' | 'tie';
+  reasoning: string;
+}
+
+/** Case- and whitespace-tolerant normalization of the raw `verdict` string
+ * onto the three legal values. Tolerant on the way IN (a model that emits
+ * `"a"` or `" TIE "` meant the same thing) and strict on the way OUT —
+ * anything else is not a verdict, and returns `null` rather than being
+ * coerced into one. */
+function normalizeVerdict(raw: unknown): 'A' | 'B' | 'tie' | null {
+  if (typeof raw !== 'string') return null;
+  const upper = raw.trim().toUpperCase();
+  if (upper === 'A') return 'A';
+  if (upper === 'B') return 'B';
+  if (upper === 'TIE') return 'tie';
+  return null;
+}
+
+/**
+ * Parse a pairwise judge response into `{verdict, reasoning}`, or `null`.
+ *
+ * ONE parse path, unlike the pointwise pair (`tryParseStructuredJudgment`
+ * strict, `parseJudgmentResponse` lenient — see provider.ts). This function
+ * is deliberately fence-tolerant on its own (a model that wraps its JSON in
+ * ```json despite guided decoding is still conforming enough), so there is
+ * no strict-then-lenient demotion to record and no `parseMode` to persist
+ * for a pairwise judgment.
+ *
+ * NEVER throws. A `null` return is the caller's signal that the response
+ * carried no usable verdict — `registry.ts`'s `executePairwiseCall` turns
+ * that into a `non_retryable` ProviderError, because re-asking the same
+ * model the same question is not a provider-health problem and must not
+ * burn the retry budget or count against the circuit breaker.
+ */
+export function tryParsePairwiseJudgment(raw: string): ParsedPairwiseJudgment | null {
+  let jsonStr = raw.trim();
+  const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) {
+    jsonStr = codeBlockMatch[1].trim();
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    return null;
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+
+  const record = parsed as Record<string, unknown>;
+  const verdict = normalizeVerdict(record.verdict);
+  if (!verdict) return null;
+  if (typeof record.reasoning !== 'string') return null;
+
+  return { verdict, reasoning: record.reasoning };
+}
