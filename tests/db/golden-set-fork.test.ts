@@ -86,6 +86,30 @@ const forkInput = (
   ...overrides,
 });
 
+/**
+ * Wraps the real `db` client so a `forkGoldenSet` call's `$transaction`
+ * invocations can be counted without touching its retry logic. Only
+ * `$transaction` is proxied — `forkGoldenSet` never reaches for anything
+ * else on `client` — and every call is delegated straight through to the
+ * real `db.$transaction`, so behaviour is untouched; the wrapper just counts.
+ *
+ * This exists so the concurrency test below can tell "the two calls
+ * genuinely raced on Postgres and one of them recovered via retry" apart
+ * from "the two calls happened to serialize and the retry path never ran at
+ * all" — both scenarios land on versions [2, 3] with distinct slugs, so
+ * that outcome alone cannot distinguish them.
+ */
+function withTransactionSpy() {
+  let calls = 0;
+  const client = {
+    $transaction: (...args: unknown[]) => {
+      calls += 1;
+      return (db.$transaction as (...a: unknown[]) => unknown)(...args);
+    },
+  } as unknown as typeof db;
+  return { client, callCount: () => calls };
+}
+
 describe('forkGoldenSet: versioning, lineage and deep copy', () => {
   beforeEach(async () => {
     await truncateAll();
@@ -283,6 +307,11 @@ describe('forkGoldenSet: versioning, lineage and deep copy', () => {
       'the race — two callers can read the same max version AND derive the same ' +
       '`${base}-v${n}` slug before either commits, so P2002 can surface on either index)',
     async () => {
+      // Attempt counts collected across all 20 iterations — see the
+      // assertion after the loop for why this is aggregated rather than
+      // checked inline on every pass.
+      const totalAttemptsPerIteration: number[] = [];
+
       for (let i = 0; i < 20; i++) {
         await truncateAll();
         const owner = await mkUser();
@@ -293,9 +322,12 @@ describe('forkGoldenSet: versioning, lineage and deep copy', () => {
           dataset.samples.map((s) => s.id)
         );
 
+        const spyA = withTransactionSpy();
+        const spyB = withTransactionSpy();
+
         const [forkA, forkB] = await Promise.all([
-          forkGoldenSet(db, forkInput(root.id, root.id, owner.id)),
-          forkGoldenSet(db, forkInput(root.id, root.id, owner.id)),
+          forkGoldenSet(spyA.client, forkInput(root.id, root.id, owner.id)),
+          forkGoldenSet(spyB.client, forkInput(root.id, root.id, owner.id)),
         ]);
 
         // Both must succeed on distinct versions — never the same number (a
@@ -308,6 +340,22 @@ describe('forkGoldenSet: versioning, lineage and deep copy', () => {
         expect(forkA.slug).not.toBeNull();
         expect(forkB.slug).not.toBeNull();
         expect(forkA.slug).not.toBe(forkB.slug);
+
+        // With no race, each call makes exactly one `$transaction` attempt
+        // (total 2); a total > 2 means at least one call hit the
+        // version/slug P2002 and retried. Recorded per-iteration and
+        // checked in aggregate after the loop (see below) rather than
+        // asserted inline here: under real Postgres connection-pool
+        // contention (e.g. this file running alongside the rest of
+        // `npm run test:db` right after `prisma migrate reset`), any SINGLE
+        // iteration can legitimately fail to overlap and land both calls
+        // fully serialized with zero retries — that is not a bug, it is
+        // this test's own concurrency being at the mercy of the scheduler.
+        // Asserting it on every one of 20 iterations trades a real race
+        // test for a flaky one; aggregating keeps the guarantee ("the retry
+        // path is not dead code — it demonstrably fires") without coupling
+        // pass/fail to a single iteration's timing luck.
+        totalAttemptsPerIteration.push(spyA.callCount() + spyB.callCount());
 
         const family = await db.goldenSet.findMany({
           where: { OR: [{ id: root.id }, { parentId: root.id }] },
@@ -325,6 +373,16 @@ describe('forkGoldenSet: versioning, lineage and deep copy', () => {
         });
         expect(candidateCount).toBe(12); // 3 sets x 2 items x 2 candidates
       }
+
+      // The aggregate check this whole loop exists to support: at least ONE
+      // of the 20 iterations must show a `$transaction` attempt count > 2,
+      // i.e. a genuine P2002-and-retry, not just 20 passes that all
+      // happened to serialize. Without this, the test cannot distinguish
+      // "raced and recovered" from "never raced" — a `while (true)` in
+      // place of the bounded retry loop, or the retry recomputing nothing
+      // and getting lucky, would pass this file identically as long as the
+      // version/slug assertions above kept holding.
+      expect(totalAttemptsPerIteration.some((attempts) => attempts > 2)).toBe(true);
     },
     60_000
   );
