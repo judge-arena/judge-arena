@@ -72,4 +72,45 @@ describe('permissions', () => {
       }
     });
   });
+
+  describe('golden-set scopes (A0)', () => {
+    it('defines golden-sets:read and golden-sets:write as first-class scopes, not aliases of datasets:*', () => {
+      expect(isValidScope('golden-sets:read')).toBe(true);
+      expect(isValidScope('golden-sets:write')).toBe(true);
+      expect(PERMISSION_SCOPES['golden-sets:read']).toBe(
+        'List and view golden sets and their items'
+      );
+      expect(PERMISSION_SCOPES['golden-sets:write']).toBe(
+        'Create, update, fork, and retire golden sets'
+      );
+      expect(ALL_SCOPES).toContain('golden-sets:read');
+      expect(ALL_SCOPES).toContain('golden-sets:write');
+    });
+
+    it('puts both scopes in a SCOPE_GROUPS group of their own — reusing the Datasets group would grant every existing Dataset Manager key write access to ground truth', () => {
+      const group = SCOPE_GROUPS.find((g) => g.label === 'Golden Sets');
+      expect(group).toBeDefined();
+      expect(group!.scopes).toEqual(['golden-sets:read', 'golden-sets:write']);
+
+      const datasetsGroup = SCOPE_GROUPS.find((g) => g.label === 'Datasets');
+      expect(datasetsGroup!.scopes).not.toContain('golden-sets:write');
+    });
+
+    it('adds golden-sets:read to the read-only presets and golden-sets:write ONLY to Full Access', () => {
+      const readOnly = SCOPE_PRESETS.find((p) => p.label === 'Read Only')!;
+      expect(readOnly.scopes).toContain('golden-sets:read');
+      expect(readOnly.scopes).not.toContain('golden-sets:write');
+
+      const runner = SCOPE_PRESETS.find((p) => p.label === 'Evaluation Runner')!;
+      expect(runner.scopes).toContain('golden-sets:read');
+      expect(runner.scopes).not.toContain('golden-sets:write');
+
+      const datasetManager = SCOPE_PRESETS.find((p) => p.label === 'Dataset Manager')!;
+      expect(datasetManager.scopes).toContain('golden-sets:read');
+      expect(datasetManager.scopes).not.toContain('golden-sets:write');
+
+      const fullAccess = SCOPE_PRESETS.find((p) => p.label === 'Full Access')!;
+      expect(fullAccess.scopes).toContain('golden-sets:write');
+    });
+  });
 });

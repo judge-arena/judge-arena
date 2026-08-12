@@ -34,6 +34,13 @@ export const PERMISSION_SCOPES = {
   'datasets:write': 'Create, update, delete, and version datasets',
   'datasets:export': 'Export dataset data (CSV, JSONL)',
 
+  // Golden sets (A0). Deliberately NOT folded into `datasets:*`: a golden set
+  // is ground truth a calibration run is scored against, and reusing the
+  // dataset scopes would silently hand every existing "Dataset Manager" key
+  // write access to it.
+  'golden-sets:read': 'List and view golden sets and their items',
+  'golden-sets:write': 'Create, update, fork, and retire golden sets',
+
   // Configuration
   'config:read': 'Export full platform configuration (YAML/JSON)',
   'config:write': 'Import platform configuration (YAML/JSON)',
@@ -82,6 +89,11 @@ export const SCOPE_GROUPS: ScopeGroup[] = [
     scopes: ['datasets:read', 'datasets:write', 'datasets:export'],
   },
   {
+    label: 'Golden Sets',
+    description: 'Manage golden sets, their items, versions, and retirement',
+    scopes: ['golden-sets:read', 'golden-sets:write'],
+  },
+  {
     label: 'Configuration',
     description: 'Import and export platform configuration',
     scopes: ['config:read', 'config:write'],
@@ -111,6 +123,7 @@ export const SCOPE_PRESETS: ScopePreset[] = [
       'models:read',
       'evaluations:read',
       'datasets:read',
+      'golden-sets:read',
       'stats:read',
     ],
   },
@@ -125,6 +138,7 @@ export const SCOPE_PRESETS: ScopePreset[] = [
       'evaluations:run',
       'evaluations:judge',
       'datasets:read',
+      'golden-sets:read',
     ],
   },
   {
@@ -135,6 +149,7 @@ export const SCOPE_PRESETS: ScopePreset[] = [
       'datasets:read',
       'datasets:write',
       'datasets:export',
+      'golden-sets:read',
       'evaluations:read',
       'evaluations:write',
       'evaluations:run',
