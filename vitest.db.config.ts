@@ -131,11 +131,22 @@ export default defineConfig({
       // deletion GoldenSet branch from hard-delete to tombstone
       // (src/lib/account-deletion.ts step 5). Branch-count-neutral by
       // construction: the if/frozen-else/unpinned shape is unchanged, only
-      // the else arm's `.delete()` became `.update()`. Measured 79.19
-      // (685/865) on two of three runs and 79.33 (687/866) on one — the
-      // known one-branch denominator jitter (see the Task 14 note above),
-      // not a change caused by this task. Both per-glob entries unchanged.
-      //   all-files            49.13 / 79.19 / 62.33 / 49.13
+      // the else arm's `.delete()` became `.update()`. Measured TEN times
+      // across two rounds: 685/865 (79.19%) seven times, 687/866 (79.33%)
+      // twice, and once 683/863 (79.14%) — the closest-to-floor value
+      // observed on this branch so far, still 0.14pp clear of the 79 floor.
+      // The numerator and denominator both move together and by more than
+      // one, e.g. 685/865 -> 683/863 is -2/-2: this is NOT a "denominator
+      // jitter" (same branch set, different total) but real run-to-run
+      // nondeterminism in which code path executes — some branch arm is
+      // reached on most runs and skipped on others (module-load ordering or
+      // a timing-dependent path is the likely cause, unconfirmed). Every one
+      // of the ten runs still passed the floor. A second task (Task 18) has
+      // now observed this instability against the Task 14 baseline
+      // (685/865); worth pinning down the source before the next
+      // re-baseline, since 79.14 leaves only 0.14pp of margin. Both per-glob
+      // entries unchanged.
+      //   all-files            49.13 / 79.19 / 62.33 / 49.13  (typical run; observed range 79.14-79.33)
       //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
       //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
       thresholds: {

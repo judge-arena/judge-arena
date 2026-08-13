@@ -121,6 +121,12 @@ async function mkGoldenSet(
   return db.goldenSet.create({
     data: {
       name: `fixture-golden-set-${goldenSetCounter}`,
+      // GoldenSet has a hand-edited @@unique([ownerId, slug]) with NULLS NOT
+      // DISTINCT (schema.prisma:689-696) — at most one slug-NULL set per
+      // owner. Default a real slug here so any caller building two or more
+      // sets under the same owner through this helper doesn't have to
+      // remember to supply one to avoid a P2002.
+      slug: `fixture-golden-set-${goldenSetCounter}`,
       ownerId,
       datasetId: dataset.id,
       protocol: 'pairwise',
@@ -495,9 +501,13 @@ describe('deleteUserAccount (P1.7 account deletion)', () => {
       const survived = await db.goldenSet.findUnique({ where: { id: goldenSet.id } });
       expect(survived).not.toBeNull();
       expect(survived?.tombstonedAt).not.toBeNull();
-      // The load-bearing assertion: a tombstoned set must NOT masquerade as a
-      // retired one. `?includeRetired=true` unhides retiredAt and must never
-      // unhide this row (src/lib/golden-sets.ts goldenSetLifecycleWhere).
+      // The load-bearing assertion: the tombstone write must stamp
+      // `tombstonedAt`, not `retiredAt`, so the two account-lifecycle-vs-
+      // product states stay distinguishable at the row level. (As of A0,
+      // `?includeRetired=true` still clears both filters together — see
+      // src/app/api/golden-sets/route.ts:47-49 — so there is no read-path
+      // distinction yet; that's a later task. This assertion only checks
+      // that deleteUserAccount writes the correct column.)
       expect(survived?.retiredAt).toBeNull();
       // GoldenSet.ownerId is `onDelete: SetNull` — the kept row needs no
       // ownership reassignment to survive the final user.delete().
@@ -519,9 +529,10 @@ describe('deleteUserAccount (P1.7 account deletion)', () => {
       const parent = await mkGoldenSet(owner.id, { name: 'fixture-golden-parent' });
       // GoldenSet has a hand-edited @@unique([ownerId, slug]) with NULLS NOT
       // DISTINCT (schema.prisma:689-696) — at most one slug-NULL set per
-      // owner. `parent` above has no slug (NULL); the child needs an
-      // explicit one or this create collides with the parent's row before
-      // deleteUserAccount is ever called.
+      // owner. `mkGoldenSet` defaults the parent to a real (non-NULL) slug,
+      // so the child below only needs its OWN distinct slug to avoid
+      // colliding with the parent's — matching the established convention
+      // of explicit slugs whenever a fixture puts two+ sets under one owner.
       const child = await db.goldenSet.create({
         data: {
           name: 'fixture-golden-child',
