@@ -26,19 +26,25 @@
  *     versions (`onDelete: NoAction` on Rubric.parentId), can't be
  *     hard-deleted either — it's soft-retired (`retiredAt` set, row kept)
  *     instead.
- *   - A private GoldenSet that a CalibrationRun still references
- *     (`onDelete: Restrict` on CalibrationRun.goldenSetId) can't be
- *     hard-deleted either, for the identical reason (1b-prereq (a), closed
- *     by Task 15) — it's soft-retired (`retiredAt` set, row kept) instead.
- *     That "is anything still referencing it" test is the golden-set FREEZE
- *     PREDICATE, and it has exactly one definition — `isGoldenSetFrozen` in
+ *   - A private GoldenSet is never hard-deleted at all. One that a
+ *     CalibrationRun still references (`onDelete: Restrict` on
+ *     CalibrationRun.goldenSetId — 1b-prereq (a)) is soft-retired
+ *     (`retiredAt` set, row kept): out of circulation, still valid ground
+ *     truth for the run that measured it. One that nothing references is
+ *     TOMBSTONED (`tombstonedAt` set, row kept): pending purge, which is a
+ *     later wave. The two columns are not synonyms — `retiredAt` is a
+ *     product state a user can choose and reverse, `tombstonedAt` is an
+ *     account-lifecycle state only this function writes. That "is anything
+ *     still referencing it" test is the golden-set FREEZE PREDICATE, and it
+ *     has exactly one definition — `isGoldenSetFrozen` in
  *     src/lib/golden-sets.ts — shared with the golden-set route guards so
  *     the account-lifecycle path and the product path cannot drift into
- *     disagreeing about what "frozen" means (A0, "Freeze and fork").
- *     Unlike Rubric.userId (`onDelete: Cascade`), GoldenSet.ownerId is
- *     `onDelete: SetNull`, so a retired GoldenSet needs no ownership
- *     reassignment to survive the final `user.delete()` — it resolves to
- *     `ownerId: null` on its own.
+ *     disagreeing about what "frozen" means (A0, "Freeze and fork"). Keeping
+ *     the row on both paths is also what stops GoldenSet.parentId
+ *     (`onDelete: NoAction`) aborting this transaction when the account
+ *     holds a forked child set. Unlike Rubric.userId (`onDelete: Cascade`),
+ *     GoldenSet.ownerId is `onDelete: SetNull`, so neither path needs an
+ *     ownership reassignment to survive the final `user.delete()`.
  *
  * Order matters: private Projects are purged FIRST so their Evaluations/
  * Runs/Judgments/HumanJudgments are gone before we look at what's left
@@ -150,31 +156,50 @@ export async function deleteUserAccount(
     });
     reassigned.goldenSets = reassignedGoldenSets.count;
 
-    // Private GoldenSets: hard-delete, UNLESS a CalibrationRun still
-    // references it (`onDelete: Restrict` on CalibrationRun.goldenSetId) —
-    // deleting through that would abort the transaction with a P2003
-    // (1b-prereq (a): this is the "account-deletion hard-deletes private
-    // GoldenSets but CalibrationRun.goldenSetId is Restrict -> tx abort"
-    // carry from 1a). Check first and soft-retire instead of hard-deleting,
-    // the same pattern step 7 below uses for Rubric. No ownership
-    // reassignment needed on the retired path — GoldenSet.ownerId is
-    // `onDelete: SetNull` (not Cascade like Rubric.userId), so leaving it
-    // pointed at the about-to-be-deleted user is fine; the final
-    // user.delete() nulls it out on its own.
+    // Private GoldenSets are NEVER hard-deleted. Two soft paths, writing two
+    // DIFFERENT columns, because they mean two different things:
+    //
+    //   - pinned by a CalibrationRun -> `retiredAt`. Out of circulation, but
+    //     still valid ground truth: it is precisely what a finished
+    //     calibration measured, and that run's kappa is uninterpretable
+    //     without it. A PRODUCT verb — the same state
+    //     `POST /api/golden-sets/[id]/retire` writes. Also the original
+    //     1b-prereq (a) fix: CalibrationRun.goldenSetId is `onDelete:
+    //     Restrict`, so deleting through it aborts this transaction.
+    //   - unpinned -> `tombstonedAt`. Nothing references it and its owner is
+    //     gone, so it is pending purge. An ACCOUNT-LIFECYCLE verb. The row is
+    //     kept and hidden from every read path (see `goldenSetLifecycleWhere`
+    //     in src/lib/golden-sets.ts) until the purge wave, which is
+    //     deliberately not part of A0.
+    //
+    // The unpinned branch used to hard-delete. Beyond the owner's
+    // "hard deletion may lose data" ruling, A0 has a mechanical reason to
+    // stop: GoldenSet gained `parentId` with `onDelete: NoAction`, so
+    // deleting a forked PARENT while its child row still exists raises P2003
+    // and rolls back this entire transaction — the user, and every
+    // reassignment above, left undone. Deleting nothing means that FK is
+    // never exercised, so no child-version guard is needed here (unlike the
+    // Rubric branch below, which still hard-deletes and therefore still
+    // checks).
+    //
+    // Neither path reassigns ownership: GoldenSet.ownerId is `onDelete:
+    // SetNull` (not Cascade like Rubric.userId), so the kept row resolves to
+    // `ownerId: null` on its own at the final user.delete().
     const privateGoldenSets = await tx.goldenSet.findMany({
       where: { ownerId: userId, visibility: 'private' },
       select: { id: true },
     });
 
-    let purgedGoldenSetCount = 0;
+    let tombstonedGoldenSetCount = 0;
     let retiredGoldenSetCount = 0;
     for (const goldenSet of privateGoldenSets) {
       // Shared predicate — see src/lib/golden-sets.ts. `tx` is passed
-      // through rather than the singleton so this count and the update or
-      // delete that follows it stay in ONE transaction: a CalibrationRun
-      // that starts between them would otherwise pin a set this loop has
-      // already decided to hard-delete, and the delete aborts the whole
-      // account deletion on a P2003.
+      // through rather than the singleton so this check and the update that
+      // follows it stay in ONE transaction: a CalibrationRun that starts
+      // between them would otherwise pin a set this loop has already
+      // decided to tombstone. ONE definition of "frozen", shared with the
+      // golden-set route guards (PATCH/DELETE `/api/golden-sets/[id]`) — do
+      // not re-inline the CalibrationRun count here.
       if (await isGoldenSetFrozen(tx, goldenSet.id)) {
         await tx.goldenSet.update({
           where: { id: goldenSet.id },
@@ -182,12 +207,23 @@ export async function deleteUserAccount(
         });
         retiredGoldenSetCount += 1;
       } else {
-        await tx.goldenSet.delete({ where: { id: goldenSet.id } });
-        purgedGoldenSetCount += 1;
+        await tx.goldenSet.update({
+          where: { id: goldenSet.id },
+          data: { tombstonedAt: new Date() },
+        });
+        tombstonedGoldenSetCount += 1;
       }
     }
-    purged.goldenSets = purgedGoldenSetCount;
-    retired.goldenSets = retiredGoldenSetCount;
+
+    // RESULT_CATEGORIES is a frozen 8-key set — tests/db/account-deletion.
+    // test.ts:461-483 asserts Object.keys() of all three maps equals it
+    // exactly — so tombstones get neither a new key nor a fourth map. They
+    // are tallied under `retired`, which already means "soft-handled, row
+    // kept" for Rubric in step 7. `purged.goldenSets` is now structurally 0:
+    // assigned explicitly so a future edit that reintroduces a delete has to
+    // notice this line.
+    purged.goldenSets = 0;
+    retired.goldenSets = retiredGoldenSetCount + tombstonedGoldenSetCount;
 
     // GoldenLabel.annotatorId is `onDelete: SetNull` — anonymizes cleanly on
     // the final user.delete(); nothing to do here.

@@ -126,6 +126,18 @@ export default defineConfig({
       //   all-files            49.11 / 79.19 / 62.33 / 49.11
       //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
       //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
+      //
+      // Re-measured 2026-08-13 in Task 18 (a0), which swapped the account-
+      // deletion GoldenSet branch from hard-delete to tombstone
+      // (src/lib/account-deletion.ts step 5). Branch-count-neutral by
+      // construction: the if/frozen-else/unpinned shape is unchanged, only
+      // the else arm's `.delete()` became `.update()`. Measured 79.19
+      // (685/865) on two of three runs and 79.33 (687/866) on one — the
+      // known one-branch denominator jitter (see the Task 14 note above),
+      // not a change caused by this task. Both per-glob entries unchanged.
+      //   all-files            49.13 / 79.19 / 62.33 / 49.13
+      //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
+      //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
       thresholds: {
         lines: 45,
         functions: 58,
