@@ -40,11 +40,17 @@
  *    fire in this call — a content comparison here would be a branch whose
  *    false arm is unreachable. A0's edit path is fork-then-PATCH: PATCH
  *    /api/golden-sets/[id]/items 409s on a frozen set, the caller forks, and
- *    then PATCHes the (unfrozen) fork. THAT handler owns the drop: it must
- *    delete the GoldenLabel rows of any item whose inputText, promptText,
- *    responseText, expected or candidate list it changes, so that no score is
- *    ever re-attributed to text its annotator did not see. If you are adding
- *    fork-with-edits later, the drop rule moves here with it.
+ *    then PATCHes the (unfrozen) fork. THAT handler owns the invalidation: it
+ *    must TOMBSTONE — never delete — the GoldenLabel rows of any item whose
+ *    inputText, promptText, responseText, expected or candidate list it
+ *    changes, stamping `tombstonedAt` and
+ *    `tombstonedReason = 'item-content-edit'` in the same transaction as the
+ *    edit, so that no score is ever left APPLYING to text its annotator did
+ *    not see. The row itself survives: a human label is irreplaceable, and
+ *    retaining it preserves who scored what and when it stopped applying
+ *    (owner ruling 2026-08-13, "no actual data removal, anywhere"). If you
+ *    are adding fork-with-edits later, THE TOMBSTONE RULE — not a delete —
+ *    moves here with it.
  *
  * 4. The fork is always private with publishedAt null. `ownerId` is the
  *    FORKING user; inheriting a platform set's `public` visibility would
@@ -254,12 +260,20 @@ export async function forkGoldenSet(
                 })),
               },
             },
+            // Routed through `goldenItemLifecycleWhere` like every other
+            // item read and every other `_count.items`, so a grep for the
+            // helper finds ALL of them with no exception to re-reason about.
+            // Here it is a provable no-op rather than a filter that can bite:
+            // the child was created moments ago in this same transaction from
+            // an already-filtered source, and `tombstonedAt` is not among the
+            // copied fields, so it cannot hold a tombstoned row.
             include: {
               items: {
+                where: goldenItemLifecycleWhere(false),
                 orderBy: { index: 'asc' },
                 include: { candidates: { orderBy: { position: 'asc' } } },
               },
-              _count: { select: { items: true } },
+              _count: { select: { items: { where: goldenItemLifecycleWhere(false) } } },
             },
           });
         },
