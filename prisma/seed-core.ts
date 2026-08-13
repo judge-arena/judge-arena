@@ -254,7 +254,7 @@ export async function seedAll(prisma: PrismaClient) {
   console.log(`   - ${catalogCount} catalog judge models + versions`);
   console.log('   - 1 Leaderboard project (public)');
   console.log('   - 2 public datasets: LiveCodeBench (metadata), JudgeBench (620 samples)');
-  console.log('   - 1 Prompt template (v1-legacy)');
+  console.log('   - 2 Prompt templates (v1-legacy pointwise, v1-pairwise pairwise)');
   console.log('\n   No credentials accounts, no ModelEndpoints, no sample runs — by design.');
   console.log('   Sign in via Authentik OIDC, or use admin-create-user.js for break-glass.');
 }

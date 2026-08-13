@@ -640,24 +640,31 @@ describe('launchBulkRunCreates (src/lib/run-launch.ts)', () => {
   // consumer cannot expand one correctly — `RunCreateMsg` carries no
   // candidate set — so it must refuse rather than half-honour it.
   //
-  // THE PAIRWISE TEMPLATE BELOW IS WHAT MAKES THIS TEST DISCRIMINATE. Without
-  // it, `resolveCurrentPromptTemplate('pairwise')` finds nothing (the seed
-  // creates only v1-legacy/pointwise; the v1-pairwise row is Task 13's work),
-  // throws, and lands in the SAME `recordExpansionFailure` for a completely
-  // different reason — so every assertion here would hold with or without the
-  // guard, and the test would certify nothing. That is not hypothetical: it is
-  // how the first version of this test was written, and it passed against the
-  // unguarded consumer.
+  // A PAIRWISE TEMPLATE HAS TO EXIST FOR THIS TEST TO DISCRIMINATE. With none,
+  // `resolveCurrentPromptTemplate('pairwise')` finds nothing, throws, and lands
+  // in the SAME `recordExpansionFailure` for a completely different reason — so
+  // every assertion here would hold with or without the guard, and the test
+  // would certify nothing. That is not hypothetical: it is how the first
+  // version of this test was written, and it passed against the unguarded
+  // consumer.
   //
-  // With the row present, the unguarded consumer expands successfully instead.
-  // Measured by deleting the guard and re-running: `status: 'pending'`, one
-  // `ModelJudgment` (promptTemplateId set, `pairOrder` NULL), one
-  // `RunModelSelection`, and one published judgment.execute — all against a run
-  // with zero `RunCandidate` rows and nothing to compare. The status, judgment-
-  // count and selection-count assertions below were each observed to fail in
-  // that state. This is also the state the codebase actually reaches once Task
-  // 13 seeds v1-pairwise, which is why the template is created here rather than
-  // left to the absence that happened to mask it.
+  // With a pairwise row present, the unguarded consumer expands successfully
+  // instead. Measured by deleting the guard and re-running: `status:
+  // 'pending'`, one `ModelJudgment` (promptTemplateId set, `pairOrder` NULL),
+  // one `RunModelSelection`, and one published judgment.execute — all against a
+  // run with zero `RunCandidate` rows and nothing to compare. The status,
+  // judgment-count and selection-count assertions below were each observed to
+  // fail in that state.
+  //
+  // Task 13 made the SEEDER ship a pairwise row (`v1-pairwise`), so this
+  // file's own `beforeEach` seeding already supplies one. The row created
+  // inline below is kept anyway, and deliberately: it keeps this test's
+  // discrimination a property of the test itself rather than of whatever the
+  // seeder happens to contain. It cannot collide with the seeded row —
+  // PromptTemplate is @@unique([name, version]) and the name is uniq()'d — and
+  // it cannot change the guarded outcome either way, because the protocol
+  // refusal is the first statement in `handle()`'s try block, before any
+  // template is resolved.
   it('refuses a non-pointwise run.create even when a template for that protocol exists: books an errored run and expands nothing', async () => {
     const user = await mkUser();
     const project = await mkProject(user.id);
