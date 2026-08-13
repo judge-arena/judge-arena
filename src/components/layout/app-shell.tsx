@@ -113,6 +113,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           router.push('/datasets');
           clearChord();
           return;
+        case 'g g':
+          router.push('/golden-sets');
+          clearChord();
+          return;
         case 'g m':
           router.push('/models');
           clearChord();
