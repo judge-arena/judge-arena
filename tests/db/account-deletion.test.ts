@@ -503,11 +503,12 @@ describe('deleteUserAccount (P1.7 account deletion)', () => {
       expect(survived?.tombstonedAt).not.toBeNull();
       // The load-bearing assertion: the tombstone write must stamp
       // `tombstonedAt`, not `retiredAt`, so the two account-lifecycle-vs-
-      // product states stay distinguishable at the row level. (As of A0,
-      // `?includeRetired=true` still clears both filters together — see
-      // src/app/api/golden-sets/route.ts:47-49 — so there is no read-path
-      // distinction yet; that's a later task. This assertion only checks
-      // that deleteUserAccount writes the correct column.)
+      // product states stay distinguishable at the row level — and they are
+      // now read differently as well as written differently. Every golden-set
+      // read path spreads `goldenSetLifecycleWhere` (src/lib/golden-sets.ts),
+      // whose `?includeRetired=true` arm still pins `tombstonedAt: null`, so
+      // stamping the wrong column here would hand this row back to callers
+      // through a flag that must never reach a purge-pending set.
       expect(survived?.retiredAt).toBeNull();
       // GoldenSet.ownerId is `onDelete: SetNull` — the kept row needs no
       // ownership reassignment to survive the final user.delete().

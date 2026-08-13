@@ -14,13 +14,19 @@ import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicGoldenSet } from '@/lib/serializers';
 import { generateSlug } from '@/lib/config';
-import { PLATFORM_OWNER_EMAIL, mapSampleToGoldenItem } from '@/lib/golden-sets';
+import {
+  PLATFORM_OWNER_EMAIL,
+  mapSampleToGoldenItem,
+  goldenSetLifecycleWhere,
+  parseIncludeRetired,
+} from '@/lib/golden-sets';
 import { createGoldenSetSchema, goldenSetInclude } from './shared';
 
 // GET /api/golden-sets — list golden sets visible to the caller.
 // Public-read (optionalAuth), paginated {data, pagination}. Retired and
 // tombstoned sets are filtered out of EVERY read path; ?includeRetired=true
-// is the escape. A retire writer with no reader would be a no-op button.
+// is the escape for RETIRED ones only. A retire writer with no reader would
+// be a no-op button.
 export async function GET(request: Request) {
   try {
     const session = await optionalAuth();
@@ -32,21 +38,25 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const protocol = searchParams.get('protocol');
     const datasetId = searchParams.get('datasetId');
-    const includeRetired = searchParams.get('includeRetired') === 'true';
     const { limit, cursor } = parsePaginationParams(searchParams);
     const pageArgs = buildPrismaPageArgs({ limit, cursor });
 
-    const where: Prisma.GoldenSetWhereInput = {};
+    // ?includeRetired=true releases `retiredAt` and NOTHING ELSE. The
+    // hand-rolled predicate this replaced cleared `tombstonedAt` under the
+    // same flag, so a set belonging to a deleted account came back in the
+    // list under "Show retired" — and unbadged, because the list card keys
+    // off `retiredAt` alone. There is now no flag that returns a tombstoned
+    // set; see goldenSetLifecycleWhere.
+    const includeRetired = parseIncludeRetired(searchParams);
+
+    const where: Prisma.GoldenSetWhereInput = {
+      ...goldenSetLifecycleWhere(includeRetired),
+    };
 
     if (!session) {
       where.visibility = 'public';
     } else if (!isAdmin(session)) {
       where.OR = [{ ownerId: session.user.id }, { visibility: 'public' }];
-    }
-
-    if (!includeRetired) {
-      where.retiredAt = null;
-      where.tombstonedAt = null;
     }
 
     // Same enum guard the datasets list uses (datasets/route.ts:74-78): an

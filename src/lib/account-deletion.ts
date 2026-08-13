@@ -171,14 +171,12 @@ export async function deleteUserAccount(
     //     column distinct from `retiredAt` so the two states stay
     //     distinguishable at the row level: a reader that cares can always
     //     tell "still valid ground truth for a run" apart from "pending
-    //     purge, no longer owned by anyone". As of A0 there is no read-path
-    //     distinction yet — `?includeRetired=true` clears BOTH the
-    //     `retiredAt` and `tombstonedAt` filters together (src/app/api/
-    //     golden-sets/route.ts:47-49, and the same shape in [id]/route.ts
-    //     and [id]/items/route.ts), so a tombstoned set is exposed by the
-    //     same flag a retired one is. Giving tombstoned sets their own
-    //     escape hatch (or none at all) is a later task's job; this one only
-    //     writes the correct column so that distinction is possible.
+    //     purge, no longer owned by anyone". The read paths now honour that
+    //     distinction: every one of them spreads `goldenSetLifecycleWhere`
+    //     (src/lib/golden-sets.ts), which pins `tombstonedAt: null` in BOTH
+    //     arms, so `?includeRetired=true` brings a RETIRED set back and a
+    //     tombstoned one has no escape hatch at all — it stays hidden until
+    //     the purge wave (not part of A0) removes it.
     //
     // The unpinned branch used to hard-delete. Beyond the owner's
     // "hard deletion may lose data" ruling, A0 has a mechanical reason to

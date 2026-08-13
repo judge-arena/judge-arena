@@ -156,7 +156,7 @@ describe('GET /api/golden-sets — list', () => {
     expect(row._count.items).toBe(3);
   });
 
-  it('filters retired and tombstoned sets out of every read path, with ?includeRetired=true as the escape', async () => {
+  it('hides retired AND tombstoned sets by default, and ?includeRetired=true releases ONLY retiredAt', async () => {
     const owner = await mkUser();
     const { goldenSet: live } = await mkGoldenSet(owner.id);
     const { goldenSet: retired } = await mkGoldenSet(owner.id);
@@ -166,14 +166,31 @@ describe('GET /api/golden-sets — list', () => {
 
     mockSessionFor(owner);
     const res = await listGoldenSets(new Request('http://localhost/api/golden-sets'));
-    const ids = (await res.json()).data.map((g: any) => g.id);
-    expect(ids).toEqual([live.id]);
+    const body = await res.json();
+    expect(body.data.map((g: any) => g.id)).toEqual([live.id]);
+    // `total` is a separate count() — it has to carry the same filter, or the
+    // list says "1 of 3" and pages two and three come back empty.
+    expect(body.pagination.total).toBe(1);
 
+    // THE DECOUPLING, and the reason this fixture carries a retired set AND a
+    // tombstoned one: the flag has to bring the retired set back while
+    // leaving the tombstoned one hidden. A fixture with only one of the two
+    // passes under the coupled predicate this replaced, which released both
+    // columns together and returned all three rows here.
     const allRes = await listGoldenSets(
       new Request('http://localhost/api/golden-sets?includeRetired=true')
     );
-    const allIds = (await allRes.json()).data.map((g: any) => g.id).sort();
-    expect(allIds).toEqual([live.id, retired.id, tombstoned.id].sort());
+    const allBody = await allRes.json();
+    expect(allBody.data.map((g: any) => g.id).sort()).toEqual([live.id, retired.id].sort());
+    expect(allBody.pagination.total).toBe(2);
+    expect(allBody.data.some((g: any) => g.id === tombstoned.id)).toBe(false);
+
+    // Strict `=== 'true'` reaches all the way through the route: a `=1` that
+    // silently did nothing has shipped twice on this branch already.
+    const notTrue = await listGoldenSets(
+      new Request('http://localhost/api/golden-sets?includeRetired=1')
+    );
+    expect((await notTrue.json()).data.map((g: any) => g.id)).toEqual([live.id]);
   });
 
   it('?protocol= filters, and an arbitrary value is ignored rather than throwing a Prisma enum validation error', async () => {
