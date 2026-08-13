@@ -4,8 +4,10 @@ import {
   GoldenSetFrozenError,
   PLATFORM_OWNER_EMAIL,
   goldenItemLifecycleWhere,
+  goldenSetLifecycleWhere,
   isGoldenSetFrozen,
   mapSampleToGoldenItem,
+  parseIncludeRetired,
   parseIncludeTombstoned,
   type SourceSample,
 } from '@/lib/golden-sets';
@@ -248,6 +250,34 @@ describe('PLATFORM_OWNER_EMAIL', () => {
     // prisma/seed-core.ts owns the value, and src/ must not import a seed
     // module at runtime, so the literal is duplicated and pinned here.
     expect(PLATFORM_OWNER_EMAIL).toBe(PLATFORM_USER_EMAIL);
+  });
+});
+
+describe('goldenSetLifecycleWhere / parseIncludeRetired', () => {
+  it('hides retired AND tombstoned sets by default', () => {
+    expect(goldenSetLifecycleWhere(false)).toEqual({ retiredAt: null, tombstonedAt: null });
+  });
+
+  it('unhides retiredAt when includeRetired is true, but never tombstonedAt', () => {
+    // retiredAt is a PRODUCT state the owner chose and can reverse — it has
+    // to stay reachable or retire becomes a one-way door and the detail page
+    // 404s forever. tombstonedAt is an ACCOUNT-LIFECYCLE state written only
+    // by deleteUserAccount and DELETE /api/golden-sets/[id] for a set pending
+    // purge; there is no caller that should get one back.
+    expect(goldenSetLifecycleWhere(true)).toEqual({ tombstonedAt: null });
+    expect(goldenSetLifecycleWhere(true)).not.toHaveProperty('retiredAt');
+  });
+
+  it('accepts exactly the string "true" for ?includeRetired, matching includeSamples', () => {
+    expect(parseIncludeRetired(new URLSearchParams('includeRetired=true'))).toBe(true);
+  });
+
+  it('treats absent, empty, "false", "1" and "TRUE" as false', () => {
+    expect(parseIncludeRetired(new URLSearchParams(''))).toBe(false);
+    expect(parseIncludeRetired(new URLSearchParams('includeRetired='))).toBe(false);
+    expect(parseIncludeRetired(new URLSearchParams('includeRetired=false'))).toBe(false);
+    expect(parseIncludeRetired(new URLSearchParams('includeRetired=1'))).toBe(false);
+    expect(parseIncludeRetired(new URLSearchParams('includeRetired=TRUE'))).toBe(false);
   });
 });
 

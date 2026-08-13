@@ -290,6 +290,47 @@ export class GoldenSetFrozenError extends Error {
   }
 }
 
+/* ─── Set lifecycle read filter ─────────────────────────────────────────────
+ *
+ * GoldenSet carries two nullable timestamps that are NOT synonyms:
+ *
+ *   retiredAt     Out of circulation, still valid ground truth. A PRODUCT
+ *                 verb. Written by POST /api/golden-sets/[id]/retire, and by
+ *                 src/lib/account-deletion.ts when a CalibrationRun still
+ *                 pins the set (that run's kappa is uninterpretable without
+ *                 the set it measured). Reversible; readable again with
+ *                 ?includeRetired=true.
+ *
+ *   tombstonedAt  Pending purge. An ACCOUNT-LIFECYCLE verb, written by
+ *                 src/lib/account-deletion.ts when the owning account is
+ *                 deleted and nothing references the set, and by DELETE
+ *                 /api/golden-sets/[id]. Not reversible and not escapable —
+ *                 it stays hidden from every read path until the purge wave
+ *                 (deliberately not part of A0) removes it.
+ *
+ * THE ASYMMETRY IS THE WHOLE POINT, and it is what this function adds over
+ * the hand-rolled `if (!includeRetired) { where.retiredAt = null;
+ * where.tombstonedAt = null; }` it replaced at each call site. That shape
+ * made ?includeRetired=true release BOTH columns, so a set belonging to a
+ * deleted account came back in the list under "Show retired" — and with no
+ * badge, because the list card keys off `retiredAt` alone.
+ *
+ * Every golden-set read path spreads `goldenSetLifecycleWhere(...)` into its
+ * `where`. There is exactly one definition so the list route, the detail
+ * route, the items route and the config export cannot drift apart.
+ */
+export function goldenSetLifecycleWhere(includeRetired: boolean): Prisma.GoldenSetWhereInput {
+  return includeRetired ? { tombstonedAt: null } : { retiredAt: null, tombstonedAt: null };
+}
+
+/** The one spelling of the escape hatch every golden-set read path accepts.
+ * Strict `=== 'true'`, matching `includeSamples` in
+ * src/app/api/config/export/route.ts:40 — so `?includeRetired=1` is false
+ * everywhere rather than true on some routes. */
+export function parseIncludeRetired(searchParams: URLSearchParams): boolean {
+  return searchParams.get('includeRetired') === 'true';
+}
+
 /* ─── Item lifecycle: tombstone, never delete ───────────────────────────────
  *
  * Owner ruling 2026-08-13: "delete is ALWAYS a same-transaction tombstone
@@ -299,8 +340,9 @@ export class GoldenSetFrozenError extends Error {
  * NOTE THE ASYMMETRY WITH A SET'S `tombstonedAt`, IT IS DELIBERATE. A SET's
  * `tombstonedAt` is an ACCOUNT-LIFECYCLE verb written by
  * src/lib/account-deletion.ts for a set pending purge, and nothing may ever
- * hand one back — there is no escape hatch. An ITEM's `tombstonedAt` is a
- * PRODUCT verb: its owner curating their own set. The owner therefore has to
+ * hand one back — `goldenSetLifecycleWhere` above pins `tombstonedAt: null`
+ * in BOTH its arms, so there is no escape hatch. An ITEM's `tombstonedAt` is
+ * a PRODUCT verb: its owner curating their own set. The owner therefore has to
  * be able to see what they removed (to notice a mistake, and because the row
  * is being kept precisely so it can be looked at), so the item filter DOES
  * take an escape — gated to the owner/admin branch by its caller, never
@@ -314,8 +356,8 @@ export function goldenItemLifecycleWhere(includeTombstoned: boolean): Prisma.Gol
 }
 
 /** The one spelling of the item escape hatch. Strict `=== 'true'`, matching
- * this repo's other boolean query flags — `?includeRetired` (the golden-set
- * routes) and `?includeSamples` (src/app/api/config/export/route.ts:38) — so
+ * this repo's other boolean query flags — `parseIncludeRetired` above and
+ * `includeSamples` (src/app/api/config/export/route.ts:40) — so
  * `?includeTombstoned=1` is false everywhere rather than true on some
  * routes. */
 export function parseIncludeTombstoned(searchParams: URLSearchParams): boolean {
