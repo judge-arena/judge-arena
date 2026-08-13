@@ -100,7 +100,7 @@ describe('meta-eval tables (GoldenSet/GoldenItem/GoldenLabel/CalibrationRun)', (
     await truncateAll();
   });
 
-  it('two annotators can label the same item; the same annotator twice rejects P2002 pinned to (goldenItemId, annotatorId)', async () => {
+  it('two annotators can label the same item; the same annotator twice rejects P2002 — and TOMBSTONING the first label frees the slot for a re-label', async () => {
     const owner = await mkUser();
     const annotatorA = await mkUser();
     const annotatorB = await mkUser();
@@ -115,14 +115,77 @@ describe('meta-eval tables (GoldenSet/GoldenItem/GoldenLabel/CalibrationRun)', (
     });
     expect(labelA.id).not.toBe(labelB.id);
 
+    // Uniqueness is now enforced by the PARTIAL index
+    // GoldenLabel_goldenItemId_annotatorId_live_key (... WHERE "tombstonedAt"
+    // IS NULL), which prisma/schema.prisma cannot declare — so P2002's
+    // meta.target is the raw index NAME rather than the field array it used
+    // to be. Asserted on `code` alone, exactly as
+    // tests/db/email-partial-unique.test.ts does for the other partial unique
+    // index in this schema.
     await expect(
       db.goldenLabel.create({
         data: { goldenItemId: item.id, annotatorId: annotatorA.id, overallScore: 9 },
       })
-    ).rejects.toMatchObject({
-      code: 'P2002',
-      meta: { target: ['goldenItemId', 'annotatorId'] },
+    ).rejects.toMatchObject({ code: 'P2002' });
+
+    // A tombstoned label is out of the index's scope, so annotatorA can score
+    // the item again after an edit invalidated their first score. Under the
+    // old whole-table unique this insert collided forever, and the only way
+    // to re-annotate was to DESTROY the first label — which is exactly what
+    // the no-data-removal ruling forbids.
+    await db.goldenLabel.update({
+      where: { id: labelA.id },
+      data: { tombstonedAt: new Date(), tombstonedReason: 'item-content-edit' },
     });
+    const relabel = await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: annotatorA.id, overallScore: 4 },
+    });
+    expect(relabel.id).not.toBe(labelA.id);
+    expect(await db.goldenLabel.count({ where: { goldenItemId: item.id } })).toBe(3);
+  });
+
+  it('the partial index keeps the DEFAULT nulls-distinct behaviour, so two anonymised labels on one item coexist', async () => {
+    // This is why `@@unique([goldenItemId, annotatorId, tombstonedAt])`
+    // hand-edited to NULLS NOT DISTINCT was rejected: that spelling treats
+    // EVERY null as equal, including annotatorId's, and account deletion's
+    // `onDelete: SetNull` would then P2002 the second deleted annotator who
+    // had labelled the same item.
+    const goldenSet = await mkGoldenSet();
+    const item = await mkGoldenItem(goldenSet.id);
+    const annotatorA = await mkUser();
+    const annotatorB = await mkUser();
+    await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: annotatorA.id, overallScore: 7 },
+    });
+    await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: annotatorB.id, overallScore: 2 },
+    });
+
+    await db.user.delete({ where: { id: annotatorA.id } });
+    await db.user.delete({ where: { id: annotatorB.id } });
+
+    const anonymised = await db.goldenLabel.findMany({ where: { goldenItemId: item.id } });
+    expect(anonymised).toHaveLength(2);
+    expect(anonymised.every((l) => l.annotatorId === null)).toBe(true);
+  });
+
+  it('a tombstoned GoldenItem keeps its index, and that index stays TAKEN', async () => {
+    const goldenSet = await mkGoldenSet();
+    const item = await mkGoldenItem(goldenSet.id, 0);
+
+    await db.goldenItem.update({
+      where: { id: item.id },
+      data: { tombstonedAt: new Date() },
+    });
+
+    const tombstoned = await db.goldenItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(tombstoned.index).toBe(0);
+    expect(tombstoned.tombstonedAt).not.toBeNull();
+
+    // @@unique([goldenSetId, index]) is deliberately NOT partial: a tombstoned
+    // row still owns its ordinal. That is precisely why survivors are never
+    // re-packed, and why the next index is a high-water mark and not a count.
+    await expect(mkGoldenItem(goldenSet.id, 0)).rejects.toMatchObject({ code: 'P2002' });
   });
 
   it('GoldenItem (goldenSetId, index) is unique', async () => {

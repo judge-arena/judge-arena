@@ -717,10 +717,21 @@ model GoldenItem {
   sourceSample          DatasetSample     @relation(fields: [sourceDatasetSampleId], references: [id], onDelete: Restrict)
   labels                GoldenLabel[]
   candidates            GoldenCandidate[]
+  // A0 follow-up (owner ruling 2026-08-13): DELETE on an item is a
+  // same-transaction tombstone tag, never a row removal. NULL = live. The
+  // row KEEPS its `index` — @@unique([goldenSetId, index]) below is
+  // deliberately NOT partial, so a tombstoned ordinal stays taken and
+  // survivors are never re-packed. See nextGoldenItemIndex in
+  // src/lib/golden-sets.ts for what the next index is.
+  tombstonedAt          DateTime?
   createdAt             DateTime          @default(now())
   updatedAt             DateTime          @updatedAt
 
   @@unique([goldenSetId, index])
+  // Serves the filtered COUNT on every paginated items read and every
+  // `_count.items` on the list page. The ordered read still comes off
+  // GoldenItem_goldenSetId_index_key.
+  @@index([goldenSetId, tombstonedAt])
   @@index([sourceDatasetSampleId])
 }
 
@@ -741,18 +752,40 @@ model GoldenCandidate {
 }
 
 model GoldenLabel {
-  id             String     @id @default(cuid())
-  goldenItemId   String
-  goldenItem     GoldenItem @relation(fields: [goldenItemId], references: [id], onDelete: Cascade)
-  annotatorId    String?
-  annotator      User?      @relation(fields: [annotatorId], references: [id], onDelete: SetNull)
-  overallScore   Float
-  criteriaScores Json?
-  reasoning      String?
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  id               String     @id @default(cuid())
+  goldenItemId     String
+  goldenItem       GoldenItem @relation(fields: [goldenItemId], references: [id], onDelete: Cascade)
+  annotatorId      String?
+  annotator        User?      @relation(fields: [annotatorId], references: [id], onDelete: SetNull)
+  overallScore     Float
+  criteriaScores   Json?
+  reasoning        String?
+  // A human label is the expensive, irreplaceable artifact this roadmap
+  // exists to protect, so PATCH /api/golden-sets/[id]/items TOMBSTONES the
+  // labels of an item whose content changed rather than deleting them
+  // (owner ruling 2026-08-13, extended to labels — see that handler's doc).
+  // `tombstonedReason` records WHY: 'item-content-edit' is the only writer
+  // today; a future retraction or purge gets its own value rather than
+  // overloading this one.
+  tombstonedAt     DateTime?
+  tombstonedReason String?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
 
-  @@unique([goldenItemId, annotatorId])
+  // `@@unique([goldenItemId, annotatorId])` IS GONE ON PURPOSE. It is
+  // replaced by a PARTIAL unique index restricted to WHERE "tombstonedAt"
+  // IS NULL, hand-written in
+  // 20260813120000_v2e_golden_item_label_tombstones — Prisma's DSL has no
+  // syntax for a WHERE predicate, so this file cannot declare it and the
+  // migration's raw SQL is the only record. Whole-table uniqueness would let
+  // a tombstoned label occupy its annotator's slot forever, making
+  // re-annotation after an edit impossible. See CONTRIBUTING.md's "Known
+  // migrate-diff pseudo-drift" table.
+  //
+  // The index below is NOT redundant: dropping the unique also dropped the
+  // only btree serving `where: { goldenItemId }`, and the partial one covers
+  // live rows only.
+  @@index([goldenItemId])
   @@index([annotatorId])
 }
 

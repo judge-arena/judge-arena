@@ -457,7 +457,7 @@ own introspected model; `prisma migrate diff --from-url ...
 --to-schema-datamodel prisma/schema.prisma` reports an empty diff; `prisma
 db push` reports "already in sync". There is currently nothing to
 whitelist in a CI drift check for the cases below — a plain `migrate diff`
-gate would pass clean today. Currently three cases (the count was stale at
+gate would pass clean today. Currently four cases (the count was stale at
 "one" while the table already listed two — corrected while landing A0):
 
 | Migration | What's really there | Why `schema.prisma` can't say it |
@@ -465,6 +465,7 @@ gate would pass clean today. Currently three cases (the count was stale at
 | `20260728215410_v2b_idempotency_tighten` | `ModelJudgment_runId_judgeModelVersionId_pairOrder_key` recreated `NULLS NOT DISTINCT` (real pointwise idempotency, 1b Task 6) | `@@unique([runId, judgeModelVersionId, pairOrder])` has no Prisma DSL syntax for `NULLS NOT DISTINCT` (PG15+) |
 | `20260729180000_v2b_email_partial_unique` | `User_email_credentials_key`, a unique index on `User(email)` restricted to `WHERE "passwordHash" NOT LIKE '!%'` (real-credentials rows only, 1b Task 13 review fix) | Prisma's schema DSL has no syntax for a partial index (`WHERE` clause) at all — not specific to this predicate |
 | `20260812190000_v2d_golden_substrate` | `GoldenSet_ownerId_slug_key` created `NULLS NOT DISTINCT` (ownerless golden sets can't share a slug — A0 step 1) | `@@unique([ownerId, slug])` has no Prisma DSL syntax for `NULLS NOT DISTINCT` (PG15+), same as the idempotency case above. Re-verified empirically on Prisma 6.19.2 against a database with this migration applied: `migrate diff --from-url ... --to-schema-datamodel` reports an empty migration. A partial variant (`... NULLS NOT DISTINCT WHERE "slug" IS NOT NULL`) was tried and REJECTED — it produces REAL drift, with `migrate diff` proposing `CREATE UNIQUE INDEX "GoldenSet_ownerId_slug_key" ON "GoldenSet"("ownerId", "slug");` to "fix" it. A partial unique index does not satisfy a Prisma `@@unique`; the email row above only escapes this because its schema declares no `@unique` at all. |
+| `20260813120000_v2e_golden_item_label_tombstones` | `GoldenLabel_goldenItemId_annotatorId_live_key`, a unique index on `GoldenLabel(goldenItemId, annotatorId)` restricted to `WHERE "tombstonedAt" IS NULL` (one LIVE label per annotator per item — A0, tombstone-not-delete ruling) | Prisma's schema DSL has no syntax for a partial index, same as the email row above. Unlike that row, this one REPLACES a declared `@@unique`, which is therefore deleted from `prisma/schema.prisma` — so the Prisma client no longer offers the `goldenItemId_annotatorId` compound where-input (verified unused before landing), and P2002 from this index reports `meta.target` as the index name string rather than a field array. The `NULLS NOT DISTINCT` variant (`@@unique([goldenItemId, annotatorId, tombstonedAt])`) was tried and REJECTED: it equates `annotatorId`'s nulls too, so account deletion's `SetNull` would collide for two deleted annotators on one item. |
 
 The real hazard is the opposite direction from "drift tooling nags you to
 revert it": because `schema.prisma` can never re-declare this attribute,
