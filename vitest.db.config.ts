@@ -117,7 +117,13 @@ export default defineConfig({
       // next converter added here will push this below 79 no matter how well
       // it is tested. Raised for the end-of-branch re-baseline; not fixed
       // here, since floors are frozen mid-branch.
-      //   all-files            49.10 / 79.19 / 62.33 / 49.10
+      //
+      // Task 14's review round added the golden-label tombstone, the
+      // owner-scoped family lookup and the position-based item ordinals. All
+      // three live in the route, which no coverage config includes, so the
+      // branches figure is UNCHANGED at 685/865; only statements moved, by
+      // the one new constant in src/lib/golden-sets.ts.
+      //   all-files            49.11 / 79.19 / 62.33 / 49.11
       //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
       //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
       thresholds: {

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { getServerSession } from 'next-auth';
 import { db, truncateAll, mkUser } from './helpers';
+import { forkGoldenSet } from '@/lib/golden-set-versions';
 import { POST as importConfig } from '@/app/api/config/import/route';
 import { GET as exportConfig } from '@/app/api/config/export/route';
 
@@ -495,11 +496,135 @@ describe('Config export/import — golden sets', () => {
     expect(await db.goldenItem.count({ where: { goldenSetId: goldenSet.id } })).toBe(6);
   });
 
+  it('a replace tombstones the LABELS of every item it retires, with a reason that does not lie', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await mkAnnotatedDataset(user.id, { slug: 'ds-fixture' });
+    const goldenSet = await mkGoldenSet(user.id, dataset, { slug: 'gs-fixture', name: 'Fixture Golden Set' });
+    const annotator = await mkUser({ email: 'annotator@test.local' });
+    const before = await liveItems(goldenSet.id);
+    await db.goldenLabel.createMany({
+      data: [
+        { goldenItemId: before[0].id, annotatorId: annotator.id, overallScore: 1 },
+        { goldenItemId: before[1].id, annotatorId: annotator.id, overallScore: 2 },
+      ],
+    });
+
+    // Only item 0 is edited. Item 1's label is invalidated ANYWAY: a replace
+    // does not re-identify the document's items against the old rows, so
+    // nothing can honestly claim item 1's score still applies to a row that
+    // is now tombstoned.
+    const doc = await exportDoc();
+    doc.goldenSets[0].items[0].candidates[0].responseText = 'A-0 (edited)';
+    expect((await importConfig(importRequest(JSON.stringify(doc)))).status).toBe(200);
+
+    const labels = await db.goldenLabel.findMany({ orderBy: { overallScore: 'asc' } });
+    expect(labels).toHaveLength(2); // tombstoned, never deleted
+    expect(labels.every((l) => l.tombstonedAt !== null)).toBe(true);
+    // A human label is attribution: the row survives and still names who made it.
+    expect(labels.every((l) => l.annotatorId === annotator.id)).toBe(true);
+    // 'item-content-edit' would be a false statement about item 1.
+    expect(labels.map((l) => l.tombstonedReason)).toEqual([
+      'config-import-replace',
+      'config-import-replace',
+    ]);
+
+    // One instant for the whole replace — items and labels alike — so the
+    // rows it invalidated read as one event rather than a scatter.
+    const stamps = new Set<number>([
+      ...labels.map((l) => l.tombstonedAt!.getTime()),
+      ...(
+        await db.goldenItem.findMany({
+          where: { goldenSetId: goldenSet.id, tombstonedAt: { not: null } },
+        })
+      ).map((i) => i.tombstonedAt!.getTime()),
+    ]);
+    expect(stamps.size).toBe(1);
+
+    // No live label is left pointing at a dead item.
+    expect(
+      await db.goldenLabel.count({
+        where: { tombstonedAt: null, goldenItem: { tombstonedAt: { not: null } } },
+      })
+    ).toBe(0);
+  });
+
+  it('an export → edit → import cycle grows the high-water mark linearly, not exponentially', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await mkAnnotatedDataset(user.id, { slug: 'ds-fixture' });
+    const goldenSet = await mkGoldenSet(user.id, dataset, { slug: 'gs-fixture', name: 'Fixture Golden Set' });
+
+    // Three full cycles, each exporting what is ACTUALLY there rather than
+    // re-sending the original document. That is the loop that compounds: a
+    // fresh export emits the indices the previous replace wrote, so adding
+    // the offset to the document's RAW index roughly doubles the high-water
+    // mark each time (2, 6, 14, …) and overflows GoldenItem.index's Int in
+    // ~31 cycles. Writing POSITION + offset steps by the item count instead.
+    for (const edit of ['edit 1', 'edit 2', 'edit 3']) {
+      const doc = await exportDoc();
+      doc.goldenSets[0].items[0].candidates[0].responseText = `A-0 (${edit})`;
+      expect((await importConfig(importRequest(JSON.stringify(doc)))).status).toBe(200);
+    }
+
+    const items = await liveItems(goldenSet.id);
+    expect(items.map((i) => i.index)).toEqual([6, 7]); // raw-index + offset gives [14, 15]
+    expect(items[0].candidates[0].responseText).toBe('A-0 (edit 3)');
+    expect(await db.goldenItem.count({ where: { goldenSetId: goldenSet.id } })).toBe(8);
+  });
+
+  it('a version family spanning two owners is not writable through the other owner\'s import', async () => {
+    const owner = await mkUser({ email: 'family-owner@test.local' });
+    const admin = await mkUser({ email: 'family-admin@test.local', role: 'admin' });
+    mockSessionFor(owner);
+    const dataset = await mkAnnotatedDataset(owner.id, { slug: 'ds-fixture' });
+    const goldenSet = await mkGoldenSet(owner.id, dataset, { slug: 'gs-fixture', name: 'Fixture Golden Set' });
+
+    // requireOwnership admits admins, so an admin may fork another user's set.
+    // The result is ONE version family with TWO owners: root owned by `owner`,
+    // v2 owned by `admin`.
+    const adminFork = await forkGoldenSet(db, {
+      rootGoldenSetId: goldenSet.id,
+      sourceGoldenSetId: goldenSet.id,
+      ownerId: admin.id,
+      name: 'Admin Fork',
+      description: null,
+    });
+    expect(adminFork.version).toBe(2);
+
+    // The owner exports (their v1 only — export is ownerId-scoped) and
+    // re-imports it edited. Unscoped, the family lookup resolves `existing`
+    // to the newest member — the ADMIN's fork — and rewrites it.
+    const doc = await exportDoc();
+    expect(doc.goldenSets).toHaveLength(1);
+    doc.goldenSets[0].items[0].candidates[0].responseText = 'A-0 (edited)';
+    expect((await importConfig(importRequest(JSON.stringify(doc)))).status).toBe(200);
+
+    const forkAfter = await db.goldenSet.findUniqueOrThrow({ where: { id: adminFork.id } });
+    expect(forkAfter.name).toBe('Admin Fork');
+    expect(forkAfter.ownerId).toBe(admin.id);
+    expect(await db.goldenItem.count({ where: { goldenSetId: adminFork.id } })).toBe(2);
+    expect(
+      await db.goldenItem.count({ where: { goldenSetId: adminFork.id, tombstonedAt: { not: null } } })
+    ).toBe(0);
+
+    // …and the import wrote the set the session actually owns.
+    const ownItems = await liveItems(goldenSet.id);
+    expect(ownItems.map((i) => i.index)).toEqual([2, 3]);
+    expect(ownItems[0].candidates[0].responseText).toBe('A-0 (edited)');
+  });
+
   it('a FROZEN set forks instead of mutating, and the fork carries the document\'s items', async () => {
     const user = await mkUser();
     mockSessionFor(user);
     const dataset = await mkAnnotatedDataset(user.id, { slug: 'ds-fixture' });
     const goldenSet = await mkGoldenSet(user.id, dataset, { slug: 'gs-fixture', name: 'Fixture Golden Set' });
+
+    const annotator = await mkUser({ email: 'fork-annotator@test.local' });
+    const sourceItems = await liveItems(goldenSet.id);
+    await db.goldenLabel.create({
+      data: { goldenItemId: sourceItems[0].id, annotatorId: annotator.id, overallScore: 4 },
+    });
 
     const doc = await exportDoc();
     await mkCalibrationRun(goldenSet.id); // freezes it
@@ -526,6 +651,23 @@ describe('Config export/import — golden sets', () => {
     expect(forkItems.map((i) => i.index)).toEqual([2, 3]);
     expect(forkItems.map((i) => i.expected)).toEqual(['B>A', 'B>A']);
     expect(await db.goldenItem.count({ where: { goldenSetId: fork.id } })).toBe(4);
+
+    // The source's label is untouched — the measured set is not being
+    // replaced. Its COPY on the fork is tombstoned with the replace, because
+    // the fork's copied items are exactly what the document supersedes.
+    const sourceLabels = await db.goldenLabel.findMany({
+      where: { goldenItem: { goldenSetId: goldenSet.id } },
+    });
+    expect(sourceLabels).toHaveLength(1);
+    expect(sourceLabels[0].tombstonedAt).toBeNull();
+
+    const forkLabels = await db.goldenLabel.findMany({
+      where: { goldenItem: { goldenSetId: fork.id } },
+    });
+    expect(forkLabels).toHaveLength(1); // copied by forkGoldenSet, then invalidated
+    expect(forkLabels[0].tombstonedAt).not.toBeNull();
+    expect(forkLabels[0].tombstonedReason).toBe('config-import-replace');
+    expect(forkLabels[0].annotatorId).toBe(annotator.id);
 
     // Reported as a `create`, never a new DiffAction value.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

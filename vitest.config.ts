@@ -129,7 +129,7 @@ export default defineConfig({
       // converter's defensive `??`/`||` arms — the same idiom, and the same
       // partial coverage, as the four converters beside it. Prose only — no
       // threshold below was touched.
-      //   all-files            37.63 / 84.83 / 67.30 / 37.63
+      //   all-files            37.64 / 84.83 / 67.30 / 37.64
       thresholds: {
         lines: 33,
         functions: 63,

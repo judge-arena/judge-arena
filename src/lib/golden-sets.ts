@@ -329,6 +329,20 @@ export function parseIncludeTombstoned(searchParams: URLSearchParams): boolean {
 export const GOLDEN_LABEL_TOMBSTONE_REASON_CONTENT_EDIT = 'item-content-edit';
 
 /**
+ * The other writer: `POST /api/config/import` replacing a set's items wholesale
+ * from a config document.
+ *
+ * NOT folded into the constant above, even though both are "the text this score
+ * applied to is gone". An import replace tombstones EVERY live item of the set,
+ * including items whose content the document did not change, because the
+ * document is the new truth for the whole set and the old rows are not
+ * re-identified against it. Labelling those `'item-content-edit'` would assert
+ * something false about the items that did not change — and a reason that lies
+ * is worse than no reason, which is the whole point of the column.
+ */
+export const GOLDEN_LABEL_TOMBSTONE_REASON_CONFIG_IMPORT_REPLACE = 'config-import-replace';
+
+/**
  * The next `GoldenItem.index` for a set: a HIGH-WATER MARK over every row,
  * tombstoned included, never a count and never a reused ordinal.
  *

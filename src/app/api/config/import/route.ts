@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import type { JudgeClass, ServingBackend } from '@prisma/client';
+import type { JudgeClass, Prisma, ServingBackend } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { requireAuth, requireScope } from '@/lib/auth-guard';
 import {
@@ -14,6 +14,7 @@ import {
   GoldenSetFrozenError,
   goldenItemLifecycleWhere,
   nextGoldenItemIndex,
+  GOLDEN_LABEL_TOMBSTONE_REASON_CONFIG_IMPORT_REPLACE,
 } from '@/lib/golden-sets';
 import { forkGoldenSet } from '@/lib/golden-set-versions';
 import { createCustomJudgeModel } from '@/lib/model-catalog';
@@ -106,6 +107,54 @@ function goldenItemsFingerprint(items: GoldenItemContent[]): string {
     .sort((a, b) => a.index - b.index)
     .map((item, position) => goldenItemFingerprint(item, position))
     .join('|');
+}
+
+/**
+ * Retire everything a config-document replace supersedes on one golden set —
+ * its live items AND the human labels attached to them — and return the
+ * ordinal its replacements must start at.
+ *
+ * Both replace paths (unfrozen update, and post-fork) call this, so they
+ * cannot drift apart on any of the three things that are easy to get wrong:
+ *
+ * 1. TOMBSTONE, NEVER DELETE (owner ruling 2026-08-13). Nothing is removed.
+ *
+ * 2. THE LABELS GO WITH THE ITEMS. A live `GoldenLabel` hanging off a
+ *    tombstoned item is a human score still asserting itself about text no
+ *    read path serves any more. This is the same invalidation
+ *    `PATCH /api/golden-sets/[id]/items` performs, with its own reason string:
+ *    an import replaces EVERY live item, including ones the document did not
+ *    change, so `'item-content-edit'` would be a false statement about most of
+ *    them. One `now` for the whole replace, so the rows it invalidates read as
+ *    a single event rather than a scatter of timestamps.
+ *
+ * 3. THE OFFSET. Retained rows KEEP their ordinals — `@@unique([goldenSetId,
+ *    index])` is deliberately not partial — so the replacements cannot land at
+ *    0..n-1 without colliding with them (P2002, aborting the whole import).
+ *    They are appended above the high-water mark instead.
+ */
+async function tombstoneReplacedGoldenItems(
+  tx: Prisma.TransactionClient,
+  goldenSetId: string
+): Promise<number> {
+  const now = new Date();
+
+  // Not filtered on the ITEM's lifecycle, so this is order-independent with
+  // respect to the item tombstone below.
+  await tx.goldenLabel.updateMany({
+    where: { goldenItem: { goldenSetId }, tombstonedAt: null },
+    data: {
+      tombstonedAt: now,
+      tombstonedReason: GOLDEN_LABEL_TOMBSTONE_REASON_CONFIG_IMPORT_REPLACE,
+    },
+  });
+
+  await tx.goldenItem.updateMany({
+    where: { goldenSetId, tombstonedAt: null },
+    data: { tombstonedAt: now },
+  });
+
+  return nextGoldenItemIndex(tx, goldenSetId);
 }
 
 /**
@@ -548,25 +597,31 @@ export async function POST(request: Request) {
         continue;
       }
 
-      const itemData = configGoldenSet.items.map((item) => ({
-        sourceDatasetSampleId: sampleIdByInput.get(item.inputText) as string,
-        index: item.index,
-        inputText: item.inputText,
-        promptText: item.promptText ?? null,
-        responseText: item.responseText ?? null,
-        // The set is homogeneous: GoldenSet.protocol is the single source of
-        // truth and every item is stamped with it.
-        protocol: configGoldenSet.protocol,
-        expected: item.expected ?? null,
-        candidates: {
-          create: item.candidates.map((c) => ({
-            position: c.position,
-            promptText: c.promptText ?? null,
-            responseText: c.responseText ?? null,
-            label: c.label ?? null,
-          })),
-        },
-      }));
+      // Sorted by the document's own `index`, so this array's ORDINAL
+      // POSITIONS are the set's intended order — which is what the replace
+      // paths below write, and what the fingerprint comparison keys on. The
+      // two must agree, or a replace would report a change it did not make.
+      const itemData = [...configGoldenSet.items]
+        .sort((a, b) => a.index - b.index)
+        .map((item) => ({
+          sourceDatasetSampleId: sampleIdByInput.get(item.inputText) as string,
+          index: item.index,
+          inputText: item.inputText,
+          promptText: item.promptText ?? null,
+          responseText: item.responseText ?? null,
+          // The set is homogeneous: GoldenSet.protocol is the single source of
+          // truth and every item is stamped with it.
+          protocol: configGoldenSet.protocol,
+          expected: item.expected ?? null,
+          candidates: {
+            create: item.candidates.map((c) => ({
+              position: c.position,
+              promptText: c.promptText ?? null,
+              responseText: c.responseText ?? null,
+              label: c.label ?? null,
+            })),
+          },
+        }));
 
       // Match on (ownerId, slug), then compare against the NEWEST member of
       // that version family. Comparing against the slug-matched root instead
@@ -579,7 +634,16 @@ export async function POST(request: Request) {
       const rootId = matched ? matched.parentId ?? matched.id : null;
       const existing = rootId
         ? await prisma.goldenSet.findFirst({
-            where: { OR: [{ id: rootId }, { parentId: rootId }] },
+            // `ownerId` is NOT redundant with the slug match above. A version
+            // family can legitimately span owners: `requireOwnership` admits
+            // admins, so an admin forking another user's set produces a v2 the
+            // ADMIN owns under a root that user owns. Without this filter, the
+            // original owner importing a document that matches their own slug
+            // resolves `existing` to the admin's fork and — if it is unfrozen
+            // and the content differs — rewrites another user's golden set and
+            // replaces all of its items. An import may only ever write sets
+            // this session owns.
+            where: { ownerId: userId, OR: [{ id: rootId }, { parentId: rootId }] },
             orderBy: { version: 'desc' },
             include: {
               items: {
@@ -680,16 +744,7 @@ export async function POST(request: Request) {
             if (await isGoldenSetFrozen(tx, existing.id)) {
               throw new GoldenSetFrozenError(existing.id);
             }
-            // Tombstone, never delete (owner ruling 2026-08-13). The retained
-            // rows KEEP their ordinals, so the document's items cannot land
-            // at 0..n-1 — that collides with the tombstoned rows on
-            // @@unique([goldenSetId, index]) (P2002) and aborts the import.
-            // They are appended above the high-water mark instead.
-            await tx.goldenItem.updateMany({
-              where: { goldenSetId: existing.id, tombstonedAt: null },
-              data: { tombstonedAt: new Date() },
-            });
-            const offset = await nextGoldenItemIndex(tx, existing.id);
+            const offset = await tombstoneReplacedGoldenItems(tx, existing.id);
             await tx.goldenSet.update({
               where: { id: existing.id },
               data: {
@@ -701,7 +756,15 @@ export async function POST(request: Request) {
                 // `datasetId` is NOT written: it is immutable, and the guard
                 // above has already proved it equal to `dataset.id`.
                 items: {
-                  create: itemData.map((item) => ({ ...item, index: item.index + offset })),
+                  // POSITION + offset, not the document's raw `index` +
+                  // offset. A fresh export emits the indices this replace
+                  // writes, so adding the offset to a raw index compounds it
+                  // on every export→edit→import cycle — 2, 6, 14, 30, … and
+                  // an `Int` column overflows after ~31 of them. Only
+                  // relative order is portable anyway (see ConfigGoldenItem),
+                  // so packing to positions loses nothing and keeps the
+                  // high-water mark growing linearly.
+                  create: itemData.map((item, position) => ({ ...item, index: position + offset })),
                 },
               },
             });
@@ -743,20 +806,18 @@ export async function POST(request: Request) {
       // rewritten — it is immutable, and the fork inherits the source's,
       // which the guard above proved equal to `dataset.id`.
       await prisma.$transaction(async (tx) => {
-        // Same tombstone-plus-offset as the unfrozen path above, for the same
-        // reason: the copied items hold ordinals 0..n-1 and keep them.
-        await tx.goldenItem.updateMany({
-          where: { goldenSetId: fork.id, tombstonedAt: null },
-          data: { tombstonedAt: new Date() },
-        });
-        const offset = await nextGoldenItemIndex(tx, fork.id);
+        // Same replace step as the unfrozen path above, for the same reasons:
+        // the items forkGoldenSet just copied hold ordinals 0..n-1 and keep
+        // them, and the labels it copied with them are annotations of text
+        // this document is superseding.
+        const offset = await tombstoneReplacedGoldenItems(tx, fork.id);
         await tx.goldenSet.update({
           where: { id: fork.id },
           data: {
             visibility: configGoldenSet.visibility,
             protocol: configGoldenSet.protocol,
             items: {
-              create: itemData.map((item) => ({ ...item, index: item.index + offset })),
+              create: itemData.map((item, position) => ({ ...item, index: position + offset })),
             },
           },
         });
