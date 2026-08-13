@@ -17,7 +17,9 @@ import {
 type DiffAction = 'create' | 'update' | 'skip';
 
 interface DiffItem {
-  type: 'project' | 'rubric' | 'model' | 'dataset';
+  // Mirrors DiffItem['type'] in src/lib/config.ts. Kept in sync by hand —
+  // this file re-declares the union rather than importing it.
+  type: 'project' | 'rubric' | 'model' | 'dataset' | 'goldenSet';
   slug: string;
   name: string;
   action: DiffAction;
@@ -364,6 +366,7 @@ export default function SettingsPage() {
     rubric: '✅',
     model: '🧠',
     dataset: '📊',
+    goldenSet: '🏅',
   };
 
   return (
@@ -379,8 +382,8 @@ export default function SettingsPage() {
           <CardHeader>
             <CardTitle>Export Configuration</CardTitle>
             <CardDescription>
-              Download your projects, rubrics, models, and datasets as a portable YAML
-              configuration file. This captures your evaluation <em>harness</em> setup
+              Download your projects, rubrics, models, datasets, and golden sets as a
+              portable YAML configuration file. This captures your evaluation <em>harness</em> setup
               — complementary to data exports (CSV/JSONL) which capture evaluation <em>results</em>.
             </CardDescription>
           </CardHeader>

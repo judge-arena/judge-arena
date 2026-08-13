@@ -96,6 +96,30 @@ export default defineConfig({
       //   all-files            48.65 / 79.37 / 62.20 / 48.65
       //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
       //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
+      //
+      // Re-measured 2026-08-13 in Task 14 (a0), which added the goldenSets
+      // section of the config document to src/lib/config.ts. Both per-glob
+      // entries are unchanged; all-files rose on statements/lines/functions
+      // and FELL on branches, 79.37 -> 79.19 (measured 685/865 hit/found in
+      // coverage-db/lcov.info).
+      //
+      // READ THIS BEFORE ADDING ANOTHER src/lib CONVERTER. The branches
+      // margin flagged two entries above has now narrowed to 0.19pp over the
+      // floor of 79, and it narrowed for a structural reason rather than a
+      // testing lapse: `dbGoldenSetToConfig` carries the same defensive
+      // `??`/`||` fallbacks as the four converters beside it (see the
+      // uncovered arms on dbProjectToConfig/dbRubricToConfig/dbModelToConfig/
+      // dbDatasetToConfig), and those arms are unreachable from their only
+      // production caller — the export route always passes a full Prisma row
+      // with `dataset`, `items` and `candidates` included. The DB suite
+      // therefore cannot reach them at all; tests/lib/config.test.ts covers
+      // them, and that run is gated by vitest.config.ts, not this one. The
+      // next converter added here will push this below 79 no matter how well
+      // it is tested. Raised for the end-of-branch re-baseline; not fixed
+      // here, since floors are frozen mid-branch.
+      //   all-files            49.10 / 79.19 / 62.33 / 49.10
+      //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
+      //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
       thresholds: {
         lines: 45,
         functions: 58,

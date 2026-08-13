@@ -9,6 +9,13 @@ import {
   deserializeConfig,
 } from '@/lib/config';
 import { legacyProviderToBackend } from '@/lib/llm';
+import {
+  isGoldenSetFrozen,
+  GoldenSetFrozenError,
+  goldenItemLifecycleWhere,
+  nextGoldenItemIndex,
+} from '@/lib/golden-sets';
+import { forkGoldenSet } from '@/lib/golden-set-versions';
 import { createCustomJudgeModel } from '@/lib/model-catalog';
 import { logger, serializeError } from '@/lib/logger';
 import { audit, getRequestContext } from '@/lib/audit';
@@ -51,6 +58,56 @@ function judgeClassForImportedProvider(provider: string): JudgeClass {
   }
 }
 
+/** The content of one golden item, in the one shape both sides of the
+ * create/update/skip comparison are projected into. */
+interface GoldenItemContent {
+  index: number;
+  inputText: string;
+  promptText: string | null;
+  responseText: string | null;
+  expected: string | null;
+  candidates: { position: number; promptText: string | null; responseText: string | null; label: string | null }[];
+}
+
+/**
+ * Content identity of one golden item AT A GIVEN ORDINAL POSITION in the set.
+ *
+ * `index` is deliberately not in the tuple. Items are tombstoned rather than
+ * deleted and a tombstoned row keeps its ordinal, so a replace appends the new
+ * items above the set's high-water mark: after one replace the live rows sit
+ * at k..k+n-1 while the document still says 0..n-1. Comparing raw `index`
+ * values would call that pair "different" forever — re-importing an unchanged
+ * document would replace again, and again, growing the table by n rows per
+ * run and reporting a spurious `update` in the preview. POSITION is what is
+ * portable, and a genuine reorder still changes it.
+ *
+ * Also excludes `id`, `goldenSetId`, `sourceDatasetSampleId` and timestamps —
+ * all instance-local.
+ */
+function goldenItemFingerprint(item: GoldenItemContent, position: number): string {
+  const candidates = [...item.candidates]
+    .sort((a, b) => a.position - b.position)
+    .map((c) => [c.position, c.promptText ?? '', c.responseText ?? '', c.label ?? '']);
+  return JSON.stringify([
+    position,
+    item.inputText,
+    item.promptText ?? '',
+    item.responseText ?? '',
+    item.expected ?? '',
+    candidates,
+  ]);
+}
+
+/** Content identity of a whole item list. Ordering is imposed (items by
+ * `index`, candidates by `position`) so two equal sets never differ on row
+ * order alone. */
+function goldenItemsFingerprint(items: GoldenItemContent[]): string {
+  return [...items]
+    .sort((a, b) => a.index - b.index)
+    .map((item, position) => goldenItemFingerprint(item, position))
+    .join('|');
+}
+
 /**
  * POST /api/config/import
  *
@@ -73,6 +130,12 @@ function judgeClassForImportedProvider(provider: string): JudgeClass {
  *     ModelEndpoint, same as every other field in this file).
  *   - Dataset samples are imported if present in the config.
  *   - Projects referenced by datasets are resolved by slug.
+ *   - Golden sets match by (ownerId, slug) and are ordered after datasets;
+ *     their items are ALWAYS embedded, and each item's source DatasetSample
+ *     is re-resolved by `inputText`. A frozen set forks instead of mutating,
+ *     reported as a `create`. `GoldenSet.datasetId` is immutable, so a
+ *     document that would repoint an existing set is refused. Replaced items
+ *     are tombstoned, never deleted. Human labels are never imported.
  *   - Returns a diff report showing what was/would be created, updated, or skipped.
  */
 export async function POST(request: Request) {
@@ -420,6 +483,293 @@ export async function POST(request: Request) {
       }
     }
 
+    // ── Golden sets ──
+    // Ordered AFTER datasets on purpose: a set's items resolve their source
+    // DatasetSample out of the dataset the loop above just created.
+    for (const configGoldenSet of config.goldenSets) {
+      const slug = configGoldenSet.slug;
+      const name = configGoldenSet.name;
+
+      // Dataset resolution is deliberately WIDER than `POST /api/golden-sets`,
+      // which admits only platform-owned public corpora. Both arms are load-
+      // bearing:
+      //   (a) fresh self-hosted instance — the dataset came in this same
+      //       document and is now owned by the importing user;
+      //   (b) re-import into the SAME instance — the set is over
+      //       judgebench-v1, owned by platform@judgearena.local, which the
+      //       exporter never emitted (datasets are scoped `{ userId }`).
+      // Drop (b) and every real golden set fails to resolve on re-import.
+      const dataset =
+        (await prisma.dataset.findFirst({
+          where: { userId, slug: configGoldenSet.datasetSlug },
+        })) ??
+        (await prisma.dataset.findFirst({
+          where: { slug: configGoldenSet.datasetSlug, visibility: 'public' },
+          orderBy: { createdAt: 'asc' },
+        }));
+
+      if (!dataset) {
+        items.push({
+          type: 'goldenSet',
+          slug,
+          name,
+          action: 'skip',
+          changes: [`dataset "${configGoldenSet.datasetSlug}" not found on this instance — import or seed it first`],
+        });
+        continue;
+      }
+
+      // `GoldenItem.sourceDatasetSampleId` is required and `onDelete:
+      // Restrict`, and a sample id is instance-local, so it is re-resolved
+      // from content: `inputText` is `DatasetSample.input` verbatim for all
+      // three mappings. Duplicate inputs collapse onto the lowest-index
+      // sample — recorded in the COVERAGE map.
+      const samples = await prisma.datasetSample.findMany({
+        where: { datasetId: dataset.id },
+        select: { id: true, input: true },
+        orderBy: { index: 'asc' },
+      });
+      const sampleIdByInput = new Map<string, string>();
+      for (const sample of samples) {
+        if (!sampleIdByInput.has(sample.input)) sampleIdByInput.set(sample.input, sample.id);
+      }
+
+      const unresolved = configGoldenSet.items.filter((i) => !sampleIdByInput.has(i.inputText));
+      if (unresolved.length > 0) {
+        items.push({
+          type: 'goldenSet',
+          slug,
+          name,
+          action: 'skip',
+          changes: [
+            `${unresolved.length} of ${configGoldenSet.items.length} items have no matching sample in dataset "${configGoldenSet.datasetSlug}" — re-export with ?includeSamples=true, or seed the corpus on this instance first`,
+          ],
+        });
+        continue;
+      }
+
+      const itemData = configGoldenSet.items.map((item) => ({
+        sourceDatasetSampleId: sampleIdByInput.get(item.inputText) as string,
+        index: item.index,
+        inputText: item.inputText,
+        promptText: item.promptText ?? null,
+        responseText: item.responseText ?? null,
+        // The set is homogeneous: GoldenSet.protocol is the single source of
+        // truth and every item is stamped with it.
+        protocol: configGoldenSet.protocol,
+        expected: item.expected ?? null,
+        candidates: {
+          create: item.candidates.map((c) => ({
+            position: c.position,
+            promptText: c.promptText ?? null,
+            responseText: c.responseText ?? null,
+            label: c.label ?? null,
+          })),
+        },
+      }));
+
+      // Match on (ownerId, slug), then compare against the NEWEST member of
+      // that version family. Comparing against the slug-matched root instead
+      // would re-fork a frozen set on every re-import of the same document,
+      // growing versions without bound.
+      const matched = await prisma.goldenSet.findFirst({
+        where: { ownerId: userId, slug },
+        select: { id: true, parentId: true },
+      });
+      const rootId = matched ? matched.parentId ?? matched.id : null;
+      const existing = rootId
+        ? await prisma.goldenSet.findFirst({
+            where: { OR: [{ id: rootId }, { parentId: rootId }] },
+            orderBy: { version: 'desc' },
+            include: {
+              items: {
+                // Tombstoned items are removed content: comparing against
+                // them would report a difference the user cannot resolve,
+                // and they are not what a fresh export would emit either.
+                where: goldenItemLifecycleWhere(false),
+                orderBy: { index: 'asc' },
+                include: { candidates: { orderBy: { position: 'asc' } } },
+              },
+            },
+          })
+        : null;
+
+      if (!existing) {
+        items.push({ type: 'goldenSet', slug, name, action: 'create' });
+        if (!dryRun) {
+          await prisma.goldenSet.create({
+            data: {
+              name,
+              slug,
+              description: configGoldenSet.description ?? null,
+              visibility: configGoldenSet.visibility,
+              protocol: configGoldenSet.protocol,
+              version: configGoldenSet.version,
+              datasetId: dataset.id,
+              ownerId: userId,
+              // No offset here: the set is being created, so no ordinal is
+              // taken and the document's own indices stand.
+              items: { create: itemData },
+            },
+          });
+        }
+        continue;
+      }
+
+      // `GoldenSet.datasetId` is IMMUTABLE — "a new record becomes a new
+      // dataset" (owner ruling 2026-08-13); PATCH /api/golden-sets/[id] 400s
+      // on its mere presence. Repointing here would be worse than the PATCH
+      // it mirrors: the items below were resolved against the OTHER dataset's
+      // samples, so applying them while leaving `datasetId` alone would leave
+      // the set claiming one corpus and its items citing another. Refused
+      // outright rather than partially applied.
+      if (existing.datasetId !== dataset.id) {
+        items.push({
+          type: 'goldenSet',
+          slug,
+          name,
+          action: 'skip',
+          changes: [
+            `dataset: → "${configGoldenSet.datasetSlug}" refused — datasetId is immutable, a golden set is the annotation layer over exactly one dataset. Import this set under a different slug, or fork it.`,
+          ],
+        });
+        continue;
+      }
+
+      const changes: string[] = [];
+      if (existing.name !== name) changes.push(`name: "${existing.name}" → "${name}"`);
+      if ((existing.description ?? '') !== (configGoldenSet.description ?? '')) changes.push('description updated');
+      if (existing.visibility !== configGoldenSet.visibility) changes.push(`visibility: ${existing.visibility} → ${configGoldenSet.visibility}`);
+      if (existing.protocol !== configGoldenSet.protocol) changes.push(`protocol: ${existing.protocol} → ${configGoldenSet.protocol}`);
+
+      const existingFingerprint = goldenItemsFingerprint(existing.items);
+      const configFingerprint = goldenItemsFingerprint(
+        configGoldenSet.items.map((item) => ({
+          index: item.index,
+          inputText: item.inputText,
+          promptText: item.promptText ?? null,
+          responseText: item.responseText ?? null,
+          expected: item.expected ?? null,
+          candidates: item.candidates.map((c) => ({
+            position: c.position,
+            promptText: c.promptText ?? null,
+            responseText: c.responseText ?? null,
+            label: c.label ?? null,
+          })),
+        }))
+      );
+      if (existingFingerprint !== configFingerprint) {
+        changes.push(`items: ${existing.items.length} → ${configGoldenSet.items.length}`);
+      }
+
+      if (changes.length === 0) {
+        items.push({ type: 'goldenSet', slug, name, action: 'skip' });
+        continue;
+      }
+
+      const frozen = await isGoldenSetFrozen(prisma, existing.id);
+
+      if (!frozen) {
+        items.push({ type: 'goldenSet', slug, name, action: 'update', changes });
+        if (!dryRun) {
+          await prisma.$transaction(async (tx) => {
+            // Re-checked INSIDE the write transaction. Separated, a
+            // CalibrationRun started between the read above and this write
+            // measures a set that changed underneath it — retention silently
+            // broken, and nothing logs.
+            if (await isGoldenSetFrozen(tx, existing.id)) {
+              throw new GoldenSetFrozenError(existing.id);
+            }
+            // Tombstone, never delete (owner ruling 2026-08-13). The retained
+            // rows KEEP their ordinals, so the document's items cannot land
+            // at 0..n-1 — that collides with the tombstoned rows on
+            // @@unique([goldenSetId, index]) (P2002) and aborts the import.
+            // They are appended above the high-water mark instead.
+            await tx.goldenItem.updateMany({
+              where: { goldenSetId: existing.id, tombstonedAt: null },
+              data: { tombstonedAt: new Date() },
+            });
+            const offset = await nextGoldenItemIndex(tx, existing.id);
+            await tx.goldenSet.update({
+              where: { id: existing.id },
+              data: {
+                name,
+                description: configGoldenSet.description ?? null,
+                visibility: configGoldenSet.visibility,
+                protocol: configGoldenSet.protocol,
+                version: configGoldenSet.version,
+                // `datasetId` is NOT written: it is immutable, and the guard
+                // above has already proved it equal to `dataset.id`.
+                items: {
+                  create: itemData.map((item) => ({ ...item, index: item.index + offset })),
+                },
+              },
+            });
+          });
+        }
+        continue;
+      }
+
+      // Frozen + changed → fork rather than mutate (design decision #6),
+      // reported as a `create` and NOT a new DiffAction: adding a value to
+      // DiffAction changes ImportDiffReport.summary's three-key shape, the
+      // settings page's actionVariant, and every existing
+      // `expect(body.summary).toEqual({ create, update, skip })`.
+      if (dryRun) {
+        items.push({
+          type: 'goldenSet',
+          slug,
+          name,
+          action: 'create',
+          changes: [...changes, 'frozen by a calibration run — a real import would fork to a new version rather than mutate it'],
+        });
+        continue;
+      }
+
+      const fork = await forkGoldenSet(prisma, {
+        rootGoldenSetId: existing.parentId ?? existing.id,
+        sourceGoldenSetId: existing.id,
+        ownerId: userId,
+        name,
+        description: configGoldenSet.description ?? null,
+      });
+      // forkGoldenSet copies the SOURCE's items (and the labels that follow
+      // unedited items). The document's items are what the user asked for,
+      // so they replace them — legal because a just-created fork has no
+      // CalibrationRun and is therefore not frozen. `protocol` is rewritten
+      // with them because the set is homogeneous: the items below are stamped
+      // with the document's protocol, and leaving the fork on the source's
+      // would make the set disagree with its own items. `datasetId` is not
+      // rewritten — it is immutable, and the fork inherits the source's,
+      // which the guard above proved equal to `dataset.id`.
+      await prisma.$transaction(async (tx) => {
+        // Same tombstone-plus-offset as the unfrozen path above, for the same
+        // reason: the copied items hold ordinals 0..n-1 and keep them.
+        await tx.goldenItem.updateMany({
+          where: { goldenSetId: fork.id, tombstonedAt: null },
+          data: { tombstonedAt: new Date() },
+        });
+        const offset = await nextGoldenItemIndex(tx, fork.id);
+        await tx.goldenSet.update({
+          where: { id: fork.id },
+          data: {
+            visibility: configGoldenSet.visibility,
+            protocol: configGoldenSet.protocol,
+            items: {
+              create: itemData.map((item) => ({ ...item, index: item.index + offset })),
+            },
+          },
+        });
+      });
+      items.push({
+        type: 'goldenSet',
+        slug: fork.slug ?? slug,
+        name,
+        action: 'create',
+        changes: [...changes, `frozen by a calibration run — forked to version ${fork.version}`],
+      });
+    }
+
     const report: ImportDiffReport = {
       items,
       summary: {
@@ -449,6 +799,16 @@ export async function POST(request: Request) {
         : `Imported: ${report.summary.create} created, ${report.summary.update} updated, ${report.summary.skip} unchanged`,
     });
   } catch (error) {
+    // A set that froze between the advisory read and the guarded write. The
+    // write already rolled back; a re-run takes the fork path instead.
+    if (error instanceof GoldenSetFrozenError) {
+      return NextResponse.json(
+        {
+          error: `Golden set ${error.goldenSetId} was frozen by a calibration run while this import was running. Re-run the import — it will fork instead of mutating.`,
+        },
+        { status: 409 }
+      );
+    }
     logger.error('Config import failed', { error: serializeError(error) });
     return NextResponse.json(
       { error: 'Failed to import configuration' },

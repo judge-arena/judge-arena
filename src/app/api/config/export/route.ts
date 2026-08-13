@@ -7,10 +7,12 @@ import {
   dbRubricToConfig,
   dbModelToConfig,
   dbDatasetToConfig,
+  dbGoldenSetToConfig,
   serializeConfig,
   yamlResponse,
   generateSlug,
 } from '@/lib/config';
+import { goldenItemLifecycleWhere } from '@/lib/golden-sets';
 import { logger, serializeError } from '@/lib/logger';
 
 /**
@@ -20,7 +22,7 @@ import { logger, serializeError } from '@/lib/logger';
  * 
  * Query params:
  *   - include: comma-separated list of sections to export.
- *              Options: projects, rubrics, models, datasets, all (default: all)
+ *              Options: projects, rubrics, models, datasets, goldenSets, all (default: all)
  *   - includeSamples: "true" to include dataset sample data in export (default: false)
  *   - format: "yaml" (default) or "json"
  *
@@ -38,8 +40,13 @@ export async function GET(request: Request) {
   const includeSamples = searchParams.get('includeSamples') === 'true';
   const format = (searchParams.get('format') ?? 'yaml').toLowerCase();
 
+  // Lowercase entries ONLY. `includeParam` is lowercased above, so a
+  // caller's `?include=goldenSets` arrives here as `goldensets`; a camelCase
+  // entry in this array would match `all` but never an explicit include, and
+  // an unknown section name is silently ignored rather than rejected — the
+  // section would just quietly export nothing.
   const sections = includeParam === 'all'
-    ? ['projects', 'rubrics', 'models', 'datasets']
+    ? ['projects', 'rubrics', 'models', 'datasets', 'goldensets']
     : includeParam.split(',').map((s) => s.trim());
 
   try {
@@ -53,6 +60,7 @@ export async function GET(request: Request) {
       rubrics: [],
       models: [],
       datasets: [],
+      goldenSets: [],
     };
 
     // ── Projects ──
@@ -195,6 +203,58 @@ export async function GET(request: Request) {
       config.datasets = datasets.map((ds) =>
         dbDatasetToConfig(ds, { includeSamples, projectSlugMap })
       );
+    }
+
+    // ── Golden sets (items ALWAYS embedded) ──
+    // Deliberately asymmetric with datasets: a dataset's samples sit behind
+    // `?includeSamples=true` (default off), but a golden set IS its
+    // annotation layer — exported without items it round-trips vacuously.
+    //
+    // `GoldenSet` keys ownership on `ownerId`, not the `userId` every other
+    // model in this file uses (prisma/schema.prisma). Retired and tombstoned
+    // sets are filtered out: `retiredAt` means out of circulation and
+    // `tombstonedAt` means pending purge — neither belongs in a portable
+    // working set, and re-importing one would silently resurrect it.
+    if (sections.includes('goldensets')) {
+      const where = admin
+        ? { retiredAt: null, tombstonedAt: null }
+        : { ownerId: userId, retiredAt: null, tombstonedAt: null };
+      const goldenSets = await prisma.goldenSet.findMany({
+        where,
+        include: {
+          dataset: { select: { slug: true, name: true } },
+          items: {
+            // Same reasoning one level down, and the same helper every other
+            // item read in src/ routes through: a tombstoned item is one its
+            // owner removed HERE, and exporting it would let a re-import
+            // resurrect it as live content.
+            where: goldenItemLifecycleWhere(false),
+            orderBy: { index: 'asc' },
+            include: { candidates: { orderBy: { position: 'asc' } } },
+          },
+        },
+        orderBy: [{ name: 'asc' }, { version: 'asc' }],
+      });
+
+      // Auto-generate slugs, same shape as the three sections above.
+      // `goldenSetSchema.slug` is `z.string().min(1)`, so a null slug here
+      // would make the exported document unimportable.
+      const slugs: string[] = [];
+      for (const goldenSet of goldenSets) {
+        if (!goldenSet.slug) {
+          const base = generateSlug(goldenSet.name);
+          const slug = goldenSet.version > 1 ? `${base}-v${goldenSet.version}` : base;
+          const uniqueSlug = slugs.includes(slug) ? `${slug}-${goldenSet.id.slice(0, 6)}` : slug;
+          await prisma.goldenSet.update({
+            where: { id: goldenSet.id },
+            data: { slug: uniqueSlug },
+          });
+          goldenSet.slug = uniqueSlug;
+        }
+        slugs.push(goldenSet.slug);
+      }
+
+      config.goldenSets = goldenSets.map((gs) => dbGoldenSetToConfig(gs));
     }
 
     const timestamp = new Date().toISOString().slice(0, 10);

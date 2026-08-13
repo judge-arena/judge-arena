@@ -119,6 +119,17 @@ export default defineConfig({
       // keys; every per-glob entry is byte-identical to the row above.
       // Prose only — no threshold below was touched.
       //   all-files            37.09 / 84.91 / 67.17 / 37.09
+      //
+      // Re-measured 2026-08-13 in Task 14 (a0), which added the goldenSets
+      // section of the config document (ConfigGoldenSet/ConfigGoldenItem,
+      // goldenSetSchema, dbGoldenSetToConfig) to src/lib/config.ts, unit-
+      // tested in tests/lib/config.test.ts. Only all-files moved; every
+      // per-glob entry is byte-identical to the rows above. Statements/lines
+      // and functions rose; branches fell 0.08pp, which is the new
+      // converter's defensive `??`/`||` arms — the same idiom, and the same
+      // partial coverage, as the four converters beside it. Prose only — no
+      // threshold below was touched.
+      //   all-files            37.63 / 84.83 / 67.30 / 37.63
       thresholds: {
         lines: 33,
         functions: 63,

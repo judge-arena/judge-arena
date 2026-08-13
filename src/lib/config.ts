@@ -113,6 +113,54 @@ export interface ConfigProject {
   isDefault: boolean;
 }
 
+/**
+ * Shape of one item inside a golden set config block.
+ *
+ * `index` is the item's position within the SET, not the source
+ * `DatasetSample.index`. It is unique within the set and monotonic in
+ * insertion order, but NOT dense: items are tombstoned rather than deleted
+ * and a tombstoned row keeps its ordinal, so a replace appends above the
+ * set's high-water mark (see `nextGoldenItemIndex` in src/lib/golden-sets.ts).
+ * Only the relative ORDER of these values is portable.
+ *
+ * There is no `sourceDatasetSampleId` here on purpose: a sample id is a
+ * surrogate key with no meaning on another instance. The importer re-resolves
+ * the FK from `inputText`, which is `DatasetSample.input` verbatim for all
+ * three protocol mappings (src/lib/golden-sets.ts's mapSampleToGoldenItem).
+ */
+export interface ConfigGoldenItem {
+  index: number;
+  inputText: string;
+  promptText?: string;
+  responseText?: string;
+  expected?: string;
+  candidates: { position: number; promptText?: string; responseText?: string; label?: string }[];
+}
+
+/**
+ * Shape of a golden set in the YAML config.
+ *
+ * `items` is REQUIRED and always emitted — deliberately asymmetric with
+ * `ConfigDataset.samples`, which sits behind `?includeSamples=true`. A golden
+ * set is an annotation layer; exported without its items it round-trips
+ * vacuously.
+ *
+ * Human labels (`GoldenLabel`) are NOT part of this shape and never will be:
+ * `annotatorId` is a real `User` FK, and import attributes everything to
+ * `session.user.id` — carrying labels would forge attributions, recording an
+ * annotator as having scored text they never saw.
+ */
+export interface ConfigGoldenSet {
+  slug: string;
+  name: string;
+  description?: string;
+  visibility: 'private' | 'public';
+  protocol: 'pointwise' | 'pairwise' | 'listwise';
+  datasetSlug: string;
+  version: number;
+  items: ConfigGoldenItem[];
+}
+
 /** Top-level config document. */
 export interface ConfigDocument {
   version: '1.0';
@@ -121,6 +169,7 @@ export interface ConfigDocument {
   rubrics: ConfigRubric[];
   models: ConfigModel[];
   datasets: ConfigDataset[];
+  goldenSets: ConfigGoldenSet[];
 }
 
 /* ─── Zod Validation Schemas ───────────────────────────────────────────── */
@@ -185,6 +234,35 @@ const projectSchema = z.object({
   isDefault: z.boolean().default(false),
 });
 
+const goldenCandidateSchema = z.object({
+  position: z.number().int().min(0),
+  promptText: z.string().optional(),
+  responseText: z.string().optional(),
+  label: z.string().optional(),
+});
+
+const goldenItemSchema = z.object({
+  index: z.number().int().min(0),
+  inputText: z.string().min(1),
+  promptText: z.string().optional(),
+  responseText: z.string().optional(),
+  expected: z.string().optional(),
+  candidates: z.array(goldenCandidateSchema).default([]),
+});
+
+const goldenSetSchema = z.object({
+  slug: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().optional(),
+  visibility: z.enum(['private', 'public']).default('private'),
+  // Required, and the set is homogeneous — every item is stamped with it on
+  // import. A set whose items disagreed would make one kappa uninterpretable.
+  protocol: z.enum(['pointwise', 'pairwise', 'listwise']),
+  datasetSlug: z.string().min(1),
+  version: z.number().int().min(1).default(1),
+  items: z.array(goldenItemSchema).default([]),
+});
+
 export const configDocumentSchema = z.object({
   version: z.literal('1.0'),
   exportedAt: z.string(),
@@ -192,6 +270,12 @@ export const configDocumentSchema = z.object({
   rubrics: z.array(rubricSchema).default([]),
   models: z.array(modelSchema).default([]),
   datasets: z.array(datasetSchema).default([]),
+  // NOTE: this object is NOT `.strict()`. Before this line existed, a
+  // document carrying `goldenSets` parsed clean and had the whole section
+  // silently stripped — no 400, no warning, every set lost. That is why the
+  // export half is worthless without this line, and why the tests for it
+  // assert on imported rows rather than on a status code.
+  goldenSets: z.array(goldenSetSchema).default([]),
 });
 
 /* ─── Serialization ────────────────────────────────────────────────────── */
@@ -320,6 +404,49 @@ export function dbDatasetToConfig(
   return result;
 }
 
+/**
+ * DB `GoldenSet` (with `dataset`, `items` and their `candidates` included) →
+ * portable config block. Items are always embedded; see `ConfigGoldenSet`.
+ *
+ * The caller is responsible for filtering tombstoned items out of
+ * `goldenSet.items` (`goldenItemLifecycleWhere(false)`) — this function is a
+ * pure projection and cannot see lifecycle state it was not handed.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function dbGoldenSetToConfig(goldenSet: any): ConfigGoldenSet {
+  return {
+    slug: goldenSet.slug || generateSlug(goldenSet.name),
+    name: goldenSet.name,
+    ...(goldenSet.description && { description: goldenSet.description }),
+    visibility: goldenSet.visibility ?? 'private',
+    protocol: goldenSet.protocol,
+    // Read off the relation rather than a projectSlugMap-style lookup: the
+    // dataset may be the platform corpus, which the datasets section (scoped
+    // `{ userId }`) never emits, so no map built there would contain it.
+    datasetSlug:
+      goldenSet.dataset?.slug || generateSlug(goldenSet.dataset?.name ?? 'unnamed'),
+    version: goldenSet.version ?? 1,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    items: (goldenSet.items ?? []).map((item: any) => {
+      const configItem: ConfigGoldenItem = {
+        index: item.index,
+        inputText: item.inputText,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        candidates: (item.candidates ?? []).map((c: any) => ({
+          position: c.position,
+          ...(c.promptText && { promptText: c.promptText }),
+          ...(c.responseText && { responseText: c.responseText }),
+          ...(c.label && { label: c.label }),
+        })),
+      };
+      if (item.promptText) configItem.promptText = item.promptText;
+      if (item.responseText) configItem.responseText = item.responseText;
+      if (item.expected) configItem.expected = item.expected;
+      return configItem;
+    }),
+  };
+}
+
 /* ─── YAML HTTP Response Helper ────────────────────────────────────────── */
 
 export function yamlResponse(yamlString: string, filename: string): Response {
@@ -338,7 +465,11 @@ export function yamlResponse(yamlString: string, filename: string): Response {
 export type DiffAction = 'create' | 'update' | 'skip';
 
 export interface DiffItem {
-  type: 'project' | 'rubric' | 'model' | 'dataset';
+  // 'goldenSet' matches the config document key, not the `/api/golden-sets`
+  // route segment. `src/app/settings/page.tsx` re-declares this union
+  // locally and maps it to an icon — both must be widened with it or the
+  // diff row renders with no icon.
+  type: 'project' | 'rubric' | 'model' | 'dataset' | 'goldenSet';
   slug: string;
   name: string;
   action: DiffAction;
