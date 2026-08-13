@@ -26,6 +26,14 @@ export const goldenSetInclude = {
 
 export const goldenSetDetailInclude = {
   owner: { select: { id: true, name: true } },
+  // The bound corpus, by name. `datasetId` is on the row already, but a
+  // detail reader wants the NAME — the set is the annotation layer over
+  // exactly one dataset and that binding is immutable, so it is the first
+  // thing the detail page states (src/app/golden-sets/[id]/page.tsx). Two
+  // columns only: Dataset joins no user data, and this include feeds the
+  // public branch of GET /api/golden-sets/[id] as well, where
+  // `toPublicGoldenSet`'s allow-list drops it.
+  dataset: { select: { id: true, name: true } },
   _count: { select: { items: { where: goldenItemLifecycleWhere(false) } } },
   items: {
     where: goldenItemLifecycleWhere(false),
