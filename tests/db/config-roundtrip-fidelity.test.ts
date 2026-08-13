@@ -294,26 +294,34 @@ describe('Config export/import — fidelity, not just idempotency', () => {
 // ─── The durable half ──────────────────────────────────────────────────────
 //
 // Every user-ownable scalar/enum column of every model the config document
-// covers must be classified. `exported` means it appears in the document;
+// covers must be classified into EXACTLY ONE of `exported` /
+// `excludedByDesign` / `knownGaps` — no column may be claimed in two of
+// these at once. `exported` means it appears in the document;
 // `excludedByDesign` means it deliberately does not, with a reason;
 // `knownGaps` means it SHOULD round-trip and does not yet.
 //
-// A name MAY appear in both `exported` and `knownGaps` at once — that is not
-// a double-claim, it is a narrower one: the column IS structurally exported,
-// but a caveat about it is recorded. See GoldenItem.index: the column round-
-// trips, but its VALUES are not stable across a replace-after-tombstone
-// import, which is a different claim than "not exported at all".
-// `excludedByDesign` may not overlap with either of the other two buckets —
-// "never exported by design" is not compatible with being exported or being
-// a gap in what's exported.
+// `exportedCaveats` is a fourth, separate, OPTIONAL bucket layered on top of
+// `exported`, not an alternative to it: it records a caveat about a column
+// that DOES round-trip structurally but has some other recorded wrinkle. See
+// GoldenItem.index — the column IS exported (every consumer reads relative
+// order off it), but its absolute VALUES are not stable across a
+// replace-after-tombstone import, which is a materially different claim from
+// `knownGaps`' "should round-trip and does not yet" (src/lib/config.ts:116-124
+// documents the non-dense-index behaviour as intentional, so this is not an
+// unfixed bug the way the parentId gaps are). Every `exportedCaveats` key
+// must also appear in that model's `exported` array — asserted below — so a
+// caveat can never quietly stand in for an export claim nobody actually made.
 //
-// knownGaps is not a suppression list — the test asserts its exact contents, so
-// a gap cannot be added or quietly fixed without updating this file.
+// knownGaps (and exportedCaveats) are not suppression lists — the test
+// asserts each one's exact contents, so an entry cannot be added or quietly
+// dropped without updating this file.
 
 type Coverage = {
   exported: string[];
   excludedByDesign: Record<string, string>;
   knownGaps: Record<string, string>;
+  /** Caveats about a column that IS exported. Keys must be a subset of `exported`. */
+  exportedCaveats?: Record<string, string>;
 };
 
 const SURROGATE = 'surrogate key, meaningless across instances';
@@ -459,9 +467,10 @@ const COVERAGE: Record<string, Coverage> = {
       tombstonedAt:
         'curation-lifecycle state, not user intent to preserve: the export query filters tombstoned items out before dbGoldenSetToConfig ever sees them (goldenItemLifecycleWhere(false) in src/app/api/config/export/route.ts), and a re-import must not resurrect an item its owner removed as live content. Same register as GoldenSet.tombstonedAt, different verb — GoldenSet’s is account-lifecycle (pending purge); an item’s is a product action (PATCH /api/golden-sets/[id]/items, or a config-import replace).',
     },
-    knownGaps: {
+    knownGaps: {},
+    exportedCaveats: {
       index:
-        'index VALUES do not survive a re-import into a set that already has tombstoned items. Items are never re-packed (a tombstoned row keeps its ordinal), so a replace appends the document’s items above the set’s high-water mark rather than at 0..n-1 — the second export therefore emits shifted indices, stepping up by the item count on each export→edit→import cycle. Relative ORDER is preserved, which is what every consumer actually reads, and what the importer’s own create/update/skip comparison keys on; absolute values are not stable across a replace-after-tombstone. Note the cost is not only ordinal: a replace retires the set’s HUMAN ANNOTATIONS wholesale — every live GoldenLabel of the set is tombstoned with reason "config-import-replace", including labels on items whose content the document did not change, because the importer does not re-identify the document’s items against the existing rows. Re-importing a config is therefore not annotation-preserving, and a set that has been annotated should be edited through PATCH /api/golden-sets/[id]/items rather than round-tripped through a config document.',
+        'index VALUES do not survive a re-import into a set that already has tombstoned items. Items are never re-packed (a tombstoned row keeps its ordinal), so a replace appends the document’s items above the set’s high-water mark rather than at 0..n-1 — the second export therefore emits shifted indices, stepping up by the item count on each export→edit→import cycle. Relative ORDER is preserved, which is what every consumer actually reads, and what the importer’s own create/update/skip comparison keys on; absolute values are not stable across a replace-after-tombstone. Note the cost is not only ordinal: a replace retires the set’s HUMAN ANNOTATIONS wholesale — every live GoldenLabel of the set is tombstoned with reason "config-import-replace", including labels on items whose content the document did not change, because the importer does not re-identify the document’s items against the existing rows. Re-importing a modified config is therefore not annotation-preserving, and a set that has been annotated should be edited through PATCH /api/golden-sets/[id]/items rather than round-tripped through a config document.',
     },
   },
 
@@ -492,7 +501,7 @@ const COVERAGE: Record<string, Coverage> = {
       createdAt: TIMESTAMP,
       updatedAt: TIMESTAMP,
       tombstonedAt:
-        'same register as GoldenItem.tombstonedAt one level up: lifecycle state for a row that is not carried at all regardless of its state (see annotatorId) — even if labels round-tripped, a tombstoned label is retired on THIS instance (its item was edited, or a config import replaced the set) and must not come back live through an import elsewhere.',
+        'same register as GoldenItem.tombstonedAt one level up: lifecycle state for a row that is not carried at all regardless of its state (see annotatorId) — even if labels round-tripped, a tombstoned label is retired on THIS instance (its item was edited, or a config import replaced the set) and must not come back live through an import elsewhere. See GoldenItem.exportedCaveats.index for what a config-import replace actually does to THIS table: it tombstones every live label of the set wholesale, not just the ones on items whose content changed.',
       tombstonedReason:
         'not a timestamp, but the same argument: records WHY a label was retired ("item-content-edit" | "config-import-replace", src/lib/golden-sets.ts) on THIS instance. Instance-local audit trail for a row that never round-trips in the first place (see annotatorId) — carrying it across instances would misattribute a retirement event that happened here to an import that happened elsewhere.',
     },
@@ -526,34 +535,33 @@ describe('Config export/import — schema coverage', () => {
           'quietly stopped being true.'
       ).toEqual([]);
 
-      // `excludedByDesign` may not overlap with `exported` or `knownGaps` —
-      // "never exported by design" contradicts being exported or being a gap
-      // in what's exported.
-      const excludedNames = Object.keys(spec.excludedByDesign);
-      const otherNames = new Set([...spec.exported, ...Object.keys(spec.knownGaps)]);
-      const excludedContradictions = excludedNames.filter((n) => otherNames.has(n)).sort();
-      expect(
-        excludedContradictions,
-        `${modelName} classifies column(s) as excludedByDesign together with exported/knownGaps`
-      ).toEqual([]);
-
-      // `exported` and `knownGaps` MAY share a name (see the comment above
-      // the `Coverage` type) — but a name may not appear twice within the
-      // SAME bucket, which is always a copy-paste mistake, not a claim.
-      const withinBucketDupes = (names: string[]) =>
-        names.filter((name, i) => names.indexOf(name) !== i);
-      expect(
-        withinBucketDupes(spec.exported),
-        `${modelName} lists the same column twice in exported`
-      ).toEqual([]);
-      expect(
-        withinBucketDupes(Object.keys(spec.knownGaps)),
-        `${modelName} lists the same column twice in knownGaps`
-      ).toEqual([]);
+      // Nothing may be claimed in two buckets at once.
+      const seen = new Set<string>();
+      const dupes: string[] = [];
+      for (const name of [
+        ...spec.exported,
+        ...Object.keys(spec.excludedByDesign),
+        ...Object.keys(spec.knownGaps),
+      ]) {
+        if (seen.has(name)) dupes.push(name);
+        seen.add(name);
+      }
+      expect(dupes, `${modelName} classifies column(s) in more than one bucket`).toEqual([]);
 
       // Every classified name must actually exist, so the lists cannot rot.
       const stale = [...classified].filter((c) => !columns.includes(c)).sort();
       expect(stale, `${modelName} classifies column(s) that no longer exist`).toEqual([]);
+
+      // `exportedCaveats` is layered ON TOP of `exported`, never an alternative
+      // to it — a caveat about a column the map does not even claim is
+      // exported would be describing something that doesn't exist.
+      const caveatKeys = Object.keys(spec.exportedCaveats ?? {});
+      const caveatsNotExported = caveatKeys.filter((c) => !spec.exported.includes(c)).sort();
+      expect(
+        caveatsNotExported,
+        `${modelName} has exportedCaveats for column(s) not listed in exported: ` +
+          `${caveatsNotExported.join(', ')}`
+      ).toEqual([]);
     });
   }
 
@@ -574,9 +582,22 @@ describe('Config export/import — schema coverage', () => {
       // it means teaching the importer to reconstruct a family from slugs,
       // which is one change across all three models and not A0's.
       GoldenSet: ['parentId'],
-      // Not the same defect as the above three: the column itself round-trips
-      // fine (see GoldenItem.exported); only its VALUES are unstable across a
-      // replace-after-tombstone import. See this entry's own text for why.
+    });
+  });
+
+  it('the set of caveats on exported columns is exactly what we have recorded', () => {
+    const actual: Record<string, string[]> = {};
+    for (const [modelName, spec] of Object.entries(COVERAGE)) {
+      const caveats = Object.keys(spec.exportedCaveats ?? {}).sort();
+      if (caveats.length) actual[modelName] = caveats;
+    }
+
+    // Same locking property as the gap ledger above, for a different claim:
+    // GoldenItem.index round-trips (it IS in `exported`), but its absolute
+    // VALUES are not stable across a replace-after-tombstone import — not
+    // the same defect as the parentId gaps above, where the column is
+    // missing from the document entirely.
+    expect(actual).toEqual({
       GoldenItem: ['index'],
     });
   });
