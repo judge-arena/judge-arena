@@ -118,6 +118,7 @@ const createdRunIds: string[] = [];
 const createdEvaluationIds: string[] = [];
 const createdVersionIds: string[] = [];
 const createdJudgeModelIds: string[] = [];
+const createdPromptTemplateIds: string[] = [];
 
 let uniqCounter = 0;
 function uniq(label: string): string {
@@ -226,6 +227,9 @@ afterAll(async () => {
   await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
   await prisma.judgeModelVersion.deleteMany({ where: { id: { in: createdVersionIds } } });
   await prisma.judgeModel.deleteMany({ where: { id: { in: createdJudgeModelIds } } });
+  // After the runs above (ModelJudgment.promptTemplate is onDelete: Restrict,
+  // and deleting a run cascades its judgments).
+  await prisma.promptTemplate.deleteMany({ where: { id: { in: createdPromptTemplateIds } } });
 
   await closeRabbit();
   await prisma.$disconnect();
@@ -634,12 +638,27 @@ describe('launchBulkRunCreates (src/lib/run-launch.ts)', () => {
   // non-pointwise value is now REPRESENTABLE on this queue even though no
   // producer emits one (`launchBulkRunCreates` hardcodes 'pointwise'). The
   // consumer cannot expand one correctly — `RunCreateMsg` carries no
-  // candidate set — so it must refuse rather than half-honour it. Without
-  // the refusal, such a message expands as respond-mode (a pairwise
-  // evaluation has no `responseText` for `deriveRunMode` to see), writing
-  // judgments with promptTemplateId null and pairOrder 'AB' against a run
-  // with zero RunCandidate rows.
-  it('refuses a non-pointwise run.create: books an errored run and expands nothing (A0 — RunCreateMsg carries no candidate set)', async () => {
+  // candidate set — so it must refuse rather than half-honour it.
+  //
+  // THE PAIRWISE TEMPLATE BELOW IS WHAT MAKES THIS TEST DISCRIMINATE. Without
+  // it, `resolveCurrentPromptTemplate('pairwise')` finds nothing (the seed
+  // creates only v1-legacy/pointwise; the v1-pairwise row is Task 13's work),
+  // throws, and lands in the SAME `recordExpansionFailure` for a completely
+  // different reason — so every assertion here would hold with or without the
+  // guard, and the test would certify nothing. That is not hypothetical: it is
+  // how the first version of this test was written, and it passed against the
+  // unguarded consumer.
+  //
+  // With the row present, the unguarded consumer expands successfully instead.
+  // Measured by deleting the guard and re-running: `status: 'pending'`, one
+  // `ModelJudgment` (promptTemplateId set, `pairOrder` NULL), one
+  // `RunModelSelection`, and one published judgment.execute — all against a run
+  // with zero `RunCandidate` rows and nothing to compare. The status, judgment-
+  // count and selection-count assertions below were each observed to fail in
+  // that state. This is also the state the codebase actually reaches once Task
+  // 13 seeds v1-pairwise, which is why the template is created here rather than
+  // left to the absence that happened to mask it.
+  it('refuses a non-pointwise run.create even when a template for that protocol exists: books an errored run and expands nothing', async () => {
     const user = await mkUser();
     const project = await mkProject(user.id);
     const rubric = await mkRubric(user.id);
@@ -648,6 +667,22 @@ describe('launchBulkRunCreates (src/lib/run-launch.ts)', () => {
       rubricId: rubric.id,
       judgeModelVersionIds: [model.version.id],
     });
+
+    // Uniquely named so it never collides with the seeded rows or with
+    // Task 13's v1-pairwise (PromptTemplate is @@unique([name, version])).
+    const pairwiseTemplate = await prisma.promptTemplate.create({
+      data: {
+        name: uniq('test-pairwise'),
+        protocol: 'pairwise',
+        version: 0,
+        body: 'Compare the two responses against ${criteriaList}.',
+      },
+    });
+    createdPromptTemplateIds.push(pairwiseTemplate.id);
+
+    const { confirmChannel } = await getRabbit();
+    await assertTopology(confirmChannel);
+    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_EXECUTE);
 
     const msg: RunCreateMsg = {
       evaluationId: evaluation.id,
@@ -667,15 +702,20 @@ describe('launchBulkRunCreates (src/lib/run-launch.ts)', () => {
     expect(ch.ackCalls).toHaveLength(1);
 
     // Recorded as a visible errored run (recordExpansionFailure's
-    // never-committed branch), not silently swallowed.
+    // never-committed branch), not silently swallowed. Unguarded this row is
+    // 'pending' — the expansion succeeds with the template above in place.
     const run = await prisma.evaluationRun.findFirstOrThrow({ where: { evaluationId: evaluation.id } });
     createdRunIds.push(run.id);
     expect(run.status).toBe('error');
 
-    // Nothing expanded: no judgments, no selections, and therefore no row
-    // carrying pairOrder 'AB' with nothing to compare.
+    // Nothing expanded: no judgments and no selections, so no judgment row
+    // exists against a run that has nothing to compare.
     expect(await prisma.modelJudgment.count({ where: { runId: run.id } })).toBe(0);
     expect(await prisma.runModelSelection.count({ where: { runId: run.id } })).toBe(0);
+
+    // And no downstream work enqueued — the unguarded path publishes one
+    // judgment.execute per created judgment before this point is reached.
+    expect(await drainQueue(confirmChannel, QUEUE_JUDGMENT_EXECUTE)).toHaveLength(0);
   });
 });
 

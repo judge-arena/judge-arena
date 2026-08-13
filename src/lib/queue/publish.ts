@@ -59,8 +59,15 @@ export interface RunCreateMsg {
      * `run-create-consumer.ts` already used this field for BOTH the
      * `EvaluationRun.protocol` column and its `resolveCurrentPromptTemplate`
      * lookup — the literal type was the only thing keeping either from
-     * seeing a second protocol. `pairOrder` on every expanded
-     * `ModelJudgment` is now derived from it too.
+     * seeing a second protocol.
+     *
+     * Widened, NOT yet honoured: `run-create-consumer.ts` refuses every
+     * value but `'pointwise'` (see its module doc), because this message
+     * carries no candidate set for a pairwise expansion to compare. So the
+     * `pairOrder` it writes is an unconditional NULL rather than something
+     * derived from this field — the only writer that emits `'AB'` is
+     * `run-launch.ts`'s `launchSingleRun`, which is also the only one that
+     * writes the `RunCandidate` rows such a judgment needs.
      */
     protocol: RunProtocol;
   };
