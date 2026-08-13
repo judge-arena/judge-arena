@@ -21,6 +21,15 @@ import { goldenItemLifecycleWhere } from '@/lib/golden-sets';
 // with consequences, not a cosmetic drift.
 export const goldenSetInclude = {
   owner: { select: { id: true, name: true } },
+  // The bound corpus, by name. Same two columns and same reasoning as
+  // `goldenSetDetailInclude` below: Dataset joins no user data, and
+  // `toPublicGoldenSet` (src/lib/serializers.ts:292-305) builds a fresh
+  // literal of ten named fields with no spread of the row, so this cannot
+  // reach the public projection. Without it the list card's
+  // `from {set.dataset.name}` (src/app/golden-sets/page.tsx:350-354) is a
+  // permanently dead branch — guarded by `set.dataset &&`, so it renders
+  // nothing rather than crashing, which is exactly why it went unnoticed.
+  dataset: { select: { id: true, name: true } },
   _count: { select: { items: { where: goldenItemLifecycleWhere(false) } } },
 } satisfies Prisma.GoldenSetInclude;
 

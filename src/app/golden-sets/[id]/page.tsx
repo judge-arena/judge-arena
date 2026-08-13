@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import { useSession } from 'next-auth/react';
 import { Header } from '@/components/layout/header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -43,10 +44,25 @@ interface GoldenItemView {
 }
 
 /**
- * GET /api/golden-sets/[id]. Owner-only fields are optional because the
- * public branch goes through `toPublicGoldenSet`
- * (src/lib/serializers.ts:260-305), whose allow-list carries neither
- * `protocol` nor `datasetId` nor `_count`.
+ * GET /api/golden-sets/[id]. Two response shapes, and the difference between
+ * them is NARROWER than the allow-list alone suggests: the public branch
+ * (`src/app/api/golden-sets/[id]/route.ts:60-68`) spreads
+ * `toPublicGoldenSet(goldenSet)` and then explicitly re-adds `datasetId`,
+ * `protocol`, `slug`, `version`, `parentId` and `items`. So `protocol` and
+ * `version` — and therefore the Protocol card and the version badge — render
+ * for a public non-owner exactly as they do for the owner.
+ *
+ * Exactly TWO fields are owner-only:
+ *   - `_count` — the public branch carries `itemCount` instead, which is why
+ *     the Items card reads through the `??` ladder below.
+ *   - `dataset` — `toPublicGoldenSet`'s allow-list drops it and the route
+ *     does not re-add it, so the Source-dataset card falls back to '—' for a
+ *     public non-owner. That is deliberate rather than an oversight: the
+ *     corpus a set annotates is owner-visible provenance, and widening the
+ *     public projection to expose it is a serializer decision, not a page's.
+ *
+ * The remaining fields stay optional as defence against a future projection
+ * change, not because this route omits them today.
  */
 interface GoldenSetDetail {
   id: string;
@@ -111,6 +127,7 @@ function nextCursorOf(payload: unknown): string | null {
 export default function GoldenSetDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const { data: session } = useSession();
   const id = params.id as string;
 
   const [goldenSet, setGoldenSet] = useState<GoldenSetDetail | null>(null);
@@ -129,7 +146,13 @@ export default function GoldenSetDetailPage() {
       if (res.ok) {
         setGoldenSet(await res.json());
       } else {
-        toast.error('Failed to load golden set');
+        // Surface the server's own message, same as the sibling list page
+        // (src/app/golden-sets/page.tsx:174-175) — otherwise 'Forbidden' and
+        // a 500 are indistinguishable to whoever is looking at the toast. A
+        // non-JSON body throws into the catch below and gets the generic
+        // string, which is the correct fallback.
+        const data = await res.json();
+        toast.error(data.error || 'Failed to load golden set');
       }
     } catch {
       toast.error('Failed to load golden set');
@@ -190,6 +213,7 @@ export default function GoldenSetDetailPage() {
   };
 
   const saveExpected = async (itemId: string) => {
+    const expected = expectedDraft.trim() || null;
     setSavingItemId(itemId);
     try {
       const res = await fetch(`/api/golden-sets/${id}/items`, {
@@ -200,12 +224,23 @@ export default function GoldenSetDetailPage() {
         // `{ sampleId, … }` of the dataset-samples route. A body of
         // `{ itemId, expected }` parses to a zod error and 400s, so the one
         // item this page edits is sent as a one-element batch.
-        body: JSON.stringify({ items: [{ id: itemId, expected: expectedDraft.trim() || null }] }),
+        body: JSON.stringify({ items: [{ id: itemId, expected }] }),
       });
       if (res.ok) {
         toast.success('Label saved');
         setEditingItemId(null);
-        await loadItems(null);
+        // Patch the row in place; do NOT re-run loadItems(null). This list is
+        // cursor-paginated in pages of 100 and a reload from the first cursor
+        // would throw away every page after it — so on the 620-row corpora
+        // this page exists to annotate, labelling item #137 would collapse the
+        // list back to #0–#99 and the annotator would have to press "Load more
+        // items" and re-scroll after EVERY label. The write is a full
+        // overwrite of one column with a value chosen here, and the route
+        // applies it verbatim (items/route.ts:170-178), so the value sent is
+        // exactly the value stored — there is nothing to read back.
+        setItems((previous) =>
+          previous.map((item) => (item.id === itemId ? { ...item, expected } : item))
+        );
       } else {
         if (res.status === 409) setFrozen(true);
         const data = await res.json();
@@ -270,13 +305,29 @@ export default function GoldenSetDetailPage() {
     }
   };
 
-  // Fork navigates with router.push to a SIBLING dynamic segment, so this
-  // component is reconciled rather than remounted and every piece of state
-  // below survives the move. `frozen` surviving it is the one that lies: the
-  // fresh fork is by definition unmeasured, and carrying the flag over would
-  // have the new version claim a calibration run references it.
+  // Fork navigates with router.push to a SIBLING dynamic segment (and so does
+  // browser back/forward between two set pages), so this component is
+  // reconciled rather than remounted: every state value below outlives the
+  // move unless it is cleared here.
+  //
+  // `loading` alone is NOT enough, because `loadGoldenSet` clears it in its
+  // `finally` whether the fetch succeeded or not. If B's detail GET 403s or
+  // 404s, a surviving `goldenSet` would render A's name, A's dataset, A's
+  // badges and live Fork/Retire buttons under B's URL, and the Not Found
+  // panel would never be reached. A surviving `items` is the same lie one
+  // level down — the rows would be A's, and the skeleton branch cannot cover
+  // it because that branch requires `items.length === 0`. `frozen` is the
+  // third: a fresh fork is by definition unmeasured, so carrying the flag
+  // over would have the new version claim a calibration run references it.
+  //
+  // So this clears everything that describes the PREVIOUS set. Nothing
+  // flashes: `loading` is set back to true in the same pass, so the skeleton
+  // covers the gap rather than the emptied not-found panel.
   useEffect(() => {
     setLoading(true);
+    setGoldenSet(null);
+    setItems([]);
+    setItemsCursor(null);
     setFrozen(false);
     setEditingItemId(null);
   }, [id]);
@@ -321,6 +372,27 @@ export default function GoldenSetDetailPage() {
   const totalItems = goldenSet.itemCount ?? goldenSet._count?.items ?? items.length;
   const labelledCount = items.filter((i) => i.expected != null && i.expected.trim() !== '').length;
 
+  /**
+   * Every write this page can issue — fork, retire, item PATCH — runs through
+   * `requireOwnership` server-side (src/lib/auth-guard.ts:400-417). This set
+   * can be someone ELSE's public set, in which case those routes answer 403,
+   * so an ungated Fork/Retire pair would be two prominent header buttons whose
+   * only possible outcome is an error toast.
+   *
+   * `owner.id` rather than `ownerId`: the scalar is on the owner branch's raw
+   * row but not on `toPublicGoldenSet`'s output, whereas `owner: { id, name }`
+   * is on both. A null owner (User deletion sets it null) belongs to nobody
+   * and gates closed.
+   *
+   * KNOWN NARROWING: `requireOwnership` also admits admins, but the client
+   * session carries only id/email/name — `src/lib/auth.ts:191-213` puts no
+   * role on it — so an admin viewing another user's set loses the buttons too.
+   * Hiding an affordance an admin could still drive through the API is the
+   * safe direction of that error; showing one that 403s is not.
+   */
+  const viewerId = (session?.user as { id?: string } | undefined)?.id;
+  const isOwner = !!viewerId && !!goldenSet.owner?.id && goldenSet.owner.id === viewerId;
+
   return (
     <div>
       <Header
@@ -328,22 +400,24 @@ export default function GoldenSetDetailPage() {
         description={goldenSet.description || undefined}
         breadcrumbs={[{ label: 'Golden Sets', href: '/golden-sets' }, { label: goldenSet.name }]}
         actions={
-          <div className="flex items-center gap-2">
-            <Button variant="secondary" size="sm" onClick={handleFork} loading={forking}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <circle cx="6" cy="6" r="3" />
-                <circle cx="18" cy="6" r="3" />
-                <circle cx="12" cy="18" r="3" />
-                <path d="M6 9v3a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V9" />
-              </svg>
-              Fork
-            </Button>
-            {!goldenSet.retiredAt && (
-              <Button variant="outline" size="sm" onClick={handleRetire} loading={retiring}>
-                Retire
+          isOwner ? (
+            <div className="flex items-center gap-2">
+              <Button variant="secondary" size="sm" onClick={handleFork} loading={forking}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="6" cy="6" r="3" />
+                  <circle cx="18" cy="6" r="3" />
+                  <circle cx="12" cy="18" r="3" />
+                  <path d="M6 9v3a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V9" />
+                </svg>
+                Fork
               </Button>
-            )}
-          </div>
+              {!goldenSet.retiredAt && (
+                <Button variant="outline" size="sm" onClick={handleRetire} loading={retiring}>
+                  Retire
+                </Button>
+              )}
+            </div>
+          ) : undefined
         }
       />
 
@@ -353,6 +427,9 @@ export default function GoldenSetDetailPage() {
           <Card>
             <CardContent className="pt-4">
               <p className="text-xs text-surface-500 dark:text-surface-400 mb-1">Source dataset</p>
+              {/* '—' here is a real state, not just a loading guard: `dataset`
+                  is one of the two owner-only fields (see GoldenSetDetail
+                  above), so a public non-owner sees the dash. */}
               <p className="text-sm font-medium text-surface-800 dark:text-surface-200">
                 {goldenSet.dataset?.name ?? '—'}
               </p>
@@ -543,7 +620,13 @@ export default function GoldenSetDetailPage() {
                               <span className="text-2xs font-mono text-surface-400">
                                 source sample {item.sourceDatasetSampleId}
                               </span>
-                              {!goldenSet.retiredAt && (
+                              {/* Three gates, one affordance. A non-owner's
+                                  PATCH 403s; a retired set is out of
+                                  circulation; and once a 409 has told us the
+                                  set is frozen, every remaining pencil can
+                                  only 409 again — the retire path already
+                                  hid itself, so the freeze path should too. */}
+                              {isOwner && !goldenSet.retiredAt && !frozen && (
                                 <button
                                   onClick={() => startEditing(item)}
                                   className="rounded p-1 text-surface-400 hover:text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-950/30 transition-colors"
