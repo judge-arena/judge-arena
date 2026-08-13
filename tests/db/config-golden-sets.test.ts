@@ -242,6 +242,46 @@ describe('Config export/import — golden sets', () => {
     expect(doc.goldenSets[0].items[0].index).toBe(1);
   });
 
+  it('export omits RETIRED and TOMBSTONED sets by default, and ?includeRetired=true brings back the retired one ONLY', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await mkAnnotatedDataset(user.id, { slug: 'ds-fixture' });
+    await mkGoldenSet(user.id, dataset, { slug: 'live-set', name: 'Live Set' });
+    const retired = await mkGoldenSet(user.id, dataset, {
+      slug: 'retired-set',
+      name: 'Retired Set',
+    });
+    const tombstoned = await mkGoldenSet(user.id, dataset, {
+      slug: 'tombstoned-set',
+      name: 'Tombstoned Set',
+    });
+    await db.goldenSet.update({ where: { id: retired.id }, data: { retiredAt: new Date() } });
+    await db.goldenSet.update({
+      where: { id: tombstoned.id },
+      data: { tombstonedAt: new Date() },
+    });
+
+    // Asserted on the exported ROWS, never on res.status — an export that
+    // lost every set would still be a 200 with a clean document.
+    const doc = await exportDoc('?format=json&include=all');
+    expect(doc.goldenSets.map((g: { slug: string }) => g.slug)).toEqual(['live-set']);
+
+    const all = await exportDoc('?format=json&include=all&includeRetired=true');
+    expect(all.goldenSets.map((g: { slug: string }) => g.slug).sort()).toEqual([
+      'live-set',
+      'retired-set',
+    ]);
+    // Still never the tombstoned one. A fixture carrying only a retired set
+    // would pass here against the coupled predicate this replaced, which
+    // released both columns under the one flag.
+    expect(all.goldenSets.some((g: { slug: string }) => g.slug === 'tombstoned-set')).toBe(false);
+
+    // And the reason the default is off rather than on: `retiredAt` is
+    // excludedByDesign from the config format — there is no field to carry
+    // it — so a set exported under this flag re-imports as a LIVE one.
+    expect(all.goldenSets.every((g: Record<string, unknown>) => !('retiredAt' in g))).toBe(true);
+  });
+
   it('export → fresh instance → import reproduces the golden set as real rows', async () => {
     const user = await mkUser();
     mockSessionFor(user);

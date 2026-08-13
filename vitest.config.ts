@@ -130,6 +130,16 @@ export default defineConfig({
       // partial coverage, as the four converters beside it. Prose only — no
       // threshold below was touched.
       //   all-files            37.64 / 84.83 / 67.30 / 37.64
+      //
+      // Re-measured 2026-08-13 in Tasks 19-22 (a0), which added the SET-level
+      // lifecycle helpers (goldenSetLifecycleWhere / parseIncludeRetired) to
+      // src/lib/golden-sets.ts and unit-tested both in
+      // tests/lib/golden-sets.test.ts. Only all-files moved, and it moved UP
+      // on three of four keys; branches is unchanged because the one branch
+      // added (the predicate's ternary) is covered in both arms. Every
+      // per-glob entry is byte-identical to the rows above. Prose only — no
+      // threshold below was touched.
+      //   all-files            37.69 / 84.91 / 67.54 / 37.69
       thresholds: {
         lines: 33,
         functions: 63,

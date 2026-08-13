@@ -46,7 +46,8 @@ interface GoldenItemView {
 /**
  * GET /api/golden-sets/[id]. Two response shapes, and the difference between
  * them is NARROWER than the allow-list alone suggests: the public branch
- * (`src/app/api/golden-sets/[id]/route.ts:60-68`) spreads
+ * (the `decision.access === 'owner'` fall-through in
+ * `src/app/api/golden-sets/[id]/route.ts`) spreads
  * `toPublicGoldenSet(goldenSet)` and then explicitly re-adds `datasetId`,
  * `protocol`, `slug`, `version`, `parentId` and `items`. So `protocol` and
  * `version` — and therefore the Protocol card and the version badge — render
@@ -91,9 +92,9 @@ const PROTOCOL_LABEL: Record<Protocol, string> = {
 
 /**
  * The literal string 'true', not '1'. Every boolean query flag in this repo is
- * a strict `=== 'true'` compare — GET /api/golden-sets/[id]:48 and GET
- * /api/golden-sets/[id]/items:57 both do it, as does
- * `parseIncludeTombstoned` (src/lib/golden-sets.ts:317-323). `=1` is therefore
+ * a strict `=== 'true'` compare — the detail route and the items route now
+ * share ONE, `parseIncludeRetired` in src/lib/golden-sets.ts, as does
+ * `parseIncludeTombstoned` beside it. `=1` is therefore
  * false EVERYWHERE, and sending it here would make the retire button write a
  * row nothing on this page can ever read back.
  */
@@ -166,9 +167,10 @@ export default function GoldenSetDetailPage() {
       setLoadingItems(true);
       try {
         // The items route carries the SAME retired guard as the detail route
-        // (items/route.ts:57-60) and 404s a retired set's items without the
-        // flag — so a page that sent it on only one of the two fetches would
-        // render a retired set with an error toast where its items should be.
+        // (both spread `goldenSetLifecycleWhere`) and 404s a retired set's
+        // items without the flag — so a page that sent it on only one of the
+        // two fetches would render a retired set with an error toast where
+        // its items should be.
         const search = new URLSearchParams({ limit: '100', includeRetired: INCLUDE_RETIRED });
         if (cursor) search.set('cursor', cursor);
         const res = await fetch(`/api/golden-sets/${id}/items?${search}`);
@@ -236,7 +238,7 @@ export default function GoldenSetDetailPage() {
         // list back to #0–#99 and the annotator would have to press "Load more
         // items" and re-scroll after EVERY label. The write is a full
         // overwrite of one column with a value chosen here, and the route
-        // applies it verbatim (items/route.ts:170-178), so the value sent is
+        // applies it verbatim (its PATCH handler), so the value sent is
         // exactly the value stored — there is nothing to read back.
         setItems((previous) =>
           previous.map((item) => (item.id === itemId ? { ...item, expected } : item))
@@ -578,7 +580,7 @@ export default function GoldenSetDetailPage() {
                                 // one tombstones this item's GoldenLabel rows
                                 // in the same transaction
                                 // (`tombstonedReason: 'item-content-edit'`,
-                                // items/route.ts:180-190). A human label is
+                                // the PATCH handler in items/route.ts). A human label is
                                 // the expensive artifact here, so say so
                                 // before the click rather than after it. A
                                 // no-op re-save is not a change and leaves

@@ -324,9 +324,12 @@ export function goldenSetLifecycleWhere(includeRetired: boolean): Prisma.GoldenS
 }
 
 /** The one spelling of the escape hatch every golden-set read path accepts.
- * Strict `=== 'true'`, matching `includeSamples` in
- * src/app/api/config/export/route.ts:40 — so `?includeRetired=1` is false
- * everywhere rather than true on some routes. */
+ * Strict `=== 'true'`, matching the `includeSamples` compare in
+ * src/app/api/config/export/route.ts — so `?includeRetired=1` is false
+ * everywhere rather than true on some routes.
+ *
+ * Named, not line-numbered, on purpose: the line reference this replaced was
+ * falsified by the very task that added `?includeRetired` to that route. */
 export function parseIncludeRetired(searchParams: URLSearchParams): boolean {
   return searchParams.get('includeRetired') === 'true';
 }
@@ -356,8 +359,8 @@ export function goldenItemLifecycleWhere(includeTombstoned: boolean): Prisma.Gol
 }
 
 /** The one spelling of the item escape hatch. Strict `=== 'true'`, matching
- * this repo's other boolean query flags — `parseIncludeRetired` above and
- * `includeSamples` (src/app/api/config/export/route.ts:40) — so
+ * this repo's other boolean query flags — `parseIncludeRetired` above and the
+ * `includeSamples` compare in src/app/api/config/export/route.ts — so
  * `?includeTombstoned=1` is false everywhere rather than true on some
  * routes. */
 export function parseIncludeTombstoned(searchParams: URLSearchParams): boolean {

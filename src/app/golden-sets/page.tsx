@@ -160,12 +160,12 @@ export default function GoldenSetsPage() {
       // detail page would be a no-op nobody can see.
       //
       // The literal string 'true', not '1': every boolean query flag in this
-      // repo is a strict `=== 'true'` compare — GET /api/golden-sets:35, the
-      // detail route :48, the items route :57 — and that is deliberate, so
-      // `=1` is false EVERYWHERE rather than true on some routes. See
-      // parseIncludeTombstoned (src/lib/golden-sets.ts:317-323) and the test
-      // pinning it (tests/lib/golden-sets.test.ts:266). Sending '1' here
-      // would make this checkbox a dead control.
+      // repo is a strict `=== 'true'` compare, and that is deliberate, so
+      // `=1` is false EVERYWHERE rather than true on some routes. All three
+      // golden-set routes now share ONE compare — `parseIncludeRetired` in
+      // src/lib/golden-sets.ts, pinned by its own case in
+      // tests/lib/golden-sets.test.ts. Sending '1' here would make this
+      // checkbox a dead control.
       if (includeRetired) params.set('includeRetired', 'true');
       const res = await fetch(`/api/golden-sets?${params}`);
       if (res.ok) {

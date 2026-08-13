@@ -12,7 +12,11 @@ import {
   yamlResponse,
   generateSlug,
 } from '@/lib/config';
-import { goldenItemLifecycleWhere } from '@/lib/golden-sets';
+import {
+  goldenItemLifecycleWhere,
+  goldenSetLifecycleWhere,
+  parseIncludeRetired,
+} from '@/lib/golden-sets';
 import { logger, serializeError } from '@/lib/logger';
 
 /**
@@ -24,6 +28,14 @@ import { logger, serializeError } from '@/lib/logger';
  *   - include: comma-separated list of sections to export.
  *              Options: projects, rubrics, models, datasets, goldenSets, all (default: all)
  *   - includeSamples: "true" to include dataset sample data in export (default: false)
+ *   - includeRetired: "true" to include RETIRED golden sets (default: false).
+ *                     `retiredAt`/`tombstonedAt` are excludedByDesign from the
+ *                     config format — there is no field to carry them — so a
+ *                     retired set exported under this flag re-imports as a
+ *                     LIVE set. Turning it on is a deliberate "resurrect these
+ *                     on the next import" decision, not a verbosity toggle.
+ *                     Tombstoned sets (pending purge, owner deleted) are never
+ *                     exported under any flag.
  *   - format: "yaml" (default) or "json"
  *
  * Complements the data export endpoints (CSV/JSONL) which export evaluation
@@ -38,6 +50,7 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const includeParam = (searchParams.get('include') ?? 'all').toLowerCase();
   const includeSamples = searchParams.get('includeSamples') === 'true';
+  const includeRetired = parseIncludeRetired(searchParams);
   const format = (searchParams.get('format') ?? 'yaml').toLowerCase();
 
   // Lowercase entries ONLY. `includeParam` is lowercased above, so a
@@ -211,16 +224,29 @@ export async function GET(request: Request) {
     // annotation layer — exported without items it round-trips vacuously.
     //
     // `GoldenSet` keys ownership on `ownerId`, not the `userId` every other
-    // model in this file uses (prisma/schema.prisma). Retired and tombstoned
-    // sets are filtered out: `retiredAt` means out of circulation and
-    // `tombstonedAt` means pending purge — neither belongs in a portable
-    // working set, and re-importing one would silently resurrect it.
+    // model in this file uses (prisma/schema.prisma).
+    //
+    // LIFECYCLE FILTER, the same `goldenSetLifecycleWhere` predicate the four
+    // /api/golden-sets read paths spread, so this document and the API cannot
+    // drift apart about what "exists". It matters more here than anywhere
+    // else: `retiredAt`, `tombstonedAt` and `publishedAt` are all
+    // excludedByDesign in the round-trip COVERAGE map because the config
+    // format has no field for them, so an exported retired set re-imports as
+    // a LIVE one — exporting by default would make a round trip silently
+    // resurrect everything the user retired.
+    //
+    // ?includeRetired=true is wired for symmetry with the other three read
+    // paths, with that resurrection stated in the route doc above rather than
+    // left to be discovered. `tombstonedAt: null` holds in both arms of the
+    // predicate: those sets belong to deleted accounts and have
+    // `ownerId: null`, so the non-admin scope already misses them, but the
+    // admin arm does not — and neither would a later widening of either.
     if (sections.includes('goldensets')) {
-      const where = admin
-        ? { retiredAt: null, tombstonedAt: null }
-        : { ownerId: userId, retiredAt: null, tombstonedAt: null };
+      // Spread AFTER the ownership scope so neither clause can be dropped by
+      // a later edit reordering them.
+      const ownerScope = admin ? {} : { ownerId: userId };
       const goldenSets = await prisma.goldenSet.findMany({
-        where,
+        where: { ...ownerScope, ...goldenSetLifecycleWhere(includeRetired) },
         include: {
           dataset: { select: { slug: true, name: true } },
           items: {

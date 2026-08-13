@@ -149,6 +149,32 @@ export default defineConfig({
       //   all-files            49.13 / 79.19 / 62.33 / 49.13  (typical run; observed range 79.14-79.33)
       //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
       //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
+      //
+      // Re-measured 2026-08-13 in Tasks 19-22 (a0), which added
+      // goldenSetLifecycleWhere/parseIncludeRetired to src/lib/golden-sets.ts
+      // and routed the four golden-set read paths through them. Measured FIVE
+      // times: 689/869 (79.28%) three times and 691/870 (79.42%) twice. Both
+      // per-glob entries byte-identical.
+      //
+      // THE BRANCHES MARGIN WIDENED RATHER THAN NARROWED, which is worth
+      // stating because the note above predicted the opposite for the next
+      // src/lib addition. The predicate's ternary adds ONE branch (two arms)
+      // to the denominator and the DB suite reaches both — a retired-and-
+      // tombstoned list fixture drives the `false` arm and ?includeRetired=
+      // true drives the `true` arm — so this landed as roughly +2/+2 on a
+      // ~79% ratio, which pulls the ratio up. That is the shape to aim for:
+      // the earlier converters narrowed the margin because their defensive
+      // `??`/`||` arms are unreachable from any production caller, not
+      // because src/lib additions cost branches per se.
+      //
+      // The run-to-run nondeterminism recorded above is still present and
+      // still the same shape (numerator and denominator moving together, 2 at
+      // a time); its source remains unidentified. The observed spread on this
+      // branch is now 79.14-79.42 across fifteen runs over two tasks. Prose
+      // only — no threshold below was touched.
+      //   all-files            49.17 / 79.28 / 62.58 / 49.17  (observed range 79.28-79.42)
+      //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
+      //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
       thresholds: {
         lines: 45,
         functions: 58,
