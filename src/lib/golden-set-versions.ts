@@ -29,7 +29,9 @@
  *    or not it notices. `annotatorId` (nullable, `onDelete: SetNull`),
  *    `overallScore`, `criteriaScores` (a real Json column) and `reasoning`
  *    are all preserved verbatim, so an annotator's judgment stays attributed
- *    to the annotator who made it.
+ *    to the annotator who made it. Only LIVE labels ride along — a tombstoned
+ *    label is one an edit invalidated, and `tombstonedAt` is not among the
+ *    copied fields, so copying one would resurrect it.
  *
  * 3. THE OTHER HALF OF DECISION #5 IS NOT HERE, DELIBERATELY. Decision #5
  *    reads "copy, except on edited items". `forkGoldenSet` takes no item
@@ -63,6 +65,7 @@ import {
   GoldenCandidate,
 } from '@prisma/client';
 import { generateSlug } from '@/lib/config';
+import { goldenItemLifecycleWhere } from '@/lib/golden-sets';
 
 const MAX_ATTEMPTS = 3;
 
@@ -150,6 +153,10 @@ export async function forkGoldenSet(
               datasetId: true,
               protocol: true,
               items: {
+                // Tombstoned rows are NOT copied. `tombstonedAt` is not among
+                // the fields copied below, so an unfiltered read would mint
+                // them as LIVE items on the child.
+                where: goldenItemLifecycleWhere(false),
                 orderBy: { index: 'asc' },
                 select: {
                   index: true,
@@ -169,6 +176,12 @@ export async function forkGoldenSet(
                     },
                   },
                   labels: {
+                    // Same hazard, worse consequence: a copied tombstoned
+                    // label lands LIVE on the fork, re-attaching a score to
+                    // text its annotator never saw. Written as a literal
+                    // rather than a helper because this is the only
+                    // GoldenLabel read path in the codebase.
+                    where: { tombstonedAt: null },
                     select: {
                       annotatorId: true,
                       overallScore: true,

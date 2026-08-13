@@ -115,6 +115,55 @@ describe('forkGoldenSet: versioning, lineage and deep copy', () => {
     await truncateAll();
   });
 
+  it('copies LIVE items and LIVE labels only — a fork must not resurrect what a tombstone removed', async () => {
+    // forkGoldenSet does not copy `tombstonedAt`, so an unfiltered read would
+    // mint the tombstoned row as a LIVE item on the child, and an invalidated
+    // label as a LIVE score on text its annotator never saw — precisely the
+    // failure decision #5 exists to prevent. The originals stay in the parent
+    // where their provenance belongs; `parentId` is the pointer back.
+    const owner = await mkUser();
+    const annotator = await mkUser();
+    const dataset = await mkDatasetWithSamples(owner.id, 3);
+    const root = await mkGoldenSet(
+      owner.id,
+      dataset.id,
+      dataset.samples.map((s) => s.id)
+    );
+    const [item0, item1] = root.items;
+
+    await db.goldenItem.update({
+      where: { id: item0.id },
+      data: { tombstonedAt: new Date() },
+    });
+    await db.goldenLabel.create({
+      data: {
+        goldenItemId: item1.id,
+        annotatorId: annotator.id,
+        overallScore: 9,
+        tombstonedAt: new Date(),
+        tombstonedReason: 'item-content-edit',
+      },
+    });
+
+    const v2 = await forkGoldenSet(db, forkInput(root.id, root.id, owner.id));
+
+    const forkedItems = await db.goldenItem.findMany({
+      where: { goldenSetId: v2.id },
+      orderBy: { index: 'asc' },
+    });
+    expect(forkedItems).toHaveLength(2);
+    // Indices are copied VERBATIM, gaps included, so index-keyed comparison
+    // across versions still lines up. The child inherits a non-dense sequence
+    // and its next index is a high-water mark, same as the parent's.
+    expect(forkedItems.map((i) => i.index)).toEqual([1, 2]);
+    expect(forkedItems.every((i) => i.tombstonedAt === null)).toBe(true);
+
+    expect(await db.goldenLabel.count({ where: { goldenItem: { goldenSetId: v2.id } } })).toBe(0);
+    // The source keeps everything — a fork copies, it does not move or purge.
+    expect(await db.goldenItem.count({ where: { goldenSetId: root.id } })).toBe(3);
+    expect(await db.goldenLabel.count({ where: { goldenItem: { goldenSetId: root.id } } })).toBe(1);
+  });
+
   it('forking the root lands on version 2, parented at the root, inheriting datasetId and protocol', async () => {
     const owner = await mkUser();
     const dataset = await mkDatasetWithSamples(owner.id, 2);

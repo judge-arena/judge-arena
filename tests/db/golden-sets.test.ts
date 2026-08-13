@@ -397,6 +397,25 @@ describe('GET /api/golden-sets/[id]', () => {
     );
     expect(shown.status).toBe(200);
   });
+
+  it('itemCount and the embedded items both exclude tombstoned rows', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { visibility: 'public', itemCount: 4 });
+    const items = await db.goldenItem.findMany({ where: { goldenSetId: goldenSet.id } });
+    await db.goldenItem.update({
+      where: { id: items[0].id },
+      data: { tombstonedAt: new Date() },
+    });
+
+    (getServerSession as unknown as Mock).mockResolvedValue(null);
+    const res = await getGoldenSet(new Request(`http://localhost/api/golden-sets/${goldenSet.id}`), {
+      params: Promise.resolve({ id: goldenSet.id }),
+    });
+    const body = await res.json();
+    expect(body.itemCount).toBe(3);
+    expect(body.items).toHaveLength(3);
+    expect(body.items.some((i: { id: string }) => i.id === items[0].id)).toBe(false);
+  });
 });
 
 describe('PATCH /api/golden-sets/[id] — immutable datasetId, freeze guard on protocol', () => {
@@ -661,11 +680,12 @@ describe('/api/golden-sets/[id]/items', () => {
     expect(after[1].inputText).toBe('edited question');
   });
 
-  it('PATCH drops an item\'s GoldenLabel rows when its content actually changes, but a same-value field leaves labels alone', async () => {
-    // Task 4's forkGoldenSet (src/lib/golden-set-versions.ts) copies
-    // GoldenLabel rows unconditionally and names THIS handler as the owner
-    // of decision #5's "copy, except on edited items" clause: an annotator's
-    // score must never end up attached to text they did not see.
+  it('PATCH TOMBSTONES an item\'s GoldenLabel rows when its content actually changes, but a same-value field leaves them alone', async () => {
+    // Owner ruling 2026-08-13 extended to labels: a human label is the
+    // expensive, irreplaceable artifact this roadmap exists to protect, so
+    // the score is retained with a tombstone rather than destroyed. It still
+    // stops applying — every read filters it — but WHO said WHAT, and WHEN it
+    // stopped applying, survive.
     const owner = await mkUser();
     const annotator = await mkUser();
     const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 2 });
@@ -674,7 +694,12 @@ describe('/api/golden-sets/[id]/items', () => {
       orderBy: { index: 'asc' },
     });
     const label0 = await db.goldenLabel.create({
-      data: { goldenItemId: items[0].id, annotatorId: annotator.id, overallScore: 7 },
+      data: {
+        goldenItemId: items[0].id,
+        annotatorId: annotator.id,
+        overallScore: 7,
+        reasoning: 'B answers the question asked',
+      },
     });
     const label1 = await db.goldenLabel.create({
       data: { goldenItemId: items[1].id, annotatorId: annotator.id, overallScore: 5 },
@@ -692,10 +717,69 @@ describe('/api/golden-sets/[id]/items', () => {
     );
     expect(res.status).toBe(200);
 
-    // Item 0's content changed -> its label is dropped.
-    await expect(db.goldenLabel.findUnique({ where: { id: label0.id } })).resolves.toBeNull();
-    // Item 1's payload restated its existing value -> not a content change -> label survives.
-    await expect(db.goldenLabel.findUnique({ where: { id: label1.id } })).resolves.not.toBeNull();
+    // Item 0's content changed -> its label is tombstoned, NOT destroyed.
+    const dropped = await db.goldenLabel.findUniqueOrThrow({ where: { id: label0.id } });
+    expect(dropped.tombstonedAt).not.toBeNull();
+    expect(dropped.tombstonedReason).toBe('item-content-edit');
+    expect(dropped.annotatorId).toBe(annotator.id);
+    expect(dropped.overallScore).toBe(7);
+    expect(dropped.reasoning).toBe('B answers the question asked');
+
+    // Item 1's payload restated its existing value -> not a content change ->
+    // the label is untouched, tombstone included.
+    const survived = await db.goldenLabel.findUniqueOrThrow({ where: { id: label1.id } });
+    expect(survived.tombstonedAt).toBeNull();
+  });
+
+  it('the same annotator can re-score an item after their earlier label was tombstoned by an edit', async () => {
+    // The whole reason GoldenLabel's unique became partial. Under the old
+    // whole-table @@unique([goldenItemId, annotatorId]) the retained row
+    // occupied the slot forever and this insert was impossible — which would
+    // have made "keep the label" and "let people re-annotate" mutually
+    // exclusive.
+    const owner = await mkUser();
+    const annotator = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 1 });
+    const item = await db.goldenItem.findFirstOrThrow({ where: { goldenSetId: goldenSet.id } });
+    await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: annotator.id, overallScore: 7 },
+    });
+
+    mockSessionFor(owner);
+    await patchItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'PATCH', {
+        items: [{ id: item.id, inputText: 'edited after annotation' }],
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+
+    const relabel = await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: annotator.id, overallScore: 3 },
+    });
+    expect(relabel.tombstonedAt).toBeNull();
+
+    const live = await db.goldenLabel.findMany({
+      where: { goldenItemId: item.id, tombstonedAt: null },
+    });
+    expect(live).toHaveLength(1);
+    expect(live[0].id).toBe(relabel.id);
+    expect(await db.goldenLabel.count({ where: { goldenItemId: item.id } })).toBe(2);
+  });
+
+  it('PATCH 400s on a TOMBSTONED item id — editing a removed item is not a silent no-op', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 2 });
+    const item = await db.goldenItem.findFirstOrThrow({ where: { goldenSetId: goldenSet.id } });
+    await db.goldenItem.update({ where: { id: item.id }, data: { tombstonedAt: new Date() } });
+
+    mockSessionFor(owner);
+    const res = await patchItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'PATCH', {
+        items: [{ id: item.id, expected: 'B>A' }],
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(400);
   });
 
   it('PATCH 409s on a CALIBRATED set and writes nothing', async () => {
@@ -737,7 +821,12 @@ describe('/api/golden-sets/[id]/items', () => {
     expect(res.status).toBe(400);
   });
 
-  it('DELETE re-indexes the survivors 0..n-1 inside the transaction — @@unique([goldenSetId, index]) makes a gap a bug, not cosmetic', async () => {
+  it('DELETE TOMBSTONES and does NOT re-index — a tombstoned row keeps its ordinal, so no gap ever opens', async () => {
+    // The old handler deleted the rows and renumbered the survivors 0..n-1 to
+    // close the gap @@unique([goldenSetId, index]) would otherwise turn into a
+    // constraint problem. Nothing is removed any more, so nothing to close —
+    // and re-packing on top of a tombstone would collide with the tombstoned
+    // row still holding index 0 (P2002) and abort every DELETE.
     const owner = await mkUser();
     const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 5 });
     const items = await db.goldenItem.findMany({
@@ -753,19 +842,101 @@ describe('/api/golden-sets/[id]/items', () => {
       { params: Promise.resolve({ id: goldenSet.id }) }
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ deleted: 2, remaining: 3 });
+    expect(await res.json()).toEqual({ tombstoned: 2, remaining: 3 });
 
-    const after = await db.goldenItem.findMany({
+    // Every row is still there.
+    await expect(db.goldenItem.count({ where: { goldenSetId: goldenSet.id } })).resolves.toBe(5);
+
+    const survivors = await db.goldenItem.findMany({
+      where: { goldenSetId: goldenSet.id, tombstonedAt: null },
+      orderBy: { index: 'asc' },
+    });
+    expect(survivors.map((i) => i.id)).toEqual([items[1].id, items[3].id, items[4].id]);
+    // 1, 3, 4 — NOT 0, 1, 2. The gaps are the record of what was removed.
+    expect(survivors.map((i) => i.index)).toEqual([1, 3, 4]);
+
+    const tombstoned = await db.goldenItem.findMany({
+      where: { goldenSetId: goldenSet.id, tombstonedAt: { not: null } },
+      orderBy: { index: 'asc' },
+    });
+    expect(tombstoned.map((i) => i.index)).toEqual([0, 2]);
+
+    // GoldenCandidate has NO flag of its own and needs none: it is reachable
+    // only through its item, so the item filter is the whole filter. The
+    // rows survive because nothing was deleted for the Cascade to follow.
+    await expect(
+      db.goldenCandidate.count({ where: { goldenItemId: { in: [items[0].id, items[2].id] } } })
+    ).resolves.toBe(4);
+
+    // The GET no longer serves them.
+    const after = await getItems(
+      new Request(`http://localhost/api/golden-sets/${goldenSet.id}/items`),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect((await after.json()).data.map((i: { index: number }) => i.index)).toEqual([1, 3, 4]);
+  });
+
+  it('DELETE is idempotent — re-tombstoning an already-tombstoned id reports 0 and is not a 400', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 3 });
+    const items = await db.goldenItem.findMany({
       where: { goldenSetId: goldenSet.id },
       orderBy: { index: 'asc' },
     });
-    expect(after.map((i) => i.index)).toEqual([0, 1, 2]);
-    expect(after.map((i) => i.id)).toEqual([items[1].id, items[3].id, items[4].id]);
 
-    // GoldenCandidate cascades off GoldenItem.
-    await expect(
-      db.goldenCandidate.count({ where: { goldenItemId: { in: [items[0].id, items[2].id] } } })
-    ).resolves.toBe(0);
+    mockSessionFor(owner);
+    const body = { itemIds: [items[0].id] };
+    const first = await deleteItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'DELETE', body),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(await first.json()).toEqual({ tombstoned: 1, remaining: 2 });
+
+    // The ownership lookup is deliberately NOT lifecycle-filtered: the id
+    // still belongs to this set, so a retried request must not 400.
+    const second = await deleteItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'DELETE', body),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(second.status).toBe(200);
+    expect(await second.json()).toEqual({ tombstoned: 0, remaining: 2 });
+
+    const row = await db.goldenItem.findUniqueOrThrow({ where: { id: items[0].id } });
+    expect(row.tombstonedAt).not.toBeNull();
+  });
+
+  it('GET ?includeTombstoned=true shows them to the OWNER and is ignored for a public reader', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { visibility: 'public', itemCount: 3 });
+    const items = await db.goldenItem.findMany({ where: { goldenSetId: goldenSet.id } });
+    await db.goldenItem.update({
+      where: { id: items[0].id },
+      data: { tombstonedAt: new Date() },
+    });
+
+    mockSessionFor(owner);
+    const asOwner = await getItems(
+      new Request(
+        `http://localhost/api/golden-sets/${goldenSet.id}/items?includeTombstoned=true`
+      ),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    const ownerBody = await asOwner.json();
+    expect(ownerBody.data).toHaveLength(3);
+    expect(ownerBody.pagination.total).toBe(3);
+
+    (getServerSession as unknown as Mock).mockResolvedValue(null);
+    const anon = await getItems(
+      new Request(
+        `http://localhost/api/golden-sets/${goldenSet.id}/items?includeTombstoned=true`
+      ),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    const anonBody = await anon.json();
+    // The escape is owner/admin-only — a public reader of a public set asking
+    // for tombstoned items gets the live ones, not a 403 and not the rows.
+    expect(anonBody.data).toHaveLength(2);
+    expect(anonBody.pagination.total).toBe(2);
   });
 
   it('DELETE 409s on a CALIBRATED set, deleting nothing', async () => {

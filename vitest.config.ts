@@ -111,6 +111,14 @@ export default defineConfig({
       //   src/lib/llm/**       94.50 / 86.60 / 97.56 / 94.50
       //   scripts/importer/**   6.15 / 83.87 / 10.29 /  6.15
       //   src/lib/realtime/**   1.55 / 80    / 71.42 /  1.55
+      //
+      // Re-measured 2026-08-13 in Task 24 (a0), which added the item-lifecycle
+      // helpers (goldenItemLifecycleWhere / parseIncludeTombstoned /
+      // nextGoldenItemIndex) to src/lib/golden-sets.ts and unit tests for the
+      // first two. Only all-files moved, and it moved UP on three of four
+      // keys; every per-glob entry is byte-identical to the row above.
+      // Prose only — no threshold below was touched.
+      //   all-files            37.09 / 84.91 / 67.17 / 37.09
       thresholds: {
         lines: 33,
         functions: 63,

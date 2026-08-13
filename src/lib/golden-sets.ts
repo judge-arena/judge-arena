@@ -289,3 +289,75 @@ export class GoldenSetFrozenError extends Error {
     this.goldenSetId = goldenSetId;
   }
 }
+
+/* ─── Item lifecycle: tombstone, never delete ───────────────────────────────
+ *
+ * Owner ruling 2026-08-13: "delete is ALWAYS a same-transaction tombstone
+ * tag; no actual data removal, anywhere." `GoldenItem.tombstonedAt` is that
+ * tag. NULL = live.
+ *
+ * NOTE THE ASYMMETRY WITH A SET'S `tombstonedAt`, IT IS DELIBERATE. A SET's
+ * `tombstonedAt` is an ACCOUNT-LIFECYCLE verb written by
+ * src/lib/account-deletion.ts for a set pending purge, and nothing may ever
+ * hand one back — there is no escape hatch. An ITEM's `tombstonedAt` is a
+ * PRODUCT verb: its owner curating their own set. The owner therefore has to
+ * be able to see what they removed (to notice a mistake, and because the row
+ * is being kept precisely so it can be looked at), so the item filter DOES
+ * take an escape — gated to the owner/admin branch by its caller, never
+ * offered to a public reader of a public set.
+ *
+ * `true` returns an EMPTY predicate rather than `{ tombstonedAt: { not: null } }`:
+ * "include tombstoned" means live AND tombstoned, not tombstoned only.
+ */
+export function goldenItemLifecycleWhere(includeTombstoned: boolean): Prisma.GoldenItemWhereInput {
+  return includeTombstoned ? {} : { tombstonedAt: null };
+}
+
+/** The one spelling of the item escape hatch. Strict `=== 'true'`, matching
+ * this repo's other boolean query flags — `?includeRetired` (the golden-set
+ * routes) and `?includeSamples` (src/app/api/config/export/route.ts:38) — so
+ * `?includeTombstoned=1` is false everywhere rather than true on some
+ * routes. */
+export function parseIncludeTombstoned(searchParams: URLSearchParams): boolean {
+  return searchParams.get('includeTombstoned') === 'true';
+}
+
+/** The only `GoldenLabel.tombstonedReason` any code writes today. A future
+ * annotator retraction or purge gets its OWN value rather than overloading
+ * this one — the column exists so "why did this score stop applying" is
+ * answerable without reading git history. */
+export const GOLDEN_LABEL_TOMBSTONE_REASON_CONTENT_EDIT = 'item-content-edit';
+
+/**
+ * The next `GoldenItem.index` for a set: a HIGH-WATER MARK over every row,
+ * tombstoned included, never a count and never a reused ordinal.
+ *
+ *     nextIndex = max(index) over ALL rows of the set + 1
+ *
+ * WHY NOT `count()` of live rows: tombstone item 0 of 3 and the count is 2,
+ * but index 2 is occupied — P2002 on the very first insert.
+ *
+ * WHY NOT `max` over LIVE rows: tombstone the tail (items 0..4, tombstone 3
+ * and 4) and live-max + 1 is 3, which is occupied by a tombstoned row.
+ *
+ * The consequence, stated so nobody rediscovers it as a bug: after the first
+ * tombstone, `index` is NOT dense. Its only guarantees are uniqueness within
+ * the set and monotonic insertion order. Any code treating it as a 0-based
+ * position into the live item array is wrong. The importer's 0..n-1
+ * (mapSampleToGoldenItem, above) stays correct only because import runs
+ * against an empty set.
+ *
+ * Takes the caller's transaction client for the same reason
+ * `isGoldenSetFrozen` does: read-then-insert across a commit boundary is a
+ * race against a concurrent append.
+ */
+export async function nextGoldenItemIndex(
+  tx: Prisma.TransactionClient,
+  goldenSetId: string
+): Promise<number> {
+  const highWaterMark = await tx.goldenItem.aggregate({
+    where: { goldenSetId },
+    _max: { index: true },
+  });
+  return (highWaterMark._max.index ?? -1) + 1;
+}

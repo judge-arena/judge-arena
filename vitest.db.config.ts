@@ -85,6 +85,17 @@ export default defineConfig({
       //   all-files            48.50 / 79.22 / 61.82 / 48.50
       //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
       //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
+      //
+      // Re-measured 2026-08-13 in Task 24 (a0), which added the item-lifecycle
+      // helpers to src/lib/golden-sets.ts (nextGoldenItemIndex is exercised by
+      // tests/db/golden-item-tombstone.test.ts) and the tombstone filters to
+      // src/lib/golden-set-versions.ts. All four all-files keys moved UP; both
+      // per-glob entries are unchanged. Note the branches margin flagged above
+      // widened with it (79.37 against a floor of 79). Prose only — no
+      // threshold below was touched.
+      //   all-files            48.65 / 79.37 / 62.20 / 48.65
+      //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
+      //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
       thresholds: {
         lines: 45,
         functions: 58,

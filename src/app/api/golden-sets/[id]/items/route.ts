@@ -11,7 +11,13 @@ import {
 } from '@/lib/auth-guard';
 import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib/pagination';
 import { logger, serializeError } from '@/lib/logger';
-import { isGoldenSetFrozen, GoldenSetFrozenError } from '@/lib/golden-sets';
+import {
+  isGoldenSetFrozen,
+  GoldenSetFrozenError,
+  goldenItemLifecycleWhere,
+  parseIncludeTombstoned,
+  GOLDEN_LABEL_TOMBSTONE_REASON_CONTENT_EDIT,
+} from '@/lib/golden-sets';
 import { updateGoldenItemsSchema, deleteGoldenItemsSchema } from '../../shared';
 
 // GET /api/golden-sets/[id]/items — this route HAS a GET, which
@@ -56,14 +62,27 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
     const { limit, cursor } = parsePaginationParams(searchParams);
     const pageArgs = buildPrismaPageArgs({ limit, cursor });
 
+    // The escape is OWNER/ADMIN ONLY. An item tombstone is a product verb —
+    // the owner curating their own set — so the owner has to be able to see
+    // what they removed. A public reader of a public set has no such claim,
+    // and passing the flag is ignored rather than refused: a 403 here would
+    // leak that the set has tombstoned items at all.
+    const includeTombstoned =
+      decision.access === 'owner' && parseIncludeTombstoned(searchParams);
+    const where = {
+      goldenSetId: params.id,
+      ...goldenItemLifecycleWhere(includeTombstoned),
+    };
+
     const [items, total] = await Promise.all([
       prisma.goldenItem.findMany({
-        where: { goldenSetId: params.id },
+        where,
         include: { candidates: { orderBy: { position: 'asc' } } },
         orderBy: { index: 'asc' },
         ...pageArgs,
       }),
-      prisma.goldenItem.count({ where: { goldenSetId: params.id } }),
+      // Identical `where`, or the pagination total contradicts the page.
+      prisma.goldenItem.count({ where }),
     ]);
 
     // GoldenItem/GoldenCandidate join no user data, so there is no
@@ -81,17 +100,32 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
 // takes a Prisma.TransactionClient specifically so the two can never
 // straddle a commit boundary).
 //
-// DROPS LABELS ON REAL CONTENT CHANGES. `forkGoldenSet`
-// (src/lib/golden-set-versions.ts) copies GoldenLabel rows unconditionally —
-// a fork has no edits to compare against, so decision #5's "copy, except on
-// edited items" clause cannot fire there. That module's doc names THIS
-// handler as the owner of the exception: an item whose inputText,
-// promptText, responseText or expected actually changes value loses its
-// GoldenLabel rows in the same transaction as the edit, so an annotator's
-// score is never left attached to text they did not see. A field present in
-// the request but equal to the item's current value is not a change, and
-// leaves labels alone — a no-op retry PATCH must not invalidate real
-// annotation work.
+// TOMBSTONES LABELS ON REAL CONTENT CHANGES — it does not delete them.
+// `forkGoldenSet` (src/lib/golden-set-versions.ts) copies GoldenLabel rows
+// unconditionally: a fork has no edits to compare against, so decision #5's
+// "copy, except on edited items" clause cannot fire there, and that module's
+// doc names THIS handler as the owner of the exception. An item whose
+// inputText, promptText, responseText or expected actually changes value has
+// its GoldenLabel rows tombstoned in the same transaction as the edit, so an
+// annotator's score is never left APPLYING to text they did not see. A field
+// present in the request but equal to the item's current value is not a
+// change and leaves labels alone — a no-op retry PATCH must not invalidate
+// real annotation work.
+//
+// WHY TOMBSTONE RATHER THAN DELETE (owner ruling 2026-08-13, extended to
+// labels — flagged for confirmation in the task that landed it): a human
+// label is the expensive, irreplaceable artifact this roadmap exists to
+// protect. An LLM verdict re-runs for pennies; an annotator's score cannot be
+// re-obtained once that person moves on. Retaining the row preserves WHO
+// scored WHAT, and `tombstonedAt` — stamped once per request, shared by every
+// label the request invalidates — pins it to a specific edit event.
+//
+// KNOWN GAP, NOT PAPERED OVER: this does not preserve the TEXT the annotator
+// saw. The update below overwrites the item's content in place and there is
+// no item-content history, so "which version of the text" is recoverable only
+// as "whatever it was immediately before the edit at tombstonedAt". Closing
+// that means versioning item content, which belongs with the staged/published
+// dataset identity work, not here.
 export async function PATCH(request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
   const session = await requireAuth();
@@ -112,13 +146,18 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
       }
 
       const current = await tx.goldenItem.findMany({
-        where: { id: { in: data.items.map((i) => i.id) }, goldenSetId: params.id },
+        where: {
+          id: { in: data.items.map((i) => i.id) },
+          goldenSetId: params.id,
+          ...goldenItemLifecycleWhere(false),
+        },
         select: { id: true, inputText: true, promptText: true, responseText: true, expected: true },
       });
       if (current.length !== data.items.length) {
         throw new ForeignItemError();
       }
       const currentById = new Map(current.map((row) => [row.id, row]));
+      const editedAt = new Date();
 
       for (const item of data.items) {
         const before = currentById.get(item.id)!;
@@ -139,7 +178,15 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
         });
 
         if (contentChanged) {
-          await tx.goldenLabel.deleteMany({ where: { goldenItemId: item.id } });
+          // One instant for the whole request, so every label invalidated by
+          // this edit carries the same timestamp and reads as one event.
+          await tx.goldenLabel.updateMany({
+            where: { goldenItemId: item.id, tombstonedAt: null },
+            data: {
+              tombstonedAt: editedAt,
+              tombstonedReason: GOLDEN_LABEL_TOMBSTONE_REASON_CONTENT_EDIT,
+            },
+          });
         }
       }
 
@@ -160,7 +207,7 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
     }
     if (error instanceof ForeignItemError) {
       return NextResponse.json(
-        { error: 'Some items do not belong to this golden set' },
+        { error: 'Some items do not belong to this golden set, or have been tombstoned' },
         { status: 400 }
       );
     }
@@ -175,12 +222,32 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
   }
 }
 
-// DELETE /api/golden-sets/[id]/items — deletes then re-indexes the survivors
-// 0..n-1 in the SAME transaction, because @@unique([goldenSetId, index])
-// makes a gap a constraint problem on the next insert, not a cosmetic one.
-// GoldenLabel/GoldenCandidate cascade off GoldenItem (onDelete: Cascade), so
-// no explicit label cleanup is needed here — only PATCH can leave an item's
-// id alive with different content underneath a stale label.
+// DELETE /api/golden-sets/[id]/items — TOMBSTONE, never a row delete (owner
+// ruling 2026-08-13: no actual data removal, anywhere). `tombstonedAt` is
+// stamped in the SAME transaction as the freeze check, so a calibration run
+// that starts mid-request cannot straddle the two.
+//
+// THERE IS NO RE-INDEX ANY MORE, AND THAT IS THE POINT. The old handler
+// deleted the rows and then renumbered the survivors 0..n-1, because
+// @@unique([goldenSetId, index]) makes a gap a constraint problem on the next
+// insert rather than a cosmetic one. A tombstone removes nothing, so no gap
+// ever opens: every ordinal is still occupied, by a mix of live and
+// tombstoned rows. Re-packing on top of that is not merely unnecessary, it is
+// guaranteed to abort — renumbering the first survivor to 0 collides with the
+// tombstoned row still holding 0 (P2002) and rolls the transaction back. It
+// would also destroy the one thing the retained row is FOR: a stable ordinal
+// recording where in the set the removed item sat.
+//
+// The next index for a set is therefore a HIGH-WATER MARK, not a count — see
+// `nextGoldenItemIndex` in src/lib/golden-sets.ts.
+//
+// GoldenLabel/GoldenCandidate cascade off GoldenItem (onDelete: Cascade), and
+// those FKs now never fire from this path. They are kept as the mechanism the
+// purge wave will use if destruction is ever authorised. Neither child gets a
+// flag of its own: both are reachable only through their item, so the item
+// filter is the complete filter. (GoldenLabel DOES carry `tombstonedAt`, but
+// for the other reason — PATCH can invalidate a label while its item stays
+// live. See that handler.)
 export async function DELETE(request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
   const session = await requireAuth();
@@ -200,6 +267,9 @@ export async function DELETE(request: Request, props: { params: Promise<{ id: st
         throw new GoldenSetFrozenError(params.id);
       }
 
+      // NOT lifecycle-filtered, deliberately: an already-tombstoned id still
+      // belongs to this set, so a retried DELETE must be an idempotent no-op
+      // rather than a 400 claiming the item is foreign.
       const owned = await tx.goldenItem.findMany({
         where: { id: { in: data.itemIds }, goldenSetId: params.id },
         select: { id: true },
@@ -208,26 +278,19 @@ export async function DELETE(request: Request, props: { params: Promise<{ id: st
         throw new ForeignItemError();
       }
 
-      await tx.goldenItem.deleteMany({
-        where: { id: { in: data.itemIds }, goldenSetId: params.id },
+      const tombstoned = await tx.goldenItem.updateMany({
+        where: { id: { in: data.itemIds }, goldenSetId: params.id, tombstonedAt: null },
+        data: { tombstonedAt: new Date() },
       });
 
-      const remaining = await tx.goldenItem.findMany({
-        where: { goldenSetId: params.id },
-        orderBy: { index: 'asc' },
-        select: { id: true, index: true },
+      const remaining = await tx.goldenItem.count({
+        where: { goldenSetId: params.id, ...goldenItemLifecycleWhere(false) },
       });
 
-      // Ascending order is load-bearing: survivors keep their relative order,
-      // so every new index is <= its old one and no update can collide with a
-      // row that has not been renumbered yet.
-      for (const [newIndex, row] of remaining.entries()) {
-        if (row.index !== newIndex) {
-          await tx.goldenItem.update({ where: { id: row.id }, data: { index: newIndex } });
-        }
-      }
-
-      return { deleted: data.itemIds.length, remaining: remaining.length };
+      // `deleted` is renamed to `tombstoned` on purpose. A caller still
+      // reading `deleted` gets `undefined` and breaks loudly, rather than
+      // silently reporting 0 removals for an operation that did happen.
+      return { tombstoned: tombstoned.count, remaining };
     });
 
     return NextResponse.json(result);
@@ -244,7 +307,7 @@ export async function DELETE(request: Request, props: { params: Promise<{ id: st
     }
     if (error instanceof ForeignItemError) {
       return NextResponse.json(
-        { error: 'Some items do not belong to this golden set' },
+        { error: 'Some items do not belong to this golden set, or have been tombstoned' },
         { status: 400 }
       );
     }
@@ -265,7 +328,7 @@ export async function DELETE(request: Request, props: { params: Promise<{ id: st
  * (GET/POST/PATCH/DELETE/.../config) and rejects arbitrary named exports. */
 class ForeignItemError extends Error {
   constructor() {
-    super('Some items do not belong to this golden set');
+    super('Some items do not belong to this golden set, or have been tombstoned');
     this.name = 'ForeignItemError';
   }
 }

@@ -150,4 +150,33 @@ describe('PUT /api/datasets/[id]/samples — golden-set freeze guard (A0 Task 1)
 
     expect(res.status).toBe(200);
   });
+
+  it('a TOMBSTONED golden item still pins the dataset — the FK does not care that the row is dead', async () => {
+    // This is the one golden-item read path that must stay unfiltered.
+    // GoldenItem.sourceDatasetSampleId is `onDelete: Restrict` and a
+    // tombstoned row still holds that FK, so Postgres will still refuse the
+    // sample delete. Sweep a `tombstonedAt: null` through this query and the
+    // guard reports "not pinned", the PUT proceeds, and Postgres raises a
+    // bare P2003 that the catch reports as a 500 — a worse failure than the
+    // one this guard exists to prevent.
+    const owner = await mkUser();
+    const { dataset, sample } = await mkDatasetWithSample(owner.id);
+    const goldenSet = await mkGoldenSetOver(owner.id, dataset.id, sample.id, 'pinning set');
+    await db.goldenItem.updateMany({
+      where: { goldenSetId: goldenSet.id },
+      data: { tombstonedAt: new Date() },
+    });
+
+    mockSessionFor(owner);
+    const res = await PUT(
+      jsonRequest(`http://localhost/api/datasets/${dataset.id}/samples`, 'PUT', {
+        samples: [{ input: 'a replacement question', expected: 'B>A' }],
+      }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).goldenSets).toEqual([{ id: goldenSet.id, name: 'pinning set' }]);
+    await expect(db.datasetSample.count({ where: { datasetId: dataset.id } })).resolves.toBe(1);
+  });
 });

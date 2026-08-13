@@ -78,12 +78,21 @@ describe('golden-set route schemas', () => {
     expect(retireGoldenSetSchema.parse({ retired: false })).toEqual({ retired: false });
   });
 
-  it('every include that feeds toPublicGoldenSet carries owner{id,name} and _count.items', () => {
+  it('every include that feeds toPublicGoldenSet carries owner{id,name} and a TOMBSTONE-FILTERED _count.items', () => {
+    // A0, tombstone-not-delete ruling (2026-08-13): `_count.items` is a
+    // FILTERED relation count. Unfiltered, `toPublicGoldenSet(g).itemCount`
+    // over-reports on every list row — and that is the number a reader uses
+    // to decide whether a set is worth calibrating against.
     expect(goldenSetInclude.owner).toEqual({ select: { id: true, name: true } });
-    expect(goldenSetInclude._count).toEqual({ select: { items: true } });
+    expect(goldenSetInclude._count).toEqual({
+      select: { items: { where: { tombstonedAt: null } } },
+    });
     expect(goldenSetDetailInclude.owner).toEqual({ select: { id: true, name: true } });
-    expect(goldenSetDetailInclude._count).toEqual({ select: { items: true } });
+    expect(goldenSetDetailInclude._count).toEqual({
+      select: { items: { where: { tombstonedAt: null } } },
+    });
     expect(goldenSetDetailInclude.items).toEqual({
+      where: { tombstonedAt: null },
       orderBy: { index: 'asc' },
       include: { candidates: { orderBy: { position: 'asc' } } },
     });

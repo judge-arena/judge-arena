@@ -264,6 +264,13 @@ export async function PUT(request: Request, props: { params: Promise<{ id: strin
     // generic 500. Checked BEFORE the transaction so nothing is deleted.
     // Not covered here: DELETE on this route can still surface a bare P2003
     // for a pinned sampleId — recorded in the migration header, out of A0.
+    //
+    // DELIBERATELY NOT lifecycle-filtered. A tombstoned GoldenItem still
+    // holds `sourceDatasetSampleId` (onDelete: Restrict), so Postgres still
+    // refuses the delete below. Adding `items: { some: { tombstonedAt: null,
+    // ... } }` here would turn this deliberate 409 into a raw P2003 reported
+    // as a 500. Pinned by 'a TOMBSTONED golden item still pins the dataset'
+    // in tests/db/dataset-sample-freeze.test.ts.
     const pinningGoldenSets = await prisma.goldenSet.findMany({
       where: { items: { some: { sourceSample: { datasetId: params.id } } } },
       select: { id: true, name: true },

@@ -12,16 +12,23 @@
  */
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
+import { goldenItemLifecycleWhere } from '@/lib/golden-sets';
 
+// `_count.items` is a FILTERED relation count. Unfiltered, every list row and
+// every public projection would report tombstoned items in `itemCount` —
+// toPublicGoldenSet(g).itemCount is the number a reader uses to decide
+// whether a set is worth calibrating against, so over-reporting it is a lie
+// with consequences, not a cosmetic drift.
 export const goldenSetInclude = {
   owner: { select: { id: true, name: true } },
-  _count: { select: { items: true } },
+  _count: { select: { items: { where: goldenItemLifecycleWhere(false) } } },
 } satisfies Prisma.GoldenSetInclude;
 
 export const goldenSetDetailInclude = {
   owner: { select: { id: true, name: true } },
-  _count: { select: { items: true } },
+  _count: { select: { items: { where: goldenItemLifecycleWhere(false) } } },
   items: {
+    where: goldenItemLifecycleWhere(false),
     orderBy: { index: 'asc' },
     include: { candidates: { orderBy: { position: 'asc' } } },
   },
@@ -91,7 +98,8 @@ export const updateGoldenItemsSchema = z.object({
     .min(1),
 });
 
-/** `DELETE /api/golden-sets/[id]/items` — survivors are re-indexed 0..n-1. */
+/** `DELETE /api/golden-sets/[id]/items` — TOMBSTONES the named items. Nothing
+ * is removed, so survivors keep their `index` and are never re-packed. */
 export const deleteGoldenItemsSchema = z.object({
   itemIds: z.array(z.string().min(1)).min(1),
 });

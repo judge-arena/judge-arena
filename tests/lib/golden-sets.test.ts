@@ -3,8 +3,10 @@ import type { Prisma } from '@prisma/client';
 import {
   GoldenSetFrozenError,
   PLATFORM_OWNER_EMAIL,
+  goldenItemLifecycleWhere,
   isGoldenSetFrozen,
   mapSampleToGoldenItem,
+  parseIncludeTombstoned,
   type SourceSample,
 } from '@/lib/golden-sets';
 import { PLATFORM_USER_EMAIL } from '../../prisma/seed-core';
@@ -246,5 +248,26 @@ describe('PLATFORM_OWNER_EMAIL', () => {
     // prisma/seed-core.ts owns the value, and src/ must not import a seed
     // module at runtime, so the literal is duplicated and pinned here.
     expect(PLATFORM_OWNER_EMAIL).toBe(PLATFORM_USER_EMAIL);
+  });
+});
+
+describe('goldenItemLifecycleWhere / parseIncludeTombstoned', () => {
+  it('hides tombstoned items by default', () => {
+    expect(goldenItemLifecycleWhere(false)).toEqual({ tombstonedAt: null });
+  });
+
+  it('returns an EMPTY predicate when tombstoned items are wanted, not a truthy filter', () => {
+    // Spreading `{}` into a `where` is a no-op; spreading
+    // `{ tombstonedAt: { not: null } }` would show ONLY tombstoned rows,
+    // which is not what any caller means by "include".
+    expect(goldenItemLifecycleWhere(true)).toEqual({});
+  });
+
+  it('accepts exactly the string "true", matching ?includeRetired and ?includeSamples', () => {
+    expect(parseIncludeTombstoned(new URLSearchParams('includeTombstoned=true'))).toBe(true);
+    expect(parseIncludeTombstoned(new URLSearchParams(''))).toBe(false);
+    expect(parseIncludeTombstoned(new URLSearchParams('includeTombstoned='))).toBe(false);
+    expect(parseIncludeTombstoned(new URLSearchParams('includeTombstoned=1'))).toBe(false);
+    expect(parseIncludeTombstoned(new URLSearchParams('includeTombstoned=TRUE'))).toBe(false);
   });
 });
