@@ -50,11 +50,12 @@ describe('golden-set route schemas', () => {
     ).toThrow();
   });
 
-  it('updateGoldenSetSchema parses an empty body (the access-matrix PATCH probe) and carries the frozen content fields so the route can guard them', () => {
+  it('updateGoldenSetSchema parses an empty body (the access-matrix PATCH probe), carries protocol so the route can freeze-guard it, and has NO datasetId key — an immutable field is not in the mutable shape', () => {
     expect(updateGoldenSetSchema.parse({})).toEqual({});
-    const withContent = updateGoldenSetSchema.parse({ datasetId: 'd2', protocol: 'listwise' });
-    expect(withContent.datasetId).toBe('d2');
-    expect(withContent.protocol).toBe('listwise');
+    const parsed = updateGoldenSetSchema.parse({ datasetId: 'd2', protocol: 'listwise' });
+    expect(parsed.protocol).toBe('listwise');
+    expect(parsed).toEqual({ protocol: 'listwise' });
+    expect('datasetId' in parsed).toBe(false);
   });
 
   it('updateGoldenItemsSchema requires at least one item and an id per item', () => {

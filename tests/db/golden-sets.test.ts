@@ -399,7 +399,7 @@ describe('GET /api/golden-sets/[id]', () => {
   });
 });
 
-describe('PATCH /api/golden-sets/[id] — freeze guard on content fields only', () => {
+describe('PATCH /api/golden-sets/[id] — immutable datasetId, freeze guard on protocol', () => {
   beforeEach(async () => {
     await truncateAll();
     (getServerSession as unknown as Mock).mockReset();
@@ -424,7 +424,7 @@ describe('PATCH /api/golden-sets/[id] — freeze guard on content fields only', 
     expect(body.visibility).toBe('public');
   });
 
-  it('409s a datasetId or protocol change on a CALIBRATED set and offers the fork url, writing nothing', async () => {
+  it('409s a protocol change on a CALIBRATED set and offers the fork url, writing nothing', async () => {
     const owner = await mkUser();
     const { goldenSet } = await mkGoldenSet(owner.id);
     await mkCalibrationRun(goldenSet.id);
@@ -460,6 +460,89 @@ describe('PATCH /api/golden-sets/[id] — freeze guard on content fields only', 
     );
     expect(res.status).toBe(200);
     expect((await res.json()).protocol).toBe('listwise');
+  });
+
+  it('400s a datasetId change on an UNCALIBRATED set — immutability is unconditional, not a freeze rule — and lands nothing else from the body either', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+    const { dataset: other } = await mkPlatformDataset(2);
+
+    mockSessionFor(owner);
+    const res = await patchGoldenSet(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}`, 'PATCH', {
+        datasetId: other.id,
+        name: 'Should not land either',
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/datasetId is immutable/);
+    expect(body.forkUrl).toBe(`/api/golden-sets/${goldenSet.id}/fork`);
+
+    const after = await db.goldenSet.findUniqueOrThrow({ where: { id: goldenSet.id } });
+    expect(after.datasetId).toBe(goldenSet.datasetId);
+    expect(after.name).toBe(goldenSet.name);
+  });
+
+  it('400s a SAME-VALUE datasetId echo too — the rule is about the field, so it never depends on reading the row', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+
+    mockSessionFor(owner);
+    const res = await patchGoldenSet(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}`, 'PATCH', {
+        datasetId: goldenSet.datasetId,
+        name: 'Read-modify-write echo',
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/datasetId is immutable/);
+
+    const after = await db.goldenSet.findUniqueOrThrow({ where: { id: goldenSet.id } });
+    expect(after.name).toBe(goldenSet.name);
+  });
+
+  it('400s (not 409s) a datasetId change on a CALIBRATED set — immutability outranks the freeze, so the answer is never "fork and then repoint"', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+    await mkCalibrationRun(goldenSet.id);
+    const { dataset: other } = await mkPlatformDataset(2);
+
+    mockSessionFor(owner);
+    const res = await patchGoldenSet(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}`, 'PATCH', {
+        datasetId: other.id,
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/datasetId is immutable/);
+
+    const after = await db.goldenSet.findUniqueOrThrow({ where: { id: goldenSet.id } });
+    expect(after.datasetId).toBe(goldenSet.datasetId);
+  });
+
+  it('a rename that does not name datasetId still lands, and leaves datasetId alone — the guard is not over-broad', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+
+    mockSessionFor(owner);
+    const res = await patchGoldenSet(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}`, 'PATCH', {
+        name: 'Renamed, same corpus',
+        description: 'still the annotation layer over one dataset',
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.name).toBe('Renamed, same corpus');
+
+    const after = await db.goldenSet.findUniqueOrThrow({ where: { id: goldenSet.id } });
+    expect(after.datasetId).toBe(goldenSet.datasetId);
+    expect(after.description).toBe('still the annotation layer over one dataset');
   });
 });
 

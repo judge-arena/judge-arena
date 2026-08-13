@@ -74,10 +74,11 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
 }
 
 // PATCH /api/golden-sets/[id] — name/description/visibility are always
-// editable; datasetId/protocol are CONTENT and are freeze-guarded. The freeze
-// count and the update it guards share ONE transaction: separated, a
-// calibration run started between them measures a set that changed underneath
-// it, and nothing logs.
+// editable; `protocol` is CONTENT and is freeze-guarded. `datasetId` is
+// IMMUTABLE and is refused outright (400), never freeze-guarded — see the
+// guard below. The freeze count and the update it guards share ONE
+// transaction: separated, a calibration run started between them measures a
+// set that changed underneath it, and nothing logs.
 export async function PATCH(request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
   const session = await requireAuth();
@@ -90,9 +91,34 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
     if (ownershipError) return ownershipError;
 
     const body = await request.json();
+
+    // IMMUTABLE, not merely frozen. A golden set is the annotation layer over
+    // exactly one dataset, so repointing it is never legitimate — you fork, or
+    // you import a new set against the other dataset. Refused on PRESENCE, not
+    // on difference: the rule is about the field, so it holds in every state
+    // and needs no read of the row. A same-value echo is refused too, which
+    // costs a read-modify-write caller one line and buys a status code that
+    // never depends on data. Sits AFTER requireOwnership so a stranger still
+    // gets 403 and this 400 never confirms that the id exists.
+    if (typeof body === 'object' && body !== null && 'datasetId' in body) {
+      return NextResponse.json(
+        {
+          error:
+            'datasetId is immutable: a golden set is the annotation layer over exactly one dataset. Fork this set, or import a new one against the other dataset.',
+          forkUrl: `/api/golden-sets/${params.id}/fork`,
+          createUrl: '/api/golden-sets',
+        },
+        { status: 400 }
+      );
+    }
+
     const data = updateGoldenSetSchema.parse(body);
 
-    const touchesContent = data.datasetId !== undefined || data.protocol !== undefined;
+    // `protocol` is the ONLY content field left on the GoldenSet row:
+    // `datasetId` can no longer be reached (above), and item/candidate/
+    // `expected` content is freeze-guarded in [id]/items/route.ts. One
+    // condition, not a one-armed disjunction — do not restore the other arm.
+    const touchesContent = data.protocol !== undefined;
 
     const goldenSet = await prisma.$transaction(async (tx) => {
       if (touchesContent && (await isGoldenSetFrozen(tx, params.id))) {
@@ -105,7 +131,6 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
           ...(data.name !== undefined && { name: data.name }),
           ...(data.description !== undefined && { description: data.description }),
           ...(data.visibility !== undefined && { visibility: data.visibility }),
-          ...(data.datasetId !== undefined && { datasetId: data.datasetId }),
           ...(data.protocol !== undefined && { protocol: data.protocol }),
         },
         include: goldenSetInclude,

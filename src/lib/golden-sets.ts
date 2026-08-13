@@ -235,10 +235,17 @@ export function mapSampleToGoldenItem(
  *
  *     frozen(goldenSetId) := calibrationRun.count({ where: { goldenSetId } }) > 0
  *
- * WHAT FREEZES is item content — items, candidates, `protocol`, `expected`,
- * and the set's `datasetId`. WHAT DOES NOT is `name`, `description`,
- * `visibility`, `retiredAt`: renaming a set changes nothing a calibration run
- * measured, and refusing a typo fix is hostile and buys nothing.
+ * WHAT FREEZES is item content — items, candidates, `protocol`, `expected`.
+ * WHAT DOES NOT is `name`, `description`, `visibility`, `retiredAt`: renaming
+ * a set changes nothing a calibration run measured, and refusing a typo fix is
+ * hostile and buys nothing.
+ *
+ * `datasetId` IS IN NEITHER LIST ANY MORE. Listing it as frozen content made
+ * it editable on any set without a CalibrationRun, which is backwards: a
+ * golden set annotates exactly one dataset, so repointing it is illegitimate
+ * whether or not anything has measured it. It is now immutable for the life of
+ * the row, refused with a 400 in the PATCH route, and never reaches this
+ * predicate at all.
  *
  * `finishedAt` IS NOT CONSULTED. CalibrationRun has no status enum, only
  * `startedAt`/`finishedAt`, so "still running" and "crashed" are the same

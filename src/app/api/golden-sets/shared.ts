@@ -55,14 +55,24 @@ export const createGoldenSetSchema = z.object({
 /**
  * `PATCH /api/golden-sets/[id]`. `name`/`description`/`visibility` are NOT
  * frozen — renaming a set changes nothing a calibration run measured.
- * `datasetId`/`protocol` ARE content, so the route freeze-guards them inside
- * the same transaction as the update.
+ * `protocol` IS content, so the route freeze-guards it inside the same
+ * transaction as the update.
+ *
+ * `datasetId` IS ABSENT, DELIBERATELY, and is not a "frozen" field either: it
+ * is IMMUTABLE for the life of the row. A golden set is the annotation layer
+ * over exactly one dataset, so repointing it silently re-describes every label
+ * it holds; the legitimate moves are fork (same dataset, next version) or a
+ * fresh import against the other dataset. The route 400s a body that names
+ * `datasetId` rather than stripping it silently — a caller who sent it meant
+ * something by it, unlike a forged `ownerId` on POST, which the server always
+ * knew better than and can drop without losing intent. This shape is the
+ * second line of defence: delete that guard and `datasetId` still cannot reach
+ * `goldenSet.update`, because it is not a property of the parsed result.
  */
 export const updateGoldenSetSchema = z.object({
   name: z.string().min(1).max(200).optional(),
   description: z.string().max(4000).nullable().optional(),
   visibility: z.enum(['private', 'public']).optional(),
-  datasetId: z.string().min(1).optional(),
   protocol: z.enum(['pointwise', 'pairwise', 'listwise']).optional(),
 });
 
