@@ -11229,3 +11229,1748 @@ detail, items, export.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
+
+---
+
+## Addendum — corrective tasks from the owner rulings of 2026-08-13
+
+These two tasks correct code that **already landed** in Tasks 7 and 8. They are numbered after
+the original 22 but must run **before Task 14**: Task 24 changes what the lifecycle read filters
+in Task 21 have to cover, and Task 15's `COVERAGE` map must classify `GoldenItem.tombstonedAt`.
+See `2026-08-13-a0-status-and-handoff.md` for the rulings and their full context.
+
+### Task 23: `GoldenSet.datasetId` is immutable, unconditionally
+
+**Files:**
+- Modify: `src/app/api/golden-sets/shared.ts:55-67` (drop `datasetId` from `updateGoldenSetSchema`, rewrite its doc)
+- Modify: `src/app/api/golden-sets/[id]/route.ts:76-113` (PATCH header comment, new 400 guard, narrow `touchesContent`, drop the `datasetId` write)
+- Modify: `src/lib/golden-sets.ts:238-241` (the freeze docstring still lists `datasetId` as frozen content)
+- Modify: `tests/db/golden-sets.test.ts:402-464` (the PATCH describe — four new `it`s, one stale title)
+- Modify: `tests/lib/golden-set-schemas.test.ts:53-58` (the schema unit test asserts `datasetId` survives parse)
+
+**Interfaces:**
+- Consumes: `isGoldenSetFrozen(tx: Prisma.TransactionClient, goldenSetId: string): Promise<boolean>` and `GoldenSetFrozenError` from `@/lib/golden-sets`; `requireOwnership('goldenSet', id, session)` from `@/lib/auth-guard`; `goldenSetInclude` from `../shared`.
+- Produces: `updateGoldenSetSchema: z.ZodObject<{ name?: string; description?: string | null; visibility?: 'private' | 'public'; protocol?: 'pointwise' | 'pairwise' | 'listwise' }>` — **no `datasetId` key**. `PATCH /api/golden-sets/[id]` gains a terminal `400 { error: string, forkUrl: string, createUrl: string }` for any body containing `datasetId`.
+
+**No migration.** Prisma has no column-level immutability, and this needs none: grep confirms the entire write surface for `GoldenSet.datasetId` is three sites — `src/app/api/golden-sets/route.ts:133` and `:202` (create-by-import, the initial value) and `src/lib/golden-set-versions.ts:211` (`datasetId: source.datasetId`, an inherit, never a repoint). PATCH was the only path that could point a set at a different corpus. Closing it closes the field. (Ruling 3's staged/published dataset identity is a separate spec; note only that an immutable pointer is strictly compatible with one — a published identity is exactly what an immutable pointer wants to name. Design nothing for it here.)
+
+**Decision: (b) — reject with a 400 that names the rule. Do not silently strip.**
+
+The `ownerId`-on-POST precedent does not transfer, and the difference is not stylistic. `ownerId` is a field the caller **had no business sending**: the server derives it from the session, there is exactly one correct value, and the caller cannot influence it. Stripping it preserves the request's meaning perfectly — the caller wanted to create a set, and a set gets created, owned by them. Nothing they intended was lost, so there is nothing to report.
+
+`datasetId` on PATCH is the opposite: it is an explicit, meaningful value the caller chose, and it expresses an intent ("point this set at corpus X"). Strip it and the response is `200` with a body showing the *old* `datasetId` — a caller who does not diff the response believes the repoint landed. From then on they reason about their labels as annotations of corpus X while the rows say corpus Y. That is precisely the confusion Ruling 1 exists to prevent, reintroduced by the mechanism meant to prevent it. Silence is only honest when the ignored field carried no intent.
+
+The 400 also has somewhere to send them, which stripping does not: the owner named the legitimate moves ("you fork or create anew"), so the body carries `forkUrl` (mirroring the affordance the 409 freeze response already ships) and `createUrl`.
+
+**Rejected on presence, not on difference** — a same-value echo 400s too. Checking "differs from the current value" would require reading the row before deciding, making the status code depend on database state, and would leave a second code path (same-value accepted) that no one tests and that quietly re-legitimises the field as PATCHable. "`datasetId` is not a PATCH field" is one sentence, true in every state, and provable without a query. The cost is a read-modify-write client that echoes the whole object back and now gets a 400; per Ruling 2's own rationale there are no existing users, so that cost is zero today and the clarity is permanent.
+
+**Two layers, deliberately.** The route 400s (loud, teaches the rule) *and* the schema omits the key (structural — even if the guard were deleted, `datasetId` cannot reach `goldenSet.update`, because `data` has no such property and TypeScript fails the build if you try).
+
+**`touchesContent` after this change:** `protocol` is the only content field left on the `GoldenSet` row. `datasetId` is immutable, and item/candidate/`expected` content is freeze-guarded in `[id]/items/route.ts`, not here. The guard becomes a single condition — not a one-armed disjunction left standing as a stub.
+
+- [ ] **Step 1: Write the failing DB tests**
+
+Append these four `it`s inside the existing `describe('PATCH /api/golden-sets/[id] — freeze guard on content fields only', ...)` block in `tests/db/golden-sets.test.ts` (after the `'a protocol change on an UNcalibrated set lands'` test at :450-463). They use the file's existing `mkGoldenSet`, `mkPlatformDataset`, `mkCalibrationRun`, `mockSessionFor` and `jsonRequest` helpers — no new fixtures.
+
+```ts
+  it('400s a datasetId change on an UNCALIBRATED set — immutability is unconditional, not a freeze rule — and lands nothing else from the body either', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+    const { dataset: other } = await mkPlatformDataset(2);
+
+    mockSessionFor(owner);
+    const res = await patchGoldenSet(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}`, 'PATCH', {
+        datasetId: other.id,
+        name: 'Should not land either',
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/datasetId is immutable/);
+    expect(body.forkUrl).toBe(`/api/golden-sets/${goldenSet.id}/fork`);
+
+    const after = await db.goldenSet.findUniqueOrThrow({ where: { id: goldenSet.id } });
+    expect(after.datasetId).toBe(goldenSet.datasetId);
+    expect(after.name).toBe(goldenSet.name);
+  });
+
+  it('400s a SAME-VALUE datasetId echo too — the rule is about the field, so it never depends on reading the row', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+
+    mockSessionFor(owner);
+    const res = await patchGoldenSet(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}`, 'PATCH', {
+        datasetId: goldenSet.datasetId,
+        name: 'Read-modify-write echo',
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/datasetId is immutable/);
+
+    const after = await db.goldenSet.findUniqueOrThrow({ where: { id: goldenSet.id } });
+    expect(after.name).toBe(goldenSet.name);
+  });
+
+  it('400s (not 409s) a datasetId change on a CALIBRATED set — immutability outranks the freeze, so the answer is never "fork and then repoint"', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+    await mkCalibrationRun(goldenSet.id);
+    const { dataset: other } = await mkPlatformDataset(2);
+
+    mockSessionFor(owner);
+    const res = await patchGoldenSet(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}`, 'PATCH', {
+        datasetId: other.id,
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/datasetId is immutable/);
+
+    const after = await db.goldenSet.findUniqueOrThrow({ where: { id: goldenSet.id } });
+    expect(after.datasetId).toBe(goldenSet.datasetId);
+  });
+
+  it('a rename that does not name datasetId still lands, and leaves datasetId alone — the guard is not over-broad', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id);
+
+    mockSessionFor(owner);
+    const res = await patchGoldenSet(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}`, 'PATCH', {
+        name: 'Renamed, same corpus',
+        description: 'still the annotation layer over one dataset',
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.name).toBe('Renamed, same corpus');
+
+    const after = await db.goldenSet.findUniqueOrThrow({ where: { id: goldenSet.id } });
+    expect(after.datasetId).toBe(goldenSet.datasetId);
+    expect(after.description).toBe('still the annotation layer over one dataset');
+  });
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `npx vitest run --config vitest.db.config.ts tests/db/golden-sets.test.ts -t "immutability is unconditional"`
+
+Expected: FAIL — `AssertionError: expected 200 to be 400 // Object.is equality` at `expect(res.status).toBe(400)`. The current route treats `datasetId` as freeze-guarded content, so on an uncalibrated set the repoint lands with a 200.
+
+(The `-t "SAME-VALUE datasetId echo"` and `-t "immutability outranks the freeze"` cases fail the same way; `-t "the guard is not over-broad"` passes already, which is the point — it is the regression pin.)
+
+- [ ] **Step 3: Make the schema unit test state the new rule**
+
+Replace `tests/lib/golden-set-schemas.test.ts:53-58` — it currently asserts `datasetId` survives parse, which is exactly the behaviour being removed:
+
+```ts
+  it('updateGoldenSetSchema parses an empty body (the access-matrix PATCH probe), carries protocol so the route can freeze-guard it, and has NO datasetId key — an immutable field is not in the mutable shape', () => {
+    expect(updateGoldenSetSchema.parse({})).toEqual({});
+    const parsed = updateGoldenSetSchema.parse({ datasetId: 'd2', protocol: 'listwise' });
+    expect(parsed.protocol).toBe('listwise');
+    expect(parsed).toEqual({ protocol: 'listwise' });
+    expect('datasetId' in parsed).toBe(false);
+  });
+```
+
+- [ ] **Step 4: Run it and watch it fail**
+
+Run: `npx vitest run tests/lib/golden-set-schemas.test.ts -t "an immutable field is not in the mutable shape"`
+
+Expected: FAIL — `AssertionError: expected { datasetId: 'd2', protocol: 'listwise' } to deeply equal { protocol: 'listwise' }`, because the schema still declares `datasetId: z.string().min(1).optional()`.
+
+- [ ] **Step 5: Drop `datasetId` from `updateGoldenSetSchema`**
+
+Replace `src/app/api/golden-sets/shared.ts:55-67`:
+
+```ts
+/**
+ * `PATCH /api/golden-sets/[id]`. `name`/`description`/`visibility` are NOT
+ * frozen — renaming a set changes nothing a calibration run measured.
+ * `protocol` IS content, so the route freeze-guards it inside the same
+ * transaction as the update.
+ *
+ * `datasetId` IS ABSENT, DELIBERATELY, and is not a "frozen" field either: it
+ * is IMMUTABLE for the life of the row. A golden set is the annotation layer
+ * over exactly one dataset, so repointing it silently re-describes every label
+ * it holds; the legitimate moves are fork (same dataset, next version) or a
+ * fresh import against the other dataset. The route 400s a body that names
+ * `datasetId` rather than stripping it silently — a caller who sent it meant
+ * something by it, unlike a forged `ownerId` on POST, which the server always
+ * knew better than and can drop without losing intent. This shape is the
+ * second line of defence: delete that guard and `datasetId` still cannot reach
+ * `goldenSet.update`, because it is not a property of the parsed result.
+ */
+export const updateGoldenSetSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  description: z.string().max(4000).nullable().optional(),
+  visibility: z.enum(['private', 'public']).optional(),
+  protocol: z.enum(['pointwise', 'pairwise', 'listwise']).optional(),
+});
+```
+
+- [ ] **Step 6: Reject `datasetId` in the PATCH handler and narrow `touchesContent`**
+
+Replace the header comment at `src/app/api/golden-sets/[id]/route.ts:76-80`:
+
+```ts
+// PATCH /api/golden-sets/[id] — name/description/visibility are always
+// editable; `protocol` is CONTENT and is freeze-guarded. `datasetId` is
+// IMMUTABLE and is refused outright (400), never freeze-guarded — see the
+// guard below. The freeze count and the update it guards share ONE
+// transaction: separated, a calibration run started between them measures a
+// set that changed underneath it, and nothing logs.
+```
+
+then replace the body of the handler from `const body = await request.json();` (:92) through the `touchesContent` line (:95):
+
+```ts
+    const body = await request.json();
+
+    // IMMUTABLE, not merely frozen. A golden set is the annotation layer over
+    // exactly one dataset, so repointing it is never legitimate — you fork, or
+    // you import a new set against the other dataset. Refused on PRESENCE, not
+    // on difference: the rule is about the field, so it holds in every state
+    // and needs no read of the row. A same-value echo is refused too, which
+    // costs a read-modify-write caller one line and buys a status code that
+    // never depends on data. Sits AFTER requireOwnership so a stranger still
+    // gets 403 and this 400 never confirms that the id exists.
+    if (typeof body === 'object' && body !== null && 'datasetId' in body) {
+      return NextResponse.json(
+        {
+          error:
+            'datasetId is immutable: a golden set is the annotation layer over exactly one dataset. Fork this set, or import a new one against the other dataset.',
+          forkUrl: `/api/golden-sets/${params.id}/fork`,
+          createUrl: '/api/golden-sets',
+        },
+        { status: 400 }
+      );
+    }
+
+    const data = updateGoldenSetSchema.parse(body);
+
+    // `protocol` is the ONLY content field left on the GoldenSet row:
+    // `datasetId` can no longer be reached (above), and item/candidate/
+    // `expected` content is freeze-guarded in [id]/items/route.ts. One
+    // condition, not a one-armed disjunction — do not restore the other arm.
+    const touchesContent = data.protocol !== undefined;
+```
+
+and delete the now-uncompilable `datasetId` spread at :108, leaving the update data as:
+
+```ts
+        data: {
+          ...(data.name !== undefined && { name: data.name }),
+          ...(data.description !== undefined && { description: data.description }),
+          ...(data.visibility !== undefined && { visibility: data.visibility }),
+          ...(data.protocol !== undefined && { protocol: data.protocol }),
+        },
+```
+
+- [ ] **Step 7: Retitle the stale existing tests**
+
+Two names in `tests/db/golden-sets.test.ts` now describe a rule that no longer exists. The bodies are correct as written (the calibrated test only ever *sent* `protocol`) — only the names lie:
+
+- `:402` — `describe('PATCH /api/golden-sets/[id] — freeze guard on content fields only', ...)` → `describe('PATCH /api/golden-sets/[id] — immutable datasetId, freeze guard on protocol', ...)`
+- `:427` — `it('409s a datasetId or protocol change on a CALIBRATED set and offers the fork url, writing nothing', ...)` → `it('409s a protocol change on a CALIBRATED set and offers the fork url, writing nothing', ...)`
+
+- [ ] **Step 8: Run both scoped files and watch them pass**
+
+Run: `npx vitest run --config vitest.db.config.ts tests/db/golden-sets.test.ts`
+Then: `npx vitest run tests/lib/golden-set-schemas.test.ts`
+
+Expected: PASS. In the DB file, the four new `it`s are green, `'a rename that does not name datasetId still lands'` and `'a protocol change on an UNcalibrated set lands'` prove the guard did not overreach, and `'409s a protocol change on a CALIBRATED set'` proves the freeze path is untouched.
+
+- [ ] **Step 9: Correct the freeze docstring, which still lists `datasetId` as frozen content**
+
+`src/lib/golden-sets.ts` is the single definition of "frozen" and its prose is what the next reader will trust. Replace :238-241:
+
+```ts
+ * WHAT FREEZES is item content — items, candidates, `protocol`, `expected`.
+ * WHAT DOES NOT is `name`, `description`, `visibility`, `retiredAt`: renaming
+ * a set changes nothing a calibration run measured, and refusing a typo fix is
+ * hostile and buys nothing.
+ *
+ * `datasetId` IS IN NEITHER LIST ANY MORE. Listing it as frozen content made
+ * it editable on any set without a CalibrationRun, which is backwards: a
+ * golden set annotates exactly one dataset, so repointing it is illegitimate
+ * whether or not anything has measured it. It is now immutable for the life of
+ * the row, refused with a 400 in the PATCH route, and never reaches this
+ * predicate at all.
+```
+
+- [ ] **Step 10: Full verification**
+
+Run: `npm test` (unit run; the coverage globs and thresholds are untouched — nothing was lowered, and `src/app/api/**` is outside every `include` as before)
+Then: `npm run test:db` (full DB suite from a `migrate reset`, catching `tests/db/access-matrix.test.ts:291`, whose PATCH probe sends `{}` and is unaffected by the new guard)
+Then: `npm run lint`
+
+Expected: all green.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add src/app/api/golden-sets/shared.ts \
+        src/app/api/golden-sets/\[id\]/route.ts \
+        src/lib/golden-sets.ts \
+        tests/db/golden-sets.test.ts \
+        tests/lib/golden-set-schemas.test.ts
+git commit -m "$(cat <<'EOF'
+fix(a0): GoldenSet.datasetId is immutable, not merely freeze-guarded
+
+A golden set is the annotation layer over exactly one dataset, so repointing
+it is never legitimate — it silently re-describes every label the set holds.
+Treating datasetId as frozen CONTENT got this backwards: it made the field
+freely editable on any set without a CalibrationRun, i.e. on exactly the sets
+whose labels a repoint would quietly invalidate. The legitimate moves are fork
+(same dataset, next version) or a fresh import against the other dataset; a
+new record becomes a new dataset.
+
+PATCH now 400s any body that names datasetId, rather than stripping it. The
+forged-ownerId-on-POST precedent does not transfer: ownerId is a field the
+caller had no business sending and that the server always knew better than, so
+dropping it loses no intent. datasetId is an explicit value the caller chose
+and meant something by — stripped, they get a 200, a response body showing the
+old datasetId, and a belief that their labels describe a corpus they do not.
+The 400 names the rule and carries forkUrl/createUrl, the same affordance the
+409 freeze response already ships.
+
+Refused on PRESENCE, not on difference, so a same-value echo is refused too.
+Checking "differs from current" would make the status code depend on a row
+read and would leave a second, untested path on which datasetId is still a
+PATCH field. There are no existing users, so the read-modify-write caller this
+costs does not exist yet, and the rule is one sentence that is true in every
+state.
+
+updateGoldenSetSchema loses the key entirely as a second line of defence: with
+the route guard deleted, datasetId still cannot reach goldenSet.update, since
+it is no longer a property of the parsed result and the build fails.
+
+protocol is now the only content field left on the GoldenSet row, so
+touchesContent is a single condition rather than a disjunction with one arm
+removed. Item, candidate and expected content stay guarded in the items route.
+The freeze docstring in src/lib/golden-sets.ts — the single definition both
+the routes and account-deletion read — no longer lists datasetId in either
+column.
+
+No migration: Prisma cannot express column immutability and does not need to
+here. The whole write surface is create-by-import (the initial value) and
+fork (datasetId: source.datasetId, an inherit). PATCH was the only repoint.
+EOF
+)"
+```
+
+### Task 24: Golden items are tombstoned, never deleted — and so are the labels an edit invalidates
+
+**Ruling this implements (product owner, 2026-08-13):** *"Delete is ALWAYS a same-transaction tombstone tag. NO actual data removal, anywhere. Hard deletion may lose data, and there are no existing users, so there is no urgency that would justify destruction."*
+
+`GoldenSet` already obeys this — `DELETE /api/golden-sets/[id]` stamps `tombstonedAt` and returns `{ success: true, tombstoned: true }` (`src/app/api/golden-sets/[id]/route.ts:138-164`). `GoldenItem` does not: `DELETE /api/golden-sets/[id]/items` calls `tx.goldenItem.deleteMany` and then renumbers the survivors (`items/route.ts:211-228`). `GoldenItem` has **no** `tombstonedAt` column. This task adds one, deletes the re-index loop, and sweeps the read paths.
+
+#### The five consequences, decided
+
+**1. The column and its index.** `GoldenItem.tombstonedAt DateTime?` (NULL = live), plus `@@index([goldenSetId, tombstonedAt])`. That composite is what makes the *filtered count* cheap — `count({ where: { goldenSetId, tombstonedAt: null } })` runs on every paginated items read and on `_count.items` for every row of the list page — and it lets the planner skip the heap on tombstone-heavy sets. It does **not** serve the ordered read; `GoldenItem_goldenSetId_index_key` still does that, and the `tombstonedAt IS NULL` filter rides along as a heap recheck over ≤620 rows. A partial index (`ON ("goldenSetId","index") WHERE "tombstonedAt" IS NULL`) would serve filter *and* order *and* count in one, and was **rejected**: it buys single-digit milliseconds on corpora this size and costs a fourth row in CONTRIBUTING.md's pseudo-drift table, which is a permanent maintenance liability. We spend that budget once in this task, on `GoldenLabel`, where a partial index is not an optimisation but the only correct answer.
+
+**2. The re-index becomes wrong, and is deleted — not left to rot.** Say it plainly: **a tombstoned row keeps its `index`, so the survivors must not be re-packed.** `@@unique([goldenSetId, index])` is still satisfied after a tombstone because *nothing was removed* — every ordinal 0..n-1 is still occupied, by a mix of live and tombstoned rows. The old loop existed only to close the gap a `deleteMany` opened. Kept on top of tombstoning it is not merely redundant, it is **guaranteed to abort**: renumbering the first survivor to `0` collides with the tombstoned row that still holds `0`, P2002, transaction rolled back, every DELETE 500s. It also destroys the one thing the retained row is *for* — a stable ordinal recording *where in the set* the removed item sat. The loop at `items/route.ts:215-228` is deleted outright, and the comment at `:178-183` and the schema doc at `shared.ts:84` that promise re-indexing are rewritten in the same commit.
+
+**3. Read paths.** Exact call sites, all of them, as found on this branch:
+
+| # | Site | Disposition |
+|---|---|---|
+| 1 | `items/route.ts:60-65` GET `findMany` | filter; owner/admin-only `?includeTombstoned=true` escape |
+| 2 | `items/route.ts:66` GET `count` | filter with the identical `where`, or the pagination total lies |
+| 3 | `items/route.ts:114-117` PATCH `current` lookup | filter — a tombstoned id then falls into the existing `ForeignItemError` 400 |
+| 4 | `items/route.ts:203-206` DELETE ownership lookup | **not** filtered, deliberately: a re-tombstone must be an idempotent no-op, not a 400 |
+| 5 | `golden-sets/shared.ts:18` + `:23` `_count.items` | filtered relation count, or `toPublicGoldenSet(g).itemCount` over-reports on every list row |
+| 6 | `golden-sets/shared.ts:24-27` `goldenSetDetailInclude.items` | filter (serves `GET /api/golden-sets/[id]`) |
+| 7 | `golden-set-versions.ts:152-181` fork's item select | filter items **and** labels — see 4 below |
+| 8 | `golden-sets/route.ts:223-226` importer read-back by index | leave unfiltered; it runs inside the transaction that just created the set, so the false arm is unreachable |
+| 9 | `datasets/[id]/samples/route.ts:267-271` pin guard | **MUST NOT be filtered.** This is the escape that matters. `GoldenItem.sourceDatasetSampleId` is `onDelete: Restrict`, and a tombstoned row still holds that FK, so Postgres still refuses the sample delete. Filter it and the guard reports "not pinned", the PUT proceeds, and Postgres raises a bare P2003 that the catch reports as a 500 — a worse failure than the one the guard was built to prevent. |
+| 10 | `config/import/route.ts` item replace (Task 14) | two `goldenItem.deleteMany` calls become tombstones; see Step 22 |
+
+**4. Children of a tombstoned item.** `GoldenCandidate` gets **no flag**. It is reachable only through its item — every read is `include: { candidates }` hanging off a `goldenItem` query — so filtering at the item level is already complete, and a second timestamp would be a value that can *disagree* with its parent's with nothing able to reconcile them. The `onDelete: Cascade` FKs stay exactly as they are: they now never fire from this path (nothing is deleted), and they remain the correct mechanism for the purge wave, which is where destruction belongs if it is ever authorised.
+
+`GoldenLabel` **does** get a flag — but not because of item tombstoning. Its item-level unreachability is identical to a candidate's. It gets one because a label can die **alone**, while its item stays live: the label-drop-on-edit at `items/route.ts:141-143`. That asymmetry is the whole justification, and it is why exactly one of the two children is flagged.
+
+**5. The next-index rule.** The importer's `index` is 0..n-1 over its selection (`golden-sets.ts:188-192`, `route.ts:162-168`) and that stays true, because import runs against an empty set. Afterwards:
+
+> **`nextIndex = max(index) over ALL rows of the set, tombstoned included, + 1`.** A high-water mark. Never `count()`, never `max` over live rows, and never a reused ordinal.
+
+`count()` of live rows collides immediately (tombstone item 0 of 3, count is 2, index 2 is taken). `max` over *live* rows collides whenever the tail was tombstoned (items 0..4, tombstone 3 and 4, live max is 2, next would be 3 — taken). Only the all-rows maximum is safe. The consequence, stated so nobody rediscovers it as a bug: **`index` stops being dense after the first tombstone.** Its guarantees shrink to exactly two — unique within a set, and monotonic in insertion order. Any code that treats `index` as a 0-based array position over live items is wrong from this task onward. `forkGoldenSet` copies `item.index` verbatim, which stays correct and carries the gaps into the child, so index-keyed comparison across versions (A2) still lines up.
+
+#### ⚠ NEEDS OWNER CONFIRMATION — extending the ruling to `GoldenLabel`
+
+The ruling names delete. `items/route.ts:141-143` does not call itself a delete, but it is one: `tx.goldenLabel.deleteMany` destroys every human annotation on an item whose content changed. **This task tombstones it instead, and that is an interpretation, not a quoted instruction.** The case for it:
+
+- A human label is the expensive, irreplaceable artifact this entire roadmap exists to protect. An LLM verdict can be re-run for pennies; an annotator's score cannot be re-obtained at all once that person moves on.
+- Preserving the row preserves **who** said **what**, and — via `tombstonedAt` stamped in the same transaction as the edit — **when it stopped applying**, which pins it to a specific edit event. That is real provenance that hard deletion incinerates.
+- It costs one nullable column, one nullable reason string, and one index swap.
+
+**Known gap, stated rather than papered over:** this preserves who/what/when, but *not* the text the annotator actually saw. `PATCH` overwrites `inputText`/`promptText`/`responseText`/`expected` in place and there is no item-content history, so "WHICH version of the text" is recoverable only as "whatever it was immediately before the edit at `tombstonedAt`". Closing that gap means versioning item content, which is Ruling 3's territory (staged → published immutable identity) and is explicitly out of scope here. If the owner rejects the label tombstone, revert Steps 16-18 and the `GoldenLabel` half of the migration; nothing else in this task depends on them.
+
+**The index consequence that forces a schema change.** `@@unique([goldenItemId, annotatorId])` is whole-table. Keep it and a tombstoned label **permanently occupies its annotator's slot**: after an edit invalidates annotatorA's score, annotatorA can never score that item again — the insert collides, forever. Re-annotation is the core A1 workflow, so the constraint must become live-rows-only. Two ways, one of which is a trap:
+
+- **`@@unique([goldenItemId, annotatorId, tombstonedAt])` hand-edited to `NULLS NOT DISTINCT`** — the trick this repo already uses twice. **Rejected, and this is the important part:** `NULLS NOT DISTINCT` treats *every* NULL in the index as equal, including `annotatorId`, which is nullable via `onDelete: SetNull`. Two deleted annotators who both labelled the same item would collapse to `(item, NULL, NULL)` twice and the second `user.delete()` would raise P2002 — breaking account deletion's anonymisation path (`src/lib/account-deletion.ts`, `GoldenLabel.annotatorId` SetNull) to fix an unrelated problem.
+- **A partial unique index, `WHERE "tombstonedAt" IS NULL`** — chosen. Keeps the default `NULLS DISTINCT`, so anonymised labels still coexist freely; enforces one *live* label per (item, annotator); and any number of tombstoned ones. Prisma cannot express a `WHERE` predicate at all, so `@@unique([goldenItemId, annotatorId])` is **removed** from `schema.prisma` and the index is hand-written — exactly the shape of `User_email_credentials_key` (`20260729180000_v2b_email_partial_unique`), which is documented as invisible to `migrate diff`/`db pull`/`db push`. Verified safe to remove from the DSL: nothing in `src/`, `tests/` or `scripts/` uses the `goldenItemId_annotatorId` compound where-input (`grep` returns only the 2026-07-25 migration that created it). Dropping that index also drops the only btree serving `where: { goldenItemId }`, so `@@index([goldenItemId])` is added back explicitly.
+
+**Files:**
+- Modify: `prisma/schema.prisma:703-725` (GoldenItem), `prisma/schema.prisma:743-757` (GoldenLabel)
+- Create: `prisma/migrations/20260813120000_v2e_golden_item_label_tombstones/migration.sql`
+- Modify: `CONTRIBUTING.md:460`, `CONTRIBUTING.md:467-468` (pseudo-drift table: "three cases" → "four", new row)
+- Modify: `src/lib/golden-sets.ts:266-284` (append after `GoldenSetFrozenError`)
+- Modify: `src/app/api/golden-sets/shared.ts:13-28`, `src/app/api/golden-sets/shared.ts:84-87`
+- Modify: `src/app/api/golden-sets/[id]/items/route.ts:14-15`, `:56-67`, `:79-94`, `:109-147`, `:178-233`, `:262-271`
+- Modify: `src/lib/golden-set-versions.ts:34-45`, `:58-65`, `:152-181`
+- Modify: `src/app/api/datasets/[id]/samples/route.ts:258-271` (comment only — the query must not change)
+- Modify: `src/app/api/config/import/route.ts` (Task 14's two `goldenItem.deleteMany` calls)
+- Modify: `tests/db/meta-eval.test.ts:103-126`
+- Modify: `tests/db/golden-sets.test.ts:581-616`, `:657-687`
+- Modify: `tests/db/golden-set-fork.test.ts:236-302`
+- Modify: `tests/db/dataset-sample-freeze.test.ts` (append one `it`)
+- Modify: `tests/lib/golden-sets.test.ts` (append one `describe`)
+- Modify: `tests/db/config-roundtrip-fidelity.test.ts` (Task 15's `GoldenItem`/`GoldenLabel` COVERAGE entries)
+- Create: `tests/db/golden-item-tombstone.test.ts`
+
+**Interfaces:**
+- Consumes: `isGoldenSetFrozen(tx: Prisma.TransactionClient, goldenSetId: string): Promise<boolean>`, `class GoldenSetFrozenError { readonly goldenSetId: string }` (Task 3); `resolveResourceAccess(session, ownerId, isPublic): { access: ResourceAccess } | { error: NextResponse }`; `parsePaginationParams`, `buildPrismaPageArgs`, `paginatedJson`; `updateGoldenItemsSchema`, `deleteGoldenItemsSchema` (Task 5); `goldenSetLifecycleWhere(includeRetired: boolean)`, `parseIncludeRetired(searchParams: URLSearchParams)` (Task 19 — neighbours, not callers)
+- Produces:
+  - `GoldenItem.tombstonedAt: DateTime?`, `@@index([goldenSetId, tombstonedAt])`
+  - `GoldenLabel.tombstonedAt: DateTime?`, `GoldenLabel.tombstonedReason: String?`, `@@index([goldenItemId])`, partial unique `GoldenLabel_goldenItemId_annotatorId_live_key`
+  - `export function goldenItemLifecycleWhere(includeTombstoned: boolean): Prisma.GoldenItemWhereInput`
+  - `export function parseIncludeTombstoned(searchParams: URLSearchParams): boolean`
+  - `export async function nextGoldenItemIndex(tx: Prisma.TransactionClient, goldenSetId: string): Promise<number>`
+  - `export const GOLDEN_LABEL_TOMBSTONE_REASON_CONTENT_EDIT = 'item-content-edit'`
+  - `DELETE /api/golden-sets/[id]/items` response shape changes: `{ deleted: number; remaining: number }` → `{ tombstoned: number; remaining: number }`
+  - `GET /api/golden-sets/[id]/items?includeTombstoned=true` (owner/admin only)
+
+---
+
+- [ ] **Step 1: Write the failing constraint tests**
+
+Replace `tests/db/meta-eval.test.ts:103-126` (the `two annotators can label the same item` block) with:
+
+```ts
+  it('two annotators can label the same item; the same annotator twice rejects P2002 — and TOMBSTONING the first label frees the slot for a re-label', async () => {
+    const owner = await mkUser();
+    const annotatorA = await mkUser();
+    const annotatorB = await mkUser();
+    const goldenSet = await mkGoldenSet(owner.id);
+    const item = await mkGoldenItem(goldenSet.id);
+
+    const labelA = await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: annotatorA.id, overallScore: 8 },
+    });
+    const labelB = await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: annotatorB.id, overallScore: 6 },
+    });
+    expect(labelA.id).not.toBe(labelB.id);
+
+    // Uniqueness is now enforced by the PARTIAL index
+    // GoldenLabel_goldenItemId_annotatorId_live_key (... WHERE "tombstonedAt"
+    // IS NULL), which prisma/schema.prisma cannot declare — so P2002's
+    // meta.target is the raw index NAME rather than the field array it used
+    // to be. Asserted on `code` alone, exactly as
+    // tests/db/email-partial-unique.test.ts does for the other partial unique
+    // index in this schema.
+    await expect(
+      db.goldenLabel.create({
+        data: { goldenItemId: item.id, annotatorId: annotatorA.id, overallScore: 9 },
+      })
+    ).rejects.toMatchObject({ code: 'P2002' });
+
+    // A tombstoned label is out of the index's scope, so annotatorA can score
+    // the item again after an edit invalidated their first score. Under the
+    // old whole-table unique this insert collided forever, and the only way
+    // to re-annotate was to DESTROY the first label — which is exactly what
+    // the no-data-removal ruling forbids.
+    await db.goldenLabel.update({
+      where: { id: labelA.id },
+      data: { tombstonedAt: new Date(), tombstonedReason: 'item-content-edit' },
+    });
+    const relabel = await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: annotatorA.id, overallScore: 4 },
+    });
+    expect(relabel.id).not.toBe(labelA.id);
+    expect(await db.goldenLabel.count({ where: { goldenItemId: item.id } })).toBe(3);
+  });
+
+  it('the partial index keeps the DEFAULT nulls-distinct behaviour, so two anonymised labels on one item coexist', async () => {
+    // This is why `@@unique([goldenItemId, annotatorId, tombstonedAt])`
+    // hand-edited to NULLS NOT DISTINCT was rejected: that spelling treats
+    // EVERY null as equal, including annotatorId's, and account deletion's
+    // `onDelete: SetNull` would then P2002 the second deleted annotator who
+    // had labelled the same item.
+    const goldenSet = await mkGoldenSet();
+    const item = await mkGoldenItem(goldenSet.id);
+    const annotatorA = await mkUser();
+    const annotatorB = await mkUser();
+    await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: annotatorA.id, overallScore: 7 },
+    });
+    await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: annotatorB.id, overallScore: 2 },
+    });
+
+    await db.user.delete({ where: { id: annotatorA.id } });
+    await db.user.delete({ where: { id: annotatorB.id } });
+
+    const anonymised = await db.goldenLabel.findMany({ where: { goldenItemId: item.id } });
+    expect(anonymised).toHaveLength(2);
+    expect(anonymised.every((l) => l.annotatorId === null)).toBe(true);
+  });
+
+  it('a tombstoned GoldenItem keeps its index, and that index stays TAKEN', async () => {
+    const goldenSet = await mkGoldenSet();
+    const item = await mkGoldenItem(goldenSet.id, 0);
+
+    await db.goldenItem.update({
+      where: { id: item.id },
+      data: { tombstonedAt: new Date() },
+    });
+
+    const tombstoned = await db.goldenItem.findUniqueOrThrow({ where: { id: item.id } });
+    expect(tombstoned.index).toBe(0);
+    expect(tombstoned.tombstonedAt).not.toBeNull();
+
+    // @@unique([goldenSetId, index]) is deliberately NOT partial: a tombstoned
+    // row still owns its ordinal. That is precisely why survivors are never
+    // re-packed, and why the next index is a high-water mark and not a count.
+    await expect(mkGoldenItem(goldenSet.id, 0)).rejects.toMatchObject({ code: 'P2002' });
+  });
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+Run: `sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/meta-eval.test.ts -t "TOMBSTONING"'`
+
+Expected: FAIL with `PrismaClientValidationError: Invalid \`db.goldenLabel.update()\` invocation ... Unknown argument \`tombstonedAt\`. Available options are marked with ?.` — the generated client has no such field on either model.
+
+- [ ] **Step 3: Add the columns to `prisma/schema.prisma`**
+
+Replace `prisma/schema.prisma:703-725`'s tail (the `labels`/`candidates`/timestamps/attribute block) so the model reads:
+
+```prisma
+  labels                GoldenLabel[]
+  candidates            GoldenCandidate[]
+  // A0 follow-up (owner ruling 2026-08-13): DELETE on an item is a
+  // same-transaction tombstone tag, never a row removal. NULL = live. The
+  // row KEEPS its `index` — @@unique([goldenSetId, index]) below is
+  // deliberately NOT partial, so a tombstoned ordinal stays taken and
+  // survivors are never re-packed. See nextGoldenItemIndex in
+  // src/lib/golden-sets.ts for what the next index is.
+  tombstonedAt          DateTime?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  @@unique([goldenSetId, index])
+  // Serves the filtered COUNT on every paginated items read and every
+  // `_count.items` on the list page. The ordered read still comes off
+  // GoldenItem_goldenSetId_index_key.
+  @@index([goldenSetId, tombstonedAt])
+  @@index([sourceDatasetSampleId])
+}
+```
+
+Replace `prisma/schema.prisma:743-757` (model `GoldenLabel`) with:
+
+```prisma
+model GoldenLabel {
+  id             String     @id @default(cuid())
+  goldenItemId   String
+  goldenItem     GoldenItem @relation(fields: [goldenItemId], references: [id], onDelete: Cascade)
+  annotatorId    String?
+  annotator      User?      @relation(fields: [annotatorId], references: [id], onDelete: SetNull)
+  overallScore   Float
+  criteriaScores Json?
+  reasoning      String?
+  // A human label is the expensive, irreplaceable artifact this roadmap
+  // exists to protect, so PATCH /api/golden-sets/[id]/items TOMBSTONES the
+  // labels of an item whose content changed rather than deleting them
+  // (owner ruling 2026-08-13, extended to labels — see that handler's doc).
+  // `tombstonedReason` records WHY: 'item-content-edit' is the only writer
+  // today; a future retraction or purge gets its own value rather than
+  // overloading this one.
+  tombstonedAt     DateTime?
+  tombstonedReason String?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  // `@@unique([goldenItemId, annotatorId])` IS GONE ON PURPOSE. It is
+  // replaced by a PARTIAL unique index restricted to WHERE "tombstonedAt"
+  // IS NULL, hand-written in
+  // 20260813120000_v2e_golden_item_label_tombstones — Prisma's DSL has no
+  // syntax for a WHERE predicate, so this file cannot declare it and the
+  // migration's raw SQL is the only record. Whole-table uniqueness would let
+  // a tombstoned label occupy its annotator's slot forever, making
+  // re-annotation after an edit impossible. See CONTRIBUTING.md's "Known
+  // migrate-diff pseudo-drift" table.
+  //
+  // The index below is NOT redundant: dropping the unique also dropped the
+  // only btree serving `where: { goldenItemId }`, and the partial one covers
+  // live rows only.
+  @@index([goldenItemId])
+  @@index([annotatorId])
+}
+```
+
+- [ ] **Step 4: Generate the diff and write the migration**
+
+Run:
+
+```bash
+npx prisma migrate diff \
+  --from-url "postgresql://judge_arena:password@localhost:5432/judge_arena" \
+  --to-schema-datamodel prisma/schema.prisma --script
+```
+
+Create `prisma/migrations/20260813120000_v2e_golden_item_label_tombstones/migration.sql` with the generated body plus this header, and replace the generated `CREATE UNIQUE INDEX` line for `GoldenLabel` (there will not be one — the diff only DROPs) with the hand-written partial index:
+
+```sql
+-- v2e: golden items and golden labels are TOMBSTONED, never deleted.
+-- Phase A0, follow-up to 20260812190000_v2d_golden_substrate. Implements the
+-- product-owner ruling of 2026-08-13: "delete is always a same-transaction
+-- tombstone tag; no actual data removal, anywhere" — hard deletion may lose
+-- data, and there are no existing users, so nothing is urgent enough to
+-- justify destruction. GoldenSet already worked this way (tombstonedAt, added
+-- by v2d); this extends it down the tree.
+--
+-- Body below generated verbatim by:
+--   npx prisma migrate diff \
+--     --from-url "$DATABASE_URL" \
+--     --to-schema-datamodel prisma/schema.prisma --script
+-- ...with ONE hand edit, marked HAND-EDITED at its own block below. The DROP
+-- INDEX on GoldenLabel_goldenItemId_annotatorId_key IS generated, because
+-- `@@unique([goldenItemId, annotatorId])` is removed from schema.prisma in
+-- this same commit; the partial index that REPLACES it is the hand edit,
+-- because Prisma's DSL cannot express a WHERE predicate at all.
+--
+-- ── Both columns nullable, no default, no backfill ─────────────────────────
+-- NULL means "live", which is what every existing row already is. There is
+-- deliberately no `DEFAULT now()` and no UPDATE: a default would tombstone
+-- every row in the table.
+--
+-- ── Why GoldenItem's @@unique([goldenSetId, index]) is UNCHANGED ───────────
+-- A tombstoned item keeps its ordinal, so no gap ever opens and the
+-- survivors must NOT be re-packed. The re-index loop in
+-- src/app/api/golden-sets/[id]/items/route.ts is deleted in this commit: run
+-- on top of a tombstone it would renumber the first survivor to 0 and
+-- collide with the tombstoned row still holding 0 (P2002), aborting every
+-- DELETE. Consequence, accepted: `index` stops being dense, and the next
+-- index for a set is max(index) over ALL rows + 1 — a high-water mark, never
+-- a count. See nextGoldenItemIndex in src/lib/golden-sets.ts.
+--
+-- ── Why GoldenLabel's unique CANNOT stay whole-table ───────────────────────
+-- PATCH /api/golden-sets/[id]/items tombstones the labels of an item whose
+-- content changed. Under the whole-table unique, that tombstoned row would
+-- occupy (goldenItemId, annotatorId) forever, and the annotator could never
+-- score that item again — re-annotation after an edit is the core A1
+-- workflow, so this is not an edge case.
+--
+-- ── Why NOT @@unique([goldenItemId, annotatorId, tombstonedAt]) ────────────
+-- That spelling is expressible in the DSL and would need only the
+-- NULLS NOT DISTINCT hand edit this repo already uses twice
+-- (20260728215410_v2b_idempotency_tighten, 20260812190000_v2d_golden_substrate).
+-- REJECTED: NULLS NOT DISTINCT treats EVERY null in the index as equal,
+-- including annotatorId's. annotatorId is nullable via `onDelete: SetNull`,
+-- so two deleted annotators who had both labelled the same item would
+-- collapse onto (item, NULL, NULL) and the second user.delete() would P2002
+-- inside src/lib/account-deletion.ts. The partial index below keeps the
+-- DEFAULT nulls-distinct behaviour, so anonymised labels coexist freely —
+-- pinned by 'the partial index keeps the DEFAULT nulls-distinct behaviour'
+-- in tests/db/meta-eval.test.ts.
+--
+-- ── What the partial index costs ───────────────────────────────────────────
+-- schema.prisma can no longer declare this constraint, so the Prisma client
+-- loses the `goldenItemId_annotatorId` compound where-input. Verified before
+-- landing that NOTHING uses it: `grep -rn goldenItemId_annotatorId src/ tests/
+-- scripts/ prisma/` returns only 20260725012218_v2_meta_eval's CREATE. P2002
+-- raised by this index reports meta.target as the index NAME string, not a
+-- field array — tests/db/meta-eval.test.ts is updated accordingly, matching
+-- what tests/db/email-partial-unique.test.ts already does for
+-- User_email_credentials_key. A fourth row is added to CONTRIBUTING.md's
+-- "Known migrate-diff pseudo-drift" table in this same commit.
+
+-- AlterTable
+ALTER TABLE "GoldenItem" ADD COLUMN     "tombstonedAt" TIMESTAMP(3);
+
+-- AlterTable
+ALTER TABLE "GoldenLabel" ADD COLUMN     "tombstonedAt" TIMESTAMP(3),
+ADD COLUMN     "tombstonedReason" TEXT;
+
+-- DropIndex
+DROP INDEX "GoldenLabel_goldenItemId_annotatorId_key";
+
+-- CreateIndex
+CREATE INDEX "GoldenItem_goldenSetId_tombstonedAt_idx" ON "GoldenItem"("goldenSetId", "tombstonedAt");
+
+-- CreateIndex
+CREATE INDEX "GoldenLabel_goldenItemId_idx" ON "GoldenLabel"("goldenItemId");
+
+-- CreateIndex — HAND-EDITED: PARTIAL unique index, no generated counterpart
+-- Same category as 20260729180000_v2b_email_partial_unique's
+-- User_email_credentials_key: a unique index Prisma's schema engine cannot
+-- see at all, so `schema.prisma` declares nothing and `migrate diff` reports
+-- an empty migration. "One LIVE label per (item, annotator)"; any number of
+-- tombstoned ones.
+CREATE UNIQUE INDEX "GoldenLabel_goldenItemId_annotatorId_live_key"
+  ON "GoldenLabel"("goldenItemId", "annotatorId") WHERE "tombstonedAt" IS NULL;
+```
+
+- [ ] **Step 5: Apply, regenerate, and verify the hand edit produces no drift**
+
+Run:
+
+```bash
+PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION=<approved-plan-id> npx prisma migrate deploy
+npx prisma generate
+npx prisma migrate diff \
+  --from-url "postgresql://judge_arena:password@localhost:5432/judge_arena" \
+  --to-schema-datamodel prisma/schema.prisma --script
+```
+
+Expected: `migrate deploy` applies `20260813120000_v2e_golden_item_label_tombstones`; the final diff prints exactly `-- This is an empty migration.` If it instead proposes `CREATE UNIQUE INDEX "GoldenLabel_goldenItemId_annotatorId_key" ...`, the `@@unique` was left in `schema.prisma` — remove it.
+
+- [ ] **Step 6: Add the fourth row to CONTRIBUTING.md's pseudo-drift table**
+
+At `CONTRIBUTING.md:460`, change `Currently three cases (the count was stale at` to `Currently four cases (the count was stale at`, and append after the `20260812190000_v2d_golden_substrate` row at `:467`:
+
+```markdown
+| `20260813120000_v2e_golden_item_label_tombstones` | `GoldenLabel_goldenItemId_annotatorId_live_key`, a unique index on `GoldenLabel(goldenItemId, annotatorId)` restricted to `WHERE "tombstonedAt" IS NULL` (one LIVE label per annotator per item — A0, tombstone-not-delete ruling) | Prisma's schema DSL has no syntax for a partial index, same as the email row above. Unlike that row, this one REPLACES a declared `@@unique`, which is therefore deleted from `prisma/schema.prisma` — so the Prisma client no longer offers the `goldenItemId_annotatorId` compound where-input (verified unused before landing), and P2002 from this index reports `meta.target` as the index name string rather than a field array. The `NULLS NOT DISTINCT` variant (`@@unique([goldenItemId, annotatorId, tombstonedAt])`) was tried and REJECTED: it equates `annotatorId`'s nulls too, so account deletion's `SetNull` would collide for two deleted annotators on one item. |
+```
+
+- [ ] **Step 7: Run the constraint tests green, then commit the schema**
+
+Run: `sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/meta-eval.test.ts'`
+
+Expected: all green. Then commit — `npm run test:db` runs `prisma migrate reset --force --skip-seed` and replays only **committed** migrations, so this has to land before any later step runs the full suite:
+
+```bash
+git add prisma/schema.prisma prisma/migrations/20260813120000_v2e_golden_item_label_tombstones CONTRIBUTING.md tests/db/meta-eval.test.ts
+git commit -m "feat(a0): add GoldenItem.tombstonedAt and GoldenLabel tombstone columns
+
+Owner ruling 2026-08-13: delete is always a same-transaction tombstone tag,
+never a row removal. GoldenItem keeps its whole-table @@unique([goldenSetId,
+index]) so a tombstoned ordinal stays taken and survivors are never re-packed.
+GoldenLabel's @@unique([goldenItemId, annotatorId]) becomes a PARTIAL unique
+index over live rows only, because a tombstoned label would otherwise occupy
+its annotator's slot forever and make re-annotation impossible. The
+NULLS NOT DISTINCT alternative was rejected: it equates annotatorId's nulls
+too and would break account deletion's SetNull.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
+- [ ] **Step 8: Write the failing unit test for the two pure helpers**
+
+Add `goldenItemLifecycleWhere` and `parseIncludeTombstoned` to the import block at the top of `tests/lib/golden-sets.test.ts`, then append:
+
+```ts
+describe('goldenItemLifecycleWhere / parseIncludeTombstoned', () => {
+  it('hides tombstoned items by default', () => {
+    expect(goldenItemLifecycleWhere(false)).toEqual({ tombstonedAt: null });
+  });
+
+  it('returns an EMPTY predicate when tombstoned items are wanted, not a truthy filter', () => {
+    // Spreading `{}` into a `where` is a no-op; spreading
+    // `{ tombstonedAt: { not: null } }` would show ONLY tombstoned rows,
+    // which is not what any caller means by "include".
+    expect(goldenItemLifecycleWhere(true)).toEqual({});
+  });
+
+  it('accepts exactly the string "true", matching parseIncludeRetired and includeSamples', () => {
+    expect(parseIncludeTombstoned(new URLSearchParams('includeTombstoned=true'))).toBe(true);
+    expect(parseIncludeTombstoned(new URLSearchParams(''))).toBe(false);
+    expect(parseIncludeTombstoned(new URLSearchParams('includeTombstoned='))).toBe(false);
+    expect(parseIncludeTombstoned(new URLSearchParams('includeTombstoned=1'))).toBe(false);
+    expect(parseIncludeTombstoned(new URLSearchParams('includeTombstoned=TRUE'))).toBe(false);
+  });
+});
+```
+
+- [ ] **Step 9: Write the failing DB test for the next-index rule**
+
+Create `tests/db/golden-item-tombstone.test.ts`:
+
+```ts
+import { describe, it, expect, beforeEach } from 'vitest';
+import { db, truncateAll, mkUser } from './helpers';
+import { nextGoldenItemIndex } from '@/lib/golden-sets';
+
+// A0, tombstone-not-delete ruling (2026-08-13). GoldenItem.index is assigned
+// 0..n-1 by the importer over its selection, which stays true because import
+// runs against an empty set. Once ANY item is tombstoned the sequence stops
+// being dense, and the only safe next index is a HIGH-WATER MARK over every
+// row including the tombstoned ones — because a tombstoned row keeps its
+// ordinal and @@unique([goldenSetId, index]) is not partial.
+
+let counter = 0;
+
+async function mkSetWithItems(itemCount: number) {
+  counter += 1;
+  const owner = await mkUser();
+  const dataset = await db.dataset.create({
+    data: {
+      name: `tombstone-fixture-${counter}`,
+      userId: owner.id,
+      source: 'local',
+      visibility: 'public',
+      samples: {
+        create: Array.from({ length: itemCount }, (_, i) => ({
+          index: i,
+          input: `question-${i}`,
+          expected: 'A>B',
+        })),
+      },
+    },
+    include: { samples: { orderBy: { index: 'asc' } } },
+  });
+  const goldenSet = await db.goldenSet.create({
+    data: {
+      name: `tombstone-fixture-set-${counter}`,
+      slug: `tombstone-fixture-set-${counter}`,
+      ownerId: owner.id,
+      datasetId: dataset.id,
+      protocol: 'pairwise',
+      items: {
+        create: dataset.samples.map((s, i) => ({
+          index: i,
+          inputText: s.input,
+          protocol: 'pairwise' as const,
+          expected: 'A>B',
+          sourceDatasetSampleId: s.id,
+        })),
+      },
+    },
+    include: { items: { orderBy: { index: 'asc' } } },
+  });
+  return { owner, dataset, goldenSet };
+}
+
+describe('nextGoldenItemIndex — the high-water-mark rule', () => {
+  beforeEach(async () => {
+    await truncateAll();
+  });
+
+  it('is 0 on an empty set and n on a dense set of n items', async () => {
+    const { goldenSet: empty } = await mkSetWithItems(0);
+    await expect(nextGoldenItemIndex(db, empty.id)).resolves.toBe(0);
+
+    const { goldenSet: dense } = await mkSetWithItems(5);
+    await expect(nextGoldenItemIndex(db, dense.id)).resolves.toBe(5);
+  });
+
+  it('counts TOMBSTONED rows too — a count() of live rows would collide immediately', async () => {
+    const { goldenSet } = await mkSetWithItems(3);
+    await db.goldenItem.updateMany({
+      where: { goldenSetId: goldenSet.id, index: 0 },
+      data: { tombstonedAt: new Date() },
+    });
+
+    // Two live rows, at indices 1 and 2. count() says 2 — and index 2 is
+    // taken, so an insert at 2 is an immediate P2002.
+    await expect(
+      db.goldenItem.count({ where: { goldenSetId: goldenSet.id, tombstonedAt: null } })
+    ).resolves.toBe(2);
+    await expect(nextGoldenItemIndex(db, goldenSet.id)).resolves.toBe(3);
+  });
+
+  it('survives a tombstoned TAIL, where max(index) over LIVE rows would also collide', async () => {
+    const { goldenSet } = await mkSetWithItems(5);
+    await db.goldenItem.updateMany({
+      where: { goldenSetId: goldenSet.id, index: { in: [3, 4] } },
+      data: { tombstonedAt: new Date() },
+    });
+
+    const liveMax = await db.goldenItem.aggregate({
+      where: { goldenSetId: goldenSet.id, tombstonedAt: null },
+      _max: { index: true },
+    });
+    expect(liveMax._max.index).toBe(2); // live-max + 1 = 3, which is TAKEN
+
+    const next = await nextGoldenItemIndex(db, goldenSet.id);
+    expect(next).toBe(5);
+
+    // And the rule actually holds against the constraint.
+    const sample = await db.datasetSample.findFirstOrThrow({
+      where: { dataset: { goldenSets: { some: { id: goldenSet.id } } } },
+    });
+    const appended = await db.goldenItem.create({
+      data: {
+        goldenSetId: goldenSet.id,
+        index: next,
+        inputText: 'appended after two tombstones',
+        protocol: 'pairwise',
+        sourceDatasetSampleId: sample.id,
+      },
+    });
+    expect(appended.index).toBe(5);
+  });
+});
+```
+
+- [ ] **Step 10: Run both and watch them fail**
+
+Run:
+
+```bash
+npx vitest run tests/lib/golden-sets.test.ts -t "goldenItemLifecycleWhere"
+sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/golden-item-tombstone.test.ts'
+```
+
+Expected: both FAIL at import resolution — `SyntaxError: The requested module '/src/lib/golden-sets.ts' does not provide an export named 'goldenItemLifecycleWhere'` and `... named 'nextGoldenItemIndex'`, so every case errors before an assertion runs.
+
+- [ ] **Step 11: Implement the helpers**
+
+Append to `src/lib/golden-sets.ts` (after `GoldenSetFrozenError`, and directly alongside Task 19's `goldenSetLifecycleWhere` so the set-level and item-level filters live in one file):
+
+```ts
+/* ─── Item lifecycle: tombstone, never delete ───────────────────────────────
+ *
+ * Owner ruling 2026-08-13: "delete is ALWAYS a same-transaction tombstone
+ * tag; no actual data removal, anywhere." `GoldenItem.tombstonedAt` is that
+ * tag. NULL = live.
+ *
+ * NOTE THE ASYMMETRY WITH `goldenSetLifecycleWhere` ABOVE, IT IS DELIBERATE.
+ * A SET's `tombstonedAt` is an ACCOUNT-LIFECYCLE verb written by
+ * src/lib/account-deletion.ts for a set pending purge, and nothing may ever
+ * hand one back — there is no escape hatch. An ITEM's `tombstonedAt` is a
+ * PRODUCT verb: its owner curating their own set. The owner therefore has to
+ * be able to see what they removed (to notice a mistake, and because the row
+ * is being kept precisely so it can be looked at), so the item filter DOES
+ * take an escape — gated to the owner/admin branch by its caller, never
+ * offered to a public reader of a public set.
+ *
+ * `true` returns an EMPTY predicate rather than `{ tombstonedAt: { not: null } }`:
+ * "include tombstoned" means live AND tombstoned, not tombstoned only.
+ */
+export function goldenItemLifecycleWhere(includeTombstoned: boolean): Prisma.GoldenItemWhereInput {
+  return includeTombstoned ? {} : { tombstonedAt: null };
+}
+
+/** The one spelling of the item escape hatch. Strict `=== 'true'`, matching
+ * `parseIncludeRetired` and `includeSamples`
+ * (src/app/api/config/export/route.ts:38) — so `?includeTombstoned=1` is
+ * false everywhere rather than true on some routes. */
+export function parseIncludeTombstoned(searchParams: URLSearchParams): boolean {
+  return searchParams.get('includeTombstoned') === 'true';
+}
+
+/** The only `GoldenLabel.tombstonedReason` any code writes today. A future
+ * annotator retraction or purge gets its OWN value rather than overloading
+ * this one — the column exists so "why did this score stop applying" is
+ * answerable without reading git history. */
+export const GOLDEN_LABEL_TOMBSTONE_REASON_CONTENT_EDIT = 'item-content-edit';
+
+/**
+ * The next `GoldenItem.index` for a set: a HIGH-WATER MARK over every row,
+ * tombstoned included, never a count and never a reused ordinal.
+ *
+ *     nextIndex = max(index) over ALL rows of the set + 1
+ *
+ * WHY NOT `count()` of live rows: tombstone item 0 of 3 and the count is 2,
+ * but index 2 is occupied — P2002 on the very first insert.
+ *
+ * WHY NOT `max` over LIVE rows: tombstone the tail (items 0..4, tombstone 3
+ * and 4) and live-max + 1 is 3, which is occupied by a tombstoned row.
+ *
+ * The consequence, stated so nobody rediscovers it as a bug: after the first
+ * tombstone, `index` is NOT dense. Its only guarantees are uniqueness within
+ * the set and monotonic insertion order. Any code treating it as a 0-based
+ * position into the live item array is wrong. The importer's 0..n-1
+ * (mapSampleToGoldenItem, above) stays correct only because import runs
+ * against an empty set.
+ *
+ * Takes the caller's transaction client for the same reason
+ * `isGoldenSetFrozen` does: read-then-insert across a commit boundary is a
+ * race against a concurrent append.
+ */
+export async function nextGoldenItemIndex(
+  tx: Prisma.TransactionClient,
+  goldenSetId: string
+): Promise<number> {
+  const highWaterMark = await tx.goldenItem.aggregate({
+    where: { goldenSetId },
+    _max: { index: true },
+  });
+  return (highWaterMark._max.index ?? -1) + 1;
+}
+```
+
+- [ ] **Step 12: Run both and watch them pass**
+
+Run:
+
+```bash
+npx vitest run tests/lib/golden-sets.test.ts
+sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/golden-item-tombstone.test.ts'
+```
+
+- [ ] **Step 13: Rewrite the DELETE test — survivors keep their indices**
+
+Replace `tests/db/golden-sets.test.ts:657-687` (the `DELETE re-indexes the survivors` block) with:
+
+```ts
+  it('DELETE TOMBSTONES and does NOT re-index — a tombstoned row keeps its ordinal, so no gap ever opens', async () => {
+    // The old handler deleted the rows and renumbered the survivors 0..n-1 to
+    // close the gap @@unique([goldenSetId, index]) would otherwise turn into a
+    // constraint problem. Nothing is removed any more, so nothing to close —
+    // and re-packing on top of a tombstone would collide with the tombstoned
+    // row still holding index 0 (P2002) and abort every DELETE.
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 5 });
+    const items = await db.goldenItem.findMany({
+      where: { goldenSetId: goldenSet.id },
+      orderBy: { index: 'asc' },
+    });
+
+    mockSessionFor(owner);
+    const res = await deleteItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'DELETE', {
+        itemIds: [items[0].id, items[2].id],
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ tombstoned: 2, remaining: 3 });
+
+    // Every row is still there.
+    await expect(db.goldenItem.count({ where: { goldenSetId: goldenSet.id } })).resolves.toBe(5);
+
+    const survivors = await db.goldenItem.findMany({
+      where: { goldenSetId: goldenSet.id, tombstonedAt: null },
+      orderBy: { index: 'asc' },
+    });
+    expect(survivors.map((i) => i.id)).toEqual([items[1].id, items[3].id, items[4].id]);
+    // 1, 3, 4 — NOT 0, 1, 2. The gaps are the record of what was removed.
+    expect(survivors.map((i) => i.index)).toEqual([1, 3, 4]);
+
+    const tombstoned = await db.goldenItem.findMany({
+      where: { goldenSetId: goldenSet.id, tombstonedAt: { not: null } },
+      orderBy: { index: 'asc' },
+    });
+    expect(tombstoned.map((i) => i.index)).toEqual([0, 2]);
+
+    // GoldenCandidate has NO flag of its own and needs none: it is reachable
+    // only through its item, so the item filter is the whole filter. The
+    // rows survive because nothing was deleted for the Cascade to follow.
+    await expect(
+      db.goldenCandidate.count({ where: { goldenItemId: { in: [items[0].id, items[2].id] } } })
+    ).resolves.toBe(4);
+
+    // The GET no longer serves them.
+    const after = await getItems(
+      new Request(`http://localhost/api/golden-sets/${goldenSet.id}/items`),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect((await after.json()).data.map((i: { index: number }) => i.index)).toEqual([1, 3, 4]);
+  });
+
+  it('DELETE is idempotent — re-tombstoning an already-tombstoned id reports 0 and is not a 400', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 3 });
+    const items = await db.goldenItem.findMany({
+      where: { goldenSetId: goldenSet.id },
+      orderBy: { index: 'asc' },
+    });
+
+    mockSessionFor(owner);
+    const body = { itemIds: [items[0].id] };
+    const first = await deleteItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'DELETE', body),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(await first.json()).toEqual({ tombstoned: 1, remaining: 2 });
+
+    // The ownership lookup is deliberately NOT lifecycle-filtered: the id
+    // still belongs to this set, so a retried request must not 400.
+    const second = await deleteItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'DELETE', body),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(second.status).toBe(200);
+    expect(await second.json()).toEqual({ tombstoned: 0, remaining: 2 });
+
+    const row = await db.goldenItem.findUniqueOrThrow({ where: { id: items[0].id } });
+    expect(row.tombstonedAt).not.toBeNull();
+  });
+
+  it('GET ?includeTombstoned=true shows them to the OWNER and is ignored for a public reader', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { visibility: 'public', itemCount: 3 });
+    const items = await db.goldenItem.findMany({ where: { goldenSetId: goldenSet.id } });
+    await db.goldenItem.update({
+      where: { id: items[0].id },
+      data: { tombstonedAt: new Date() },
+    });
+
+    mockSessionFor(owner);
+    const asOwner = await getItems(
+      new Request(
+        `http://localhost/api/golden-sets/${goldenSet.id}/items?includeTombstoned=true`
+      ),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    const ownerBody = await asOwner.json();
+    expect(ownerBody.data).toHaveLength(3);
+    expect(ownerBody.pagination.total).toBe(3);
+
+    (getServerSession as unknown as Mock).mockResolvedValue(null);
+    const anon = await getItems(
+      new Request(
+        `http://localhost/api/golden-sets/${goldenSet.id}/items?includeTombstoned=true`
+      ),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    const anonBody = await anon.json();
+    // The escape is owner/admin-only — a public reader of a public set asking
+    // for tombstoned items gets the live ones, not a 403 and not the rows.
+    expect(anonBody.data).toHaveLength(2);
+    expect(anonBody.pagination.total).toBe(2);
+  });
+```
+
+- [ ] **Step 14: Run it and watch it fail**
+
+Run: `sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/golden-sets.test.ts -t "DELETE TOMBSTONES"'`
+
+Expected: FAIL on the response body — `AssertionError: expected { deleted: 2, remaining: 3 } to deeply equal { tombstoned: 2, remaining: 3 }`. (The row-count assertion would fail next: the handler still hard-deletes, so `count` is 3, not 5.)
+
+- [ ] **Step 15: Implement the DELETE tombstone and delete the re-index loop**
+
+In `src/app/api/golden-sets/[id]/items/route.ts`, extend the import at `:14` to
+`import { isGoldenSetFrozen, GoldenSetFrozenError, goldenItemLifecycleWhere, parseIncludeTombstoned, GOLDEN_LABEL_TOMBSTONE_REASON_CONTENT_EDIT } from '@/lib/golden-sets';`
+then replace `:178-233` (the comment block and the whole `DELETE` body through `return NextResponse.json(result);`) with:
+
+```ts
+// DELETE /api/golden-sets/[id]/items — TOMBSTONE, never a row delete (owner
+// ruling 2026-08-13: no actual data removal, anywhere). `tombstonedAt` is
+// stamped in the SAME transaction as the freeze check, so a calibration run
+// that starts mid-request cannot straddle the two.
+//
+// THERE IS NO RE-INDEX ANY MORE, AND THAT IS THE POINT. The old handler
+// deleted the rows and then renumbered the survivors 0..n-1, because
+// @@unique([goldenSetId, index]) makes a gap a constraint problem on the next
+// insert rather than a cosmetic one. A tombstone removes nothing, so no gap
+// ever opens: every ordinal is still occupied, by a mix of live and
+// tombstoned rows. Re-packing on top of that is not merely unnecessary, it is
+// guaranteed to abort — renumbering the first survivor to 0 collides with the
+// tombstoned row still holding 0 (P2002) and rolls the transaction back. It
+// would also destroy the one thing the retained row is FOR: a stable ordinal
+// recording where in the set the removed item sat.
+//
+// The next index for a set is therefore a HIGH-WATER MARK, not a count — see
+// `nextGoldenItemIndex` in src/lib/golden-sets.ts.
+//
+// GoldenLabel/GoldenCandidate cascade off GoldenItem (onDelete: Cascade), and
+// those FKs now never fire from this path. They are kept as the mechanism the
+// purge wave will use if destruction is ever authorised. Neither child gets a
+// flag of its own: both are reachable only through their item, so the item
+// filter is the complete filter. (GoldenLabel DOES carry `tombstonedAt`, but
+// for the other reason — PATCH can invalidate a label while its item stays
+// live. See that handler.)
+export async function DELETE(request: Request, props: { params: Promise<{ id: string }> }) {
+  const params = await props.params;
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
+  const scopeCheck = requireScope(session, 'golden-sets:write');
+  if (scopeCheck) return scopeCheck;
+
+  try {
+    const ownershipError = await requireOwnership('goldenSet', params.id, session);
+    if (ownershipError) return ownershipError;
+
+    const body = await request.json();
+    const data = deleteGoldenItemsSchema.parse(body);
+
+    const result = await prisma.$transaction(async (tx) => {
+      if (await isGoldenSetFrozen(tx, params.id)) {
+        throw new GoldenSetFrozenError(params.id);
+      }
+
+      // NOT lifecycle-filtered, deliberately: an already-tombstoned id still
+      // belongs to this set, so a retried DELETE must be an idempotent no-op
+      // rather than a 400 claiming the item is foreign.
+      const owned = await tx.goldenItem.findMany({
+        where: { id: { in: data.itemIds }, goldenSetId: params.id },
+        select: { id: true },
+      });
+      if (owned.length !== data.itemIds.length) {
+        throw new ForeignItemError();
+      }
+
+      const tombstoned = await tx.goldenItem.updateMany({
+        where: { id: { in: data.itemIds }, goldenSetId: params.id, tombstonedAt: null },
+        data: { tombstonedAt: new Date() },
+      });
+
+      const remaining = await tx.goldenItem.count({
+        where: { goldenSetId: params.id, ...goldenItemLifecycleWhere(false) },
+      });
+
+      // `deleted` is renamed to `tombstoned` on purpose. A caller still
+      // reading `deleted` gets `undefined` and breaks loudly, rather than
+      // silently reporting 0 removals for an operation that did happen.
+      return { tombstoned: tombstoned.count, remaining };
+    });
+
+    return NextResponse.json(result);
+```
+
+Update the two docs that still promise re-indexing — `src/app/api/golden-sets/shared.ts:84`:
+
+```ts
+/** `DELETE /api/golden-sets/[id]/items` — TOMBSTONES the named items. Nothing
+ * is removed, so survivors keep their `index` and are never re-packed. */
+```
+
+and `ForeignItemError` at `:262-271`, whose message now also covers a tombstoned id:
+
+```ts
+class ForeignItemError extends Error {
+  constructor() {
+    super('Some items do not belong to this golden set, or have been tombstoned');
+    this.name = 'ForeignItemError';
+  }
+}
+```
+
+...with the two `NextResponse.json({ error: 'Some items do not belong to this golden set' }, ...)` bodies at `:161-165` and `:245-249` updated to the same string.
+
+- [ ] **Step 16: Implement the GET filter and its owner-gated escape**
+
+Replace `src/app/api/golden-sets/[id]/items/route.ts:56-67` with:
+
+```ts
+    const { limit, cursor } = parsePaginationParams(searchParams);
+    const pageArgs = buildPrismaPageArgs({ limit, cursor });
+
+    // The escape is OWNER/ADMIN ONLY. An item tombstone is a product verb —
+    // the owner curating their own set — so the owner has to be able to see
+    // what they removed. A public reader of a public set has no such claim,
+    // and passing the flag is ignored rather than refused: a 403 here would
+    // leak that the set has tombstoned items at all.
+    const includeTombstoned =
+      decision.access === 'owner' && parseIncludeTombstoned(searchParams);
+    const where = {
+      goldenSetId: params.id,
+      ...goldenItemLifecycleWhere(includeTombstoned),
+    };
+
+    const [items, total] = await Promise.all([
+      prisma.goldenItem.findMany({
+        where,
+        include: { candidates: { orderBy: { position: 'asc' } } },
+        orderBy: { index: 'asc' },
+        ...pageArgs,
+      }),
+      // Identical `where`, or the pagination total contradicts the page.
+      prisma.goldenItem.count({ where }),
+    ]);
+```
+
+Then run: `sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/golden-sets.test.ts -t "DELETE"'` and the `?includeTombstoned` case. Expected: green.
+
+- [ ] **Step 17: Rewrite the label test — the score survives the edit that invalidated it**
+
+Replace `tests/db/golden-sets.test.ts:581-616` (the `PATCH drops an item's GoldenLabel rows` block) with:
+
+```ts
+  it('PATCH TOMBSTONES an item\'s GoldenLabel rows when its content actually changes, but a same-value field leaves them alone', async () => {
+    // Owner ruling 2026-08-13 extended to labels: a human label is the
+    // expensive, irreplaceable artifact this roadmap exists to protect, so
+    // the score is retained with a tombstone rather than destroyed. It still
+    // stops applying — every read filters it — but WHO said WHAT, and WHEN it
+    // stopped applying, survive.
+    const owner = await mkUser();
+    const annotator = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 2 });
+    const items = await db.goldenItem.findMany({
+      where: { goldenSetId: goldenSet.id },
+      orderBy: { index: 'asc' },
+    });
+    const label0 = await db.goldenLabel.create({
+      data: {
+        goldenItemId: items[0].id,
+        annotatorId: annotator.id,
+        overallScore: 7,
+        reasoning: 'B answers the question asked',
+      },
+    });
+    const label1 = await db.goldenLabel.create({
+      data: { goldenItemId: items[1].id, annotatorId: annotator.id, overallScore: 5 },
+    });
+
+    mockSessionFor(owner);
+    const res = await patchItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'PATCH', {
+        items: [
+          { id: items[0].id, inputText: 'a genuinely different question' },
+          { id: items[1].id, expected: items[1].expected }, // restates the current value: not a change
+        ],
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(200);
+
+    // Item 0's content changed -> its label is tombstoned, NOT destroyed.
+    const dropped = await db.goldenLabel.findUniqueOrThrow({ where: { id: label0.id } });
+    expect(dropped.tombstonedAt).not.toBeNull();
+    expect(dropped.tombstonedReason).toBe('item-content-edit');
+    expect(dropped.annotatorId).toBe(annotator.id);
+    expect(dropped.overallScore).toBe(7);
+    expect(dropped.reasoning).toBe('B answers the question asked');
+
+    // Item 1's payload restated its existing value -> not a content change ->
+    // the label is untouched, tombstone included.
+    const survived = await db.goldenLabel.findUniqueOrThrow({ where: { id: label1.id } });
+    expect(survived.tombstonedAt).toBeNull();
+  });
+
+  it('the same annotator can re-score an item after their earlier label was tombstoned by an edit', async () => {
+    // The whole reason GoldenLabel's unique became partial. Under the old
+    // whole-table @@unique([goldenItemId, annotatorId]) the retained row
+    // occupied the slot forever and this insert was impossible — which would
+    // have made "keep the label" and "let people re-annotate" mutually
+    // exclusive.
+    const owner = await mkUser();
+    const annotator = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 1 });
+    const item = await db.goldenItem.findFirstOrThrow({ where: { goldenSetId: goldenSet.id } });
+    await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: annotator.id, overallScore: 7 },
+    });
+
+    mockSessionFor(owner);
+    await patchItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'PATCH', {
+        items: [{ id: item.id, inputText: 'edited after annotation' }],
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+
+    const relabel = await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: annotator.id, overallScore: 3 },
+    });
+    expect(relabel.tombstonedAt).toBeNull();
+
+    const live = await db.goldenLabel.findMany({
+      where: { goldenItemId: item.id, tombstonedAt: null },
+    });
+    expect(live).toHaveLength(1);
+    expect(live[0].id).toBe(relabel.id);
+    expect(await db.goldenLabel.count({ where: { goldenItemId: item.id } })).toBe(2);
+  });
+
+  it('PATCH 400s on a TOMBSTONED item id — editing a removed item is not a silent no-op', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 2 });
+    const item = await db.goldenItem.findFirstOrThrow({ where: { goldenSetId: goldenSet.id } });
+    await db.goldenItem.update({ where: { id: item.id }, data: { tombstonedAt: new Date() } });
+
+    mockSessionFor(owner);
+    const res = await patchItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'PATCH', {
+        items: [{ id: item.id, expected: 'B>A' }],
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(res.status).toBe(400);
+  });
+```
+
+- [ ] **Step 18: Run it and watch it fail**
+
+Run: `sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/golden-sets.test.ts -t "PATCH TOMBSTONES"'`
+
+Expected: FAIL with `PrismaClientKnownRequestError: An operation failed because it depends on one or more records that were required but not found. No GoldenLabel found` from `findUniqueOrThrow` — the handler's `goldenLabel.deleteMany` destroyed the row.
+
+- [ ] **Step 19: Implement the label tombstone and the PATCH lifecycle filter**
+
+In `src/app/api/golden-sets/[id]/items/route.ts`, replace the doc block at `:84-94` with:
+
+```ts
+// TOMBSTONES LABELS ON REAL CONTENT CHANGES — it does not delete them.
+// `forkGoldenSet` (src/lib/golden-set-versions.ts) copies GoldenLabel rows
+// unconditionally: a fork has no edits to compare against, so decision #5's
+// "copy, except on edited items" clause cannot fire there, and that module's
+// doc names THIS handler as the owner of the exception. An item whose
+// inputText, promptText, responseText or expected actually changes value has
+// its GoldenLabel rows tombstoned in the same transaction as the edit, so an
+// annotator's score is never left APPLYING to text they did not see. A field
+// present in the request but equal to the item's current value is not a
+// change and leaves labels alone — a no-op retry PATCH must not invalidate
+// real annotation work.
+//
+// WHY TOMBSTONE RATHER THAN DELETE (owner ruling 2026-08-13, extended to
+// labels — flagged for confirmation in the task that landed it): a human
+// label is the expensive, irreplaceable artifact this roadmap exists to
+// protect. An LLM verdict re-runs for pennies; an annotator's score cannot be
+// re-obtained once that person moves on. Retaining the row preserves WHO
+// scored WHAT, and `tombstonedAt` — stamped once per request, shared by every
+// label the request invalidates — pins it to a specific edit event.
+//
+// KNOWN GAP, NOT PAPERED OVER: this does not preserve the TEXT the annotator
+// saw. The update below overwrites the item's content in place and there is
+// no item-content history, so "which version of the text" is recoverable only
+// as "whatever it was immediately before the edit at tombstonedAt". Closing
+// that means versioning item content, which belongs with the staged/published
+// dataset identity work, not here.
+```
+
+Replace `:114-117` (the `current` lookup) with:
+
+```ts
+      const current = await tx.goldenItem.findMany({
+        where: {
+          id: { in: data.items.map((i) => i.id) },
+          goldenSetId: params.id,
+          ...goldenItemLifecycleWhere(false),
+        },
+        select: { id: true, inputText: true, promptText: true, responseText: true, expected: true },
+      });
+```
+
+Add `const editedAt = new Date();` immediately after the `currentById` map at `:121`, and replace `:141-143` with:
+
+```ts
+        if (contentChanged) {
+          // One instant for the whole request, so every label invalidated by
+          // this edit carries the same timestamp and reads as one event.
+          await tx.goldenLabel.updateMany({
+            where: { goldenItemId: item.id, tombstonedAt: null },
+            data: {
+              tombstonedAt: editedAt,
+              tombstonedReason: GOLDEN_LABEL_TOMBSTONE_REASON_CONTENT_EDIT,
+            },
+          });
+        }
+```
+
+Run: `sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/golden-sets.test.ts'`. Expected: green.
+
+- [ ] **Step 20: Filter the shared includes — `_count.items` and the detail items**
+
+Replace `src/app/api/golden-sets/shared.ts:13-28` with:
+
+```ts
+import { Prisma } from '@prisma/client';
+import { z } from 'zod';
+import { goldenItemLifecycleWhere } from '@/lib/golden-sets';
+
+// `_count.items` is a FILTERED relation count. Unfiltered, every list row and
+// every public projection would report tombstoned items in `itemCount` —
+// toPublicGoldenSet(g).itemCount is the number a reader uses to decide
+// whether a set is worth calibrating against, so over-reporting it is a lie
+// with consequences, not a cosmetic drift.
+export const goldenSetInclude = {
+  owner: { select: { id: true, name: true } },
+  _count: { select: { items: { where: goldenItemLifecycleWhere(false) } } },
+} satisfies Prisma.GoldenSetInclude;
+
+export const goldenSetDetailInclude = {
+  owner: { select: { id: true, name: true } },
+  _count: { select: { items: { where: goldenItemLifecycleWhere(false) } } },
+  items: {
+    where: goldenItemLifecycleWhere(false),
+    orderBy: { index: 'asc' },
+    include: { candidates: { orderBy: { position: 'asc' } } },
+  },
+} satisfies Prisma.GoldenSetInclude;
+```
+
+Then append to `tests/db/golden-sets.test.ts`'s `GET /api/golden-sets/[id]` describe:
+
+```ts
+  it('itemCount and the embedded items both exclude tombstoned rows', async () => {
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { visibility: 'public', itemCount: 4 });
+    const items = await db.goldenItem.findMany({ where: { goldenSetId: goldenSet.id } });
+    await db.goldenItem.update({
+      where: { id: items[0].id },
+      data: { tombstonedAt: new Date() },
+    });
+
+    (getServerSession as unknown as Mock).mockResolvedValue(null);
+    const res = await getGoldenSet(new Request(`http://localhost/api/golden-sets/${goldenSet.id}`), {
+      params: Promise.resolve({ id: goldenSet.id }),
+    });
+    const body = await res.json();
+    expect(body.itemCount).toBe(3);
+    expect(body.items).toHaveLength(3);
+    expect(body.items.some((i: { id: string }) => i.id === items[0].id)).toBe(false);
+  });
+```
+
+Run: `sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/golden-sets.test.ts -t "itemCount"'`. Expected: FAIL first with `expected 4 to be 3` if you run it before the include edit; green after.
+
+- [ ] **Step 21: The fork must not resurrect tombstoned items or labels**
+
+Append to `tests/db/golden-set-fork.test.ts`:
+
+```ts
+  it('copies LIVE items and LIVE labels only — a fork must not resurrect what a tombstone removed', async () => {
+    // forkGoldenSet does not copy `tombstonedAt`, so an unfiltered read would
+    // mint the tombstoned row as a LIVE item on the child, and an invalidated
+    // label as a LIVE score on text its annotator never saw — precisely the
+    // failure decision #5 exists to prevent. The originals stay in the parent
+    // where their provenance belongs; `parentId` is the pointer back.
+    const owner = await mkUser();
+    const annotator = await mkUser();
+    const dataset = await mkDatasetWithSamples(owner.id, 3);
+    const root = await mkGoldenSet(
+      owner.id,
+      dataset.id,
+      dataset.samples.map((s) => s.id)
+    );
+    const [item0, item1] = root.items;
+
+    await db.goldenItem.update({
+      where: { id: item0.id },
+      data: { tombstonedAt: new Date() },
+    });
+    await db.goldenLabel.create({
+      data: {
+        goldenItemId: item1.id,
+        annotatorId: annotator.id,
+        overallScore: 9,
+        tombstonedAt: new Date(),
+        tombstonedReason: 'item-content-edit',
+      },
+    });
+
+    const v2 = await forkGoldenSet(db, forkInput(root.id, root.id, owner.id));
+
+    const forkedItems = await db.goldenItem.findMany({
+      where: { goldenSetId: v2.id },
+      orderBy: { index: 'asc' },
+    });
+    expect(forkedItems).toHaveLength(2);
+    // Indices are copied VERBATIM, gaps included, so index-keyed comparison
+    // across versions still lines up. The child inherits a non-dense sequence
+    // and its next index is a high-water mark, same as the parent's.
+    expect(forkedItems.map((i) => i.index)).toEqual([1, 2]);
+    expect(forkedItems.every((i) => i.tombstonedAt === null)).toBe(true);
+
+    expect(await db.goldenLabel.count({ where: { goldenItem: { goldenSetId: v2.id } } })).toBe(0);
+    // The source keeps everything — a fork copies, it does not move or purge.
+    expect(await db.goldenItem.count({ where: { goldenSetId: root.id } })).toBe(3);
+    expect(await db.goldenLabel.count({ where: { goldenItem: { goldenSetId: root.id } } })).toBe(1);
+  });
+```
+
+Run: `sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/golden-set-fork.test.ts -t "LIVE items and LIVE labels"'`
+
+Expected: FAIL with `expected [ {…}, {…}, {…} ] to have a length of 2 but got 3` — the fork copies all three items today.
+
+Then in `src/lib/golden-set-versions.ts`, add `import { goldenItemLifecycleWhere } from '@/lib/golden-sets';` and change the source read at `:152` / `:171`:
+
+```ts
+              items: {
+                // Tombstoned rows are NOT copied. `tombstonedAt` is not among
+                // the fields copied below, so an unfiltered read would mint
+                // them as LIVE items on the child.
+                where: goldenItemLifecycleWhere(false),
+                orderBy: { index: 'asc' },
+                select: {
+                  index: true,
+                  inputText: true,
+                  promptText: true,
+                  responseText: true,
+                  protocol: true,
+                  expected: true,
+                  sourceDatasetSampleId: true,
+                  candidates: {
+                    orderBy: { position: 'asc' },
+                    select: {
+                      position: true,
+                      promptText: true,
+                      responseText: true,
+                      label: true,
+                    },
+                  },
+                  labels: {
+                    // Same hazard, worse consequence: a copied tombstoned
+                    // label lands LIVE on the fork, re-attaching a score to
+                    // text its annotator never saw. Written as a literal
+                    // rather than a helper because this is the only
+                    // GoldenLabel read path in the codebase.
+                    where: { tombstonedAt: null },
+                    select: {
+                      annotatorId: true,
+                      overallScore: true,
+                      criteriaScores: true,
+                      reasoning: true,
+                    },
+                  },
+                },
+              },
+```
+
+Add to the module doc's point 2 (`:26-32`): *"Only LIVE labels ride along — a tombstoned label is one an edit invalidated, and `tombstonedAt` is not among the copied fields, so copying one would resurrect it."* Re-run the fork suite: `sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/golden-set-fork.test.ts'`.
+
+- [ ] **Step 22: Pin the read path that must NOT be filtered**
+
+Append to `tests/db/dataset-sample-freeze.test.ts`'s describe:
+
+```ts
+  it('a TOMBSTONED golden item still pins the dataset — the FK does not care that the row is dead', async () => {
+    // This is the one golden-item read path that must stay unfiltered.
+    // GoldenItem.sourceDatasetSampleId is `onDelete: Restrict` and a
+    // tombstoned row still holds that FK, so Postgres will still refuse the
+    // sample delete. Sweep a `tombstonedAt: null` through this query and the
+    // guard reports "not pinned", the PUT proceeds, and Postgres raises a
+    // bare P2003 that the catch reports as a 500 — a worse failure than the
+    // one this guard exists to prevent.
+    const owner = await mkUser();
+    const { dataset, sample } = await mkDatasetWithSample(owner.id);
+    const goldenSet = await mkGoldenSetOver(owner.id, dataset.id, sample.id, 'pinning set');
+    await db.goldenItem.updateMany({
+      where: { goldenSetId: goldenSet.id },
+      data: { tombstonedAt: new Date() },
+    });
+
+    mockSessionFor(owner);
+    const res = await PUT(
+      jsonRequest(`http://localhost/api/datasets/${dataset.id}/samples`, 'PUT', {
+        samples: [{ input: 'a replacement question', expected: 'B>A' }],
+      }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).goldenSets).toEqual([{ id: goldenSet.id, name: 'pinning set' }]);
+    await expect(db.datasetSample.count({ where: { datasetId: dataset.id } })).resolves.toBe(1);
+  });
+```
+
+Run: `sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/dataset-sample-freeze.test.ts'`
+
+Expected: **PASS immediately.** Say so plainly rather than faking a red — the correct implementation here is "change nothing", so this is a regression pin, not a red-green cycle. It exists so the next person sweeping tombstone filters through the codebase cannot quietly break the FK guard. Record that intent in the query's comment at `src/app/api/datasets/[id]/samples/route.ts:266`:
+
+```ts
+    // DELIBERATELY NOT lifecycle-filtered. A tombstoned GoldenItem still
+    // holds `sourceDatasetSampleId` (onDelete: Restrict), so Postgres still
+    // refuses the delete below. Adding `items: { some: { tombstonedAt: null,
+    // ... } }` here would turn this deliberate 409 into a raw P2003 reported
+    // as a 500. Pinned by 'a TOMBSTONED golden item still pins the dataset'
+    // in tests/db/dataset-sample-freeze.test.ts.
+    const pinningGoldenSets = await prisma.goldenSet.findMany({
+```
+
+- [ ] **Step 23: Stop the config importer from hard-deleting items**
+
+Task 14 landed two `tx.goldenItem.deleteMany({ where: { goldenSetId: ... } })` calls in `src/app/api/config/import/route.ts` — one on the unfrozen update path, one after a fork. Locate them:
+
+```bash
+grep -n "goldenItem.deleteMany" src/app/api/config/import/route.ts
+```
+
+Replace **both** with the tombstone plus a high-water-mark offset. Import `nextGoldenItemIndex` and `goldenItemLifecycleWhere` from `@/lib/golden-sets`, then, in each transaction:
+
+```ts
+            // Tombstone, never delete (owner ruling 2026-08-13). The retained
+            // rows KEEP their ordinals, so the document's items cannot land
+            // at 0..n-1 — that collides with the tombstoned rows on
+            // @@unique([goldenSetId, index]) (P2002) and aborts the import.
+            // They are appended above the high-water mark instead.
+            await tx.goldenItem.updateMany({
+              where: { goldenSetId: existing.id, tombstonedAt: null },
+              data: { tombstonedAt: new Date() },
+            });
+            const offset = await nextGoldenItemIndex(tx, existing.id);
+            await tx.goldenSet.update({
+              where: { id: existing.id },
+              data: {
+                name,
+                description: configGoldenSet.description ?? null,
+                visibility: configGoldenSet.visibility,
+                protocol: configGoldenSet.protocol,
+                version: configGoldenSet.version,
+                datasetId: dataset.id,
+                items: {
+                  create: itemData.map((item) => ({ ...item, index: item.index + offset })),
+                },
+              },
+            });
+```
+
+and the identical shape against `fork.id` on the fork path. Then record the round-trip consequence in `tests/db/config-roundtrip-fidelity.test.ts`'s `GoldenItem` entry (Task 15), moving `index` out of `exported` is **not** what is wanted — it is still exported; add a `knownGaps` entry instead:
+
+```ts
+  GoldenItem: {
+    exported: ['index', 'inputText', 'promptText', 'responseText', 'expected'],
+    excludedByDesign: {
+      id: SURROGATE,
+      goldenSetId: 'implied by document nesting',
+      protocol: HOMOGENEOUS,
+      sourceDatasetSampleId:
+        'a DatasetSample id is instance-local, so the FK itself is not portable. It is re-resolved on import from the set’s datasetSlug + this item’s inputText (which is DatasetSample.input verbatim for all three protocol mappings). Two samples with identical input collapse onto the lowest-index one — accepted, because the annotation is over the input text.',
+      createdAt: TIMESTAMP,
+      updatedAt: TIMESTAMP,
+      tombstonedAt:
+        'lifecycle state, not content. A tombstoned item is one its owner removed on THIS instance; carrying the flag would let a re-import resurrect it, and carrying the ROW would import something no read path will ever serve. Same reasoning as GoldenSet.retiredAt above.',
+    },
+    knownGaps: {
+      index:
+        'index VALUES do not survive a re-import into a set that already has tombstoned items. Items are never re-packed (a tombstoned row keeps its ordinal), so the importer appends the document’s items above the set’s high-water mark rather than at 0..n-1 — the second export therefore emits shifted indices. Relative ORDER is preserved, which is what every consumer actually reads; absolute values are not stable across a replace-after-tombstone.',
+    },
+  },
+```
+
+and add the `GoldenLabel` columns to that model's `excludedByDesign` map with `tombstonedAt: ANNOTATION, tombstonedReason: ANNOTATION` — the whole model is deliberately unexported, and a new column must still be *decided* rather than slip in.
+
+Run: `sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/config-golden-sets.test.ts tests/db/config-roundtrip-fidelity.test.ts'`
+
+- [ ] **Step 24: Full verification**
+
+Run:
+
+```bash
+npm run lint
+npm test
+npm run test:db
+npm run test:coverage
+```
+
+Expected: all green. `npm run test:db` resets and replays the migration chain from scratch, which is the real test that `20260813120000_v2e_golden_item_label_tombstones` — hand edit included — is correct. On coverage: `src/lib/golden-sets.ts` gains four exports, three of them fully unit-tested and `nextGoldenItemIndex` exercised by `tests/db/golden-item-tombstone.test.ts`, so both aggregates should move **up**. Per `vitest.db.config.ts:42-73`, if the actuals rise materially, re-baseline the floors upward and update the "Actuals as of" comment blocks in both configs. **Never lower a threshold to go green.**
+
+- [ ] **Step 25: Commit**
+
+```bash
+git add src/lib/golden-sets.ts src/lib/golden-set-versions.ts \
+  src/app/api/golden-sets/shared.ts "src/app/api/golden-sets/[id]/items/route.ts" \
+  "src/app/api/datasets/[id]/samples/route.ts" src/app/api/config/import/route.ts \
+  tests/lib/golden-sets.test.ts tests/db/golden-item-tombstone.test.ts \
+  tests/db/golden-sets.test.ts tests/db/golden-set-fork.test.ts \
+  tests/db/dataset-sample-freeze.test.ts tests/db/config-roundtrip-fidelity.test.ts
+git commit -m "feat(a0): tombstone golden items and their labels instead of deleting
+
+DELETE /api/golden-sets/[id]/items stamps tombstonedAt in the same
+transaction as the freeze check and returns { tombstoned, remaining }. The
+re-index loop is GONE: a tombstoned row keeps its index, so no gap opens,
+and re-packing survivors would collide with the tombstoned ordinal (P2002)
+and abort every delete. Index is no longer dense; the next one is a
+high-water mark over all rows (nextGoldenItemIndex), never a count.
+
+Read paths filtered: items GET (findMany + count, with an owner-only
+?includeTombstoned=true escape), PATCH's current-row lookup, _count.items
+and the detail items include, and forkGoldenSet's item AND label selects —
+the fork copies no tombstonedAt, so an unfiltered read would resurrect dead
+rows as live ones. The dataset-sample pin guard is deliberately NOT
+filtered: a tombstoned item still holds its Restrict FK, so filtering there
+would turn a deliberate 409 into a raw P2003.
+
+Labels are tombstoned rather than deleted when an edit invalidates them —
+INTERPRETATION of the ruling, flagged for owner confirmation. A human label
+is irreplaceable, and the retained row preserves who scored what and when it
+stopped applying. That forces GoldenLabel's unique to become a partial index
+over live rows only, or a tombstone would occupy its annotator's slot
+forever and re-annotation would be impossible.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```

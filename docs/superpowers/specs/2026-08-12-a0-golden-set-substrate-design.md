@@ -122,7 +122,25 @@ recorded because a later reader will otherwise re-litigate them.
 | 5 | What does a fork do to human labels? | **Copy, except on edited items.** An annotator's judgment is never re-attributed to text they did not see. |
 | 6 | What can a golden set be built from? | **One platform-curated `Dataset`, bound in the schema.** Creation is import; no hand-authoring in A0. |
 
-Two further rulings arrived with the approval:
+### Rulings added 2026-08-13, after Task 11
+
+These arrived mid-implementation and **supersede parts of this document written on 2026-08-12**.
+Where they contradict text above, they win; the affected passages have been amended in place and
+say so.
+
+| # | Ruling | Effect |
+|---|---|---|
+| 7 | **`GoldenSet.datasetId` is immutable, always** — "a new record becomes a new dataset" | Not freeze-guarded content; never mutable. Task 23 corrects `updateGoldenSetSchema` and the PATCH guard. |
+| 8 | **Delete is always a same-transaction tombstone tag; no data is ever removed** | Golden-set DELETE already complies. Golden-*item* DELETE does not — it hard-deletes and re-packs indices, so Task 24 adds `GoldenItem.tombstonedAt` in a `v2e` migration and removes the re-index, which becomes wrong rather than merely redundant once nothing is removed. |
+| 9 | **Datasets should have a staged/WIP state, taking an immutable identity on publication** | Out of A0's scope; needs its own spec. Note `Dataset.publishedAt` already exists with zero writers, as on three other models, and no publish endpoint exists anywhere — whoever designs this invents the verb for all four. |
+
+Ruling 8 has one consequence that is an *interpretation* rather than something the owner said, and
+is marked as needing confirmation in Task 24: the label-drop-on-edit path also hard-deletes
+`GoldenLabel` rows. Under "no actual data removal" it should tombstone — and it is the case that
+matters most, because a human label is the expensive, irreplaceable artifact this roadmap exists to
+protect, and keeping the row preserves who said what about which version of the text.
+
+### Rulings that arrived with the original approval
 
 - **Pair order.** A0 emits `AB` only. The `BA` sweep and its side-by-side permutation-difference
   report are wanted, and are held for A2/A3 where `positionBias` lives.
@@ -298,9 +316,16 @@ and `account-deletion.ts`, so the two cannot drift:
 frozen(goldenSetId) := calibrationRun.count({ where: { goldenSetId } }) > 0
 ```
 
-**What freezes:** item content — items, candidates, `protocol`, `expected`, and the set's
-`datasetId`. **What does not:** `name`, `description`, `visibility`, `retiredAt`. Renaming a set
-changes nothing a calibration run measured; refusing a typo fix is hostile and buys nothing.
+**What freezes:** item content — items, candidates, `protocol`, `expected`. **What does not:**
+`name`, `description`, `visibility`, `retiredAt`. Renaming a set changes nothing a calibration run
+measured; refusing a typo fix is hostile and buys nothing.
+
+**`datasetId` is not in either list, because it is immutable unconditionally** — owner ruling
+2026-08-13, superseding this document's original treatment of it as freeze-guarded content. A
+golden set is the annotation layer over exactly one dataset, so repointing it is never legitimate
+at any point in the set's life, calibrated or not: you create a new set, or fork. The original
+framing would have let an uncalibrated set claim to annotate corpus B while its items still
+carried `sourceDatasetSampleId` values from corpus A. See Task 23.
 
 **The count and the mutation share one transaction.** Separated, a calibration run started
 between them measures a set that changed underneath it — retention silently broken, verdict
@@ -358,7 +383,7 @@ the access-matrix registry key and the config document key.
 |---|---|---|
 | `golden-sets/route.ts` | GET, POST | GET is `optionalAuth` public-read, paginated `{data, pagination}` (the datasets/projects shape, not the bare array `/api/rubrics` returns). POST is create-by-import. |
 | `golden-sets/[id]/route.ts` | GET, PATCH, DELETE | GET decides via `resolveResourceAccess` → owner gets the raw row, public gets `toPublicGoldenSet`. PATCH is freeze-guarded on content fields. |
-| `golden-sets/[id]/items/route.ts` | **GET**, PATCH, DELETE | No POST — items only arrive by import. DELETE re-indexes survivors 0..n-1 inside a `$transaction`, because `@@unique([goldenSetId, index])`. |
+| `golden-sets/[id]/items/route.ts` | **GET**, PATCH, DELETE | No POST — items only arrive by import. DELETE **tombstones** (see below); it does not remove rows. |
 | `golden-sets/[id]/fork/route.ts` | POST | |
 | `golden-sets/[id]/retire/route.ts` | POST | The first `retiredAt` writer with a product meaning. |
 | `golden-sets/shared.ts` | — | zod schemas and Prisma includes. Next 15 rejects non-allowlisted named exports from `route.ts` (`src/app/api/models/shared.ts:1-8`). |
@@ -591,6 +616,11 @@ Seven things that can fail:
    and prompt variations. Requested by the owner on 2026-08-12, to be written as a sibling spec.
 2. **The `BA` permutation sweep**, recorded as an A2 dependency with the note that it needs no
    migration and no backfill.
+3. **A staged-dataset spec** (ruling 9) — a draft → published lifecycle for `Dataset`, where
+   publication confers an immutable identity. It interacts with A0 directly: A0's 409 guard on
+   `PUT /api/datasets/[id]/samples` currently fires whenever *any* golden set annotates the
+   dataset, which under a staged model becomes one case of a more general "published corpora do
+   not drift" rule.
 
 ---
 
