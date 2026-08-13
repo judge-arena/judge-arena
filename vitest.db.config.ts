@@ -152,9 +152,12 @@ export default defineConfig({
       //
       // Re-measured 2026-08-13 in Tasks 19-22 (a0), which added
       // goldenSetLifecycleWhere/parseIncludeRetired to src/lib/golden-sets.ts
-      // and routed the four golden-set read paths through them. Measured FIVE
-      // times: 689/869 (79.28%) three times and 691/870 (79.42%) twice. Both
-      // per-glob entries byte-identical.
+      // and routed the four golden-set read paths through them. Measured
+      // SEVEN times before review: 689/869 (79.28%) four times, 691/870
+      // (79.42%) three times. Re-measured FOUR more times after fix round 1,
+      // which added an admin-scoped config-export test and a stranger-on-a-
+      // private-retired-set test: 691/871 (79.33%) three times, 693/872
+      // (79.47%) once. Both per-glob entries byte-identical throughout.
       //
       // THE BRANCHES MARGIN WIDENED RATHER THAN NARROWED, which is worth
       // stating because the note above predicted the opposite for the next
@@ -170,9 +173,9 @@ export default defineConfig({
       // The run-to-run nondeterminism recorded above is still present and
       // still the same shape (numerator and denominator moving together, 2 at
       // a time); its source remains unidentified. The observed spread on this
-      // branch is now 79.14-79.42 across fifteen runs over two tasks. Prose
+      // branch is now 79.14-79.47 across nineteen runs over two tasks. Prose
       // only — no threshold below was touched.
-      //   all-files            49.17 / 79.28 / 62.58 / 49.17  (observed range 79.28-79.42)
+      //   all-files            49.17 / 79.33 / 62.58 / 49.17  (observed range 79.33-79.47)
       //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
       //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
       thresholds: {

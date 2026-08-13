@@ -286,8 +286,10 @@ export default function GoldenSetsPage() {
     const q = search.trim().toLowerCase();
     return goldenSets.filter((s) => {
       // GET /api/golden-sets honours ?protocol and ?datasetId but NOT
-      // ?visibility (see its `where` builder, route.ts:41-59), so the param
-      // sent above is forward-compatible only and the filter has to bite
+      // ?visibility — the only `visibility` clause its `where` builder writes
+      // comes from the SESSION (anonymous callers are pinned to public), never
+      // from the query — so the param sent above is forward-compatible only
+      // and the filter has to bite
       // here or the control does nothing. src/app/datasets/page.tsx:262 runs
       // the same client-side predicate even though its route does support the
       // param, so this is the page-level convention either way.

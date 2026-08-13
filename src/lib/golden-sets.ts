@@ -301,12 +301,18 @@ export class GoldenSetFrozenError extends Error {
  *                 the set it measured). Reversible; readable again with
  *                 ?includeRetired=true.
  *
- *   tombstonedAt  Pending purge. An ACCOUNT-LIFECYCLE verb, written by
- *                 src/lib/account-deletion.ts when the owning account is
- *                 deleted and nothing references the set, and by DELETE
- *                 /api/golden-sets/[id]. Not reversible and not escapable —
- *                 it stays hidden from every read path until the purge wave
- *                 (deliberately not part of A0) removes it.
+ *   tombstonedAt  Pending purge, with TWO writers that differ in what they
+ *                 leave behind. src/lib/account-deletion.ts stamps it when
+ *                 the owning account is deleted and nothing references the
+ *                 set, and `GoldenSet.ownerId` is `onDelete: SetNull`, so
+ *                 that row also ends up with `ownerId: null`. DELETE
+ *                 /api/golden-sets/[id] stamps it when the owner deletes
+ *                 their own set, and the OWNER STAYS SET. Anything scoping
+ *                 on `ownerId` therefore still sees the second kind, which
+ *                 is why this column is filtered explicitly rather than
+ *                 left to an ownership clause. Neither writer is reversible
+ *                 and neither is escapable — the row stays hidden from every
+ *                 read path until the purge wave (not part of A0) removes it.
  *
  * THE ASYMMETRY IS THE WHOLE POINT, and it is what this function adds over
  * the hand-rolled `if (!includeRetired) { where.retiredAt = null;
@@ -341,11 +347,15 @@ export function parseIncludeRetired(searchParams: URLSearchParams): boolean {
  * tag. NULL = live.
  *
  * NOTE THE ASYMMETRY WITH A SET'S `tombstonedAt`, IT IS DELIBERATE. A SET's
- * `tombstonedAt` is an ACCOUNT-LIFECYCLE verb written by
- * src/lib/account-deletion.ts for a set pending purge, and nothing may ever
- * hand one back — `goldenSetLifecycleWhere` above pins `tombstonedAt: null`
- * in BOTH its arms, so there is no escape hatch. An ITEM's `tombstonedAt` is
- * a PRODUCT verb: its owner curating their own set. The owner therefore has to
+ * `tombstonedAt` marks the whole set pending purge, and it has TWO writers:
+ * src/lib/account-deletion.ts when the owning account goes (which leaves
+ * `ownerId: null`), and DELETE /api/golden-sets/[id] when the owner deletes
+ * the set themselves (which leaves the owner intact). Neither is reversible
+ * and nothing may ever hand one back — `goldenSetLifecycleWhere` above pins
+ * `tombstonedAt: null` in BOTH its arms, so there is no escape hatch at any
+ * read path. An ITEM's `tombstonedAt` removes one row from a set that is
+ * still live and still being worked on: a PRODUCT verb, its owner curating
+ * their own set. The owner therefore has to
  * be able to see what they removed (to notice a mistake, and because the row
  * is being kept precisely so it can be looked at), so the item filter DOES
  * take an escape — gated to the owner/admin branch by its caller, never

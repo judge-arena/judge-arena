@@ -26,7 +26,7 @@ export const goldenSetInclude = {
   // `toPublicGoldenSet` (src/lib/serializers.ts:292-305) builds a fresh
   // literal of ten named fields with no spread of the row, so this cannot
   // reach the public projection. Without it the list card's
-  // `from {set.dataset.name}` (src/app/golden-sets/page.tsx:350-354) is a
+  // `from {set.dataset.name}` line (src/app/golden-sets/page.tsx) is a
   // permanently dead branch — guarded by `set.dataset &&`, so it renders
   // nothing rather than crashing, which is exactly why it went unnoticed.
   dataset: { select: { id: true, name: true } },

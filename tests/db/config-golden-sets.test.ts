@@ -282,6 +282,43 @@ describe('Config export/import — golden sets', () => {
     expect(all.goldenSets.every((g: Record<string, unknown>) => !('retiredAt' in g))).toBe(true);
   });
 
+  it('an ADMIN export spans other users\' sets, and the lifecycle filter still applies to them', async () => {
+    // Guards a near-miss rather than a bug: the golden-set section's `where`
+    // is `admin ? {} : { ownerId: userId }` spread ahead of the lifecycle
+    // predicate. Collapsing that to an unconditional `ownerId: userId` — the
+    // obvious simplification, and what the plan's own snippet said to write —
+    // shrinks every admin export to the admin's own sets, silently and with a
+    // 200. Nothing in tests/db/config*.ts covered the admin arm, so that
+    // regression would have shipped green.
+    const otherUser = await mkUser({ email: 'export-scope-other@test.local' });
+    const admin = await mkUser({ email: 'export-scope-admin@test.local', role: 'admin' });
+
+    const dataset = await mkAnnotatedDataset(otherUser.id, { slug: 'ds-other' });
+    await mkGoldenSet(otherUser.id, dataset, { slug: 'other-live', name: 'Other Live' });
+    const otherTombstoned = await mkGoldenSet(otherUser.id, dataset, {
+      slug: 'other-tombstoned',
+      name: 'Other Tombstoned',
+    });
+    // Tombstoned with the OWNER INTACT — the shape DELETE /api/golden-sets/[id]
+    // writes, and the reason `tombstonedAt: null` is load-bearing rather than
+    // implied by any ownership clause.
+    await db.goldenSet.update({
+      where: { id: otherTombstoned.id },
+      data: { tombstonedAt: new Date() },
+    });
+
+    // `role` is not forwarded by this file's mockSessionFor, and isAdmin reads
+    // exactly `session.user.role === 'admin'`.
+    (getServerSession as unknown as Mock).mockResolvedValue({
+      user: { id: admin.id, email: admin.email, role: 'admin' },
+    });
+
+    const doc = await exportDoc('?format=json&include=goldenSets');
+    // The admin sees a set they do not own — this is the assertion the
+    // collapsed `ownerId: userId` would fail, with an empty array.
+    expect(doc.goldenSets.map((g: { slug: string }) => g.slug)).toEqual(['other-live']);
+  });
+
   it('export → fresh instance → import reproduces the golden set as real rows', async () => {
     const user = await mkUser();
     mockSessionFor(user);

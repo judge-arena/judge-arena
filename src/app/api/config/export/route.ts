@@ -237,10 +237,21 @@ export async function GET(request: Request) {
     //
     // ?includeRetired=true is wired for symmetry with the other three read
     // paths, with that resurrection stated in the route doc above rather than
-    // left to be discovered. `tombstonedAt: null` holds in both arms of the
-    // predicate: those sets belong to deleted accounts and have
-    // `ownerId: null`, so the non-admin scope already misses them, but the
-    // admin arm does not — and neither would a later widening of either.
+    // left to be discovered. `tombstonedAt: null` holds in BOTH arms of the
+    // predicate, and it is LOAD-BEARING IN BOTH — do not read it as
+    // belt-and-braces and delete it.
+    //
+    // A SET'S `tombstonedAt` HAS TWO WRITERS, and only one of them nulls the
+    // owner. `src/lib/account-deletion.ts` tombstones an unpinned private set
+    // when its account goes, and `GoldenSet.ownerId` is `onDelete: SetNull`,
+    // so that row ends up with `ownerId: null` and falls outside
+    // `ownerId: userId` on its own. But `DELETE /api/golden-sets/[id]`
+    // tombstones with the OWNER INTACT — that is the ordinary "delete this
+    // set" button — so for a plain non-admin export, a set the caller deleted
+    // themselves still matches the ownership scope, and this clause is the
+    // only thing keeping it out of a portable document that would re-import
+    // it as live. The admin arm has no ownership scope at all, so both kinds
+    // are in range there.
     if (sections.includes('goldensets')) {
       // Spread AFTER the ownership scope so neither clause can be dropped by
       // a later edit reordering them.

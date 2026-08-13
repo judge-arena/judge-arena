@@ -433,6 +433,34 @@ describe('GET /api/golden-sets/[id]', () => {
     expect(purgePending.status).toBe(404);
   });
 
+  it('a stranger gets 404 — NOT 403 — on someone else\'s PRIVATE retired set, because the lifecycle predicate runs in the query', async () => {
+    const owner = await mkUser();
+    const stranger = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { visibility: 'private' });
+    await db.goldenSet.update({ where: { id: goldenSet.id }, data: { retiredAt: new Date() } });
+
+    mockSessionFor(stranger);
+    const retired = await getGoldenSet(
+      new Request(`http://localhost/api/golden-sets/${goldenSet.id}`),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    // The post-fetch ordering this replaced ran resolveResourceAccess FIRST,
+    // so a stranger got 403 here — which confirms the id exists. Restoring
+    // that ordering fails this assertion.
+    expect(retired.status).toBe(404);
+
+    // The control that makes the assertion above mean something: the SAME
+    // stranger on the SAME set, un-retired, still gets 403. So the 404 is the
+    // lifecycle predicate talking, not this route answering 404 to everyone
+    // who cannot see a private set.
+    await db.goldenSet.update({ where: { id: goldenSet.id }, data: { retiredAt: null } });
+    const live = await getGoldenSet(
+      new Request(`http://localhost/api/golden-sets/${goldenSet.id}`),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(live.status).toBe(403);
+  });
+
   it('itemCount and the embedded items both exclude tombstoned rows', async () => {
     const owner = await mkUser();
     const { goldenSet } = await mkGoldenSet(owner.id, { visibility: 'public', itemCount: 4 });
