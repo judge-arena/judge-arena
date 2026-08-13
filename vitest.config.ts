@@ -96,7 +96,7 @@ export default defineConfig({
       // Actuals as of 2026-08-13 (stmts/branch/funcs/lines) — re-measured in
       // Task 12 (a0), which added the pairwise seam + protocol dispatch to
       // src/worker/judgment-consumer.ts. Only the two statement/line figures
-      // moved (all-files 37.57 -> 37.11, src/worker 3.74 -> 3.42) and both
+      // moved (all-files 37.57 -> 37.08, src/worker 3.74 -> 3.40) and both
       // moved DOWN purely because the denominator grew: this DB-free run never
       // imports src/worker/**, so every statement added there is counted and
       // uncovered. No new uncovered code landed in any imported file; branches
@@ -105,9 +105,9 @@ export default defineConfig({
       // after render.ts grew buildPairwiseUserPrompt/candidateText and
       // registry.ts grew executePairwiseCall, unit-tested in
       // tests/lib/render-pairwise.test.ts + tests/lib/pairwise-execution.test.ts):
-      //   all-files            37.11 / 84.84 / 67.18 / 37.11
+      //   all-files            37.08 / 84.84 / 67.18 / 37.08
       //   src/lib/queue/**     47.30 / 84.37 / 73.33 / 47.30
-      //   src/worker/**         3.42 / 100   / 100   /  3.42   <- artifact
+      //   src/worker/**         3.40 / 100   / 100   /  3.40   <- artifact
       //   src/lib/llm/**       94.50 / 86.60 / 97.56 / 94.50
       //   scripts/importer/**   6.15 / 83.87 / 10.29 /  6.15
       //   src/lib/realtime/**   1.55 / 80    / 71.42 /  1.55
@@ -121,7 +121,7 @@ export default defineConfig({
         // instead. Actual: 47.3/84.37/73.33/47.3.
         'src/lib/queue/**': { statements: 44, functions: 70, branches: 81, lines: 44 },
         // Only dispatch-failure.ts is unit-tested; claim/main/reaper/*-consumer
-        // are integration-only (tests/integration/**). Actual: 3.42/100/100/3.42
+        // are integration-only (tests/integration/**). Actual: 3.40/100/100/3.40
         // — where those two 100s are the not-imported artifact, not coverage.
         'src/worker/**': { statements: 0, functions: 80, branches: 80, lines: 0 },
         // Provider backends + resilience/registry/render are heavily unit-tested.

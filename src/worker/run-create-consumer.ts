@@ -9,6 +9,15 @@
  * `RunModelSelection`) per entry in `runSpec.modelSelections`, then
  * publishes one `judgment.execute` per created `ModelJudgment` row.
  *
+ * POINTWISE ONLY (A0). `RunCreateMsg.protocol` is a real `RunProtocol` as of
+ * Task 12, so a non-pointwise value is representable here even though no
+ * producer emits one; `handle()` refuses it up front rather than expanding
+ * something it cannot complete — see the guard's own comment for why a
+ * pairwise message has no candidate set to expand against and would
+ * mis-derive its mode. Pairwise runs are launched by `run-launch.ts`'s
+ * `launchSingleRun` instead, which writes `RunCandidate` rows in the same
+ * transaction as the run.
+ *
  * ── judgeModelVersionId is the identity; modelConfigId is legacy (Task 12) ──
  * Each `modelSelections` entry carries `judgeModelVersionId` (the queue/
  * worker identity every `ModelJudgment` needs to run — see
@@ -179,6 +188,28 @@ export function createRunCreateConsumer(): RunCreateConsumer {
     let createdRunId: string | null = null;
 
     try {
+      // A0: this consumer expands POINTWISE runs only, and refuses anything
+      // else up front rather than half-honouring it. `RunCreateMsg.protocol`
+      // became a real `RunProtocol` in Task 12, so `'pairwise'`/`'listwise'`
+      // are now representable on the wire — but nothing here can expand
+      // either one correctly: `RunCreateMsg` carries no candidate set, so a
+      // pairwise expansion would produce judgments against a run with zero
+      // `RunCandidate` rows and nothing to compare. The mode derivation just
+      // below is the reason this must be a refusal and not a best effort —
+      // it keys on `Evaluation.responseText`, which a pairwise evaluation
+      // does not have, so such a message would silently expand as
+      // respond-mode with `promptTemplateId: null`. Thrown (not acked
+      // quietly) so `recordExpansionFailure` books it as a visible errored
+      // run, exactly like every other expansion failure. Pairwise runs go
+      // through `run-launch.ts`'s `launchSingleRun`, which writes
+      // `RunCandidate` rows transactionally with the run.
+      if (msg.runSpec.protocol !== 'pointwise') {
+        throw new Error(
+          `run.create expands pointwise runs only — got protocol "${msg.runSpec.protocol}". ` +
+            'A pairwise run must be launched through launchSingleRun, which writes its RunCandidate rows.'
+        );
+      }
+
       const evaluation = await prisma.evaluation.findUnique({
         where: { id: msg.evaluationId },
         select: { responseText: true },
@@ -243,14 +274,16 @@ export function createRunCreateConsumer(): RunCreateConsumer {
             judgeModelVersionId: sel.judgeModelVersionId,
             modelConfigId: sel.modelConfigId,
             promptTemplateId,
-            // A0: pairOrder written explicitly from the message's protocol,
-            // never left to a default — 'AB' for pairwise, NULL for
-            // pointwise, matching the NULLS NOT DISTINCT
-            // @@unique([runId, judgeModelVersionId, pairOrder]). Same rule
-            // run-launch.ts applies; both writers must agree or the same
-            // (run, judge) pair means two different things depending on
-            // which path created it.
-            pairOrder: msg.runSpec.protocol === 'pairwise' ? 'AB' : null,
+            // A0: pairOrder written EXPLICITLY, never left to a default —
+            // unconditionally NULL here, because the guard at the top of
+            // `handle()` has already refused every protocol but 'pointwise',
+            // and NULL is what pointwise means under the hand-edited NULLS
+            // NOT DISTINCT @@unique([runId, judgeModelVersionId, pairOrder]).
+            // This is NOT a derivation from `msg.runSpec.protocol`: the only
+            // writer that can produce a non-NULL pairOrder is
+            // run-launch.ts's launchSingleRun ('AB'), which is also the only
+            // one that writes the RunCandidate rows such a judgment needs.
+            pairOrder: null,
             status: 'pending' as const,
           })),
           skipDuplicates: true,

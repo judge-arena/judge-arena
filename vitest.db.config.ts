@@ -71,15 +71,18 @@ export default defineConfig({
       // auth-guard 86.36 / 80.95 / 91.66) predated Tasks 9b-11 and was already
       // stale before Task 12 touched anything — measured at Task 12's parent
       // commit, all-files was 49.37 / 79.22 / 61.82. Task 12 itself moved only
-      // statements/lines (49.37 -> 48.67), and only by growing the denominator:
-      // it added statements to src/worker/judgment-consumer.ts, which this run
-      // never imports. Prose only — no threshold below was touched.
+      // statements/lines (49.37 -> 48.50), and only by growing the denominator:
+      // it added statements to src/worker/**, which this run never imports,
+      // plus pairwise-only validation branches in run-launch.ts that the db
+      // suite's pointwise fixtures never reach. Prose only — no threshold
+      // below was touched.
       //
-      // NOTE for the end-of-branch re-baseline: the branches actual (79.37)
-      // sits ~0.4pp above its floor of 79, not the -2pp this file's own policy
-      // calls for. That margin predates Task 12 (79.22 at its parent commit);
-      // flagged here rather than fixed, since floors are frozen mid-branch.
-      //   all-files            48.67 / 79.37 / 61.82 / 48.67
+      // NOTE for the end-of-branch re-baseline: the branches actual (79.22)
+      // sits 0.22pp above its floor of 79, not the -2pp this file's own policy
+      // calls for. That margin predates Task 12 (79.22 at its parent commit
+      // too — this task is branch-neutral here); flagged rather than fixed,
+      // since floors are frozen mid-branch.
+      //   all-files            48.50 / 79.22 / 61.82 / 48.50
       //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
       //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
       thresholds: {

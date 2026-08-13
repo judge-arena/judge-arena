@@ -2,12 +2,14 @@
  * ─── judgment.execute Consumer ─────────────────────────────────────────────
  *
  * Pipeline per message: claim (idempotent — see ./claim.ts) -> load full
- * judgment context (run/evaluation/rubric/judge version/judge model) ->
- * resolve a `ModelEndpoint` to call through -> run the provider call (via
- * the `runProviderJudgment` seam, injectable for tests) -> persist the
- * result -> publish `judgment.completed` on `run:{runId}` (best-effort,
- * never fails the message) -> finalization pass (`maybeFinalizeRun`, src/lib/
- * run-finalizer.ts) -> ack.
+ * judgment context (run/evaluation/rubric/judge version/judge model, plus
+ * A0's `RunCandidate` comparison set) -> resolve a `ModelEndpoint` to call
+ * through -> run the provider call (via whichever of the three seams the
+ * run's protocol and mode select — `runProviderJudgment`,
+ * `runProviderResponse`, `runProviderPairwise`, all injectable for tests)
+ * -> persist the result -> publish `judgment.completed` on `run:{runId}`
+ * (best-effort, never fails the message) -> finalization pass
+ * (`maybeFinalizeRun`, src/lib/run-finalizer.ts) -> ack.
  *
  * ── The provider seam ───────────────────────────────────────────────────────
  * `runProviderJudgment` is intentionally narrow: `{ judgment, run, rubric,
@@ -35,30 +37,43 @@
  * model GENERATES one from the prompt, `executeRespond`). Task 9 shipped
  * judge-mode only and 501'd respond-mode at launch time
  * (`src/lib/run-launch.ts`). Task 9b restores respond-mode as a first-class
- * queue path (Trijeet decision 2026-07-29): every message is dispatched
- * through `deriveRunMode` (`src/lib/run-mode.ts`, v1's exact
+ * queue path (Trijeet decision 2026-07-29). A0 puts one dispatch step in
+ * front of it: `EvaluationRun.protocol` is read FIRST and decides which
+ * seam runs, and `deriveRunMode` (`src/lib/run-mode.ts`, v1's exact
  * `responseText?.trim() ? 'judge' : 'respond'` rule, re-derived here off
  * `context.run.evaluation.responseText` — already loaded by
- * `judgmentContextQuery`, no extra query needed) to one of two provider
- * seams:
- *   - `'judge'`   -> `runProviderJudgment` (existing, described above);
- *     rubric is REQUIRED (unchanged from Task 9).
- *   - `'respond'` -> `runProviderResponse` (default implementation
+ * `judgmentContextQuery`, no extra query needed) only ever chooses
+ * judge-vs-respond WITHIN `'pointwise'`. A pairwise run has no
+ * `Evaluation.responseText` by construction (its two responses are
+ * `RunCandidate` rows), so deriving the mode unconditionally would route
+ * every pairwise judgment to the respond seam and generate text instead of
+ * comparing anything. That gives three provider seams:
+ *   - pointwise + `'judge'`   -> `runProviderJudgment` (existing, described
+ *     above); rubric is REQUIRED (unchanged from Task 9).
+ *   - pointwise + `'respond'` -> `runProviderResponse` (default implementation
  *     `defaultRunProviderResponse` wraps `executeRespond`, which goes
  *     through the SAME registry dispatch + `callThroughResilience` —
  *     classify()/breaker/retry — machinery `executeJudgment` uses).
  *     Rubric is NOT required; `promptTemplateId` is `null` on every
  *     respond-mode `ModelJudgment` (set at creation time by
  *     `run-launch.ts`/`run-create-consumer.ts`, not here).
+ *   - `'pairwise'` (A0)       -> `runProviderPairwise` (default implementation
+ *     `defaultRunProviderPairwise` wraps `executePairwise`, same registry
+ *     dispatch and same resilience machinery again). Always judge-mode, so
+ *     rubric AND `PromptTemplate` are both REQUIRED, plus exactly 2
+ *     `RunCandidate` rows — all three guarded before the call.
+ *     `'listwise'` is refused outright: storable and annotatable in A0, not
+ *     runnable, and there is no listwise renderer to call.
  * Persistence mirrors this same split: `persistSuccess` (judge) vs.
- * `persistRespondSuccess` (respond) — see that function's doc for why the
- * persisted SHAPE must match v1's respond judgment exactly (generated text
- * into `reasoning`, `overallScore` stays `null`). Both go through the same
- * generic `persistSuccessWithRetry` bounded-retry/DLQ-preservation wrapper,
- * and the classify()-driven retry/DLQ disposition below is entirely
- * mode-agnostic (it never inspects which provider seam produced the
- * error) — Tasks 7/8's retry/DLQ/claim machinery applies identically to
- * both modes.
+ * `persistRespondSuccess` (respond) vs. `persistPairwiseSuccess` (pairwise)
+ * — see those functions' docs for why the persisted SHAPE differs (v1's
+ * respond judgment puts generated text in `reasoning`; a pairwise judgment
+ * stores the RAW verdict and leaves `overallScore` null, because a
+ * preference is not a score). All three go through the same generic
+ * `persistSuccessWithRetry` bounded-retry/DLQ-preservation wrapper, and the
+ * classify()-driven retry/DLQ disposition below is entirely seam-agnostic
+ * (it never inspects which provider seam produced the error) — Tasks 7/8's
+ * retry/DLQ/claim machinery applies identically to all three.
  *
  * ── Disposition scope — provider errors ONLY ────────────────────────────────
  * The `classify()`-driven retry/DLQ disposition below wraps ONLY the
@@ -404,10 +419,11 @@ function combinedTokenCount(result: { tokenCount?: number; inputTokens?: number;
   return result.tokenCount;
 }
 
-/** Fields shared by `persistSuccess` (judge) and `persistRespondSuccess`
- * (respond) — every metadata field that doesn't depend on which mode
- * produced the result. Extracted so the two persist paths can't silently
- * drift on a shared field (Task 10 review simplification). */
+/** Fields shared by `persistSuccess` (judge), `persistRespondSuccess`
+ * (respond) and `persistPairwiseSuccess` (pairwise, A0) — every metadata
+ * field that doesn't depend on which seam produced the result. Extracted so
+ * the persist paths can't silently drift on a shared field (Task 10 review
+ * simplification). */
 interface CommonResultFields {
   rawResponse: string;
   latencyMs: number;
@@ -806,10 +822,11 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
 
     // The classify()-driven retry/DLQ disposition below wraps ONLY this
     // provider() call — see the module doc's "Disposition scope" section
-    // for why persistence and finalization must not share this catch. Mode-
-    // agnostic: it never inspects which seam (judge/respond) produced the
-    // error — Tasks 7/8's retry/DLQ/claim machinery applies identically to
-    // both (see module doc's "Respond mode" section).
+    // for why persistence and finalization must not share this catch. Seam-
+    // agnostic: it never inspects which of the three seams (judge/respond/
+    // pairwise) produced the error — Tasks 7/8's retry/DLQ/claim machinery
+    // applies identically to all three (see module doc's "Respond mode"
+    // section).
     let judgeResult: JudgmentResult | null = null;
     let respondResult: RespondResult | null = null;
     let pairwiseResult: PairwiseJudgmentResult | null = null;

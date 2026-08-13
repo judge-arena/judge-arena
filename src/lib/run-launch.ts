@@ -231,7 +231,8 @@ export interface LaunchSingleRunParams {
    * caller is unchanged. `'listwise'` is rejected — storable and
    * annotatable, not runnable. */
   protocol?: RunProtocol;
-  /** A0: the comparison set for a pairwise run — exactly 2 entries.
+  /** A0: the comparison set for a pairwise run — exactly 2 entries, at
+   * distinct `position`s, each carrying `responseText` or `promptText`.
    * Written as `RunCandidate` rows inside the same transaction as the run,
    * because the worker reads the candidate text from there and NOT from the
    * evaluation (a pairwise pair has two responses; `Evaluation` has room
@@ -284,6 +285,40 @@ export async function launchSingleRun(
   }
   if (protocol === 'pointwise' && candidates.length > 0) {
     throw new RunLaunchError(400, 'A pointwise run takes no candidates.');
+  }
+  if (protocol === 'pairwise') {
+    // Both of these are caught HERE, at the launch layer, because both
+    // otherwise surface as something that describes the symptom instead of
+    // the cause — the same reason the count check above exists.
+    //
+    // Duplicate positions would hit `RunCandidate`'s
+    // @@unique([runId, position]) (schema.prisma:426) as a raw Prisma P2002
+    // escaping the create transaction, which the routes turn into a 500
+    // rather than a 400 about the candidates the caller actually sent.
+    const positions = candidates.map((candidate) => candidate.position);
+    if (new Set(positions).size !== positions.length) {
+      throw new RunLaunchError(
+        400,
+        `A pairwise run requires distinct candidate positions, got [${positions.join(', ')}].`
+      );
+    }
+    // Text-less candidates would pass every check up to and including the
+    // worker's own RunCandidate count guard, then throw inside
+    // `buildPairwiseUserPrompt` (src/lib/llm/render.ts) as a `non_retryable`
+    // "Failed to render judgment prompt" — a rendering failure standing in
+    // for "this run was launched with an empty candidate". The
+    // `responseText ?? promptText` precedence (and `??`, not `||`) mirrors
+    // render.ts's `candidateText` exactly, so this check and the renderer
+    // can never disagree about which candidates are empty.
+    const blank = candidates
+      .filter((candidate) => !(candidate.responseText ?? candidate.promptText ?? '').trim())
+      .map((candidate) => candidate.position);
+    if (blank.length > 0) {
+      throw new RunLaunchError(
+        400,
+        `Every pairwise candidate must carry responseText or promptText — position(s) [${blank.join(', ')}] are empty.`
+      );
+    }
   }
 
   // A pairwise run is ALWAYS judge-mode. `deriveRunMode` keys on
