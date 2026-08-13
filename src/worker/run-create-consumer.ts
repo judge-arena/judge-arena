@@ -243,6 +243,14 @@ export function createRunCreateConsumer(): RunCreateConsumer {
             judgeModelVersionId: sel.judgeModelVersionId,
             modelConfigId: sel.modelConfigId,
             promptTemplateId,
+            // A0: pairOrder written explicitly from the message's protocol,
+            // never left to a default — 'AB' for pairwise, NULL for
+            // pointwise, matching the NULLS NOT DISTINCT
+            // @@unique([runId, judgeModelVersionId, pairOrder]). Same rule
+            // run-launch.ts applies; both writers must agree or the same
+            // (run, judge) pair means two different things depending on
+            // which path created it.
+            pairOrder: msg.runSpec.protocol === 'pairwise' ? 'AB' : null,
             status: 'pending' as const,
           })),
           skipDuplicates: true,

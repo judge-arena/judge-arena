@@ -72,7 +72,7 @@
  * `202` with a per-item status instead of either an all-or-nothing error or
  * a `runsQueued` count that silently under-reports failures.
  */
-import type { Prisma } from '@prisma/client';
+import type { Prisma, RunProtocol } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { deriveRunMode } from '@/lib/run-mode';
 import { logger } from '@/lib/logger';
@@ -162,14 +162,17 @@ export const runDetailInclude = {
 
 export type RunDetail = Prisma.EvaluationRunGetPayload<{ include: typeof runDetailInclude }>;
 
-async function resolveCurrentPromptTemplate() {
-  // "Current" = highest version for the pointwise protocol — same query as
-  // src/worker/run-create-consumer.ts's resolveCurrentPromptTemplate, kept
-  // as a local duplicate (that file lives under src/worker/, importing a
-  // web-tier lib from it — or vice versa — would be the wrong direction of
-  // coupling for what is a two-line query).
+async function resolveCurrentPromptTemplate(protocol: RunProtocol) {
+  // "Current" = highest version FOR THIS PROTOCOL — same query as
+  // src/worker/run-create-consumer.ts's resolveCurrentPromptTemplate (which
+  // has taken a protocol argument since Task 9b), kept as a local duplicate
+  // (that file lives under src/worker/, importing a web-tier lib from it —
+  // or vice versa — would be the wrong direction of coupling for what is a
+  // two-line query). A0: the `'pointwise'` literal that used to be hardcoded
+  // here is what made the seeded `v1-pairwise` row unreachable from the web
+  // tier.
   return prisma.promptTemplate.findFirst({
-    where: { protocol: 'pointwise' },
+    where: { protocol },
     orderBy: { version: 'desc' },
   });
 }
@@ -203,6 +206,17 @@ async function requireOwnedActiveEndpoints(userId: string, versionIds: string[])
 
 // ─── launchSingleRun ────────────────────────────────────────────────────────
 
+/** One `RunCandidate` row to create alongside the run — the discrete
+ * candidates a pairwise/listwise comparison is over (schema.prisma:417-427,
+ * which had zero writers before A0). Mirrors `GoldenCandidate` field for
+ * field, so a golden item's candidates map onto a run's with no reshaping. */
+export interface LaunchRunCandidateInput {
+  position: number;
+  promptText?: string | null;
+  responseText?: string | null;
+  label?: string | null;
+}
+
 export interface LaunchSingleRunParams {
   evaluationId: string;
   triggeredById: string;
@@ -213,6 +227,16 @@ export interface LaunchSingleRunParams {
    * no version id to fall back to and are simply skipped; see the Task 12
    * report for that documented, accepted limitation). */
   judgeModelVersionIds?: string[];
+  /** A0: the run's protocol. Defaults to `'pointwise'` so every existing
+   * caller is unchanged. `'listwise'` is rejected — storable and
+   * annotatable, not runnable. */
+  protocol?: RunProtocol;
+  /** A0: the comparison set for a pairwise run — exactly 2 entries.
+   * Written as `RunCandidate` rows inside the same transaction as the run,
+   * because the worker reads the candidate text from there and NOT from the
+   * evaluation (a pairwise pair has two responses; `Evaluation` has room
+   * for one). */
+  candidates?: LaunchRunCandidateInput[];
 }
 
 export interface LaunchSingleRunDeps {
@@ -243,7 +267,33 @@ export async function launchSingleRun(
   });
   if (!evaluation) throw new RunLaunchError(404, 'Evaluation not found');
 
-  const mode = deriveRunMode(evaluation.responseText);
+  const protocol: RunProtocol = params.protocol ?? 'pointwise';
+  if (protocol === 'listwise') {
+    throw new RunLaunchError(
+      400,
+      'Listwise runs are not executable. A listwise golden set is storable and annotatable in A0, not runnable — there is no listwise renderer.'
+    );
+  }
+
+  const candidates = params.candidates ?? [];
+  if (protocol === 'pairwise' && candidates.length !== 2) {
+    throw new RunLaunchError(
+      400,
+      `A pairwise run requires exactly 2 candidates, got ${candidates.length}.`
+    );
+  }
+  if (protocol === 'pointwise' && candidates.length > 0) {
+    throw new RunLaunchError(400, 'A pointwise run takes no candidates.');
+  }
+
+  // A pairwise run is ALWAYS judge-mode. `deriveRunMode` keys on
+  // `Evaluation.responseText`, which is empty for a pairwise run BY
+  // CONSTRUCTION — the two responses live on `RunCandidate`, not on the
+  // evaluation — so deriving unconditionally would classify every pairwise
+  // run as 'respond', skip both the rubric requirement AND the
+  // PromptTemplate resolution, and publish judgments the worker cannot
+  // render.
+  const mode = protocol === 'pointwise' ? deriveRunMode(evaluation.responseText) : 'judge';
 
   const rubricId = params.rubricId ?? evaluation.rubricId ?? null;
   if (mode === 'judge' && !rubricId) {
@@ -283,9 +333,9 @@ export async function launchSingleRun(
   // one) — only judge-mode runs resolve+require a PromptTemplate row.
   let promptTemplateId: string | null = null;
   if (mode === 'judge') {
-    const promptTemplate = await resolveCurrentPromptTemplate();
+    const promptTemplate = await resolveCurrentPromptTemplate(protocol);
     if (!promptTemplate) {
-      throw new RunLaunchError(500, 'No PromptTemplate found for protocol "pointwise"');
+      throw new RunLaunchError(500, `No PromptTemplate found for protocol "${protocol}"`);
     }
     promptTemplateId = promptTemplate.id;
   }
@@ -299,10 +349,25 @@ export async function launchSingleRun(
       data: {
         evaluationId: params.evaluationId,
         rubricId: rubric?.id ?? null,
-        protocol: 'pointwise',
+        protocol,
         status: 'pending',
         deadlineAt,
         triggeredById: params.triggeredById,
+        // RunCandidate rows are created in the SAME transaction as the run.
+        // A pairwise run whose candidates land in a second write can be
+        // observed — and claimed by a worker — with a complete-looking run
+        // and no comparison set.
+        runCandidates:
+          candidates.length > 0
+            ? {
+                create: candidates.map((candidate) => ({
+                  position: candidate.position,
+                  promptText: candidate.promptText ?? null,
+                  responseText: candidate.responseText ?? null,
+                  label: candidate.label ?? null,
+                })),
+              }
+            : undefined,
         runModelSelections: {
           create: selectedVersionIds.map((judgeModelVersionId) => ({ judgeModelVersionId })),
         },
@@ -310,6 +375,16 @@ export async function launchSingleRun(
           create: selectedVersionIds.map((judgeModelVersionId) => ({
             judgeModelVersionId, // modelConfigId intentionally left null — see module doc
             promptTemplateId,
+            // pairOrder is written EXPLICITLY on every judgment, never left
+            // to a default: 'AB' for the single order A0 emits, NULL for
+            // pointwise, which is what the existing
+            // @@unique([runId, judgeModelVersionId, pairOrder]) —
+            // hand-edited NULLS NOT DISTINCT in
+            // 20260728215410_v2b_idempotency_tighten — assumes. That is
+            // what makes A2's BA sweep additive: a second judgment per pair,
+            // no migration, no backfill, and no ambiguity about what the
+            // existing rows measured.
+            pairOrder: protocol === 'pairwise' ? 'AB' : null,
             status: 'pending' as const,
           })),
         },
@@ -465,6 +540,12 @@ export async function launchBulkRunCreates(
           rubricId: rubricId ?? undefined,
           modelSelections,
           triggeredById,
+          // Explicitly pointwise, now against a `RunProtocol`-typed field
+          // rather than a literal one. The bulk path stays pointwise in A0
+          // ON PURPOSE: `RunCreateMsg` carries no candidate set, so a
+          // pairwise bulk launch would expand into judgments with no
+          // comparison to make. Pairwise runs go through `launchSingleRun`,
+          // which writes RunCandidate rows transactionally with the run.
           protocol: 'pointwise',
         },
       };

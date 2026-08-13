@@ -116,12 +116,13 @@ import {
   type JudgmentExecuteMsg,
 } from '@/lib/queue/publish';
 import { classify } from '@/lib/llm/errors';
-import { executeJudgment, executeRespond } from '@/lib/llm';
+import { executeJudgment, executeRespond, executePairwise } from '@/lib/llm';
 import type {
   RunProviderJudgmentInput as RegistryJudgmentInput,
   JudgmentResult as RegistryJudgmentResult,
   RunProviderResponseInput as RegistryResponseInput,
   RespondResult as RegistryRespondResult,
+  PairwiseResult as RegistryPairwiseResult,
   SamplingParams,
 } from '@/lib/llm';
 import { maybeFinalizeRun } from '@/lib/run-finalizer';
@@ -153,6 +154,10 @@ function judgmentContextQuery(judgmentId: string) {
         include: {
           evaluation: { select: { inputText: true, promptText: true, responseText: true } },
           rubric: { include: { criteria: { orderBy: { order: 'asc' as const } } } },
+          // A0: the pairwise comparison set. Ordered by `position` here so
+          // the presented order ('AB') is a property of the QUERY, not of
+          // whatever order Postgres happened to return.
+          runCandidates: { orderBy: { position: 'asc' as const } },
         },
       },
       judgeModelVersion: { include: { judgeModel: true } },
@@ -279,6 +284,67 @@ export const defaultRunProviderResponse: RespondProviderFn = async (input) => {
   };
 
   const result: RegistryRespondResult = await executeRespond(registryInput);
+  return result;
+};
+
+// ─── The pairwise provider seam (A0) ─────────────────────────────────────────
+
+export interface RunProviderPairwiseInput {
+  judgment: JudgmentContext;
+  run: RunWithEvaluation;
+  rubric: RubricWithCriteria;
+  version: VersionWithJudgeModel;
+  endpoint: ModelEndpoint;
+}
+
+/** Pairwise mirror of `JudgmentResult`/`RespondResult` — same "looser local
+ * type, strict registry type is a subtype" rationale. A pairwise judge
+ * emits a preference, so there is no `overallScore` and no
+ * `criteriaScores`. */
+export interface PairwiseJudgmentResult {
+  verdict: 'A' | 'B' | 'tie';
+  reasoning: string;
+  rawResponse: string;
+  latencyMs: number;
+  tokenCount?: number;
+  servedModelId?: string;
+  finishReason?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  samplingParamsUsed?: SamplingParams;
+}
+
+export type PairwiseProviderFn = (input: RunProviderPairwiseInput) => Promise<PairwiseJudgmentResult>;
+
+/** Default `runProviderPairwise` — the pairwise mirror of
+ * `defaultRunProviderJudgment`. The two candidate texts come from
+ * `run.runCandidates` (NOT from the evaluation: a pair has two responses
+ * and `Evaluation` has room for one), and the judgment's pinned
+ * `PromptTemplate` is the seeded `v1-pairwise` row, whose `protocol` is
+ * what drives `render.ts`'s branch into the A-vs-B user prompt. */
+export const defaultRunProviderPairwise: PairwiseProviderFn = async (input) => {
+  const { run, rubric, version, endpoint, judgment } = input;
+
+  const registryInput: RegistryJudgmentInput = {
+    judgeVersion: version,
+    endpoint,
+    // Guarded by the consumer's own promptTemplate check before this seam
+    // is ever called (see `handle()` below).
+    template: judgment.promptTemplate!,
+    rubric: { name: rubric.name, description: rubric.description, criteria: rubric.criteria },
+    submission: {
+      inputText: run.evaluation.inputText,
+      promptText: run.evaluation.promptText ?? undefined,
+      candidates: run.runCandidates.map((candidate) => ({
+        position: candidate.position,
+        promptText: candidate.promptText,
+        responseText: candidate.responseText,
+        label: candidate.label,
+      })),
+    },
+  };
+
+  const result: RegistryPairwiseResult = await executePairwise(registryInput);
   return result;
 };
 
@@ -421,6 +487,36 @@ async function persistRespondSuccess(
 }
 
 /**
+ * Pairwise mirror of `persistSuccess`. `verdict` is stored RAW, as the
+ * model said it, against the `pairOrder` the model was SHOWN — which
+ * `run-launch.ts`/`run-create-consumer.ts` already wrote at creation time
+ * and which this function deliberately does not touch. Which sample was
+ * preferred is derived from (verdict, pairOrder) at read time; encoding it
+ * here would make A2's BA sweep a backfill instead of an insert (A0 design
+ * doc, decision #4).
+ *
+ * `overallScore` stays NULL and `criteriaScores` stays `Prisma.DbNull`:
+ * a preference is not a score, and a fabricated 0 would be consumed by
+ * every downstream average as though it were one.
+ */
+async function persistPairwiseSuccess(
+  judgmentId: string,
+  result: PairwiseJudgmentResult,
+  version: VersionWithJudgeModel
+): Promise<void> {
+  await prisma.modelJudgment.update({
+    where: { id: judgmentId },
+    data: {
+      ...commonSuccessUpdateData(result, version),
+      overallScore: null,
+      reasoning: result.reasoning,
+      criteriaScores: Prisma.DbNull,
+      verdict: result.verdict,
+    },
+  });
+}
+
+/**
  * `maybeFinalizeRun` (src/lib/run-finalizer.ts — the real, `SELECT ... FOR
  * UPDATE`-locked, concurrency-safe finalization pass), isolated in its own
  * try/catch. A finalization failure must never propagate into the
@@ -535,6 +631,14 @@ export type PersistRespondFn = (
   version: VersionWithJudgeModel
 ) => Promise<void>;
 
+/** `persistPairwiseSuccess`'s signature — the pairwise mirror of
+ * `PersistFn`, constructor-injectable the same way. */
+export type PersistPairwiseFn = (
+  judgmentId: string,
+  result: PairwiseJudgmentResult,
+  version: VersionWithJudgeModel
+) => Promise<void>;
+
 export interface JudgmentConsumerOptions {
   /** Constructor-injected judge-mode provider seam — defaults to
    * `defaultRunProviderJudgment`. Tests inject a fake to assert exactly-once
@@ -552,6 +656,12 @@ export interface JudgmentConsumerOptions {
   /** Constructor-injected respond-mode persist seam (Task 9b) — defaults to
    * `persistRespondSuccess`. Same rationale as `persist`. */
   persistRespond?: PersistRespondFn;
+  /** Constructor-injected pairwise provider seam (A0) — defaults to
+   * `defaultRunProviderPairwise`. Same rationale as `provider`. */
+  providerPairwise?: PairwiseProviderFn;
+  /** Constructor-injected pairwise persist seam (A0) — defaults to
+   * `persistPairwiseSuccess`. Same rationale as `persist`. */
+  persistPairwise?: PersistPairwiseFn;
 }
 
 export interface JudgmentConsumer {
@@ -563,6 +673,8 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
   const providerResponse = options.providerResponse ?? defaultRunProviderResponse;
   const persist = options.persist ?? persistSuccess;
   const persistRespond = options.persistRespond ?? persistRespondSuccess;
+  const providerPairwise = options.providerPairwise ?? defaultRunProviderPairwise;
+  const persistPairwise = options.persistPairwise ?? persistPairwiseSuccess;
 
   async function handle(raw: ConsumeMessage, ch: Channel): Promise<void> {
     const msg = JSON.parse(raw.content.toString()) as JudgmentExecuteMsg;
@@ -619,18 +731,31 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
       return;
     }
 
-    // Mode derivation (Task 9b) — v1's exact `responseText?.trim() ?
-    // 'judge' : 'respond'` rule, shared via src/lib/run-mode.ts so this
-    // worker and the human-judgment route never disagree about which mode
-    // a run is in. `responseText` is already loaded by
-    // `judgmentContextQuery` — no extra query needed.
-    const mode = deriveRunMode(context.run.evaluation.responseText);
+    // A0: protocol first, mode second. `EvaluationRun.protocol` decides
+    // WHICH seam runs; `deriveRunMode` only ever decides judge-vs-respond
+    // WITHIN pointwise. A pairwise run has no `Evaluation.responseText` by
+    // construction (its two responses live on RunCandidate), so deriving
+    // unconditionally would route every pairwise judgment to the respond
+    // seam and generate text instead of comparing anything.
+    const protocol = context.run.protocol;
+
+    if (protocol === 'listwise') {
+      await markJudgmentError(
+        msg.judgmentId,
+        'Listwise runs are not executable — a listwise set is storable and annotatable, not runnable'
+      );
+      await safeFinalizeRun(msg.runId);
+      ch.ack(raw);
+      return;
+    }
+
+    const mode = protocol === 'pointwise' ? deriveRunMode(context.run.evaluation.responseText) : 'judge';
     const rubric = context.run.rubric ?? null;
 
     if (mode === 'judge' && !rubric) {
       await markJudgmentError(
         msg.judgmentId,
-        'EvaluationRun has no rubric — cannot build a pointwise judgment prompt'
+        `EvaluationRun has no rubric — cannot build a ${protocol} judgment prompt`
       );
       await safeFinalizeRun(msg.runId);
       ch.ack(raw);
@@ -648,6 +773,20 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
       await markJudgmentError(
         msg.judgmentId,
         'ModelJudgment has no promptTemplateId set — cannot render a judgment prompt'
+      );
+      await safeFinalizeRun(msg.runId);
+      ch.ack(raw);
+      return;
+    }
+
+    // A0: the comparison set is a hard precondition for a pairwise call.
+    // Without it, `buildPairwiseUserPrompt` would throw inside
+    // `prepareJudgmentCall` and surface as a rendering failure, which is a
+    // far worse description of "this run was created without candidates".
+    if (protocol === 'pairwise' && context.run.runCandidates.length !== 2) {
+      await markJudgmentError(
+        msg.judgmentId,
+        `Pairwise run has ${context.run.runCandidates.length} RunCandidate rows — exactly 2 are required`
       );
       await safeFinalizeRun(msg.runId);
       ch.ack(raw);
@@ -673,8 +812,17 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
     // both (see module doc's "Respond mode" section).
     let judgeResult: JudgmentResult | null = null;
     let respondResult: RespondResult | null = null;
+    let pairwiseResult: PairwiseJudgmentResult | null = null;
     try {
-      if (mode === 'judge') {
+      if (protocol === 'pairwise') {
+        pairwiseResult = await providerPairwise({
+          judgment: context,
+          run: context.run,
+          rubric: rubric!, // non-null — pairwise is always mode 'judge', guarded above
+          version: judgeModelVersion,
+          endpoint,
+        });
+      } else if (mode === 'judge') {
         judgeResult = await provider({
           judgment: context,
           run: context.run,
@@ -743,13 +891,17 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
     // it must never reset the judgment to 'pending' and trigger a
     // re-execution of a provider call that already succeeded.
     const persisted =
-      mode === 'judge'
-        ? await persistSuccessWithRetry(msg, judgeResult!, () =>
-            persist(msg.judgmentId, judgeResult!, judgeModelVersion)
+      protocol === 'pairwise'
+        ? await persistSuccessWithRetry(msg, pairwiseResult!, () =>
+            persistPairwise(msg.judgmentId, pairwiseResult!, judgeModelVersion)
           )
-        : await persistSuccessWithRetry(msg, respondResult!, () =>
-            persistRespond(msg.judgmentId, respondResult!, judgeModelVersion)
-          );
+        : mode === 'judge'
+          ? await persistSuccessWithRetry(msg, judgeResult!, () =>
+              persist(msg.judgmentId, judgeResult!, judgeModelVersion)
+            )
+          : await persistSuccessWithRetry(msg, respondResult!, () =>
+              persistRespond(msg.judgmentId, respondResult!, judgeModelVersion)
+            );
     if (!persisted) {
       // Retry budget exhausted — already logged fatally and DLQ'd (with
       // the full result) inside persistSuccessWithRetry. Row intentionally

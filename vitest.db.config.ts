@@ -66,10 +66,21 @@ export default defineConfig({
       // The ratchet is preserved by RE-BASELINING UPWARD when actuals rise
       // materially — not by pinning to the last measurement.
       //
-      // Actuals as of 2026-08-12 (stmts/branch/funcs/lines), measured on the
-      // run that added tests/db/background-writes.test.ts:
-      //   all-files            47.41 / 81.04 / 60.43 / 47.41
-      //   auth-guard.ts        86.36 / 80.95 / 91.66 / 86.36
+      // Actuals as of 2026-08-13 (stmts/branch/funcs/lines), re-measured in
+      // Task 12 (a0). The previous set recorded here (47.41 / 81.04 / 60.43,
+      // auth-guard 86.36 / 80.95 / 91.66) predated Tasks 9b-11 and was already
+      // stale before Task 12 touched anything — measured at Task 12's parent
+      // commit, all-files was 49.37 / 79.22 / 61.82. Task 12 itself moved only
+      // statements/lines (49.37 -> 48.67), and only by growing the denominator:
+      // it added statements to src/worker/judgment-consumer.ts, which this run
+      // never imports. Prose only — no threshold below was touched.
+      //
+      // NOTE for the end-of-branch re-baseline: the branches actual (79.37)
+      // sits ~0.4pp above its floor of 79, not the -2pp this file's own policy
+      // calls for. That margin predates Task 12 (79.22 at its parent commit);
+      // flagged here rather than fixed, since floors are frozen mid-branch.
+      //   all-files            48.67 / 79.37 / 61.82 / 48.67
+      //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
       //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
       thresholds: {
         lines: 45,

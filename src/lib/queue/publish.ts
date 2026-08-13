@@ -24,6 +24,7 @@ import {
   QUEUE_RUN_CREATE,
 } from './topology';
 import type { ConfirmChannel } from 'amqplib';
+import type { RunProtocol } from '@prisma/client';
 
 export interface JudgmentExecuteMsg {
   judgmentId: string;
@@ -53,7 +54,15 @@ export interface RunCreateMsg {
      */
     modelSelections: Array<{ judgeModelVersionId: string; modelConfigId: string | null }>;
     triggeredById: string;
-    protocol: 'pointwise';
+    /**
+     * A0: widened from the literal `'pointwise'` to the real enum.
+     * `run-create-consumer.ts` already used this field for BOTH the
+     * `EvaluationRun.protocol` column and its `resolveCurrentPromptTemplate`
+     * lookup — the literal type was the only thing keeping either from
+     * seeing a second protocol. `pairOrder` on every expanded
+     * `ModelJudgment` is now derived from it too.
+     */
+    protocol: RunProtocol;
   };
 }
 
