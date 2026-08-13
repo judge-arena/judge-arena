@@ -108,6 +108,51 @@ const FULL_CONFIG = {
       ],
     },
   ],
+  goldenSets: [
+    {
+      slug: 'gs-alpha',
+      name: 'Golden Set Alpha',
+      description: 'golden set description, populated on purpose',
+      visibility: 'private' as const,
+      protocol: 'pairwise' as const,
+      datasetSlug: 'ds-alpha',
+      version: 1,
+      items: [
+        {
+          index: 0,
+          // MUST equal a DatasetSample.input of ds-alpha above. The importer
+          // re-resolves GoldenItem.sourceDatasetSampleId (required,
+          // onDelete: Restrict) by content, because a sample id is
+          // instance-local — see that column's COVERAGE entry. Change one of
+          // these strings without the other and the set is skipped, not
+          // errored.
+          inputText: 'input zero',
+          // Item-level promptText/responseText are null for every JudgeBench
+          // mapping; populated here anyway because this fixture measures
+          // FIDELITY, and a field nobody sets is a field nobody notices
+          // being dropped.
+          promptText: 'item prompt zero',
+          responseText: 'item response zero',
+          expected: 'A>B',
+          candidates: [
+            { position: 0, promptText: 'cand prompt a0', responseText: 'cand response a0', label: 'A' },
+            { position: 1, promptText: 'cand prompt b0', responseText: 'cand response b0', label: 'B' },
+          ],
+        },
+        {
+          index: 1,
+          inputText: 'input one',
+          promptText: 'item prompt one',
+          responseText: 'item response one',
+          expected: 'B>A',
+          candidates: [
+            { position: 0, promptText: 'cand prompt a1', responseText: 'cand response a1', label: 'A' },
+            { position: 1, promptText: 'cand prompt b1', responseText: 'cand response b1', label: 'B' },
+          ],
+        },
+      ],
+    },
+  ],
 };
 
 const EXPORT_QUERY = '?format=json&include=all&includeSamples=true';
@@ -158,6 +203,15 @@ function normalize(doc: Record<string, any>): Record<string, any> {
         ? [...d.samples].sort((a: any, b: any) => a.index - b.index)
         : d.samples,
     })),
+    goldenSets: [...(doc.goldenSets ?? [])].sort(bySlug).map((g: any) => ({
+      ...g,
+      items: [...(g.items ?? [])]
+        .sort((a: any, b: any) => a.index - b.index)
+        .map((i: any) => ({
+          ...i,
+          candidates: [...(i.candidates ?? [])].sort((a: any, b: any) => a.position - b.position),
+        })),
+    })),
   };
 }
 
@@ -181,6 +235,7 @@ describe('Config export/import — fidelity, not just idempotency', () => {
     expect(exported.rubrics, 'rubrics lost data on round-trip').toEqual(expected.rubrics);
     expect(exported.models, 'models lost data on round-trip').toEqual(expected.models);
     expect(exported.datasets, 'datasets lost data on round-trip').toEqual(expected.datasets);
+    expect(exported.goldenSets, 'golden sets lost data on round-trip').toEqual(expected.goldenSets);
   });
 
   it('a config exported from one instance reproduces byte-identical state on a fresh instance', async () => {
@@ -207,20 +262,31 @@ describe('Config export/import — fidelity, not just idempotency', () => {
     const doc = await exportDoc();
     await importDoc(doc);
 
-    const [projects, rubrics, datasets, samples, endpoints] = await Promise.all([
-      db.project.count({ where: { userId: user.id } }),
-      db.rubric.count({ where: { userId: user.id } }),
-      db.dataset.count({ where: { userId: user.id } }),
-      db.datasetSample.count(),
-      db.modelEndpoint.count({ where: { userId: user.id } }),
-    ]);
+    const [projects, rubrics, datasets, samples, endpoints, goldenSets, goldenItems, goldenCandidates] =
+      await Promise.all([
+        db.project.count({ where: { userId: user.id } }),
+        db.rubric.count({ where: { userId: user.id } }),
+        db.dataset.count({ where: { userId: user.id } }),
+        db.datasetSample.count(),
+        db.modelEndpoint.count({ where: { userId: user.id } }),
+        // GoldenSet keys ownership on ownerId, not userId.
+        db.goldenSet.count({ where: { ownerId: user.id } }),
+        db.goldenItem.count(),
+        db.goldenCandidate.count(),
+      ]);
 
-    expect({ projects, rubrics, datasets, samples, endpoints }).toEqual({
+    expect({ projects, rubrics, datasets, samples, endpoints, goldenSets, goldenItems, goldenCandidates }).toEqual({
       projects: 1,
       rubrics: 1,
       datasets: 1,
       samples: 2,
       endpoints: 1,
+      // A second import must find the set by (ownerId, slug) and skip it.
+      // 2 here instead of 1 means the slug match failed; 4 items means the
+      // update path recreated instead of matching.
+      goldenSets: 1,
+      goldenItems: 2,
+      goldenCandidates: 4,
     });
   });
 });
@@ -231,6 +297,15 @@ describe('Config export/import — fidelity, not just idempotency', () => {
 // covers must be classified. `exported` means it appears in the document;
 // `excludedByDesign` means it deliberately does not, with a reason;
 // `knownGaps` means it SHOULD round-trip and does not yet.
+//
+// A name MAY appear in both `exported` and `knownGaps` at once — that is not
+// a double-claim, it is a narrower one: the column IS structurally exported,
+// but a caveat about it is recorded. See GoldenItem.index: the column round-
+// trips, but its VALUES are not stable across a replace-after-tombstone
+// import, which is a different claim than "not exported at all".
+// `excludedByDesign` may not overlap with either of the other two buckets —
+// "never exported by design" is not compatible with being exported or being
+// a gap in what's exported.
 //
 // knownGaps is not a suppression list — the test asserts its exact contents, so
 // a gap cannot be added or quietly fixed without updating this file.
@@ -245,6 +320,19 @@ const SURROGATE = 'surrogate key, meaningless across instances';
 const OWNER = 'owner is the importing session, never carried in the document';
 const TIMESTAMP = 'server-assigned on write';
 const PUBLICATION = 'publication state is instance-scoped: you cannot carry "published on the hosted board" to your own instance';
+// GoldenLabel.annotatorId is a real User FK, nullable via `onDelete: SetNull`
+// since it was introduced in 20260725012218_v2_meta_eval. Uniqueness on it is
+// per-LIVE-label, not whole-table: the hand-written partial index
+// GoldenLabel_goldenItemId_annotatorId_live_key (WHERE "tombstonedAt" IS
+// NULL, added by 20260813120000_v2e_golden_item_label_tombstones) replaced
+// `@@unique([goldenItemId, annotatorId])`, because a tombstoned label would
+// otherwise occupy its annotator's slot forever and block re-annotation —
+// see that migration's own comment. That change is about re-annotation, not
+// portability; it does not touch the argument below.
+const ANNOTATION =
+  'human annotations do not round-trip: GoldenLabel.annotatorId is a real User FK with no portable representation, and the importer attributes everything to session.user.id (src/app/api/config/import/route.ts:216). Carrying a label across instances would forge an attribution — an annotator would be recorded as having scored text they never saw.';
+const HOMOGENEOUS =
+  'the set is homogeneous: GoldenSet.protocol is the single source of truth and import stamps every item with it';
 
 const COVERAGE: Record<string, Coverage> = {
   Project: {
@@ -330,6 +418,86 @@ const COVERAGE: Record<string, Coverage> = {
     },
     knownGaps: {},
   },
+
+  GoldenSet: {
+    exported: [
+      'slug',
+      'name',
+      'description',
+      'visibility',
+      'protocol',
+      'version',
+      'datasetId', // emitted as `datasetSlug`
+    ],
+    excludedByDesign: {
+      id: SURROGATE,
+      ownerId: OWNER,
+      createdAt: TIMESTAMP,
+      updatedAt: TIMESTAMP,
+      publishedAt: PUBLICATION,
+      retiredAt:
+        'retire state is a product verb meaning "out of circulation on THIS instance"; carrying it would let a re-import silently resurrect a retired set, and a retired set is not part of a portable working set',
+      tombstonedAt:
+        'account-lifecycle state, pending purge — never user intent, and a tombstoned set must not come back through a config file',
+    },
+    knownGaps: {
+      parentId:
+        'golden set version LINEAGE does not round-trip. ConfigGoldenSet carries `version` but not the parent link, so exporting v1+v2 yields two independent root sets on import. Same defect as Rubric.parentId and Dataset.parentId, and the same fix would close all three.',
+    },
+  },
+
+  GoldenItem: {
+    exported: ['index', 'inputText', 'promptText', 'responseText', 'expected'],
+    excludedByDesign: {
+      id: SURROGATE,
+      goldenSetId: 'implied by document nesting',
+      protocol: HOMOGENEOUS,
+      sourceDatasetSampleId:
+        'a DatasetSample id is instance-local, so the FK itself is not portable. It is re-resolved on import from the set’s datasetSlug + this item’s inputText (which is DatasetSample.input verbatim for all three protocol mappings). Two samples with identical input collapse onto the lowest-index one — accepted, because the annotation is over the input text.',
+      createdAt: TIMESTAMP,
+      updatedAt: TIMESTAMP,
+      tombstonedAt:
+        'curation-lifecycle state, not user intent to preserve: the export query filters tombstoned items out before dbGoldenSetToConfig ever sees them (goldenItemLifecycleWhere(false) in src/app/api/config/export/route.ts), and a re-import must not resurrect an item its owner removed as live content. Same register as GoldenSet.tombstonedAt, different verb — GoldenSet’s is account-lifecycle (pending purge); an item’s is a product action (PATCH /api/golden-sets/[id]/items, or a config-import replace).',
+    },
+    knownGaps: {
+      index:
+        'index VALUES do not survive a re-import into a set that already has tombstoned items. Items are never re-packed (a tombstoned row keeps its ordinal), so a replace appends the document’s items above the set’s high-water mark rather than at 0..n-1 — the second export therefore emits shifted indices, stepping up by the item count on each export→edit→import cycle. Relative ORDER is preserved, which is what every consumer actually reads, and what the importer’s own create/update/skip comparison keys on; absolute values are not stable across a replace-after-tombstone. Note the cost is not only ordinal: a replace retires the set’s HUMAN ANNOTATIONS wholesale — every live GoldenLabel of the set is tombstoned with reason "config-import-replace", including labels on items whose content the document did not change, because the importer does not re-identify the document’s items against the existing rows. Re-importing a config is therefore not annotation-preserving, and a set that has been annotated should be edited through PATCH /api/golden-sets/[id]/items rather than round-tripped through a config document.',
+    },
+  },
+
+  GoldenCandidate: {
+    exported: ['position', 'promptText', 'responseText', 'label'],
+    excludedByDesign: {
+      id: SURROGATE,
+      goldenItemId: 'implied by document nesting',
+    },
+    knownGaps: {},
+  },
+
+  // Listed with an EMPTY `exported` array on purpose. GoldenLabel is inside
+  // the config document's blast radius — it hangs off GoldenItem, which the
+  // document does carry — and every one of its columns is deliberately
+  // absent. Recording that here rather than omitting the model means a new
+  // label column still fails this test until somebody decides, instead of
+  // slipping in under "we don't cover that table".
+  GoldenLabel: {
+    exported: [],
+    excludedByDesign: {
+      id: SURROGATE,
+      goldenItemId: 'implied by document nesting — except nothing is nested; see annotatorId',
+      annotatorId: ANNOTATION,
+      overallScore: ANNOTATION,
+      criteriaScores: ANNOTATION,
+      reasoning: ANNOTATION,
+      createdAt: TIMESTAMP,
+      updatedAt: TIMESTAMP,
+      tombstonedAt:
+        'same register as GoldenItem.tombstonedAt one level up: lifecycle state for a row that is not carried at all regardless of its state (see annotatorId) — even if labels round-tripped, a tombstoned label is retired on THIS instance (its item was edited, or a config import replaced the set) and must not come back live through an import elsewhere.',
+      tombstonedReason:
+        'not a timestamp, but the same argument: records WHY a label was retired ("item-content-edit" | "config-import-replace", src/lib/golden-sets.ts) on THIS instance. Instance-local audit trail for a row that never round-trips in the first place (see annotatorId) — carrying it across instances would misattribute a retirement event that happened here to an import that happened elsewhere.',
+    },
+    knownGaps: {},
+  },
 };
 
 describe('Config export/import — schema coverage', () => {
@@ -358,18 +526,30 @@ describe('Config export/import — schema coverage', () => {
           'quietly stopped being true.'
       ).toEqual([]);
 
-      // Nothing may be claimed in two buckets at once.
-      const seen = new Set<string>();
-      const dupes: string[] = [];
-      for (const name of [
-        ...spec.exported,
-        ...Object.keys(spec.excludedByDesign),
-        ...Object.keys(spec.knownGaps),
-      ]) {
-        if (seen.has(name)) dupes.push(name);
-        seen.add(name);
-      }
-      expect(dupes, `${modelName} classifies column(s) in more than one bucket`).toEqual([]);
+      // `excludedByDesign` may not overlap with `exported` or `knownGaps` —
+      // "never exported by design" contradicts being exported or being a gap
+      // in what's exported.
+      const excludedNames = Object.keys(spec.excludedByDesign);
+      const otherNames = new Set([...spec.exported, ...Object.keys(spec.knownGaps)]);
+      const excludedContradictions = excludedNames.filter((n) => otherNames.has(n)).sort();
+      expect(
+        excludedContradictions,
+        `${modelName} classifies column(s) as excludedByDesign together with exported/knownGaps`
+      ).toEqual([]);
+
+      // `exported` and `knownGaps` MAY share a name (see the comment above
+      // the `Coverage` type) — but a name may not appear twice within the
+      // SAME bucket, which is always a copy-paste mistake, not a claim.
+      const withinBucketDupes = (names: string[]) =>
+        names.filter((name, i) => names.indexOf(name) !== i);
+      expect(
+        withinBucketDupes(spec.exported),
+        `${modelName} lists the same column twice in exported`
+      ).toEqual([]);
+      expect(
+        withinBucketDupes(Object.keys(spec.knownGaps)),
+        `${modelName} lists the same column twice in knownGaps`
+      ).toEqual([]);
 
       // Every classified name must actually exist, so the lists cannot rot.
       const stale = [...classified].filter((c) => !columns.includes(c)).sort();
@@ -389,6 +569,15 @@ describe('Config export/import — schema coverage', () => {
     expect(actual).toEqual({
       Rubric: ['parentId'],
       Dataset: ['features', 'format', 'inputType', 'parentId', 'splits', 'version'],
+      // A0 adds the third instance of the same defect: version number
+      // round-trips, the parent link does not. Recorded, not fixed — closing
+      // it means teaching the importer to reconstruct a family from slugs,
+      // which is one change across all three models and not A0's.
+      GoldenSet: ['parentId'],
+      // Not the same defect as the above three: the column itself round-trips
+      // fine (see GoldenItem.exported); only its VALUES are unstable across a
+      // replace-after-tombstone import. See this entry's own text for why.
+      GoldenItem: ['index'],
     });
   });
 });
