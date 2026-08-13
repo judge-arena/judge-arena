@@ -396,23 +396,41 @@ describe('GET /api/golden-sets/[id]', () => {
     expect(body.protocol).toBe('pairwise');
   });
 
-  it('404s a retired or tombstoned set unless ?includeRetired=true', async () => {
+  it('404s a retired set unless ?includeRetired=true, and 404s a tombstoned one even WITH the flag', async () => {
     const owner = await mkUser();
-    const { goldenSet } = await mkGoldenSet(owner.id);
-    await db.goldenSet.update({ where: { id: goldenSet.id }, data: { retiredAt: new Date() } });
+    const { goldenSet: retired } = await mkGoldenSet(owner.id);
+    const { goldenSet: tombstoned } = await mkGoldenSet(owner.id);
+    await db.goldenSet.update({ where: { id: retired.id }, data: { retiredAt: new Date() } });
+    await db.goldenSet.update({
+      where: { id: tombstoned.id },
+      data: { tombstonedAt: new Date() },
+    });
 
     mockSessionFor(owner);
     const hidden = await getGoldenSet(
-      new Request(`http://localhost/api/golden-sets/${goldenSet.id}`),
-      { params: Promise.resolve({ id: goldenSet.id }) }
+      new Request(`http://localhost/api/golden-sets/${retired.id}`),
+      { params: Promise.resolve({ id: retired.id }) }
     );
     expect(hidden.status).toBe(404);
 
+    // The escape hatch is what keeps retire reversible: the owner has to be
+    // able to open a set they just retired, in order to un-retire or fork it.
     const shown = await getGoldenSet(
-      new Request(`http://localhost/api/golden-sets/${goldenSet.id}?includeRetired=true`),
-      { params: Promise.resolve({ id: goldenSet.id }) }
+      new Request(`http://localhost/api/golden-sets/${retired.id}?includeRetired=true`),
+      { params: Promise.resolve({ id: retired.id }) }
     );
     expect(shown.status).toBe(200);
+    const shownBody = await shown.json();
+    expect(shownBody.id).toBe(retired.id);
+    expect(shownBody.retiredAt).not.toBeNull();
+
+    // The asymmetry, and the half a retired-only fixture cannot see: no flag
+    // reaches a set pending purge.
+    const purgePending = await getGoldenSet(
+      new Request(`http://localhost/api/golden-sets/${tombstoned.id}?includeRetired=true`),
+      { params: Promise.resolve({ id: tombstoned.id }) }
+    );
+    expect(purgePending.status).toBe(404);
   });
 
   it('itemCount and the embedded items both exclude tombstoned rows', async () => {
@@ -665,6 +683,102 @@ describe('/api/golden-sets/[id]/items', () => {
       params: Promise.resolve({ id: priv.id }),
     });
     expect(closed.status).toBe(401);
+  });
+
+  it('GET 404s a RETIRED set without the flag and serves it with ?includeRetired=true, but never serves a TOMBSTONED one', async () => {
+    // If the detail route 404'd a retired set while this one still handed
+    // back its rows, the detail filter would be decoration — anything that
+    // wants the content just asks the other route.
+    const owner = await mkUser();
+    const { goldenSet: retired } = await mkGoldenSet(owner.id, { itemCount: 2 });
+    const { goldenSet: tombstoned } = await mkGoldenSet(owner.id, { itemCount: 2 });
+    await db.goldenSet.update({ where: { id: retired.id }, data: { retiredAt: new Date() } });
+    await db.goldenSet.update({
+      where: { id: tombstoned.id },
+      data: { tombstonedAt: new Date() },
+    });
+
+    mockSessionFor(owner);
+    const hidden = await getItems(
+      new Request(`http://localhost/api/golden-sets/${retired.id}/items`),
+      { params: Promise.resolve({ id: retired.id }) }
+    );
+    expect(hidden.status).toBe(404);
+
+    const shown = await getItems(
+      new Request(`http://localhost/api/golden-sets/${retired.id}/items?includeRetired=true`),
+      { params: Promise.resolve({ id: retired.id }) }
+    );
+    expect(shown.status).toBe(200);
+    expect((await shown.json()).data).toHaveLength(2);
+
+    const purgePending = await getItems(
+      new Request(`http://localhost/api/golden-sets/${tombstoned.id}/items?includeRetired=true`),
+      { params: Promise.resolve({ id: tombstoned.id }) }
+    );
+    expect(purgePending.status).toBe(404);
+  });
+
+  it('PATCH and DELETE refuse item edits on a RETIRED or TOMBSTONED set, and start working again once it is un-retired', async () => {
+    // Closes the gap Task 8 recorded: GET filtered lifecycle from the start,
+    // so a retired set's items were unreadable through the API and still
+    // freely editable through it.
+    const owner = await mkUser();
+    const { goldenSet } = await mkGoldenSet(owner.id, { itemCount: 2 });
+    const items = await db.goldenItem.findMany({
+      where: { goldenSetId: goldenSet.id },
+      orderBy: { index: 'asc' },
+    });
+    await db.goldenSet.update({ where: { id: goldenSet.id }, data: { retiredAt: new Date() } });
+
+    mockSessionFor(owner);
+    const editBody = { items: [{ id: items[0].id, expected: 'B>A' }] };
+    const patched = await patchItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'PATCH', editBody),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(patched.status).toBe(409);
+    expect((await patched.json()).error).toMatch(/retired/i);
+
+    const deleted = await deleteItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'DELETE', {
+        itemIds: [items[0].id],
+      }),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(deleted.status).toBe(409);
+
+    // Asserted on ROWS, not just on the status: a 409 that still wrote would
+    // be the worse bug of the two.
+    const untouched = await db.goldenItem.findUniqueOrThrow({ where: { id: items[0].id } });
+    expect(untouched.expected).toBe(items[0].expected);
+    expect(untouched.tombstonedAt).toBeNull();
+
+    // Un-retiring is the documented way back to editing, so the guard has to
+    // be a lifecycle gate rather than a permanent freeze. An unconditional
+    // refusal would pass every assertion above and fail this one.
+    await db.goldenSet.update({ where: { id: goldenSet.id }, data: { retiredAt: null } });
+    const relanded = await patchItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'PATCH', editBody),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(relanded.status).toBe(200);
+    expect(
+      (await db.goldenItem.findUniqueOrThrow({ where: { id: items[0].id } })).expected
+    ).toBe('B>A');
+
+    // A tombstoned set is refused on the same path, and there is no flag that
+    // un-tombstones it.
+    await db.goldenSet.update({
+      where: { id: goldenSet.id },
+      data: { tombstonedAt: new Date() },
+    });
+    const onTombstoned = await patchItems(
+      jsonRequest(`http://localhost/api/golden-sets/${goldenSet.id}/items`, 'PATCH', editBody),
+      { params: Promise.resolve({ id: goldenSet.id }) }
+    );
+    expect(onTombstoned.status).toBe(409);
+    expect((await onTombstoned.json()).error).toMatch(/tombstoned/i);
   });
 
   it('PATCH updates per-item expected on an uncalibrated set', async () => {

@@ -15,9 +15,12 @@ import {
   isGoldenSetFrozen,
   GoldenSetFrozenError,
   goldenItemLifecycleWhere,
+  goldenSetLifecycleWhere,
+  parseIncludeRetired,
   parseIncludeTombstoned,
   GOLDEN_LABEL_TOMBSTONE_REASON_CONTENT_EDIT,
 } from '@/lib/golden-sets';
+import type { Prisma } from '@prisma/client';
 import { updateGoldenItemsSchema, deleteGoldenItemsSchema } from '../../shared';
 
 // GET /api/golden-sets/[id]/items — this route HAS a GET, which
@@ -36,9 +39,17 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
       if (scopeCheck) return scopeCheck;
     }
 
-    const goldenSet = await prisma.goldenSet.findUnique({
-      where: { id: params.id },
-      select: { id: true, ownerId: true, visibility: true, retiredAt: true, tombstonedAt: true },
+    const { searchParams } = new URL(request.url);
+
+    // Same predicate as the detail route, in the same place (the `where`, not
+    // a post-fetch check), and for the same reason: if this route kept
+    // serving a retired set's 620 rows, the detail route's 404 would be
+    // decoration — anything wanting the content would just ask here instead.
+    const includeRetired = parseIncludeRetired(searchParams);
+
+    const goldenSet = await prisma.goldenSet.findFirst({
+      where: { id: params.id, ...goldenSetLifecycleWhere(includeRetired) },
+      select: { id: true, ownerId: true, visibility: true },
     });
     if (!goldenSet) {
       return NextResponse.json({ error: 'Golden set not found' }, { status: 404 });
@@ -50,14 +61,6 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
       goldenSet.visibility === 'public'
     );
     if ('error' in decision) return decision.error;
-
-    // Run AFTER the access decision so a private set still 401/403s rather
-    // than leaking "this id exists but is retired".
-    const { searchParams } = new URL(request.url);
-    const includeRetired = searchParams.get('includeRetired') === 'true';
-    if (!includeRetired && (goldenSet.retiredAt || goldenSet.tombstonedAt)) {
-      return NextResponse.json({ error: 'Golden set not found' }, { status: 404 });
-    }
 
     const { limit, cursor } = parsePaginationParams(searchParams);
     const pageArgs = buildPrismaPageArgs({ limit, cursor });
@@ -126,6 +129,11 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
 // as "whatever it was immediately before the edit at tombstonedAt". Closing
 // that means versioning item content, which belongs with the staged/published
 // dataset identity work, not here.
+//
+// ALSO LIFECYCLE-GUARDED, closing the gap recorded when this handler landed:
+// GET filtered `retiredAt`/`tombstonedAt` from the start and these verbs did
+// not, so a retired set's items were unreadable through the API and still
+// freely editable through it. See assertGoldenSetInCirculation below.
 export async function PATCH(request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
   const session = await requireAuth();
@@ -144,6 +152,7 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
       if (await isGoldenSetFrozen(tx, params.id)) {
         throw new GoldenSetFrozenError(params.id);
       }
+      await assertGoldenSetInCirculation(tx, params.id);
 
       const current = await tx.goldenItem.findMany({
         where: {
@@ -204,6 +213,9 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
         },
         { status: 409 }
       );
+    }
+    if (error instanceof GoldenSetNotInCirculationError) {
+      return notInCirculationResponse(error);
     }
     if (error instanceof ForeignItemError) {
       return NextResponse.json(
@@ -266,6 +278,7 @@ export async function DELETE(request: Request, props: { params: Promise<{ id: st
       if (await isGoldenSetFrozen(tx, params.id)) {
         throw new GoldenSetFrozenError(params.id);
       }
+      await assertGoldenSetInCirculation(tx, params.id);
 
       // NOT lifecycle-filtered, deliberately: an already-tombstoned id still
       // belongs to this set, so a retried DELETE must be an idempotent no-op
@@ -305,6 +318,9 @@ export async function DELETE(request: Request, props: { params: Promise<{ id: st
         { status: 409 }
       );
     }
+    if (error instanceof GoldenSetNotInCirculationError) {
+      return notInCirculationResponse(error);
+    }
     if (error instanceof ForeignItemError) {
       return NextResponse.json(
         { error: 'Some items do not belong to this golden set, or have been tombstoned' },
@@ -331,4 +347,87 @@ class ForeignItemError extends Error {
     super('Some items do not belong to this golden set, or have been tombstoned');
     this.name = 'ForeignItemError';
   }
+}
+
+/** Thrown when an item mutation targets a set that is out of circulation.
+ * Module-local for the same reason ForeignItemError is. */
+class GoldenSetNotInCirculationError extends Error {
+  readonly goldenSetId: string;
+  readonly state: 'retired' | 'tombstoned';
+
+  constructor(goldenSetId: string, state: 'retired' | 'tombstoned') {
+    super(
+      state === 'retired'
+        ? `Golden set ${goldenSetId} is retired: it is out of circulation, so its items are not ` +
+            'editable. Un-retire it, or fork it to a new version.'
+        : `Golden set ${goldenSetId} is tombstoned and pending purge; its items cannot be edited.`
+    );
+    this.name = 'GoldenSetNotInCirculationError';
+    this.goldenSetId = goldenSetId;
+    this.state = state;
+  }
+}
+
+/**
+ * Refuses an item mutation on a set `goldenSetLifecycleWhere` hides from every
+ * read path. Closes the gap recorded when PATCH/DELETE landed: GET filtered
+ * `retiredAt`/`tombstonedAt` and these verbs did not, so a retired set's
+ * items were unreadable through the API and still freely editable through it.
+ *
+ * IT DOES NOT ANSWER THE WAY GET DOES, on purpose. GET 404s, because an
+ * anonymous or stranger caller must not learn the id exists. These handlers
+ * sit past `requireOwnership`, so the only callers who reach here are the
+ * owner and an admin — both of whom already know — and a bare 404 to the
+ * owner of a set they can see in their own list under "Show retired" is
+ * confusing rather than protective. They get a 409 naming the state and the
+ * way out, the same shape `GoldenSetFrozenError` uses one line above.
+ *
+ * THERE IS DELIBERATELY NO ?includeRetired ESCAPE ON A WRITE. Retire is
+ * reversible, so the route back to editing is to un-retire (POST
+ * /api/golden-sets/[id]/retire with `{ retired: false }`) or to fork — both
+ * of which leave the decision on the row. A query flag would instead let an
+ * edit land silently on a set every read path reports as out of circulation.
+ * Tombstoned has no route back at all, by design.
+ *
+ * Takes the caller's transaction client for the same reason
+ * `isGoldenSetFrozen` does: read-then-write across a commit boundary is a
+ * race against a concurrent retire.
+ */
+async function assertGoldenSetInCirculation(
+  tx: Prisma.TransactionClient,
+  goldenSetId: string
+): Promise<void> {
+  const goldenSet = await tx.goldenSet.findUnique({
+    where: { id: goldenSetId },
+    select: { retiredAt: true, tombstonedAt: true },
+  });
+  // `tombstonedAt` is checked first: a set can carry both (account deletion
+  // retires a pinned set, DELETE tombstones), and pending-purge is the state
+  // with no way back, so it is the one worth reporting.
+  if (goldenSet?.tombstonedAt) {
+    throw new GoldenSetNotInCirculationError(goldenSetId, 'tombstoned');
+  }
+  if (goldenSet?.retiredAt) {
+    throw new GoldenSetNotInCirculationError(goldenSetId, 'retired');
+  }
+}
+
+/** The 409 body both mutating verbs return for an out-of-circulation set.
+ * `forkUrl` is offered for a RETIRED set only — forking a tombstoned one
+ * would mint a live copy of a set that is pending purge. */
+function notInCirculationResponse(error: GoldenSetNotInCirculationError) {
+  return NextResponse.json(
+    {
+      error: error.message,
+      goldenSetId: error.goldenSetId,
+      state: error.state,
+      ...(error.state === 'retired'
+        ? {
+            retireUrl: `/api/golden-sets/${error.goldenSetId}/retire`,
+            forkUrl: `/api/golden-sets/${error.goldenSetId}/fork`,
+          }
+        : {}),
+    },
+    { status: 409 }
+  );
 }

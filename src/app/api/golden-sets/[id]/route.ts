@@ -11,12 +11,17 @@ import {
 } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicGoldenSet } from '@/lib/serializers';
-import { isGoldenSetFrozen, GoldenSetFrozenError } from '@/lib/golden-sets';
+import {
+  isGoldenSetFrozen,
+  GoldenSetFrozenError,
+  goldenSetLifecycleWhere,
+  parseIncludeRetired,
+} from '@/lib/golden-sets';
 import { updateGoldenSetSchema, goldenSetInclude, goldenSetDetailInclude } from '../shared';
 
 // GET /api/golden-sets/[id] — public if visibility: 'public' (PII-stripped
-// via toPublicGoldenSet), else owner/admin only. Retired/tombstoned sets are
-// 404 unless ?includeRetired=true.
+// via toPublicGoldenSet), else owner/admin only. A retired set is 404 unless
+// ?includeRetired=true; a tombstoned one is 404 with or without it.
 export async function GET(request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
 
@@ -27,8 +32,25 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
       if (scopeCheck) return scopeCheck;
     }
 
-    const goldenSet = await prisma.goldenSet.findUnique({
-      where: { id: params.id },
+    // findUnique -> findFirst: the lifecycle predicate now rides in the same
+    // `where` as the id, which findUnique's unique-input type rejects. A
+    // retired or tombstoned set reads as "not found" rather than as a
+    // separate 410 — a caller who cannot see it does not need to learn that
+    // it exists — and ?includeRetired=true is the documented way back in for
+    // the retired half only.
+    //
+    // THIS REPLACES A POST-FETCH CHECK that ran after resolveResourceAccess,
+    // whose comment claimed the ordering kept a private set 401/403ing
+    // "rather than leaking this id exists but is retired". Filtering in the
+    // query is strictly LESS leaky, not more: a stranger asking for someone
+    // else's private retired set now gets 404, where the old order gave them
+    // a 403 that confirmed the id exists. The one behaviour that changed for
+    // a caller who can legitimately see the row is none — the owner's 404
+    // without the flag and 200 with it are both unchanged.
+    const includeRetired = parseIncludeRetired(new URL(request.url).searchParams);
+
+    const goldenSet = await prisma.goldenSet.findFirst({
+      where: { id: params.id, ...goldenSetLifecycleWhere(includeRetired) },
       include: goldenSetDetailInclude,
     });
 
@@ -42,13 +64,6 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
       goldenSet.visibility === 'public'
     );
     if ('error' in decision) return decision.error;
-
-    // Run AFTER the access decision so a private set still 401/403s rather
-    // than leaking "this id exists but is retired".
-    const includeRetired = new URL(request.url).searchParams.get('includeRetired') === 'true';
-    if (!includeRetired && (goldenSet.retiredAt || goldenSet.tombstonedAt)) {
-      return NextResponse.json({ error: 'Golden set not found' }, { status: 404 });
-    }
 
     if (decision.access === 'owner') {
       return NextResponse.json(goldenSet);
