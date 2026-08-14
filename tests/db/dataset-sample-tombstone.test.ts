@@ -484,6 +484,64 @@ describe('PUT /api/datasets/[id]/samples — tombstone-and-append (A1 Task 5)', 
     expect(after?.sampleCount).toBe(2);
   });
 
+  it('WRITES sampleCount, and writes the incoming length — not the stale value, not the row count', async () => {
+    // The `tx.dataset.update` that stores `sampleCount` is the one write in
+    // this handler the task was told to leave ALONE, and until this test it
+    // was the one write nothing pinned: both other PUT fixtures happen to
+    // replace an N-row corpus with N samples, so the value that was already
+    // stored is the value being asserted and DELETING the update outright
+    // leaves them green.
+    //
+    // The fixture breaks that coincidence by making all three candidate
+    // numbers distinct. Two live rows in, THREE samples out:
+    //
+    //   never written (stale fixture value) = 2  <- what deleting the write leaves
+    //   row count after the replace         = 5  <- 2 hidden + 3 appended
+    //   startIndex + n                      = 5  <- 2 + 3, the POST's old bug
+    //   data.samples.length                 = 3  <- the rule, and the live count
+    //
+    // The last two agree here BY CONSTRUCTION rather than by luck, and that is
+    // the property being pinned: after tombstone-and-append the live set IS
+    // the incoming document, so `data.samples.length` is already the live
+    // count. That is why the write must not be "fixed" to count rows.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await mkCorpus(user.id, [0, 1]);
+    await expect(
+      db.dataset.findUnique({ where: { id: dataset.id }, select: { sampleCount: true } })
+    ).resolves.toEqual({ sampleCount: 2 });
+
+    const res = await callPut(dataset.id, [
+      { input: 'first' },
+      { input: 'second' },
+      { input: 'third' },
+    ]);
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).replaced).toBe(3);
+
+    // Five rows on disk, three of them live.
+    await expect(db.datasetSample.count({ where: { datasetId: dataset.id } })).resolves.toBe(5);
+    await expect(
+      db.datasetSample.count({ where: { datasetId: dataset.id, ...liveSamplesOnly() } })
+    ).resolves.toBe(3);
+    const rows = await db.datasetSample.findMany({
+      where: { datasetId: dataset.id },
+      orderBy: { index: 'asc' },
+    });
+    expect(rows.map((r) => r.index)).toEqual([0, 1, 2, 3, 4]);
+
+    // THE ASSERTION THIS TEST EXISTS FOR. 3 — not the 2 left behind by a
+    // missing write, and not the 5 a row count or `startIndex + n` would
+    // store. The UI ladder reads this value FIRST, so a wrong one shadows the
+    // live count beneath it.
+    const after = await db.dataset.findUnique({
+      where: { id: dataset.id },
+      select: { sampleCount: true },
+    });
+    expect(after?.sampleCount).toBe(3);
+  });
+
   it('hides an UN-DELETED row too — a tombstone row with isTombstone: false is live', async () => {
     // Every other fixture in this file hides rows with `isTombstone: true`, so
     // an outgoing read written as the simpler `{ tombstone: { is: null } }`
