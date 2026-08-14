@@ -394,6 +394,109 @@ export function parseIncludeRetired(searchParams: URLSearchParams): boolean {
   return searchParams.get('includeRetired') === 'true';
 }
 
+/**
+ * Thrown when a write targets a set that is out of circulation. Routes map it
+ * to a 409 naming the state and the way out — see `notInCirculationResponse`
+ * in src/app/api/golden-sets/shared.ts, which is the one body all of them
+ * return.
+ *
+ * MODULE-LEVEL, NOT ROUTE-LEVEL, since three routes now throw it: the items
+ * verbs, PATCH /api/golden-sets/[id], and the fork. (It began life private to
+ * items/route.ts because Next.js 15 rejects arbitrary named exports from a
+ * `route.ts`; that constraint is why it moves HERE rather than being exported
+ * from where it was.)
+ */
+export class GoldenSetNotInCirculationError extends Error {
+  readonly goldenSetId: string;
+  readonly state: 'retired' | 'tombstoned';
+
+  constructor(goldenSetId: string, state: 'retired' | 'tombstoned') {
+    super(
+      state === 'retired'
+        ? `Golden set ${goldenSetId} is retired: it is out of circulation, so it is not editable. ` +
+            'Un-retire it, or fork it to a new version.'
+        : `Golden set ${goldenSetId} is tombstoned and pending purge; it cannot be edited.`
+    );
+    this.name = 'GoldenSetNotInCirculationError';
+    this.goldenSetId = goldenSetId;
+    this.state = state;
+  }
+}
+
+/**
+ * Refuses a write on a set `goldenSetLifecycleWhere` hides from every read
+ * path. Closes the gap recorded when the items verbs landed: GET filtered
+ * `retiredAt`/`tombstonedAt` and the writes did not, so a retired set's items
+ * were unreadable through the API and still freely editable through it.
+ *
+ * IT DOES NOT ANSWER THE WAY GET DOES, on purpose. GET 404s, because an
+ * anonymous or stranger caller must not learn the id exists. Every caller of
+ * this sits past `requireOwnership`, so the only ones who reach it are the
+ * owner and an admin — both of whom already know — and a bare 404 to the owner
+ * of a set they can see in their own list under "Show retired" is confusing
+ * rather than protective. They get a 409 naming the state and the way out, the
+ * same shape `GoldenSetFrozenError` uses.
+ *
+ * THERE IS DELIBERATELY NO ?includeRetired ESCAPE ON A WRITE. Retire is
+ * reversible, so the route back to editing is to un-retire (POST
+ * /api/golden-sets/[id]/retire with `{ retired: false }`) or to fork — both of
+ * which leave the decision on the row. A query flag would instead let an edit
+ * land silently on a set every read path reports as out of circulation.
+ * Tombstoned has no route back at all, by design.
+ *
+ * TWO CALLERS AT TWO LEVELS, and that is the point of sharing it: PATCH/DELETE
+ * `/api/golden-sets/[id]/items` (item content) and PATCH
+ * `/api/golden-sets/[id]` (the set's own metadata). Without the second, a
+ * tombstoned set's name stayed owner-editable while its items were frozen.
+ *
+ * Takes the caller's transaction client for the same reason
+ * `isGoldenSetFrozen` does: read-then-write across a commit boundary is a race
+ * against a concurrent retire.
+ */
+export async function assertGoldenSetInCirculation(
+  tx: Prisma.TransactionClient,
+  goldenSetId: string
+): Promise<void> {
+  const goldenSet = await tx.goldenSet.findUnique({
+    where: { id: goldenSetId },
+    select: { retiredAt: true, tombstonedAt: true },
+  });
+  // `tombstonedAt` is checked first: a set can carry both (account deletion
+  // retires a pinned set, DELETE tombstones), and pending-purge is the state
+  // with no way back, so it is the one worth reporting.
+  if (goldenSet?.tombstonedAt) {
+    throw new GoldenSetNotInCirculationError(goldenSetId, 'tombstoned');
+  }
+  if (goldenSet?.retiredAt) {
+    throw new GoldenSetNotInCirculationError(goldenSetId, 'retired');
+  }
+}
+
+/**
+ * The WEAKER half of the assertion above: refuses a tombstoned set and admits
+ * a retired one.
+ *
+ * Exactly one caller, POST /api/golden-sets/[id]/fork, and the asymmetry is
+ * deliberate rather than an oversight to be tidied up later. Forking a RETIRED
+ * set is the documented escape hatch — every "un-retire it, or fork it"
+ * message this feature produces points at it, and `assertGoldenSetInCirculation`
+ * would make all of them lie. Forking a TOMBSTONED set is the opposite: it
+ * copies the items, candidates and LIVE labels of a row pending purge into a
+ * fresh, live, visible set, laundering it back into circulation.
+ */
+export async function assertGoldenSetNotTombstoned(
+  tx: Prisma.TransactionClient,
+  goldenSetId: string
+): Promise<void> {
+  const goldenSet = await tx.goldenSet.findUnique({
+    where: { id: goldenSetId },
+    select: { tombstonedAt: true },
+  });
+  if (goldenSet?.tombstonedAt) {
+    throw new GoldenSetNotInCirculationError(goldenSetId, 'tombstoned');
+  }
+}
+
 /* ─── Item lifecycle: tombstone, never delete ───────────────────────────────
  *
  * Owner ruling 2026-08-13: "delete is ALWAYS a same-transaction tombstone

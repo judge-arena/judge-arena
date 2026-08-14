@@ -4,12 +4,24 @@ import { z } from 'zod';
 import { requireAuth, requireScope, requireOwnership } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
 import { forkGoldenSet, GoldenSetVersionConflictError } from '@/lib/golden-set-versions';
-import { forkGoldenSetSchema } from '../../shared';
+import {
+  GoldenSetNotInCirculationError,
+  assertGoldenSetNotTombstoned,
+} from '@/lib/golden-sets';
+import { forkGoldenSetSchema, notInCirculationResponse } from '../../shared';
 
 // POST /api/golden-sets/[id]/fork — the escape hatch a frozen set offers.
 // Version numbering, slug derivation and the nested item/candidate create all
 // live in src/lib/golden-set-versions.ts, structurally identical to
 // src/lib/dataset-versions.ts:127-228 (one transaction, bounded P2002 retry).
+//
+// GUARDED ON `tombstonedAt` ONLY, and the asymmetry is the whole point. A
+// RETIRED set must stay forkable: forking is the documented way back for one,
+// named in every 409 this feature returns for a retired set. A TOMBSTONED set
+// must not be: the fork copies its items, candidates and LIVE labels into a
+// fresh live set, which launders a row pending purge back into circulation —
+// the hazard items/route.ts named and then enforced only by withholding the
+// forkUrl from its 409 body, which is not a guard, it is a hint.
 export async function POST(request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
   const session = await requireAuth();
@@ -28,6 +40,16 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
     if (!existing) {
       return NextResponse.json({ error: 'Golden set not found' }, { status: 404 });
     }
+
+    // 409 rather than the 404 the read paths give a tombstoned set: this sits
+    // past `requireOwnership`, so the only callers who reach it are the owner
+    // and an admin, who already know the row exists. Same reasoning, same
+    // body, as the items verbs — see assertGoldenSetInCirculation's doc.
+    // `prisma` rather than a transaction client: `forkGoldenSet` opens its own
+    // transaction with a bounded P2002 retry, and passing this check into it
+    // would re-run the read on every retry to guard against a tombstone that
+    // cannot be undone anyway.
+    await assertGoldenSetNotTombstoned(prisma, params.id);
 
     // Body is optional — same tolerance as POST /api/datasets/[id]/versions
     // (datasets/[id]/versions/route.ts:46-52): no body, empty body, or
@@ -59,6 +81,9 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
         { error: 'Validation failed', details: error.errors },
         { status: 400 }
       );
+    }
+    if (error instanceof GoldenSetNotInCirculationError) {
+      return notInCirculationResponse(error);
     }
     if (error instanceof GoldenSetVersionConflictError) {
       logger.error('Golden set version conflict exhausted retries', {

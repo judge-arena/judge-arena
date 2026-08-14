@@ -10,9 +10,36 @@
  * query whose result can reach the public branch must use it, or one of the
  * includes below that extends it.
  */
+import { NextResponse } from 'next/server';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
-import { goldenItemLifecycleWhere } from '@/lib/golden-sets';
+import { goldenItemLifecycleWhere, type GoldenSetNotInCirculationError } from '@/lib/golden-sets';
+
+/** The 409 body every write that refused an out-of-circulation set returns —
+ * the items verbs, PATCH /api/golden-sets/[id], and the fork. Lives here
+ * rather than in src/lib/golden-sets.ts so that module stays free of
+ * `next/server`, and here rather than in one route.ts because Next.js 15
+ * rejects arbitrary named exports from a route module.
+ *
+ * `forkUrl` is offered for a RETIRED set only. Forking a tombstoned one would
+ * mint a live copy of a set pending purge — which the fork route now refuses
+ * outright rather than merely declining to advertise. */
+export function notInCirculationResponse(error: GoldenSetNotInCirculationError) {
+  return NextResponse.json(
+    {
+      error: error.message,
+      goldenSetId: error.goldenSetId,
+      state: error.state,
+      ...(error.state === 'retired'
+        ? {
+            retireUrl: `/api/golden-sets/${error.goldenSetId}/retire`,
+            forkUrl: `/api/golden-sets/${error.goldenSetId}/fork`,
+          }
+        : {}),
+    },
+    { status: 409 }
+  );
+}
 
 // `_count.items` is a FILTERED relation count. Unfiltered, every list row and
 // every public projection would report tombstoned items in `itemCount` —

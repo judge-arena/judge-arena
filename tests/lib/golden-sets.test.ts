@@ -2,7 +2,10 @@ import { describe, it, expect, vi } from 'vitest';
 import type { Prisma } from '@prisma/client';
 import {
   GoldenSetFrozenError,
+  GoldenSetNotInCirculationError,
   PLATFORM_OWNER_EMAIL,
+  assertGoldenSetInCirculation,
+  assertGoldenSetNotTombstoned,
   findGoldenSetsPinningDataset,
   goldenItemLifecycleWhere,
   goldenSetLifecycleWhere,
@@ -288,6 +291,88 @@ describe('GoldenSetFrozenError', () => {
     expect(error.goldenSetId).toBe('gs-1');
     expect(error.message).toContain('gs-1');
     expect(error.message).toMatch(/fork/i);
+  });
+});
+
+describe('assertGoldenSetInCirculation / assertGoldenSetNotTombstoned', () => {
+  function stubSet(row: { retiredAt: Date | null; tombstonedAt: Date | null } | null) {
+    const findUnique = vi.fn().mockResolvedValue(row);
+    return {
+      tx: { goldenSet: { findUnique } } as unknown as Prisma.TransactionClient,
+      findUnique,
+    };
+  }
+
+  const LIVE = { retiredAt: null, tombstonedAt: null };
+
+  it('passes a live set through both assertions', async () => {
+    await expect(assertGoldenSetInCirculation(stubSet(LIVE).tx, 'gs-1')).resolves.toBeUndefined();
+    await expect(assertGoldenSetNotTombstoned(stubSet(LIVE).tx, 'gs-1')).resolves.toBeUndefined();
+  });
+
+  it('refuses a RETIRED set on the full assertion and ADMITS it on the fork one', async () => {
+    // The asymmetry is the S1 fix in one assertion: forking a retired set is
+    // the documented escape hatch every "un-retire, or fork" message points
+    // at, so the fork guard must not refuse it.
+    const retired = { retiredAt: new Date(), tombstonedAt: null };
+    await expect(assertGoldenSetInCirculation(stubSet(retired).tx, 'gs-1')).rejects.toThrow(
+      GoldenSetNotInCirculationError
+    );
+    await expect(
+      assertGoldenSetNotTombstoned(stubSet(retired).tx, 'gs-1')
+    ).resolves.toBeUndefined();
+  });
+
+  it('refuses a TOMBSTONED set on BOTH, reporting the tombstone even when the row is also retired', async () => {
+    // A set can carry both: account deletion retires a pinned set, DELETE
+    // tombstones. Pending-purge is the state with no way back, so it is the
+    // one worth reporting — and the one whose 409 offers no way out.
+    const both = { retiredAt: new Date(), tombstonedAt: new Date() };
+    await expect(assertGoldenSetInCirculation(stubSet(both).tx, 'gs-1')).rejects.toMatchObject({
+      state: 'tombstoned',
+      goldenSetId: 'gs-1',
+    });
+    await expect(assertGoldenSetNotTombstoned(stubSet(both).tx, 'gs-1')).rejects.toMatchObject({
+      state: 'tombstoned',
+    });
+  });
+
+  it('does not invent a state for a set that does not exist — the caller\'s 404/403 already ran', async () => {
+    await expect(assertGoldenSetInCirculation(stubSet(null).tx, 'gone')).resolves.toBeUndefined();
+    await expect(assertGoldenSetNotTombstoned(stubSet(null).tx, 'gone')).resolves.toBeUndefined();
+  });
+
+  it('reads only the lifecycle columns it judges on', async () => {
+    const full = stubSet(LIVE);
+    await assertGoldenSetInCirculation(full.tx, 'gs-1');
+    expect(full.findUnique).toHaveBeenCalledWith({
+      where: { id: 'gs-1' },
+      select: { retiredAt: true, tombstonedAt: true },
+    });
+
+    const tombstoneOnly = stubSet(LIVE);
+    await assertGoldenSetNotTombstoned(tombstoneOnly.tx, 'gs-1');
+    expect(tombstoneOnly.findUnique).toHaveBeenCalledWith({
+      where: { id: 'gs-1' },
+      select: { tombstonedAt: true },
+    });
+  });
+});
+
+describe('GoldenSetNotInCirculationError', () => {
+  it('names the state, carries the id, and points a RETIRED set at the way back', () => {
+    const retired = new GoldenSetNotInCirculationError('gs-1', 'retired');
+    expect(retired).toBeInstanceOf(Error);
+    expect(retired.name).toBe('GoldenSetNotInCirculationError');
+    expect(retired.state).toBe('retired');
+    expect(retired.goldenSetId).toBe('gs-1');
+    expect(retired.message).toMatch(/un-retire|fork/i);
+
+    const tombstoned = new GoldenSetNotInCirculationError('gs-2', 'tombstoned');
+    expect(tombstoned.state).toBe('tombstoned');
+    // No way back is offered, because there is none.
+    expect(tombstoned.message).toMatch(/purge/i);
+    expect(tombstoned.message).not.toMatch(/fork/i);
   });
 });
 

@@ -14,10 +14,17 @@ import { toPublicGoldenSet } from '@/lib/serializers';
 import {
   isGoldenSetFrozen,
   GoldenSetFrozenError,
+  GoldenSetNotInCirculationError,
+  assertGoldenSetInCirculation,
   goldenSetLifecycleWhere,
   parseIncludeRetired,
 } from '@/lib/golden-sets';
-import { updateGoldenSetSchema, goldenSetInclude, goldenSetDetailInclude } from '../shared';
+import {
+  updateGoldenSetSchema,
+  goldenSetInclude,
+  goldenSetDetailInclude,
+  notInCirculationResponse,
+} from '../shared';
 
 // GET /api/golden-sets/[id] — public if visibility: 'public' (PII-stripped
 // via toPublicGoldenSet), else owner/admin only. A retired set is 404 unless
@@ -89,11 +96,19 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
 }
 
 // PATCH /api/golden-sets/[id] — name/description/visibility are always
-// editable; `protocol` is CONTENT and is freeze-guarded. `datasetId` is
-// IMMUTABLE and is refused outright (400), never freeze-guarded — see the
-// guard below. The freeze count and the update it guards share ONE
-// transaction: separated, a calibration run started between them measures a
-// set that changed underneath it, and nothing logs.
+// editable ON A SET IN CIRCULATION; `protocol` is CONTENT and is additionally
+// freeze-guarded. `datasetId` is IMMUTABLE and is refused outright (400), never
+// freeze-guarded — see the guard below. The freeze count and the update it
+// guards share ONE transaction: separated, a calibration run started between
+// them measures a set that changed underneath it, and nothing logs.
+//
+// TWO ORTHOGONAL GUARDS, and they answer different questions. `isGoldenSetFrozen`
+// asks "has anything measured this content" and therefore only applies to
+// content. `assertGoldenSetInCirculation` asks "may this row be written at
+// all", and a retired or tombstoned set may not — the same rule
+// /api/golden-sets/[id]/items applies to item content, applied here to the set's
+// own fields, so a tombstoned set's metadata cannot stay editable while its
+// items are frozen.
 export async function PATCH(request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
   const session = await requireAuth();
@@ -139,6 +154,17 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
       if (touchesContent && (await isGoldenSetFrozen(tx, params.id))) {
         throw new GoldenSetFrozenError(params.id);
       }
+      // The SAME guard the items verbs apply, one level up. Without it a
+      // tombstoned set's name/description/visibility stayed owner-editable
+      // while its items were frozen — and a retired set, which every read path
+      // hides, could be renamed into a state its owner could not see. In the
+      // transaction with the update for the same reason the freeze count is:
+      // a concurrent retire must not land between the check and the write.
+      //
+      // NOT gated on `touchesContent`. The freeze protects what a calibration
+      // run measured, so it only applies to content; circulation is about
+      // whether the row may be written at all.
+      await assertGoldenSetInCirculation(tx, params.id);
 
       return tx.goldenSet.update({
         where: { id: params.id },
@@ -163,6 +189,9 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
         },
         { status: 409 }
       );
+    }
+    if (error instanceof GoldenSetNotInCirculationError) {
+      return notInCirculationResponse(error);
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json(

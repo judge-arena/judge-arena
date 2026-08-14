@@ -14,14 +14,19 @@ import { logger, serializeError } from '@/lib/logger';
 import {
   isGoldenSetFrozen,
   GoldenSetFrozenError,
+  GoldenSetNotInCirculationError,
+  assertGoldenSetInCirculation,
   goldenItemLifecycleWhere,
   goldenSetLifecycleWhere,
   parseIncludeRetired,
   parseIncludeTombstoned,
   GOLDEN_LABEL_TOMBSTONE_REASON_CONTENT_EDIT,
 } from '@/lib/golden-sets';
-import type { Prisma } from '@prisma/client';
-import { updateGoldenItemsSchema, deleteGoldenItemsSchema } from '../../shared';
+import {
+  updateGoldenItemsSchema,
+  deleteGoldenItemsSchema,
+  notInCirculationResponse,
+} from '../../shared';
 
 // GET /api/golden-sets/[id]/items — this route HAS a GET, which
 // datasets/[id]/samples does not. That omission is exactly why a client-side
@@ -349,85 +354,10 @@ class ForeignItemError extends Error {
   }
 }
 
-/** Thrown when an item mutation targets a set that is out of circulation.
- * Module-local for the same reason ForeignItemError is. */
-class GoldenSetNotInCirculationError extends Error {
-  readonly goldenSetId: string;
-  readonly state: 'retired' | 'tombstoned';
-
-  constructor(goldenSetId: string, state: 'retired' | 'tombstoned') {
-    super(
-      state === 'retired'
-        ? `Golden set ${goldenSetId} is retired: it is out of circulation, so its items are not ` +
-            'editable. Un-retire it, or fork it to a new version.'
-        : `Golden set ${goldenSetId} is tombstoned and pending purge; its items cannot be edited.`
-    );
-    this.name = 'GoldenSetNotInCirculationError';
-    this.goldenSetId = goldenSetId;
-    this.state = state;
-  }
-}
-
-/**
- * Refuses an item mutation on a set `goldenSetLifecycleWhere` hides from every
- * read path. Closes the gap recorded when PATCH/DELETE landed: GET filtered
- * `retiredAt`/`tombstonedAt` and these verbs did not, so a retired set's
- * items were unreadable through the API and still freely editable through it.
- *
- * IT DOES NOT ANSWER THE WAY GET DOES, on purpose. GET 404s, because an
- * anonymous or stranger caller must not learn the id exists. These handlers
- * sit past `requireOwnership`, so the only callers who reach here are the
- * owner and an admin — both of whom already know — and a bare 404 to the
- * owner of a set they can see in their own list under "Show retired" is
- * confusing rather than protective. They get a 409 naming the state and the
- * way out, the same shape `GoldenSetFrozenError` uses one line above.
- *
- * THERE IS DELIBERATELY NO ?includeRetired ESCAPE ON A WRITE. Retire is
- * reversible, so the route back to editing is to un-retire (POST
- * /api/golden-sets/[id]/retire with `{ retired: false }`) or to fork — both
- * of which leave the decision on the row. A query flag would instead let an
- * edit land silently on a set every read path reports as out of circulation.
- * Tombstoned has no route back at all, by design.
- *
- * Takes the caller's transaction client for the same reason
- * `isGoldenSetFrozen` does: read-then-write across a commit boundary is a
- * race against a concurrent retire.
- */
-async function assertGoldenSetInCirculation(
-  tx: Prisma.TransactionClient,
-  goldenSetId: string
-): Promise<void> {
-  const goldenSet = await tx.goldenSet.findUnique({
-    where: { id: goldenSetId },
-    select: { retiredAt: true, tombstonedAt: true },
-  });
-  // `tombstonedAt` is checked first: a set can carry both (account deletion
-  // retires a pinned set, DELETE tombstones), and pending-purge is the state
-  // with no way back, so it is the one worth reporting.
-  if (goldenSet?.tombstonedAt) {
-    throw new GoldenSetNotInCirculationError(goldenSetId, 'tombstoned');
-  }
-  if (goldenSet?.retiredAt) {
-    throw new GoldenSetNotInCirculationError(goldenSetId, 'retired');
-  }
-}
-
-/** The 409 body both mutating verbs return for an out-of-circulation set.
- * `forkUrl` is offered for a RETIRED set only — forking a tombstoned one
- * would mint a live copy of a set that is pending purge. */
-function notInCirculationResponse(error: GoldenSetNotInCirculationError) {
-  return NextResponse.json(
-    {
-      error: error.message,
-      goldenSetId: error.goldenSetId,
-      state: error.state,
-      ...(error.state === 'retired'
-        ? {
-            retireUrl: `/api/golden-sets/${error.goldenSetId}/retire`,
-            forkUrl: `/api/golden-sets/${error.goldenSetId}/fork`,
-          }
-        : {}),
-    },
-    { status: 409 }
-  );
-}
+/* `GoldenSetNotInCirculationError`, `assertGoldenSetInCirculation` and
+ * `notInCirculationResponse` used to live here, module-local. They moved to
+ * src/lib/golden-sets.ts and ../../shared.ts respectively once PATCH
+ * /api/golden-sets/[id] and the fork route needed the same rule: a tombstoned
+ * set's METADATA stayed owner-editable while its ITEMS were frozen here, which
+ * is the same asymmetry this guard closes, one level up. One definition of "in
+ * circulation", three callers. */

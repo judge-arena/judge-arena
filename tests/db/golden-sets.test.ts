@@ -606,6 +606,68 @@ describe('PATCH /api/golden-sets/[id] — immutable datasetId, freeze guard on p
     expect(after.datasetId).toBe(goldenSet.datasetId);
   });
 
+  it('409s a rename on a RETIRED or TOMBSTONED set, and the retired one becomes editable again once un-retired', async () => {
+    // S2. PATCH had only the freeze check, so a tombstoned set's METADATA
+    // stayed owner-editable while its ITEMS were frozen by
+    // assertGoldenSetInCirculation one level down — the same asymmetry that
+    // helper was written to close, one level up. It is reused here rather than
+    // hand-rolled, so "in circulation" has exactly one definition.
+    const owner = await mkUser();
+    const { goldenSet: retired } = await mkGoldenSet(owner.id, { itemCount: 1 });
+    const { goldenSet: tombstoned } = await mkGoldenSet(owner.id, { itemCount: 1 });
+    await db.goldenSet.update({ where: { id: retired.id }, data: { retiredAt: new Date() } });
+    await db.goldenSet.update({
+      where: { id: tombstoned.id },
+      data: { tombstonedAt: new Date() },
+    });
+
+    mockSessionFor(owner);
+    const retiredRes = await patchGoldenSet(
+      jsonRequest(`http://localhost/api/golden-sets/${retired.id}`, 'PATCH', {
+        name: 'renamed while retired',
+      }),
+      { params: Promise.resolve({ id: retired.id }) }
+    );
+    expect(retiredRes.status).toBe(409);
+    const retiredBody = await retiredRes.json();
+    expect(retiredBody.state).toBe('retired');
+    expect(retiredBody.retireUrl).toContain(retired.id);
+    expect(retiredBody.forkUrl).toContain(retired.id);
+
+    const tombstonedRes = await patchGoldenSet(
+      jsonRequest(`http://localhost/api/golden-sets/${tombstoned.id}`, 'PATCH', {
+        name: 'renamed while tombstoned',
+      }),
+      { params: Promise.resolve({ id: tombstoned.id }) }
+    );
+    expect(tombstonedRes.status).toBe(409);
+    expect((await tombstonedRes.json()).state).toBe('tombstoned');
+
+    // Neither rename landed.
+    expect((await db.goldenSet.findUniqueOrThrow({ where: { id: retired.id } })).name).toBe(
+      retired.name
+    );
+    expect((await db.goldenSet.findUniqueOrThrow({ where: { id: tombstoned.id } })).name).toBe(
+      tombstoned.name
+    );
+
+    // Un-retire — the way out the 409 named — and the same PATCH lands.
+    await retireRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${retired.id}/retire`, 'POST', {
+        retired: false,
+      }),
+      { params: Promise.resolve({ id: retired.id }) }
+    );
+    const again = await patchGoldenSet(
+      jsonRequest(`http://localhost/api/golden-sets/${retired.id}`, 'PATCH', {
+        name: 'renamed after un-retiring',
+      }),
+      { params: Promise.resolve({ id: retired.id }) }
+    );
+    expect(again.status).toBe(200);
+    expect((await again.json()).name).toBe('renamed after un-retiring');
+  });
+
   it('a rename that does not name datasetId still lands, and leaves datasetId alone — the guard is not over-broad', async () => {
     const owner = await mkUser();
     const { goldenSet } = await mkGoldenSet(owner.id);
@@ -1217,6 +1279,58 @@ describe('POST /api/golden-sets/[id]/fork', () => {
     );
     expect(bodyless.status).toBe(201);
     expect((await bodyless.json()).name).toBe(goldenSet.name);
+  });
+
+  it('refuses to fork a TOMBSTONED set, and still forks a RETIRED one', async () => {
+    // S1. The unguarded findUnique copied a tombstoned set's items, candidates
+    // and LIVE labels into a fresh live set — laundering a row pending purge
+    // back into circulation, which items/route.ts:415-417 names as the hazard
+    // and enforced only by withholding the forkUrl from its 409 body.
+    //
+    // The guard is on `tombstonedAt` ONLY. Forking a RETIRED set is the
+    // documented escape hatch that every "un-retire, or fork" message on this
+    // feature points at; guarding both would make those messages lie.
+    const owner = await mkUser();
+    const { goldenSet: tombstoned } = await mkGoldenSet(owner.id, { itemCount: 2 });
+    const { goldenSet: retired } = await mkGoldenSet(owner.id, { itemCount: 2 });
+    const annotator = await mkUser();
+    const tombstonedItem = await db.goldenItem.findFirstOrThrow({
+      where: { goldenSetId: tombstoned.id },
+    });
+    await db.goldenLabel.create({
+      data: { goldenItemId: tombstonedItem.id, annotatorId: annotator.id, overallScore: 4 },
+    });
+    await db.goldenSet.update({
+      where: { id: tombstoned.id },
+      data: { tombstonedAt: new Date() },
+    });
+    await db.goldenSet.update({ where: { id: retired.id }, data: { retiredAt: new Date() } });
+
+    mockSessionFor(owner);
+    const refused = await forkRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${tombstoned.id}/fork`, 'POST', {}),
+      { params: Promise.resolve({ id: tombstoned.id }) }
+    );
+    expect(refused.status).toBe(409);
+    const refusedBody = await refused.json();
+    expect(refusedBody.state).toBe('tombstoned');
+    // A tombstoned set has no way back, so the 409 offers no fork url either.
+    expect(refusedBody.forkUrl).toBeUndefined();
+    // Nothing was minted: the family still has exactly the one row.
+    expect(await db.goldenSet.count({ where: { parentId: tombstoned.id } })).toBe(0);
+    expect(await db.goldenLabel.count()).toBe(1);
+
+    const allowed = await forkRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${retired.id}/fork`, 'POST', {}),
+      { params: Promise.resolve({ id: retired.id }) }
+    );
+    expect(allowed.status).toBe(201);
+    const fork = await allowed.json();
+    expect(fork.version).toBe(2);
+    expect(fork.parentId).toBe(retired.id);
+    // The fork is IN circulation — that is the point of the escape hatch.
+    expect(fork.retiredAt).toBeNull();
+    expect(fork.tombstonedAt).toBeNull();
   });
 
   it('is 404 on an unknown id and 403 for a stranger', async () => {
