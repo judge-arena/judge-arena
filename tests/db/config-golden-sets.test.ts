@@ -1078,8 +1078,9 @@ describe('Config import — the guards the later sweeps never reached (M1-M3)', 
     // shape that reaches the bug. With items present, the item re-resolution
     // below the read spreads `liveSamplesOnly()`, whose `dataset` clause
     // already excludes a hidden corpus: every item resolves to nothing and the
-    // set takes the `unresolved.length > 0` skip. `configGoldenSetSchema`
-    // declares `items: z.array(...).default([])` with no `.min(1)`, so an
+    // set takes the `unresolved.length > 0` skip. `goldenSetSchema`
+    // (src/lib/config.ts, module-private) declares
+    // `items: z.array(...).default([])` with no `.min(1)`, so an
     // empty array parses clean, `unresolved` is empty, that skip is not taken,
     // and the create branch binds `GoldenSet.datasetId` to the hidden dataset
     // through an `onDelete: Restrict` FK — durable, with no in-product remedy.

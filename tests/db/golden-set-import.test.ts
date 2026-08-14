@@ -263,6 +263,46 @@ describe('POST /api/golden-sets — create-by-import against real JudgeBench row
     expect(items.map((i) => i.index)).toEqual([0, 1, 2, 3, 4]);
   });
 
+  it('a limit ABOVE the live-sample count yields every live sample — not a 400, and not a short read', async () => {
+    // The third property of the mutual-exclusion ruling, and the only one
+    // nothing pinned: `limit` has no upper bound, and overshooting it is not an
+    // error. A route that validated `limit` against the corpus size would 400
+    // here; one that padded, or that cut against the UNFILTERED count, would
+    // return 620.
+    //
+    // NON-VACUITY: one row is hidden first, so 619 and 620 are distinguishable.
+    // Against a clean corpus this assertion would hold whether or not the read
+    // filters, which is the shape it exists to fail against.
+    const user = await mkUser();
+    mockSessionFor(user);
+
+    const hidden = await db.datasetSample.findFirstOrThrow({
+      where: { datasetId: JUDGEBENCH_DATASET_ID, index: 2 },
+    });
+    await db.tombstone.create({
+      data: { datasetSampleId: hidden.id, isTombstone: true, reason: 'fixture' },
+    });
+
+    const res = await POST(
+      jsonRequest('http://localhost/api/golden-sets', 'POST', {
+        datasetId: JUDGEBENCH_DATASET_ID,
+        protocol: 'pairwise',
+        name: 'JudgeBench limit overshoot',
+        limit: 999999,
+      })
+    );
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body._count.items).toBe(619);
+    // Identical to omitting `limit` entirely — the same corpus, same count.
+    await expect(db.goldenItem.count({ where: { goldenSetId: body.id } })).resolves.toBe(619);
+    // And the hidden row is not among them, so 619 is the LIVE set rather than
+    // 620 minus an arbitrary one.
+    await expect(
+      db.goldenItem.count({ where: { goldenSetId: body.id, sourceDatasetSampleId: hidden.id } })
+    ).resolves.toBe(0);
+  });
+
   it('sending both limit and sampleIndices is a 400, creating nothing', async () => {
     const user = await mkUser();
     mockSessionFor(user);

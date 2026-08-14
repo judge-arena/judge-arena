@@ -548,7 +548,8 @@ export default function GoldenSetsPage() {
                   />
                 ) : (
                   <p className="text-xs text-surface-500 dark:text-surface-400">
-                    Every sample in the dataset is imported.
+                    Every live sample in the dataset is imported. Deleted samples
+                    are never imported, with or without a limit.
                   </p>
                 )}
               </div>
