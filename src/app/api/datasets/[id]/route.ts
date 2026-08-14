@@ -5,6 +5,7 @@ import { requireAuth, requireScope, optionalAuth, resolveResourceAccess, require
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicDataset } from '@/lib/serializers';
 import { findGoldenSetsPinningDataset } from '@/lib/golden-sets';
+import { tombstoneDataset } from '@/lib/tombstones';
 
 const updateDatasetSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -162,7 +163,24 @@ export async function DELETE(_request: Request, props: { params: Promise<{ id: s
       );
     }
 
-    await prisma.dataset.delete({ where: { id: params.id } });
+    // A1 Decision 1: deleting a dataset HIDES it. `Dataset → DatasetSample` is
+    // `onDelete: Cascade`, so the one statement this replaces took an entire
+    // corpus with it — and with it every row a `GoldenItem.sourceDatasetSampleId`
+    // still points at.
+    //
+    // The dataset's samples are deliberately NOT tombstoned one by one.
+    // Decision 16: a sample inherits its parent's hidden state through
+    // `liveSamplesOnly()`, whose `dataset: { NOT: { tombstone: … } }` clause
+    // excludes every row of a hidden corpus from every filtered read. Looping
+    // here would write N rows to say what this one row already says, and would
+    // make un-hiding the dataset a second N-row job that can half-succeed. The
+    // instinct to loop comes from the `Cascade` above; it does not apply,
+    // because nothing is deleted.
+    //
+    // `prisma` satisfies `Prisma.TransactionClient` structurally — the same
+    // call shape as `findGoldenSetsPinningDataset(prisma, …)` above — and a
+    // single upsert is already atomic, so this needs no `$transaction`.
+    await tombstoneDataset(prisma, params.id, 'dataset deleted');
     return NextResponse.json({ success: true });
   } catch (error) {
     logger.error('Failed to delete dataset', { error: serializeError(error) });

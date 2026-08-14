@@ -6,7 +6,8 @@ import {
   POST as addSamples,
   PUT as replaceSamples,
 } from '@/app/api/datasets/[id]/samples/route';
-import { liveSamplesOnly } from '@/lib/tombstones';
+import { DELETE as deleteDataset } from '@/app/api/datasets/[id]/route';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 // A1, the tombstone overlay. DELETE /api/datasets/[id]/samples HIDES the named
 // rows: the DatasetSample survives on disk with its ordinal, a Tombstone row
@@ -508,5 +509,132 @@ describe('PUT /api/datasets/[id]/samples — tombstone-and-append (A1 Task 5)', 
     // Converged rather than duplicated: one row per entity, upserted on a
     // @unique FK, never P2002.
     expect(await db.tombstone.count({ where: { datasetSampleId: sample.id } })).toBe(1);
+  });
+});
+
+// ─── A1 Task 6: DELETE /api/datasets/[id] tombstones the dataset ────────────
+// The handler ended in a bare `prisma.dataset.delete`, and `Dataset →
+// DatasetSample` is `onDelete: Cascade`, so that one statement took an entire
+// corpus with it. It is now a `tombstoneDataset` upsert.
+//
+// The samples are NOT tombstoned one by one (Decision 16): they inherit the
+// parent's hidden state through `liveSamplesOnly()`'s `dataset:` clause. The
+// row-state and no-per-sample-loop halves are pinned in
+// tests/db/dataset-sample-freeze.test.ts, on the happy-path test this task
+// inverted. What is pinned here is the parent-arm inheritance itself and the
+// convergence property.
+//
+// NOT ASSERTED ANYWHERE YET, on purpose: that a hidden dataset stops appearing
+// in GET /api/datasets. That read belongs to the dataset read sweep later in
+// this plan, which owns the route assertion.
+describe('DELETE /api/datasets/[id] — the overlay (A1 Task 6)', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('hides EVERY sample of the corpus through the parent arm, without writing one sample tombstone', async () => {
+    // A multi-row corpus, and one of its rows is ALREADY hidden in its own
+    // right. That is what keeps the inheritance claim honest: with a single
+    // clean row, `liveSamplesOnly()` returning [] is equally explained by the
+    // sample arm, by the parent arm, or by a per-sample loop. Here the parent
+    // arm has to hide the three rows carrying NO tombstone of their own, and
+    // the sample tombstone count stays at exactly the one that was there
+    // before the verb ran — so a loop would push it to 4.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await mkCorpus(user.id, [0, 1, 2, 3]);
+    await db.tombstone.create({
+      data: {
+        datasetSampleId: dataset.samples[2].id,
+        isTombstone: true,
+        reason: 'deleted by hand',
+      },
+    });
+
+    // Live before: three of the four.
+    await expect(
+      db.datasetSample.count({ where: { datasetId: dataset.id, ...liveSamplesOnly() } })
+    ).resolves.toBe(3);
+
+    const res = await deleteDataset(
+      new Request(`http://localhost/api/datasets/${dataset.id}`, { method: 'DELETE' }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true });
+
+    // Live after: none — through the parent arm, for the three that carry no
+    // tombstone of their own.
+    await expect(
+      db.datasetSample.count({ where: { datasetId: dataset.id, ...liveSamplesOnly() } })
+    ).resolves.toBe(0);
+
+    // Every row survives on disk with its ordinal. `onDelete: Cascade` did not
+    // fire, because nothing was deleted.
+    const rows = await db.datasetSample.findMany({
+      where: { datasetId: dataset.id },
+      orderBy: { index: 'asc' },
+    });
+    expect(rows.map((r) => r.index)).toEqual([0, 1, 2, 3]);
+
+    // ONE dataset tombstone, and the sample-tombstone population is untouched:
+    // still just the hand-made one, still carrying its own reason. A loop over
+    // the corpus would make this 4 and would overwrite that reason.
+    await expect(db.tombstone.count({ where: { datasetId: dataset.id } })).resolves.toBe(1);
+    await expect(
+      db.tombstone.count({ where: { datasetSampleId: { not: null } } })
+    ).resolves.toBe(1);
+    const untouched = await db.tombstone.findUnique({
+      where: { datasetSampleId: dataset.samples[2].id },
+    });
+    expect(untouched?.reason).toBe('deleted by hand');
+  });
+
+  it('converges on hidden when repeated — never P2002, never a silent no-op', async () => {
+    // `Tombstone.datasetId` is @unique, so a second delete that `create`d
+    // rather than `upsert`ed raises P2002 and surfaces as a generic 500. And
+    // an upsert whose `update:` arm is EMPTY leaves a dataset that was
+    // deleted, restored, then deleted again VISIBLE — a delete that silently
+    // does nothing. Both are pinned here, and the restore in the middle is
+    // what makes the second half non-vacuous: without it the second delete
+    // writes `isTombstone: true` over `isTombstone: true` and an empty update
+    // arm looks correct.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await mkCorpus(user.id, [0]);
+
+    const first = await deleteDataset(
+      new Request(`http://localhost/api/datasets/${dataset.id}`, { method: 'DELETE' }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+    expect(first.status).toBe(200);
+    expect(await db.tombstone.count({ where: { datasetId: dataset.id } })).toBe(1);
+
+    await db.tombstone.update({
+      where: { datasetId: dataset.id },
+      data: { isTombstone: false, reason: null },
+    });
+    // Restored: live again, and so are its samples — the parent arm is what
+    // put them back, since none of them ever carried a tombstone.
+    await expect(
+      db.dataset.count({ where: { id: dataset.id, ...liveDatasetsOnly() } })
+    ).resolves.toBe(1);
+    await expect(
+      db.datasetSample.count({ where: { datasetId: dataset.id, ...liveSamplesOnly() } })
+    ).resolves.toBe(1);
+
+    const second = await deleteDataset(
+      new Request(`http://localhost/api/datasets/${dataset.id}`, { method: 'DELETE' }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+    expect(second.status).toBe(200);
+
+    expect(await db.tombstone.count({ where: { datasetId: dataset.id } })).toBe(1);
+    const tomb = await db.tombstone.findUnique({ where: { datasetId: dataset.id } });
+    expect(tomb?.isTombstone).toBe(true);
+    // The reason is re-asserted too, not left null by an update that only
+    // touched the flag.
+    expect(tomb?.reason).toBe('dataset deleted');
   });
 });

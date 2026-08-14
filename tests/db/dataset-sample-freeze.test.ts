@@ -3,6 +3,7 @@ import { getServerSession } from 'next-auth';
 import { db, truncateAll, mkUser } from './helpers';
 import { PUT, DELETE as deleteSamples } from '@/app/api/datasets/[id]/samples/route';
 import { DELETE as deleteDataset } from '@/app/api/datasets/[id]/route';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 // A0 Task 1. GoldenItem.sourceDatasetSampleId is `onDelete: Restrict`, so the
 // moment 20260812190000_v2d_golden_substrate lands, PUT /api/datasets/[id]/samples
@@ -320,10 +321,10 @@ describe('the other destructive paths onto a golden-set-pinned corpus (M1)', () 
     await expect(db.dataset.count({ where: { id: dataset.id } })).resolves.toBe(1);
   });
 
-  it('DELETE /api/datasets/[id] still deletes an unpinned dataset', async () => {
+  it('DELETE /api/datasets/[id] HIDES an unpinned dataset instead of destroying it', async () => {
     const user = await mkUser();
     mockSessionFor(user);
-    const { dataset } = await mkDatasetWithSample(user.id);
+    const { dataset, sample } = await mkDatasetWithSample(user.id);
 
     const res = await deleteDataset(
       new Request(`http://localhost/api/datasets/${dataset.id}`, { method: 'DELETE' }),
@@ -331,7 +332,43 @@ describe('the other destructive paths onto a golden-set-pinned corpus (M1)', () 
     );
 
     expect(res.status).toBe(200);
-    await expect(db.dataset.count({ where: { id: dataset.id } })).resolves.toBe(0);
+
+    // The old assertion here was `count()` → 0. A tombstone can never satisfy
+    // it, and it passed for the wrong reason anyway: it is equally satisfied
+    // by cascading an annotated corpus away.
+    await expect(db.dataset.count({ where: { id: dataset.id } })).resolves.toBe(1);
+    const tomb = await db.tombstone.findUnique({ where: { datasetId: dataset.id } });
+    expect(tomb?.isTombstone).toBe(true);
+
+    // …and it is hidden, by the one definition of hidden.
+    await expect(
+      db.dataset.findMany({ where: { id: dataset.id, ...liveDatasetsOnly() } })
+    ).resolves.toEqual([]);
+
+    // Decision 16: the samples are NOT tombstoned one by one. They survive on
+    // disk untouched — no cascade, because nothing was deleted — and they are
+    // hidden by INHERITANCE, through liveSamplesOnly()'s `dataset:` clause.
+    // Asserting only the empty live read would pass under a per-sample loop
+    // too, so the zero-sample-tombstones half is pinned as well.
+    await expect(db.datasetSample.count({ where: { datasetId: dataset.id } })).resolves.toBe(1);
+    await expect(
+      db.tombstone.count({ where: { datasetSampleId: { not: null } } })
+    ).resolves.toBe(0);
+    await expect(
+      db.datasetSample.findMany({ where: { datasetId: dataset.id, ...liveSamplesOnly() } })
+    ).resolves.toEqual([]);
+
+    // The row a golden item's `Restrict` FK would cite is still there and
+    // still addressable by id. That is the whole point of the overlay.
+    await expect(
+      db.datasetSample.findUnique({ where: { id: sample.id } })
+    ).resolves.not.toBeNull();
+
+    // NOT ASSERTED HERE, on purpose: that a hidden dataset stops appearing in
+    // GET /api/datasets. That read is swept by the dataset read sweep later in
+    // this plan, and asserting it now would fail for a reason this task cannot
+    // fix. This task pins the row state and the overlay row; the sweep pins
+    // the route.
   });
 
   it('a golden set with NO items still blocks the dataset delete — GoldenSet.datasetId is the other Restrict FK', async () => {
