@@ -233,13 +233,14 @@ export default function GoldenSetsPage() {
           protocol,
           name: name.trim(),
           description: description.trim() || undefined,
-          // DatasetSample.index is 0-based and contiguous across the whole
-          // corpus (prisma/seed-judgebench.ts:187-189), so "the first N" is
-          // 0..N-1. Omitted entirely = import every sample; GoldenItem.index
-          // is assigned 0..n-1 over the SELECTION, server-side.
-          sampleIndices: limitSamples
-            ? Array.from({ length: parsedLimit }, (_, i) => i)
-            : undefined,
+          // "The first N" is resolved SERVER-SIDE, because only the server
+          // knows which rows are live. DatasetSample.index is a high-water
+          // ordinal, not a dense 0..n-1 sequence, the moment a sample is
+          // hidden — so the `Array.from({ length: N }, (_, i) => i)` this
+          // replaced named hidden rows, and the route 400s on the first one it
+          // cannot resolve. Omitted entirely = import every live sample;
+          // GoldenItem.index is assigned 0..n-1 over the SELECTION, server-side.
+          limit: limitSamples ? parsedLimit : undefined,
         }),
       });
       if (res.ok) {

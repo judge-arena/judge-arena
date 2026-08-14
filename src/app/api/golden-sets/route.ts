@@ -157,6 +157,11 @@ export async function POST(request: Request) {
       },
       orderBy: { index: 'asc' },
       select: { id: true, index: true, input: true, expected: true, metadata: true },
+      // `limit` is "the first N LIVE samples", so the cut happens in SQL AFTER
+      // the lifecycle filter and after the `index` ordering — never over a
+      // window the caller guessed. Mutually exclusive with `sampleIndices`,
+      // refused in the schema, so the two spreads above cannot both apply.
+      ...(data.limit !== undefined ? { take: data.limit } : {}),
     });
 
     // Present => only the named samples, IN THE ORDER GIVEN.

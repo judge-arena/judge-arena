@@ -85,23 +85,43 @@ export type GoldenSetDetailRow = Prisma.GoldenSetGetPayload<{
 
 /**
  * `POST /api/golden-sets` — creation IS import (A0 design, "Creation is
- * import"). `sampleIndices` names `DatasetSample.index` values; omitted means
- * every sample. Duplicates are rejected rather than silently minting two
- * golden items from one source sample.
+ * import"). Two ways to select a subset, and they are MUTUALLY EXCLUSIVE:
+ *
+ *   - `sampleIndices` names `DatasetSample.index` values, IN THE ORDER GIVEN.
+ *     Duplicates are rejected rather than silently minting two golden items
+ *     from one source sample.
+ *   - `limit` means "the first N LIVE samples, in index order". It exists
+ *     because the caller cannot synthesise that list: `index` is a high-water
+ *     ordinal, not a dense 0..n-1 sequence, the moment a sample is hidden — so
+ *     `Array.from({ length: N }, (_, i) => i)` names hidden rows and the route
+ *     400s on the first one it cannot resolve. Only the server knows which
+ *     rows are live.
+ *
+ * Neither present = every live sample.
+ *
+ * Sending BOTH is a 400 rather than a precedence rule: they are two different
+ * selections, and honouring one silently would import rows the caller did not
+ * ask for.
  */
-export const createGoldenSetSchema = z.object({
-  datasetId: z.string().min(1),
-  protocol: z.enum(['pointwise', 'pairwise', 'listwise']),
-  name: z.string().min(1, 'Name is required').max(200),
-  description: z.string().max(4000).optional(),
-  sampleIndices: z
-    .array(z.number().int().min(0))
-    .min(1)
-    .refine((v) => new Set(v).size === v.length, {
-      message: 'sampleIndices must not contain duplicates',
-    })
-    .optional(),
-});
+export const createGoldenSetSchema = z
+  .object({
+    datasetId: z.string().min(1),
+    protocol: z.enum(['pointwise', 'pairwise', 'listwise']),
+    name: z.string().min(1, 'Name is required').max(200),
+    description: z.string().max(4000).optional(),
+    sampleIndices: z
+      .array(z.number().int().min(0))
+      .min(1)
+      .refine((v) => new Set(v).size === v.length, {
+        message: 'sampleIndices must not contain duplicates',
+      })
+      .optional(),
+    limit: z.number().int().min(1).optional(),
+  })
+  .refine((v) => v.sampleIndices === undefined || v.limit === undefined, {
+    message: 'Send either sampleIndices or limit, not both — they select different rows.',
+    path: ['limit'],
+  });
 
 /**
  * `PATCH /api/golden-sets/[id]`. `name`/`description`/`visibility` are NOT

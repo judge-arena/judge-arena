@@ -44,6 +44,32 @@ describe('golden-set route schemas', () => {
     ).toThrow();
   });
 
+  it('createGoldenSetSchema refuses sampleIndices and limit together — two different selections, not a precedence rule', () => {
+    expect(() =>
+      createGoldenSetSchema.parse({
+        datasetId: 'd1',
+        protocol: 'pairwise',
+        name: 'Both',
+        sampleIndices: [0, 1],
+        limit: 5,
+      })
+    ).toThrow(/not both/);
+
+    // Each ALONE still parses. A refusal that rejected both would satisfy the
+    // assertion above while deleting the feature.
+    expect(
+      createGoldenSetSchema.parse({ datasetId: 'd1', protocol: 'pairwise', name: 'L', limit: 5 }).limit
+    ).toBe(5);
+    expect(
+      createGoldenSetSchema.parse({ datasetId: 'd1', protocol: 'pairwise', name: 'S', sampleIndices: [3] })
+        .sampleIndices
+    ).toEqual([3]);
+    // And omitting both is still "every live sample".
+    expect(
+      createGoldenSetSchema.parse({ datasetId: 'd1', protocol: 'pairwise', name: 'All' }).limit
+    ).toBeUndefined();
+  });
+
   it('createGoldenSetSchema rejects an unknown protocol', () => {
     expect(() =>
       createGoldenSetSchema.parse({ datasetId: 'd1', protocol: 'setwise', name: 'X' })

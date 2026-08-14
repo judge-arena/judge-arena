@@ -8,6 +8,20 @@ import { POST } from '@/app/api/golden-sets/route';
 vi.mock('next-auth', () => ({ getServerSession: vi.fn() }));
 vi.mock('next/headers', () => ({ headers: vi.fn(async () => new Headers()) }));
 
+// Same fake, same reason, as tests/db/access-matrix.test.ts and
+// tests/db/config-golden-sets.test.ts. requireAuth()'s rate-limit chokepoint
+// hits a REAL Redis sliding window keyed by client IP, always '127.0.0.1'
+// here, and `fileParallelism: false` makes that 120/min budget shared by every
+// file in one `npm run test:db` run. Adding cases to this file without the
+// fake spends more of that shared budget and fails UNRELATED files.
+vi.mock('@/lib/rate-limit-redis', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/rate-limit-redis')>();
+  return {
+    ...actual,
+    apiLimiter: { check: vi.fn(async () => ({ ok: true, remaining: 999, resetAt: Date.now() + 60_000 })) },
+  };
+});
+
 function mockSessionFor(user: { id: string; email: string }) {
   (getServerSession as unknown as Mock).mockResolvedValue({
     user: { id: user.id, email: user.email },
@@ -197,6 +211,77 @@ describe('POST /api/golden-sets — create-by-import against real JudgeBench row
       })
     );
     expect(res.status).toBe(400);
+    await expect(db.goldenSet.count()).resolves.toBe(before);
+  });
+
+  it('limit: N imports the first N LIVE samples — a hidden row inside the window is skipped, not 400ed and not returned short', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+
+    // NON-VACUITY, two ways:
+    //
+    //  (a) The tombstone sits INSIDE the first N. At the tail, `limit: 5`
+    //      returns the same five rows whether or not the read filters and
+    //      whether or not `take` runs after the filter — the test would pass
+    //      against exactly the code it exists to fail against.
+    //  (b) The SECOND fixture row is an `isTombstone: false` tombstone, which
+    //      is a LIVE row. Every other shape in this wave uses `true`, so a
+    //      filter written as the simpler `{ tombstone: { is: null } }` passes
+    //      all of them; here it would drop index 4 and shift the window.
+    const hidden = await db.datasetSample.findFirstOrThrow({
+      where: { datasetId: JUDGEBENCH_DATASET_ID, index: 2 },
+    });
+    await db.tombstone.create({
+      data: { datasetSampleId: hidden.id, isTombstone: true, reason: 'fixture' },
+    });
+    const unhidden = await db.datasetSample.findFirstOrThrow({
+      where: { datasetId: JUDGEBENCH_DATASET_ID, index: 4 },
+    });
+    await db.tombstone.create({ data: { datasetSampleId: unhidden.id, isTombstone: false } });
+
+    const res = await POST(
+      jsonRequest('http://localhost/api/golden-sets', 'POST', {
+        datasetId: JUDGEBENCH_DATASET_ID,
+        protocol: 'pairwise',
+        name: 'JudgeBench first five live',
+        limit: 5,
+      })
+    );
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body._count.items).toBe(5);
+
+    const items = await db.goldenItem.findMany({
+      where: { goldenSetId: body.id },
+      orderBy: { index: 'asc' },
+      include: { sourceSample: { select: { index: true } } },
+    });
+    // 2 is hidden, so 5 is pulled up to fill the window; 4 carries a tombstone
+    // row that says isTombstone: false, so it is live and stays put.
+    expect(items.map((i) => i.sourceSample.index)).toEqual([0, 1, 3, 4, 5]);
+    // GoldenItem.index is 0..n-1 over the SELECTION, never the sample's own.
+    expect(items.map((i) => i.index)).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it('sending both limit and sampleIndices is a 400, creating nothing', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const before = await db.goldenSet.count();
+
+    const res = await POST(
+      jsonRequest('http://localhost/api/golden-sets', 'POST', {
+        datasetId: JUDGEBENCH_DATASET_ID,
+        protocol: 'pairwise',
+        name: 'Both selections',
+        sampleIndices: [0, 1],
+        limit: 5,
+      })
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    // The route's standard zod envelope; the specific sentence rides in
+    // `details`, which is what tells the caller which two keys collided.
+    expect(JSON.stringify(body.details)).toContain('not both');
     await expect(db.goldenSet.count()).resolves.toBe(before);
   });
 });
