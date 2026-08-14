@@ -12,10 +12,15 @@ import {
   PATCH as patchDataset,
   GET as getDataset,
 } from '@/app/api/datasets/[id]/route';
+import {
+  GET as listDatasets,
+  POST as createDataset,
+} from '@/app/api/datasets/route';
 import { GET as exportConfig } from '@/app/api/config/export/route';
 import { POST as importConfig } from '@/app/api/config/import/route';
 import { POST as createEvaluations } from '@/app/api/evaluations/route';
 import { GET as exportProject } from '@/app/api/projects/[id]/export/route';
+import { GET as getProject } from '@/app/api/projects/[id]/route';
 import { POST as createGoldenSet } from '@/app/api/golden-sets/route';
 import {
   POST as createVersion,
@@ -23,7 +28,7 @@ import {
 } from '@/app/api/datasets/[id]/versions/route';
 import { GET as exportDataset } from '@/app/api/datasets/[id]/export/route';
 import { POST as refreshDataset } from '@/app/api/datasets/[id]/refresh/route';
-import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
+import { liveDatasetsOnly, liveSamplesOnly, tombstoneDataset } from '@/lib/tombstones';
 import { PLATFORM_OWNER_EMAIL } from '@/lib/golden-sets';
 
 // A1, the tombstone overlay. DELETE /api/datasets/[id]/samples HIDES the named
@@ -599,9 +604,11 @@ describe('PUT /api/datasets/[id]/samples — tombstone-and-append (A1 Task 5)', 
 // inverted. What is pinned here is the parent-arm inheritance itself and the
 // convergence property.
 //
-// NOT ASSERTED ANYWHERE YET, on purpose: that a hidden dataset stops appearing
-// in GET /api/datasets. That read belongs to the dataset read sweep later in
-// this plan, which owns the route assertion.
+// THAT A HIDDEN DATASET STOPS APPEARING IN GET /api/datasets is asserted by
+// the Task 9 block at the bottom of this file ('DELETE /api/datasets/[id]
+// makes the corpus disappear from GET /api/datasets'), which owns the list
+// read. It was left un-pinned here only because that read was still
+// unfiltered at the Task 6 commit.
 describe('DELETE /api/datasets/[id] — the overlay (A1 Task 6)', () => {
   beforeEach(async () => {
     await truncateAll();
@@ -718,9 +725,9 @@ describe('DELETE /api/datasets/[id] — the overlay (A1 Task 6)', () => {
 // Every mutation handler opens with an ownership guard read of its dataset,
 // and not one of them filtered — so once Task 6 made DELETE hide a dataset
 // rather than destroy it, a tombstoned corpus stayed completely writable
-// through the API. (The list and detail READS are still unfiltered at this
-// commit too; closing those is Task 9. The two halves land in that order, so
-// for one commit a hidden dataset is readable and unwritable.)
+// through the API. (The list and detail READS are filtered too now — Task 9,
+// pinned by the last block in this file. The two halves landed in that order,
+// so for one commit a hidden dataset was readable and unwritable.)
 //
 // TWO OF THESE ARE LIVE DEFECTS ON THIS BRANCH, not hypotheticals, and both
 // are the same shape: `liveSamplesOnly()` carries a PARENT arm, so the sample
@@ -958,8 +965,8 @@ describe('a hidden dataset is closed to writes (A1 Task 7, Decision 15)', () => 
     // eight other resource types whose access-matrix tests pin that behaviour,
     // so the liveness check is explicit and local to this handler
     // (`assertDatasetLive`). Without it you can rename a corpus you have
-    // already deleted — and once Task 9 filters the list and detail reads, that
-    // rename lands on a row nothing returns.
+    // already deleted — and now that the list and detail reads ARE filtered
+    // (Task 9), that rename lands on a row nothing returns.
     const user = await mkUser();
     mockSessionFor(user);
     const { dataset } = await t7Corpus(user.id);
@@ -1541,5 +1548,229 @@ describe('the sample read sweep: a hidden sample is invisible to every filtered 
     });
     expect(item.sourceDatasetSampleId).toBe(alive.id);
     expect(item.sourceDatasetSampleId).not.toBe(dead.id);
+  });
+});
+
+// ─── A1 Task 9: the dataset read sweep ──────────────────────────────────────
+// Ten dataset reads take `liveDatasetsOnly()`. These two tests pin the two
+// that a whole class of consumers sits behind: the paginated list (which is
+// ALSO the golden-set dataset picker — golden-sets/page.tsx fetches
+// /api/datasets, it is not a distinct server read) and the single-dataset GET.
+//
+// The third test in this block is the opposite claim, and it is the reason the
+// filter and the must-not-filter class landed in ONE task: the slug-dedup read
+// in the SAME file as the list must stay UNFILTERED, or creating a dataset
+// whose name collides with a hidden one raises P2002 and 500s.
+
+let sweepCounter = 0;
+
+/** A private dataset owned by `userId`, with a caller-chosen name. */
+async function mkSweepDataset(userId: string, name: string) {
+  sweepCounter += 1;
+  return db.dataset.create({
+    data: { name, slug: `${name}-${sweepCounter}`, userId, source: 'local', visibility: 'private' },
+  });
+}
+
+function sweepSessionFor(user: { id: string; email: string }) {
+  (getServerSession as unknown as Mock).mockResolvedValue({
+    user: { id: user.id, email: user.email },
+  });
+}
+
+describe('the dataset read sweep — a hidden dataset leaves every list (A1 Task 9)', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('GET /api/datasets drops the hidden one, keeps the un-hidden one, and the total agrees with the page', async () => {
+    const user = await mkUser();
+    sweepSessionFor(user);
+
+    // THREE datasets, deliberately — two vacuous shapes bite on this exact
+    // assertion:
+    //
+    //   * `sweep-hidden` (isTombstone: true) is the only row that can show
+    //     the filter doing anything at all. Without it, a route with NO
+    //     filter passes every line below.
+    //   * `sweep-restored` carries a Tombstone row with isTombstone: FALSE.
+    //     It is the only fixture that separates the required
+    //     `NOT: { tombstone: { is: { isTombstone: true } } }` from the
+    //     simpler `{ tombstone: { is: null } }`, which would wrongly hide a
+    //     restored dataset and still satisfy every other assertion here.
+    const live = await mkSweepDataset(user.id, 'sweep-live');
+    const hidden = await mkSweepDataset(user.id, 'sweep-hidden');
+    const restored = await mkSweepDataset(user.id, 'sweep-restored');
+    expect(live.id).toBeTruthy();
+    await tombstoneDataset(db, hidden.id, 'read-sweep fixture');
+    await db.tombstone.create({ data: { datasetId: restored.id, isTombstone: false } });
+
+    const res = await listDatasets(new Request('http://localhost/api/datasets'));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body.data).toHaveLength(2);
+    expect(body.data.map((d: { name: string }) => d.name).sort()).toEqual([
+      'sweep-live',
+      'sweep-restored',
+    ]);
+
+    // `pagination.total` comes from a SECOND query — `prisma.dataset.count`
+    // over the same `where`. Filter the findMany and not the count and this
+    // reads 3 against a page of 2: a silent desync, no type error, and the
+    // `where` is declared `any` so nothing catches it but this line.
+    expect(body.pagination.total).toBe(2);
+  });
+
+  it('DELETE /api/datasets/[id] makes the corpus disappear from GET /api/datasets', async () => {
+    // THE USER-VISIBLE HALF OF A DATASET DELETE. The Task 6 block above could
+    // not assert this — the list read was still unfiltered at that commit, so
+    // it left the claim explicitly un-pinned and named this task as its owner.
+    // Nothing else in the suite drives the delete VERB and then the list READ,
+    // which is the only pair a user actually experiences.
+    const user = await mkUser();
+    sweepSessionFor(user);
+    const doomed = await mkSweepDataset(user.id, 'sweep-doomed');
+    const survivor = await mkSweepDataset(user.id, 'sweep-survivor');
+
+    const before = await listDatasets(new Request('http://localhost/api/datasets'));
+    expect((await before.json()).pagination.total).toBe(2);
+
+    const del = await deleteDataset(
+      new Request(`http://localhost/api/datasets/${doomed.id}`, { method: 'DELETE' }),
+      { params: Promise.resolve({ id: doomed.id }) }
+    );
+    expect(del.status).toBe(200);
+
+    const after = await listDatasets(new Request('http://localhost/api/datasets'));
+    const body = await after.json();
+    expect(body.data.map((d: { id: string }) => d.id)).toEqual([survivor.id]);
+    expect(body.pagination.total).toBe(1);
+
+    // And the row is still on disk — this is a hide, not a destroy. Without
+    // this line the test passes just as happily against a hard `delete`.
+    await expect(db.dataset.count({ where: { id: doomed.id } })).resolves.toBe(1);
+  });
+
+  it('GET /api/datasets/[id] 404s on a hidden dataset and still serves a restored one', async () => {
+    const user = await mkUser();
+    sweepSessionFor(user);
+    const hidden = await mkSweepDataset(user.id, 'sweep-single-hidden');
+    const restored = await mkSweepDataset(user.id, 'sweep-single-restored');
+    await tombstoneDataset(db, hidden.id, 'read-sweep fixture');
+    // Same isTombstone: false arm as above, for the same reason.
+    await db.tombstone.create({ data: { datasetId: restored.id, isTombstone: false } });
+
+    const gone = await getDataset(new Request(`http://localhost/api/datasets/${hidden.id}`), {
+      params: Promise.resolve({ id: hidden.id }),
+    });
+    expect(gone.status).toBe(404);
+    expect((await gone.json()).error).toBe('Dataset not found');
+
+    const stillThere = await getDataset(new Request(`http://localhost/api/datasets/${restored.id}`), {
+      params: Promise.resolve({ id: restored.id }),
+    });
+    expect(stillThere.status).toBe(200);
+  });
+
+  it('GET /api/projects/[id] hides it from BOTH the anonymous list and the OWNER\'s', async () => {
+    // TWO reads in one file, and only one of them is a `dataset.findMany`:
+    // the owner's copy is a nested `datasets:` relation arg inside the heavy
+    // project include, which a `dataset.findX` grep does not surface at all.
+    // Filtering only the one grep finds leaves the hidden corpus on the
+    // project page of the person who deleted it — so both branches are driven
+    // here, in one test, against one fixture.
+    const user = await mkUser();
+    const project = await db.project.create({
+      data: { name: `sweep-project-${(sweepCounter += 1)}`, userId: user.id, visibility: 'public' },
+    });
+    // PUBLIC, because the anonymous branch reads `visibility: 'public'` and a
+    // private fixture would vanish from it for the wrong reason.
+    const hidden = await db.dataset.create({
+      data: {
+        name: 'sweep-proj-hidden',
+        slug: `sweep-proj-hidden-${sweepCounter}`,
+        userId: user.id,
+        projectId: project.id,
+        source: 'local',
+        visibility: 'public',
+      },
+    });
+    const kept = await db.dataset.create({
+      data: {
+        name: 'sweep-proj-kept',
+        slug: `sweep-proj-kept-${sweepCounter}`,
+        userId: user.id,
+        projectId: project.id,
+        source: 'local',
+        visibility: 'public',
+      },
+    });
+    await tombstoneDataset(db, hidden.id, 'read-sweep fixture');
+
+    // Read 1 of 2: anonymous. `optionalAuth()` resolves to null here.
+    (getServerSession as unknown as Mock).mockResolvedValue(null);
+    const anon = await getProject(new Request(`http://localhost/api/projects/${project.id}`), {
+      params: Promise.resolve({ id: project.id }),
+    });
+    expect(anon.status).toBe(200);
+    const anonBody = await anon.json();
+    expect(anonBody.datasets.map((d: { id: string }) => d.id)).toEqual([kept.id]);
+
+    // Read 2 of 2: the OWNER, whose branch is a wholly different query.
+    sweepSessionFor(user);
+    const owned = await getProject(new Request(`http://localhost/api/projects/${project.id}`), {
+      params: Promise.resolve({ id: project.id }),
+    });
+    expect(owned.status).toBe(200);
+    const ownedBody = await owned.json();
+    expect(ownedBody.datasets.map((d: { id: string }) => d.id)).toEqual([kept.id]);
+  });
+
+  it('creating a dataset whose name collides with a HIDDEN one still gets a unique slug', async () => {
+    // THE P2002 CLASS. `datasets/route.ts`'s slug-dedup read must stay
+    // UNFILTERED: a hidden dataset still occupies its row in
+    // @@unique([userId, slug]) (schema.prisma:596). This test fails the day
+    // somebody sweeps `liveDatasetsOnly()` through that read "for
+    // consistency" — the hidden row vanishes from `existingSlugs`, the
+    // `-xxxx` suffix is never appended, and `prisma.dataset.create` raises
+    // P2002, which this route's catch does not handle. The caller gets a
+    // bare 500.
+    //
+    // NON-VACUITY: the first dataset is HIDDEN before the second create.
+    // Without the tombstone the dedup read sees the row whether or not it is
+    // filtered, and this test proves nothing.
+    const user = await mkUser();
+    sweepSessionFor(user);
+
+    const firstRes = await createDataset(
+      jsonRequest('http://localhost/api/datasets', 'POST', {
+        name: 'Slug Dedup Probe',
+        source: 'local',
+        visibility: 'private',
+      })
+    );
+    expect(firstRes.status).toBe(201);
+    const first = await firstRes.json();
+    expect(first.slug).toBe('slug-dedup-probe');
+
+    await tombstoneDataset(db, first.id, 'slug-dedup guard fixture');
+
+    const secondRes = await createDataset(
+      jsonRequest('http://localhost/api/datasets', 'POST', {
+        name: 'Slug Dedup Probe',
+        source: 'local',
+        visibility: 'private',
+      })
+    );
+    expect(secondRes.status).toBe(201);
+    const second = await secondRes.json();
+    expect(second.slug).not.toBe(first.slug);
+    expect(second.slug.startsWith('slug-dedup-probe-')).toBe(true);
+
+    // Both rows exist and both hold a slug — the constraint was never tested
+    // by luck.
+    await expect(db.dataset.count({ where: { userId: user.id } })).resolves.toBe(2);
   });
 });

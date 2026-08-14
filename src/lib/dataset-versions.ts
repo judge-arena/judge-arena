@@ -153,6 +153,20 @@ export async function createDatasetVersion(
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       return await client.$transaction(async (tx) => {
+        // MUST NOT BE TOMBSTONE-FILTERED (A1). This is the version
+        // HIGH-WATER read — the plan's own ordinal argument applied to
+        // `version`. A hidden version keeps its number in
+        // @@unique([parentId, version]) (schema.prisma:597), so filtering
+        // here lets the next fork read a lower max, reuse a taken number and
+        // collide. The retry loop cannot rescue that: it would recompute the
+        // same filtered max and land on the same taken number every attempt,
+        // and MAX_ATTEMPTS later the caller gets a
+        // `DatasetVersionConflictError` naming a concurrency race that never
+        // happened.
+        //
+        // The version-list read in datasets/[id]/versions/route.ts looks
+        // textually identical and IS filtered — it decides what the history
+        // panel shows, not what number the next row takes.
         const familyVersions = await tx.dataset.findMany({
           where: { OR: [{ id: rootDatasetId }, { parentId: rootDatasetId }] },
           select: { version: true },
@@ -165,6 +179,12 @@ export async function createDatasetVersion(
         // to stay truthful to whichever version this attempt lands on.
         const baseSlug = generateSlug(name);
         const versionSlug = `${baseSlug}-v${nextVersion}`;
+        // MUST NOT BE TOMBSTONE-FILTERED (A1). Slug DEDUP against
+        // @@unique([userId, slug]) (schema.prisma:596). A hidden dataset
+        // still owns its slug; filtered, this derives a colliding
+        // `${baseSlug}-v${nextVersion}`, and `isRetryableVersionConflict`
+        // would then retry the same doomed value MAX_ATTEMPTS times before
+        // surfacing a DatasetVersionConflictError that names the wrong race.
         const existingSlugs = (
           await tx.dataset.findMany({ where: { userId }, select: { slug: true } })
         )

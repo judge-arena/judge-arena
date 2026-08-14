@@ -376,6 +376,10 @@ export async function POST(request: Request) {
 
       // Generate a unique slug for the dataset
       const dsSlug = generateSlug(`hf-${meta.name}`);
+      // MUST NOT BE TOMBSTONE-FILTERED (A1). Slug DEDUP against
+      // @@unique([userId, slug]) (schema.prisma:596) — same shape as
+      // datasets/route.ts's. A hidden dataset still owns its slug; filtered,
+      // this mints a duplicate and the create below raises P2002.
       const existingSlugs = (
         await prisma.dataset.findMany({
           where: { userId: session.user.id },

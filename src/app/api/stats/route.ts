@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { rabbitHealthy } from '@/lib/queue/connection';
 import { logger, serializeError } from '@/lib/logger';
+import { liveDatasetsOnly } from '@/lib/tombstones';
 
 // GET /api/stats - Dashboard statistics
 export async function GET() {
@@ -41,10 +42,15 @@ export async function GET() {
       // per-user "configured model" count now.
       prisma.modelEndpoint.count({ where: { ...userFilter, isActive: true } }),
       prisma.rubric.count({ where: userFilter }),
+      // A1: hidden datasets do not count. The non-admin arm already owns
+      // `OR`; `liveDatasetsOnly()` sets only `NOT`, so this is additive.
       prisma.dataset.count({
         where: isAdmin(session)
-          ? {}
-          : { OR: [{ userId: session.user.id }, { visibility: 'public' }] },
+          ? liveDatasetsOnly()
+          : {
+              OR: [{ userId: session.user.id }, { visibility: 'public' }],
+              ...liveDatasetsOnly(),
+            },
       }),
       // ── Queue-backed counts (replaces the retired in-process
       // getQueueStats() — src/lib/evaluation-run-manager.ts's module-level

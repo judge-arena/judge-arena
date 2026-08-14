@@ -165,6 +165,17 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
           { id: rootId },
           { parentId: rootId },
         ],
+        // A1: a hidden version drops out of the history panel. SPREAD, not
+        // merged: this `where` already owns `OR`, and `liveDatasetsOnly()`
+        // sets only `NOT`, so the two coexist. An `OR`-shaped helper would
+        // have silently clobbered the family predicate above with no type
+        // error — which is why the helper returns `NOT`.
+        //
+        // NOT the same read as `dataset-versions.ts`'s family scan, which
+        // looks textually identical and MUST NOT be filtered: that one is the
+        // version high-water mark feeding @@unique([parentId, version]). This
+        // one only decides what the panel displays.
+        ...liveDatasetsOnly(),
       },
       select: {
         id: true,

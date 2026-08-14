@@ -11,6 +11,7 @@ import {
 import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib/pagination';
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicDataset } from '@/lib/serializers';
+import { liveDatasetsOnly } from '@/lib/tombstones';
 
 const createDatasetSchema = z.object({
   name: z.string().min(1, 'Name is required').max(200),
@@ -78,9 +79,23 @@ export async function GET(request: Request) {
     if (visibility === 'private' || visibility === 'public') where.visibility = visibility;
     if (projectId) where.projectId = projectId;
 
+    // A1 (tombstone overlay): a hidden dataset is invisible to every dataset
+    // read. Built ONCE, here, because `findMany` and `count` below both take
+    // this object — filter one and not the other and `pagination.total`
+    // silently disagrees with the page it describes. `where` is declared
+    // `any` at :63, so `liveDatasetsOnly()`'s return type gives ZERO
+    // protection on this line; this single shared const is the only guard.
+    // `liveDatasetsOnly()` sets exactly one key, `NOT`, and nothing above
+    // sets `NOT`, so the spread cannot clobber the visibility clauses.
+    //
+    // This also covers the golden-set dataset picker: golden-sets/page.tsx
+    // fetches `/api/datasets?visibility=public&limit=100`, it is not a
+    // separate server read.
+    const liveWhere = { ...where, ...liveDatasetsOnly() };
+
     const [datasets, total] = await Promise.all([
       prisma.dataset.findMany({
-        where,
+        where: liveWhere,
         include: {
           user: { select: { id: true, name: true, email: true } },
           project: { select: { id: true, name: true } },
@@ -89,7 +104,7 @@ export async function GET(request: Request) {
         orderBy: { updatedAt: 'desc' },
         ...pageArgs,
       }),
-      prisma.dataset.count({ where }),
+      prisma.dataset.count({ where: liveWhere }),
     ]);
 
     // Own (or, for an admin, every) dataset gets the full shape; a public
@@ -184,6 +199,15 @@ export async function POST(request: Request) {
 
     // Auto-generate slug for config portability
     const dsSlug = generateSlug(data.name);
+    // MUST NOT BE TOMBSTONE-FILTERED (A1). This is slug DEDUP, not a
+    // visibility read: a hidden dataset still holds its row in
+    // @@unique([userId, slug]) (schema.prisma:596). Sweep `liveDatasetsOnly()`
+    // through here — as the list read twenty lines up now does — and the
+    // hidden row drops out of `existingSlugs`, the suffix is never appended,
+    // and the `create` below dies on P2002, which this route's catch does not
+    // handle (it only maps P2003), so the caller gets a bare 500.
+    // Pinned by 'creating a dataset whose name collides with a HIDDEN one'
+    // in tests/db/dataset-sample-tombstone.test.ts.
     const existingSlugs = (await prisma.dataset.findMany({
       where: { userId: session.user.id },
       select: { slug: true },

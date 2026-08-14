@@ -387,6 +387,12 @@ async function findOrCreateDataset(
 ): Promise<string> {
   // No `(parentId, version)` constraint exists for Dataset (unlike Rubric),
   // so every row — root or child — is content-matched the same way.
+  //
+  // MUST NOT BE TOMBSTONE-FILTERED (A1). This is idempotency/dedup against
+  // @@unique([userId, slug]) (schema.prisma:596), and the v1→v2 importer is
+  // re-runnable. A hidden dataset still owns its slug; filtered, a re-run
+  // stops recognising the row it created last time and tries to create it
+  // again — a P2002 mid-migration, not a harmless duplicate.
   const where = v1.slug
     ? { userId: v2UserId, slug: v1.slug }
     : { userId: v2UserId, slug: null, name: v1.name, version: v1.version, parentId: v2ParentId };
@@ -444,6 +450,10 @@ async function findOrCreateDatasetSample(
   v1: V1DatasetSample,
   v2DatasetId: string
 ): Promise<string> {
+  // MUST NOT BE TOMBSTONE-FILTERED (A1). Sample idempotency by ORDINAL:
+  // `datasetId_index` is @@unique([datasetId, index]) (schema.prisma:619) and
+  // a hidden sample keeps its ordinal. Filtered, a re-run treats the hidden
+  // row as absent and re-creates one at the same index — an immediate P2002.
   const existing = await ctx.v2.datasetSample.findUnique({
     where: { datasetId_index: { datasetId: v2DatasetId, index: v1.index } },
   });

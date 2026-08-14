@@ -451,6 +451,11 @@ export async function POST(request: Request) {
     // ── Datasets ──
     for (const configDataset of config.datasets) {
       const slug = configDataset.slug;
+      // MUST NOT BE TOMBSTONE-FILTERED (A1). This is the upsert-by-slug read
+      // for @@unique([userId, slug]) (schema.prisma:596). Filtered, a hidden
+      // dataset's slug reads as free, the create branch runs, and Postgres
+      // raises P2002 mid-import — on a route whose dataset section has no
+      // `$transaction`, so the document lands half-applied.
       const existing = await prisma.dataset.findFirst({
         where: { userId, slug },
         include: { _count: { select: { samples: true } } },

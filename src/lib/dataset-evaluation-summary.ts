@@ -113,6 +113,19 @@ function computeSummary(evaluations: EvaluationForSummary[]): DatasetEvaluationS
  * dataset-refresh-update.ts, used by the separate HF-refresh route, is
  * untouched — it has its own preserve-evaluationSummary contract and isn't
  * part of this race.)
+ *
+ * MUST NOT BE TOMBSTONE-FILTERED (A1) — and, uniquely in that class, CANNOT
+ * BE. Every other member is a Prisma read that would compile perfectly well
+ * with the filter spread in and break a write at runtime; this one is
+ * unreachable by construction.
+ *
+ * TOMBSTONE OVERLAY (A1): the row lock below is `$queryRaw`, and both filter
+ * helpers in src/lib/tombstones.ts compile to Prisma `where` fragments — they
+ * CANNOT reach raw SQL. "Spread the helper into every dataset read site" (the
+ * rule the rest of A1 follows, and which now covers ten reads) therefore does
+ * not apply to this statement, and nobody should try to make it. It selects
+ * one Dataset by primary key for an UPDATE it is about to make; hiding the
+ * dataset does not change which row that is.
  */
 export async function refreshDatasetEvaluationSummary(datasetId: string): Promise<void> {
   const commit = await prisma.$transaction(async (tx) => {

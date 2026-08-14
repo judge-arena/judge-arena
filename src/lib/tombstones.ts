@@ -58,11 +58,13 @@ import type { Prisma } from '@prisma/client';
  * `isTombstone: true` → excluded. The `@unique` on each FK is what guarantees
  * the join matches at most one tombstone.
  *
- * TYPE-SAFETY WARNING FOR ONE CALLER. `src/app/api/datasets/route.ts:62`
- * declares `const where: any = {}`, so this return type offers ZERO protection
- * there. That same object is passed to both `findMany` (`:83`) and `count`
- * (`:92`) — filter one and not the other and the pagination total silently
- * desynchronises from the page it is counting.
+ * TYPE-SAFETY WARNING FOR ONE CALLER. `src/app/api/datasets/route.ts` declares
+ * its list predicate as `const where: any = {}`, so this return type offers
+ * ZERO protection there. That route's `findMany` and its pagination `count`
+ * both read ONE derived object, `const liveWhere = { ...where,
+ * ...liveDatasetsOnly() }` — deliberately, because filtering one and not the
+ * other desynchronises the total from the page it is counting, with no type
+ * error to catch it. Do not re-inline either call site's `where`.
  */
 export function liveSamplesOnly(): Prisma.DatasetSampleWhereInput {
   return {

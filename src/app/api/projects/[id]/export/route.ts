@@ -10,7 +10,7 @@ import {
   jsonlResponse,
 } from '@/lib/export';
 import { logger, serializeError } from '@/lib/logger';
-import { liveSamplesOnly } from '@/lib/tombstones';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 /**
  * Full include for evaluation export (same as evaluations/export)
@@ -108,7 +108,12 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
       if (format === 'jsonl') {
         // In JSONL mode, append dataset samples with a _type discriminator
         const datasets = await prisma.dataset.findMany({
-          where: { projectId: params.id },
+          // A1, read 1 of 2 in this file: a hidden dataset exports nothing.
+          // The nested sample filter alone would already empty it out (the
+          // parent arm of `liveSamplesOnly()`), but the dataset would still
+          // appear — as a row with zero samples, which reads as a corpus that
+          // was emptied rather than one that was withdrawn.
+          where: { projectId: params.id, ...liveDatasetsOnly() },
           include: { samples: { where: liveSamplesOnly(), orderBy: { index: 'asc' } } },
         });
 
@@ -150,7 +155,8 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
       // exercises a single branch, so both carry the filter and both carry a
       // test.
       const datasets = await prisma.dataset.findMany({
-        where: { projectId: params.id },
+        // A1, read 2 of 2 in this file: same rule on the datasets scope.
+        where: { projectId: params.id, ...liveDatasetsOnly() },
         include: { samples: { where: liveSamplesOnly(), orderBy: { index: 'asc' } } },
       });
 

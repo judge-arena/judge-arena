@@ -45,11 +45,11 @@ const bulkReplaceSamplesSchema = z.object({
 // `findFirst` rather than `findUnique` so the id and the overlay predicate
 // travel in one plain `where`.
 //
-// THE READ SIDE HAS NOT CAUGHT UP YET, and that is worth stating rather than
-// implying: `datasets/route.ts` (list) and `datasets/[id]/route.ts` (detail)
-// are still unfiltered at this commit. Filtering them is Task 9. Until it
-// lands, a hidden dataset is readable and unwritable — a deliberate ordering,
-// not an inconsistency to be reconciled here.
+// THE READ SIDE HAS SINCE CAUGHT UP: `datasets/route.ts` (list, and its
+// pagination count) and `datasets/[id]/route.ts` (detail) both spread
+// `liveDatasetsOnly()` now, so a hidden dataset is neither readable nor
+// writable. The two halves landed in that order, one commit apart; nothing
+// here had to change when the read half arrived.
 //
 // TWO OF THE FOUR WERE ACTIVELY BROKEN WITHOUT IT, not merely permissive, and
 // for the same reason: `liveSamplesOnly()` carries a PARENT arm, so the sample

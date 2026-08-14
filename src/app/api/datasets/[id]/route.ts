@@ -22,8 +22,9 @@ import { liveDatasetsOnly, liveSamplesOnly, tombstoneDataset } from '@/lib/tombs
  * the write handlers run immediately after the ownership gate.
  *
  * Without it a hidden dataset stays PATCHable: you could rename a corpus you
- * had already deleted — and once Task 9 filters the list and detail reads,
- * that rename lands on a row nothing returns.
+ * had already deleted — and now that the list and detail reads ARE filtered
+ * (the `GET` below, and `datasets/route.ts`), that rename lands on a row
+ * nothing returns.
  *
  * IT ANSWERS 404, NOT 409, unlike its golden-set counterpart, and the
  * difference is not cosmetic. A retired golden set stays visible to its owner
@@ -31,7 +32,8 @@ import { liveDatasetsOnly, liveSamplesOnly, tombstoneDataset } from '@/lib/tombs
  * confuse someone looking straight at it. A hidden dataset has neither: no
  * escape flag, and no un-delete verb anywhere in A1. 404 is also what this
  * branch already answers everywhere else — all nine dataset guard reads Task 7
- * converted return it, and Task 9 brings the list and detail reads into line.
+ * converted return it, and the list and detail reads are now in line with them
+ * (`GET` below filters, so a hidden dataset 404s there too).
  * A 409 here would leave one handler in the set saying something different.
  *
  * Not exported: Next.js 15 validates a `route.ts`'s named exports against a
@@ -72,8 +74,19 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
       if (scopeCheck) return scopeCheck;
     }
 
-    const dataset = await prisma.dataset.findUnique({
-      where: { id: params.id },
+    const dataset = await prisma.dataset.findFirst({
+      // A1: a hidden dataset 404s here, exactly as a deleted one used to.
+      //
+      // `findFirst`, NOT `findUnique`, and the swap is forced rather than
+      // stylistic: spreading a `DatasetWhereInput` into a
+      // `DatasetWhereUniqueInput` widens `id` to `string | StringFilter`,
+      // which the unique input does not accept, and TypeScript then fails the
+      // whole overload — silently dropping every `include` from the inferred
+      // result type, so the reported errors land ten lines below on
+      // `dataset.samples`. `id` is still the primary key, so this matches at
+      // most one row either way. Same call shape as `assertDatasetLive` above
+      // and as all nine guard reads Task 7 converted.
+      where: { id: params.id, ...liveDatasetsOnly() },
       include: {
         user: { select: { id: true, name: true, email: true } },
         project: { select: { id: true, name: true } },

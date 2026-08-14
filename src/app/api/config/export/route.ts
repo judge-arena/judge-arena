@@ -18,7 +18,7 @@ import {
   parseIncludeRetired,
 } from '@/lib/golden-sets';
 import { logger, serializeError } from '@/lib/logger';
-import { liveSamplesOnly } from '@/lib/tombstones';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 /**
  * GET /api/config/export
@@ -190,7 +190,10 @@ export async function GET(request: Request) {
 
     // ── Datasets ──
     if (sections.includes('datasets')) {
-      const where = admin ? undefined : { userId };
+      // A1: a hidden dataset never enters the portable document — including
+      // on the admin branch, which previously passed `undefined`. The
+      // importer writes whatever this emits back as a fresh, live row.
+      const where = admin ? liveDatasetsOnly() : { userId, ...liveDatasetsOnly() };
       const datasets = await prisma.dataset.findMany({
         where,
         include: includeSamples
