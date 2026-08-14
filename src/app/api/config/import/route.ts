@@ -23,6 +23,7 @@ import { forkGoldenSet } from '@/lib/golden-set-versions';
 import { createCustomJudgeModel } from '@/lib/model-catalog';
 import { logger, serializeError } from '@/lib/logger';
 import { audit, getRequestContext } from '@/lib/audit';
+import { liveSamplesOnly } from '@/lib/tombstones';
 
 /** Old config exports (pre Task 12 review fix) only ever wrote one of the
  * three legacy `ModelConfig.provider` values — translate those the same
@@ -649,8 +650,14 @@ export async function POST(request: Request) {
       // from content: `inputText` is `DatasetSample.input` verbatim for all
       // three mappings. Duplicate inputs collapse onto the lowest-index
       // sample — recorded in the COVERAGE map.
+      //
+      // LIVE ROWS ONLY, and the interaction with that collapse is the whole
+      // point: the map keeps the FIRST hit per input, so an unfiltered read
+      // lets a hidden row at a low index shadow a perfectly good live
+      // duplicate at a higher one. The import then binds a live golden item to
+      // a dead row, through a Restrict FK, permanently.
       const samples = await prisma.datasetSample.findMany({
-        where: { datasetId: dataset.id },
+        where: { datasetId: dataset.id, ...liveSamplesOnly() },
         select: { id: true, input: true },
         orderBy: { index: 'asc' },
       });

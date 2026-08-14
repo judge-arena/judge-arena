@@ -20,7 +20,7 @@ import {
   goldenSetLifecycleWhere,
   parseIncludeRetired,
 } from '@/lib/golden-sets';
-import { liveDatasetsOnly } from '@/lib/tombstones';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 import { createGoldenSetSchema, goldenSetInclude } from './shared';
 
 // GET /api/golden-sets — list golden sets visible to the caller.
@@ -146,6 +146,13 @@ export async function POST(request: Request) {
     const samples = await prisma.datasetSample.findMany({
       where: {
         datasetId: dataset.id,
+        // A0's primary flow. Unfiltered, a hidden sample becomes a golden item
+        // and `GoldenItem.sourceDatasetSampleId` — `onDelete: Restrict` — pins
+        // the row forever, with no in-product way to release it.
+        //
+        // `liveSamplesOnly()` contributes only `NOT` and `dataset` keys, so it
+        // collides with neither `datasetId` nor the `index` spread below.
+        ...liveSamplesOnly(),
         ...(data.sampleIndices ? { index: { in: data.sampleIndices } } : {}),
       },
       orderBy: { index: 'asc' },

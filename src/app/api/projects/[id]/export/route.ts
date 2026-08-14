@@ -10,6 +10,7 @@ import {
   jsonlResponse,
 } from '@/lib/export';
 import { logger, serializeError } from '@/lib/logger';
+import { liveSamplesOnly } from '@/lib/tombstones';
 
 /**
  * Full include for evaluation export (same as evaluations/export)
@@ -108,7 +109,7 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
         // In JSONL mode, append dataset samples with a _type discriminator
         const datasets = await prisma.dataset.findMany({
           where: { projectId: params.id },
-          include: { samples: { orderBy: { index: 'asc' } } },
+          include: { samples: { where: liveSamplesOnly(), orderBy: { index: 'asc' } } },
         });
 
         const datasetRows = datasets.flatMap((ds) =>
@@ -143,9 +144,14 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
 
     // ── Datasets scope ──
     if (scope === 'datasets') {
+      // The SECOND of two textually identical reads in this file — this one in
+      // the `scope=datasets` branch, the other in the `scope=all` JSONL branch
+      // above. Filtering one and not the other is invisible to anything that
+      // exercises a single branch, so both carry the filter and both carry a
+      // test.
       const datasets = await prisma.dataset.findMany({
         where: { projectId: params.id },
-        include: { samples: { orderBy: { index: 'asc' } } },
+        include: { samples: { where: liveSamplesOnly(), orderBy: { index: 'asc' } } },
       });
 
       const rows = datasets.flatMap((ds) =>

@@ -217,9 +217,13 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
     const body = await request.json();
     const data = updateSampleSchema.parse(body);
 
-    // Verify the sample belongs to this dataset
-    const sample = await prisma.datasetSample.findUnique({
-      where: { id: data.sampleId },
+    // Verify the sample belongs to this dataset AND is still live. A hidden
+    // sample must 404 here, or it stays silently editable while every read
+    // path hides it — an edit nobody can see and nobody can review.
+    // `findFirst`, because the live predicate is a relation filter layered on
+    // top of the id.
+    const sample = await prisma.datasetSample.findFirst({
+      where: { id: data.sampleId, ...liveSamplesOnly() },
       select: { datasetId: true },
     });
 

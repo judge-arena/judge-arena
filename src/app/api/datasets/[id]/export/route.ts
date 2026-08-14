@@ -9,7 +9,7 @@ import {
   jsonlResponse,
 } from '@/lib/export';
 import { logger, serializeError } from '@/lib/logger';
-import { liveDatasetsOnly } from '@/lib/tombstones';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 /**
  * GET /api/datasets/[id]/export?format=csv|jsonl
@@ -44,7 +44,11 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
     const dataset = await prisma.dataset.findFirst({
       where: { id: params.id, ...liveDatasetsOnly() },
       include: {
-        samples: { orderBy: { index: 'asc' } },
+        // `optionalAuth`: this route serves public datasets to callers with no
+        // session at all, so a hidden row leaking here leaks furthest. Both
+        // consumers below — the CSV flatten and the JSONL expansion — read this
+        // one array, so both are fixed by this one filter.
+        samples: { where: liveSamplesOnly(), orderBy: { index: 'asc' } },
       },
     });
 

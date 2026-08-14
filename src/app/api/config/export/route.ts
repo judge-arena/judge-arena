@@ -18,6 +18,7 @@ import {
   parseIncludeRetired,
 } from '@/lib/golden-sets';
 import { logger, serializeError } from '@/lib/logger';
+import { liveSamplesOnly } from '@/lib/tombstones';
 
 /**
  * GET /api/config/export
@@ -193,7 +194,12 @@ export async function GET(request: Request) {
       const datasets = await prisma.dataset.findMany({
         where,
         include: includeSamples
-          ? { samples: { orderBy: { index: 'asc' } } }
+          ? // The config document is a portable VIEW of the instance, so it
+            // carries what the instance shows, not what its tables still hold.
+            // A hidden row emitted here is worse than a leak on a page: the
+            // importer writes it back as a fresh, live row on a new id, with no
+            // tombstone and nothing recording that it was ever withdrawn.
+            { samples: { where: liveSamplesOnly(), orderBy: { index: 'asc' } } }
           : undefined,
         orderBy: { name: 'asc' },
       });

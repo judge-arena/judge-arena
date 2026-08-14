@@ -5,7 +5,7 @@ import { requireAuth, requireScope, optionalAuth, resolveResourceAccess, require
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicDataset } from '@/lib/serializers';
 import { findGoldenSetsPinningDataset } from '@/lib/golden-sets';
-import { liveDatasetsOnly, tombstoneDataset } from '@/lib/tombstones';
+import { liveDatasetsOnly, liveSamplesOnly, tombstoneDataset } from '@/lib/tombstones';
 
 /**
  * DECISION 15 — A HIDDEN DATASET IS CLOSED TO WRITES, at the two sites the
@@ -77,6 +77,7 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
         user: { select: { id: true, name: true, email: true } },
         project: { select: { id: true, name: true } },
         samples: {
+          where: liveSamplesOnly(),
           orderBy: { index: 'asc' },
           take: 100,
         },

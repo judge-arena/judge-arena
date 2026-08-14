@@ -7,7 +7,15 @@ import {
   PUT as replaceSamples,
   PATCH as patchSample,
 } from '@/app/api/datasets/[id]/samples/route';
-import { DELETE as deleteDataset, PATCH as patchDataset } from '@/app/api/datasets/[id]/route';
+import {
+  DELETE as deleteDataset,
+  PATCH as patchDataset,
+  GET as getDataset,
+} from '@/app/api/datasets/[id]/route';
+import { GET as exportConfig } from '@/app/api/config/export/route';
+import { POST as importConfig } from '@/app/api/config/import/route';
+import { POST as createEvaluations } from '@/app/api/evaluations/route';
+import { GET as exportProject } from '@/app/api/projects/[id]/export/route';
 import { POST as createGoldenSet } from '@/app/api/golden-sets/route';
 import {
   POST as createVersion,
@@ -1146,5 +1154,367 @@ describe('a hidden dataset is closed to writes (A1 Task 7, Decision 15)', () => 
 
     expect(res.status).toBe(201);
     await expect(db.goldenItem.count()).resolves.toBe(2);
+  });
+});
+
+// ─── A1 Task 8: the sample read sweep ───────────────────────────────────────
+// Ten filtered sample reads, one test each. The fixture below hides the MIDDLE
+// row of three, not the tail, so a read that merely TRUNCATES (a stray `take`,
+// a wrong `orderBy`) can never be mistaken for a read that filters.
+//
+// TWO OF THE TEN ARE NOT LEAKS.
+//   versions/route.ts RESURRECTS. The overlay is keyed on row id and the child
+//   version's rows are `create`d fresh, so they are born untombstoned — an
+//   unfiltered copy does not show a hidden sample in the new version, it
+//   promotes it back to a permanently live row and leaves the only record of
+//   the hide behind on the parent.
+//   config/import/route.ts MISBINDS. It builds `sampleIdByInput` in `index`
+//   order keeping the FIRST hit, so a hidden row at a low index shadows a
+//   perfectly good live duplicate at a higher one and the imported golden item
+//   binds to the dead row — through `GoldenItem.sourceDatasetSampleId`, which
+//   is `onDelete: Restrict`, permanently.
+//
+// TWO SAMPLE READS STAY UNFILTERED and are not this block's to change; both
+// already say why in place (samples/route.ts). The POST high-water `_count`
+// must see hidden rows or a new append reuses an ordinal a hidden row still
+// holds and violates @@unique([datasetId, index]); the DELETE membership
+// lookup must accept an already-hidden id so a retried delete converges on
+// hidden instead of 400ing that the id is foreign. Both are pinned by the
+// Task 3 and Task 4 blocks above, which is what keeps the sweep honest: a
+// later hand that "completes" it by filtering them turns those tests red.
+describe('the sample read sweep: a hidden sample is invisible to every filtered read (A1 Task 8)', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  /** Three pairwise-shaped samples, the MIDDLE one tombstoned. */
+  async function t8CorpusWithHiddenMiddle(userId: string, projectId?: string) {
+    fixtureCounter += 1;
+    const dataset = await db.dataset.create({
+      data: {
+        name: `t8-corpus-${fixtureCounter}`,
+        userId,
+        projectId,
+        source: 'local',
+        visibility: 'public',
+        inputType: 'query-response',
+        sampleCount: 3,
+      },
+    });
+    const mk = (index: number, input: string) =>
+      db.datasetSample.create({
+        data: {
+          datasetId: dataset.id,
+          index,
+          input,
+          expected: index % 2 === 0 ? 'A>B' : 'B>A',
+          metadata: JSON.stringify({ response_A: `A-${index}`, response_B: `B-${index}` }),
+        },
+      });
+    const live0 = await mk(0, 't8-live-0');
+    const hidden1 = await mk(1, 't8-hidden-1');
+    const live2 = await mk(2, 't8-live-2');
+    await db.tombstone.create({
+      data: { datasetSampleId: hidden1.id, isTombstone: true, reason: 'a bad row' },
+    });
+    return { dataset, live0, hidden1, live2 };
+  }
+
+  it('version-create copies only the LIVE rows — unfiltered it silently RESURRECTS every hidden sample', async () => {
+    // A version test over a tombstone-free parent passes unfiltered and proves
+    // nothing, which is why this fixture tombstones a parent row BEFORE the
+    // fork.
+    //
+    // And the harm is worse than a leak. The overlay is keyed on ROW ID, and
+    // the child's rows are created fresh — so they are born untombstoned. An
+    // unfiltered copy promotes the hidden row back to permanently live in the
+    // new version, leaving the only record of the hide behind on the parent.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset } = await t8CorpusWithHiddenMiddle(user.id);
+
+    const res = await createVersion(
+      jsonRequest(`http://localhost/api/datasets/${dataset.id}/versions`, 'POST', {}),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+    expect(res.status).toBe(201);
+    const child = await res.json();
+
+    expect(child.samples.map((s: { input: string }) => s.input)).toEqual([
+      't8-live-0',
+      't8-live-2',
+    ]);
+    // createDatasetVersion re-packs to 0..n-1 and stores the same length, so a
+    // filtered copy leaves the child dense and its stored count truthful.
+    expect(child.samples.map((s: { index: number }) => s.index)).toEqual([0, 1]);
+    expect(child.sampleCount).toBe(2);
+    // Nothing in the child is tombstoned — which is precisely why the PARENT's
+    // filter is the only thing between a hidden row and a live one.
+    await expect(
+      db.tombstone.count({ where: { datasetSample: { is: { datasetId: child.id } } } })
+    ).resolves.toBe(0);
+  });
+
+  it('PATCH /api/datasets/[id]/samples 404s on a hidden sample instead of silently editing it', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset, hidden1 } = await t8CorpusWithHiddenMiddle(user.id);
+
+    const res = await patchSample(
+      jsonRequest(`http://localhost/api/datasets/${dataset.id}/samples`, 'PATCH', {
+        sampleId: hidden1.id,
+        input: 'edited a hidden row',
+      }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toBe('Sample not found in this dataset');
+    // 404-and-write is the worse bug: assert the row, not just the status.
+    await expect(
+      db.datasetSample.findUniqueOrThrow({ where: { id: hidden1.id } })
+    ).resolves.toMatchObject({ input: 't8-hidden-1' });
+  });
+
+  it('GET /api/datasets/[id] embeds the live samples only — and an UN-hidden row comes back', async () => {
+    // Vacuity shape 2. With only `isTombstone: true` fixtures, a filter written
+    // as `{ tombstone: { is: null } }` passes every other test in this block
+    // while permanently hiding restored rows. The row carrying an
+    // `isTombstone: false` tombstone is the only fixture that separates the two
+    // formulations — and it must be VISIBLE.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset, live2 } = await t8CorpusWithHiddenMiddle(user.id);
+    await db.tombstone.create({
+      data: { datasetSampleId: live2.id, isTombstone: false },
+    });
+
+    const res = await getDataset(
+      new Request(`http://localhost/api/datasets/${dataset.id}`),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body.samples.map((s: { input: string }) => s.input)).toEqual([
+      't8-live-0',
+      't8-live-2',
+    ]);
+  });
+
+  it('POST /api/golden-sets imports the live rows only — a hidden row must not become a golden item', async () => {
+    const platform = await db.user.create({
+      data: { email: PLATFORM_OWNER_EMAIL, passwordHash: 'fixture-hash' },
+    });
+    const { dataset, hidden1 } = await t8CorpusWithHiddenMiddle(platform.id);
+    const importer = await mkUser();
+    mockSessionFor(importer);
+
+    const res = await createGoldenSet(
+      jsonRequest('http://localhost/api/golden-sets', 'POST', {
+        datasetId: dataset.id,
+        protocol: 'pairwise',
+        name: 'Live rows only',
+      })
+    );
+    expect(res.status).toBe(201);
+    const body = await res.json();
+
+    expect(body._count.items).toBe(2);
+    const items = await db.goldenItem.findMany({
+      where: { goldenSetId: body.id },
+      orderBy: { index: 'asc' },
+    });
+    expect(items.map((i) => i.inputText)).toEqual(['t8-live-0', 't8-live-2']);
+    // The pin is the harm, not the row count: sourceDatasetSampleId is
+    // `onDelete: Restrict`, so a single item on the hidden row holds it forever.
+    expect(items.map((i) => i.sourceDatasetSampleId)).not.toContain(hidden1.id);
+  });
+
+  it('GET /api/datasets/[id]/export leaves the hidden row out of the CSV', async () => {
+    // Anonymous, on a public dataset: this route serves the document to callers
+    // with no session, so a hidden row leaking here leaks furthest.
+    const user = await mkUser();
+    const { dataset } = await t8CorpusWithHiddenMiddle(user.id);
+
+    const res = await exportDataset(
+      new Request(`http://localhost/api/datasets/${dataset.id}/export?format=csv`),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+    expect(res.status).toBe(200);
+    const csv = await res.text();
+
+    expect(csv).toContain('t8-live-0');
+    expect(csv).toContain('t8-live-2');
+    expect(csv).not.toContain('t8-hidden-1');
+  });
+
+  it('GET /api/config/export?includeSamples=true carries what the instance SHOWS, not what its tables hold', async () => {
+    // The config document is a portable VIEW of the instance. A hidden row in
+    // it is worse than a leak on a page: re-import it anywhere and the row is
+    // live again, on a fresh id, with no tombstone and nothing recording that
+    // it was ever withdrawn.
+    const user = await mkUser();
+    mockSessionFor(user);
+    await t8CorpusWithHiddenMiddle(user.id);
+
+    const res = await exportConfig(
+      new Request('http://localhost/api/config/export?include=datasets&includeSamples=true')
+    );
+    expect(res.status).toBe(200);
+    const yaml = await res.text();
+
+    expect(yaml).toContain('t8-live-0');
+    expect(yaml).toContain('t8-live-2');
+    expect(yaml).not.toContain('t8-hidden-1');
+  });
+
+  it('POST /api/evaluations batch creates one evaluation per LIVE sample, never one for a withdrawn row', async () => {
+    // Unfiltered, every batch run scores rows the owner has already withdrawn,
+    // and the results look like ordinary judgments — indistinguishable, after
+    // the fact, from judgments on rows that were meant to be scored.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const project = await db.project.create({ data: { name: 't8-project', userId: user.id } });
+    const { dataset, hidden1 } = await t8CorpusWithHiddenMiddle(user.id);
+
+    const res = await createEvaluations(
+      jsonRequest('http://localhost/api/evaluations', 'POST', {
+        projectId: project.id,
+        datasetId: dataset.id,
+        // Explicit empty selection: the route treats `undefined` as "use my
+        // verified endpoints", and this file configures none.
+        judgeModelVersionIds: [],
+      })
+    );
+    expect(res.status).toBe(201);
+    expect((await res.json()).evaluationsCreated).toBe(2);
+
+    const evaluations = await db.evaluation.findMany({
+      where: { datasetId: dataset.id },
+      select: { datasetSampleId: true, promptText: true },
+    });
+    expect(evaluations.map((e) => e.promptText).sort()).toEqual(['t8-live-0', 't8-live-2']);
+    expect(evaluations.map((e) => e.datasetSampleId)).not.toContain(hidden1.id);
+  });
+
+  it('GET /api/projects/[id]/export?scope=datasets leaves the hidden row out', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const project = await db.project.create({ data: { name: 't8-project-ds', userId: user.id } });
+    await t8CorpusWithHiddenMiddle(user.id, project.id);
+
+    const res = await exportProject(
+      new Request(
+        `http://localhost/api/projects/${project.id}/export?scope=datasets&format=csv`
+      ),
+      { params: Promise.resolve({ id: project.id }) }
+    );
+    expect(res.status).toBe(200);
+    const csv = await res.text();
+
+    expect(csv).toContain('t8-live-0');
+    expect(csv).toContain('t8-live-2');
+    expect(csv).not.toContain('t8-hidden-1');
+  });
+
+  it('GET /api/projects/[id]/export?scope=all&format=jsonl leaves the hidden row out — the SECOND read in that file', async () => {
+    // Its own test rather than a second assertion on the one above: the two
+    // reads in projects/[id]/export are textually identical apart from
+    // indentation and sit in different branches (`scope=all` JSONL vs
+    // `scope=datasets`), so filtering one and not the other is invisible to a
+    // test that only exercises one branch.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const project = await db.project.create({ data: { name: 't8-project-all', userId: user.id } });
+    await t8CorpusWithHiddenMiddle(user.id, project.id);
+
+    const res = await exportProject(
+      new Request(`http://localhost/api/projects/${project.id}/export?scope=all&format=jsonl`),
+      { params: Promise.resolve({ id: project.id }) }
+    );
+    expect(res.status).toBe(200);
+    const jsonl = await res.text();
+
+    expect(jsonl).toContain('t8-live-0');
+    expect(jsonl).toContain('t8-live-2');
+    expect(jsonl).not.toContain('t8-hidden-1');
+  });
+
+  it('a config import binds its golden item to the LIVE duplicate, never to the hidden row at the lower index', async () => {
+    // The importer builds `sampleIdByInput` in `index` order and keeps the
+    // FIRST hit per inputText. This fixture puts the hidden row at index 0 and
+    // its live twin at index 1, so unfiltered the item binds to the DEAD row —
+    // through `onDelete: Restrict`, permanently. A fixture with the duplicate
+    // at a LOWER index than the hidden row passes unfiltered and proves nothing.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await db.dataset.create({
+      data: {
+        name: 't8-duplicate-corpus',
+        slug: 't8-dup-corpus',
+        userId: user.id,
+        source: 'local',
+        visibility: 'private',
+        inputType: 'query-response',
+        sampleCount: 2,
+      },
+    });
+    const dead = await db.datasetSample.create({
+      data: { datasetId: dataset.id, index: 0, input: 'who wrote hamlet', expected: 'A>B' },
+    });
+    const alive = await db.datasetSample.create({
+      data: { datasetId: dataset.id, index: 1, input: 'who wrote hamlet', expected: 'A>B' },
+    });
+    await db.tombstone.create({
+      data: { datasetSampleId: dead.id, isTombstone: true, reason: 'a bad row' },
+    });
+
+    const doc = {
+      version: '1.0',
+      exportedAt: '2026-08-14T00:00:00.000Z',
+      goldenSets: [
+        {
+          slug: 't8-gs-dup',
+          name: 'Duplicate resolution',
+          visibility: 'private',
+          protocol: 'pairwise',
+          datasetSlug: 't8-dup-corpus',
+          version: 1,
+          items: [
+            {
+              index: 0,
+              inputText: 'who wrote hamlet',
+              expected: 'A>B',
+              candidates: [
+                { position: 0, responseText: 'shakespeare' },
+                { position: 1, responseText: 'bacon' },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const res = await importConfig(
+      new Request('http://localhost/api/config/import?dryRun=false', {
+        method: 'POST',
+        body: JSON.stringify(doc),
+        headers: { 'content-type': 'application/json' },
+      })
+    );
+    expect(res.status).toBe(200);
+    // Asserted so a resolution failure reads as "skipped" rather than as a
+    // silent zero-row query further down.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const diff = (await res.json()).items.find((i: any) => i.type === 'goldenSet');
+    expect(diff.action).toBe('create');
+
+    const item = await db.goldenItem.findFirstOrThrow({
+      where: { goldenSet: { slug: 't8-gs-dup' } },
+    });
+    expect(item.sourceDatasetSampleId).toBe(alive.id);
+    expect(item.sourceDatasetSampleId).not.toBe(dead.id);
   });
 });

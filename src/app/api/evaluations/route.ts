@@ -8,6 +8,7 @@ import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib
 import { logger } from '@/lib/logger';
 import { fetchNRows, fetchDatasetMetadata } from '@/lib/huggingface';
 import { generateSlug } from '@/lib/config';
+import { liveSamplesOnly } from '@/lib/tombstones';
 
 // ── Dataset batch evaluation ──
 const createBatchSchema = z.object({
@@ -515,7 +516,15 @@ export async function POST(request: Request) {
     const dataset = await prisma.dataset.findUnique({
       where: { id: batchData.datasetId },
       include: {
-        samples: { orderBy: { index: 'asc' } },
+        // One evaluation per LIVE sample. Unfiltered, every batch run scores
+        // rows the owner has already withdrawn, and the results look like
+        // ordinary judgments — indistinguishable after the fact from judgments
+        // on rows that were meant to be scored.
+        //
+        // NOT the include at the `dataset.create` in the HuggingFace path
+        // above: those rows are made in the same statement and cannot carry a
+        // tombstone.
+        samples: { where: liveSamplesOnly(), orderBy: { index: 'asc' } },
       },
     });
     if (!dataset) return NextResponse.json({ error: 'Dataset not found' }, { status: 404 });

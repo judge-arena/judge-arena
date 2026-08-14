@@ -5,7 +5,7 @@ import { requireAuth, requireScope, isAdmin, optionalAuth, resolveResourceAccess
 import { logger, serializeError } from '@/lib/logger';
 import { createVersionSchema } from './schema';
 import { createDatasetVersion, DatasetVersionConflictError } from '@/lib/dataset-versions';
-import { liveDatasetsOnly } from '@/lib/tombstones';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 // POST /api/datasets/[id]/versions — create a new version from the current dataset
 export async function POST(request: Request, props: { params: Promise<{ id: string }> }) {
@@ -22,7 +22,12 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
     const existing = await prisma.dataset.findFirst({
       where: { id: params.id, ...liveDatasetsOnly() },
       include: {
-        samples: { orderBy: { index: 'asc' } },
+        // NOT a leak — a RESURRECTION. The overlay is keyed on row id and the
+        // child's rows are `create`d fresh, so they are born untombstoned.
+        // Unfiltered, this copy does not merely show a hidden sample in the new
+        // version; it promotes it back to a permanently live row, and the only
+        // record that it was ever hidden stays behind on the parent.
+        samples: { where: liveSamplesOnly(), orderBy: { index: 'asc' } },
       },
     });
 
