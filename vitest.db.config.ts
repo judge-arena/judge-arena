@@ -131,6 +131,21 @@ export default defineConfig({
       //     asserted it never moved; it did, consistent with the golden-set
       //     rows Tasks 19-22 added to tests/db/access-matrix.test.ts reaching
       //     two further branches. Now 82.
+      //
+      // ── UPDATE: FINAL FIX WAVE (2026-08-13, after the re-baseline) ──────
+      // PROSE ONLY. No floor below is touched — the wave moved actuals UP, so
+      // every margin widened.
+      //
+      // Three runs of `npm run test:db:coverage` (444 tests, 35 files), all
+      // three IDENTICAL including the branches column that jitters above:
+      //   all-files            49.55 / 79.59 / 63.19 / 49.55
+      //   auth-guard.ts        87.37 / 85.07 / 91.66 / 87.37   (unmoved)
+      //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42   (top of range)
+      //
+      // Three identical runs is NOT evidence the jitter is gone — the ranges
+      // above were observed over ten. Read these as "one more sample inside
+      // the same band", which is exactly why the floors carry a buffer rather
+      // than tracking the point estimate.
       thresholds: {
         lines: 47,
         functions: 60,

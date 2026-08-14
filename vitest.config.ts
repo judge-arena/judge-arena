@@ -119,7 +119,7 @@ export default defineConfig({
       //
       // Five runs of `npm run test:coverage`, all identical
       // (stmts / branch / funcs / lines):
-      //   all-files            37.69 / 84.91 / 67.54 / 37.69
+      //   all-files            37.69 / 84.91 / 67.54 / 37.69   <- see UPDATE
       //   src/lib/queue/**     47.30 / 84.37 / 73.33 / 47.30
       //   src/worker/**         3.40 / 100   / 100   /  3.40   <- artifact
       //   src/lib/llm/**       94.62 / 86.72 / 97.64 / 94.62
@@ -138,6 +138,23 @@ export default defineConfig({
       // result. Verified by running vitest with --coverage.thresholds.autoUpdate
       // against a throwaway copy of this config and reading back what vitest
       // itself computed — the reliable way to get glob actuals.
+      //
+      // ── UPDATE: FINAL FIX WAVE (2026-08-13, after the re-baseline) ──────
+      // PROSE ONLY. No floor below is touched — the re-baseline above stands,
+      // and the wave moved actuals UP, so every margin widened.
+      //
+      // Four runs of `npm run test:coverage`, all identical:
+      //   all-files            38.22 / 85.19 / 68.14 / 38.22
+      //
+      // Nothing else moved and nothing else could: the wave added
+      // `findGoldenSetsPinningDataset`, `assertGoldenSetInCirculation`,
+      // `assertGoldenSetNotTombstoned` and `GoldenSetNotInCirculationError` to
+      // src/lib/golden-sets.ts (the last two MOVED there from
+      // src/app/api/golden-sets/[id]/items/route.ts, which no coverage config
+      // includes), all four unit-tested in tests/lib/golden-sets.test.ts —
+      // that file is now 94.68 / 98.14 / 94.44 / 94.68, its only uncovered
+      // lines being `nextGoldenItemIndex`, which needs a live DB. No file
+      // under any per-glob entry was touched by this wave.
       thresholds: {
         lines: 35,
         functions: 65,
