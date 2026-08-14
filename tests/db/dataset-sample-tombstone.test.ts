@@ -5,9 +5,18 @@ import {
   DELETE as deleteSamples,
   POST as addSamples,
   PUT as replaceSamples,
+  PATCH as patchSample,
 } from '@/app/api/datasets/[id]/samples/route';
-import { DELETE as deleteDataset } from '@/app/api/datasets/[id]/route';
+import { DELETE as deleteDataset, PATCH as patchDataset } from '@/app/api/datasets/[id]/route';
+import { POST as createGoldenSet } from '@/app/api/golden-sets/route';
+import {
+  POST as createVersion,
+  GET as listVersions,
+} from '@/app/api/datasets/[id]/versions/route';
+import { GET as exportDataset } from '@/app/api/datasets/[id]/export/route';
+import { POST as refreshDataset } from '@/app/api/datasets/[id]/refresh/route';
 import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
+import { PLATFORM_OWNER_EMAIL } from '@/lib/golden-sets';
 
 // A1, the tombstone overlay. DELETE /api/datasets/[id]/samples HIDES the named
 // rows: the DatasetSample survives on disk with its ordinal, a Tombstone row
@@ -694,5 +703,448 @@ describe('DELETE /api/datasets/[id] — the overlay (A1 Task 6)', () => {
     // The reason is re-asserted too, not left null by an update that only
     // touched the flag.
     expect(tomb?.reason).toBe('dataset deleted');
+  });
+});
+
+// ─── A1 Task 7: a hidden dataset is closed to writes (Decision 15) ──────────
+// Every mutation handler opens with an ownership guard read of its dataset,
+// and not one of them filtered. So the moment Task 6 landed, a tombstoned
+// dataset vanished from every list and detail read while staying completely
+// writable through the API.
+//
+// TWO OF THESE ARE LIVE DEFECTS ON THIS BRANCH, not hypotheticals, and both
+// are the same shape: `liveSamplesOnly()` carries a PARENT arm, so the sample
+// reads inside POST and PUT already see nothing under a hidden dataset while
+// the writes around them still land. POST therefore stores `sampleCount: 0`,
+// and PUT answers `replaced: 0` while appending rows AND never tombstoning the
+// outgoing ones — so un-hiding the corpus hands back BOTH sets with a
+// `sampleCount` describing only the later one. The guard closes both, and
+// each has its own test below.
+//
+// NON-VACUITY. Every fixture carries a REAL Tombstone row, and the last two
+// carry `isTombstone: false` rows: without those, a filter written as the
+// simpler `{ tombstone: { is: null } }` passes this entire block while
+// silently keeping an UN-deleted dataset closed to writes forever.
+describe('a hidden dataset is closed to writes (A1 Task 7, Decision 15)', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  /**
+   * A public dataset with two PAIRWISE-SHAPED samples, owned by `userId`.
+   *
+   * Distinct from `mkCorpus` above, which cares about ordinal shape and writes
+   * no metadata: `mapSampleToGoldenItem` (src/lib/golden-sets.ts) THROWS on a
+   * sample with no `response_A`/`response_B`, so the golden-set import tests
+   * below need a corpus that is a real pair set.
+   */
+  async function t7Corpus(userId: string) {
+    fixtureCounter += 1;
+    const dataset = await db.dataset.create({
+      data: {
+        name: `t7-corpus-${fixtureCounter}`,
+        userId,
+        source: 'local',
+        visibility: 'public',
+        inputType: 'query-response',
+        sampleCount: 2,
+      },
+    });
+    const a = await db.datasetSample.create({
+      data: {
+        datasetId: dataset.id,
+        index: 0,
+        input: 'who wrote hamlet',
+        expected: 'A>B',
+        metadata: JSON.stringify({ response_A: 'shakespeare', response_B: 'bacon' }),
+      },
+    });
+    const b = await db.datasetSample.create({
+      data: {
+        datasetId: dataset.id,
+        index: 1,
+        input: 'what is 2 + 2',
+        expected: 'B>A',
+        metadata: JSON.stringify({ response_A: 'five', response_B: 'four' }),
+      },
+    });
+    return { dataset, a, b };
+  }
+
+  async function t7Hide(datasetId: string) {
+    await db.tombstone.create({
+      data: { datasetId, isTombstone: true, reason: 'hidden by the Task 7 fixture' },
+    });
+  }
+
+  /** Un-hide, so an assertion can look at what the hidden write left behind. */
+  async function t7Unhide(datasetId: string) {
+    await db.tombstone.update({
+      where: { datasetId },
+      data: { isTombstone: false, reason: null },
+    });
+  }
+
+  it('POST /api/datasets/[id]/samples 404s on a hidden dataset and appends nothing', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset } = await t7Corpus(user.id);
+    await t7Hide(dataset.id);
+
+    const res = await addSamples(
+      jsonRequest(`http://localhost/api/datasets/${dataset.id}/samples`, 'POST', {
+        samples: [{ input: 'a third question' }],
+      }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toBe('Dataset not found');
+    // A handler that 404s AND writes is the worse bug, so assert the corpus,
+    // not just the status.
+    await expect(
+      db.datasetSample.count({ where: { datasetId: dataset.id } })
+    ).resolves.toBe(2);
+  });
+
+  it('DEFECT: POST onto a hidden dataset used to store sampleCount 0 — a corpus that lies about itself the moment it comes back', async () => {
+    // The concrete harm the guard removes, and it is NOT the append. POST's
+    // live-count read (samples/route.ts, inside the insert transaction) spreads
+    // `liveSamplesOnly()`, whose PARENT arm sees nothing under a hidden
+    // dataset — so the handler happily wrote `sampleCount: 0` over a two-row
+    // corpus and returned 201. Un-hide and the dataset advertises 0 samples
+    // while holding three, and the UI ladder reads the STORED value first.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset } = await t7Corpus(user.id);
+    await t7Hide(dataset.id);
+
+    const res = await addSamples(
+      jsonRequest(`http://localhost/api/datasets/${dataset.id}/samples`, 'POST', {
+        samples: [{ input: 'appended under a tombstone' }],
+      }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+    expect(res.status).toBe(404);
+
+    // Restoring the dataset is what makes the damage visible: while it is
+    // hidden, every filtered read answers empty either way.
+    await t7Unhide(dataset.id);
+
+    const live = await db.datasetSample.findMany({
+      where: { datasetId: dataset.id, ...liveSamplesOnly() },
+      orderBy: { index: 'asc' },
+    });
+    expect(live.map((s) => s.input)).toEqual(['who wrote hamlet', 'what is 2 + 2']);
+
+    const after = await db.dataset.findUniqueOrThrow({
+      where: { id: dataset.id },
+      select: { sampleCount: true },
+    });
+    // Was 0 before the guard landed. `2` is both the stored value and the live
+    // count, which is the property `sampleCount` is supposed to have.
+    expect(after.sampleCount).toBe(2);
+  });
+
+  it('PATCH /api/datasets/[id]/samples 404s on a hidden dataset and edits nothing', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset, a } = await t7Corpus(user.id);
+    await t7Hide(dataset.id);
+
+    const res = await patchSample(
+      jsonRequest(`http://localhost/api/datasets/${dataset.id}/samples`, 'PATCH', {
+        sampleId: a.id,
+        input: 'edited under a tombstone',
+      }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(404);
+    await expect(
+      db.datasetSample.findUniqueOrThrow({ where: { id: a.id } })
+    ).resolves.toMatchObject({ input: 'who wrote hamlet' });
+  });
+
+  it('DELETE /api/datasets/[id]/samples 404s on a hidden dataset and hides nothing', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset, a, b } = await t7Corpus(user.id);
+    await t7Hide(dataset.id);
+
+    const res = await callDelete(dataset.id, [a.id]);
+
+    expect(res.status).toBe(404);
+    // A surviving ROW COUNT proves nothing here: since Task 3 this verb hides
+    // rather than removes, so the rows survive either way. Assert on the
+    // OVERLAY — no sample tombstone was written.
+    await expect(
+      db.tombstone.count({ where: { datasetSampleId: { in: [a.id, b.id] } } })
+    ).resolves.toBe(0);
+  });
+
+  it('PUT /api/datasets/[id]/samples 404s on a hidden dataset and replaces nothing', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset } = await t7Corpus(user.id);
+    await t7Hide(dataset.id);
+
+    const res = await callPut(dataset.id, [{ input: 'a wholly different corpus' }]);
+
+    expect(res.status).toBe(404);
+    const rows = await db.datasetSample.findMany({
+      where: { datasetId: dataset.id },
+      orderBy: { index: 'asc' },
+    });
+    expect(rows.map((s) => s.input)).toEqual(['who wrote hamlet', 'what is 2 + 2']);
+  });
+
+  it('DEFECT: PUT onto a hidden dataset used to answer replaced: 0 while writing rows — un-hiding then returned BOTH corpora', async () => {
+    // The sharpest of the two, and the status code was the least of it. PUT
+    // reads its outgoing set with `liveSamplesOnly()`, so under a hidden parent
+    // that read came back EMPTY: nothing was tombstoned, the incoming document
+    // was appended anyway above the high-water mark, `sampleCount` was written
+    // as the incoming length, and the filtered response read answered `[]` —
+    // an HTTP 200 saying `replaced: 0` from a handler that had just written.
+    //
+    // Un-hide and the corpus holds the OLD rows and the NEW ones, live, with a
+    // `sampleCount` describing only the new ones. There is no un-mix: nothing
+    // records which set was which.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset } = await t7Corpus(user.id);
+    await t7Hide(dataset.id);
+
+    const res = await callPut(dataset.id, [{ input: 'a wholly different corpus' }]);
+    expect(res.status).toBe(404);
+
+    // Not one outgoing row was tombstoned — which, before the guard, was true
+    // of the 200 response too, and is exactly what made the mix permanent.
+    await expect(
+      db.tombstone.count({ where: { datasetSampleId: { not: null } } })
+    ).resolves.toBe(0);
+
+    await t7Unhide(dataset.id);
+
+    const live = await db.datasetSample.findMany({
+      where: { datasetId: dataset.id, ...liveSamplesOnly() },
+      orderBy: { index: 'asc' },
+    });
+    // Before the guard this was the two originals PLUS 'a wholly different
+    // corpus', all live, with nothing to say which was which.
+    expect(live.map((s) => s.input)).toEqual(['who wrote hamlet', 'what is 2 + 2']);
+
+    const after = await db.dataset.findUniqueOrThrow({
+      where: { id: dataset.id },
+      select: { sampleCount: true },
+    });
+    // Was 1 — the incoming length — against three live rows.
+    expect(after.sampleCount).toBe(2);
+  });
+
+  it('PATCH /api/datasets/[id] 404s on a hidden dataset — you cannot rename a corpus you have deleted', async () => {
+    // `requireOwnership('dataset', …)` reads UNFILTERED and is shared with
+    // eight other resource types whose access-matrix tests pin that behaviour,
+    // so the liveness check is explicit and local to this handler
+    // (`assertDatasetLive`). Without it the rename lands on a row no read path
+    // returns.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset } = await t7Corpus(user.id);
+    const originalName = dataset.name;
+    await t7Hide(dataset.id);
+
+    const res = await patchDataset(
+      jsonRequest(`http://localhost/api/datasets/${dataset.id}`, 'PATCH', {
+        name: 'renamed after deletion',
+      }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toBe('Dataset not found');
+    await expect(
+      db.dataset.findUniqueOrThrow({ where: { id: dataset.id } })
+    ).resolves.toMatchObject({ name: originalName });
+  });
+
+  it('DELETE /api/datasets/[id] 404s on an ALREADY hidden dataset, and leaves the first delete\'s reason intact', async () => {
+    // A second delete must not overwrite the record of the first. The
+    // convergence property Task 6 pins is about delete -> RESTORE -> delete;
+    // a straight retry on a still-hidden dataset is a write onto a hidden row
+    // and answers 404 like every other write here.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset } = await t7Corpus(user.id);
+    await db.tombstone.create({
+      data: { datasetId: dataset.id, isTombstone: true, reason: 'the first delete' },
+    });
+
+    const res = await deleteDataset(
+      new Request(`http://localhost/api/datasets/${dataset.id}`, { method: 'DELETE' }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(404);
+    const tomb = await db.tombstone.findUniqueOrThrow({ where: { datasetId: dataset.id } });
+    expect(tomb.isTombstone).toBe(true);
+    expect(tomb.reason).toBe('the first delete');
+  });
+
+  it('POST /api/golden-sets 404s over a hidden corpus — nothing is minted onto rows Restrict then pins forever', async () => {
+    // The corpus is PLATFORM-OWNED and public, so every OTHER check in the
+    // route passes. Unfiltered, this request returns 201 and writes two
+    // GoldenItems whose `sourceDatasetSampleId` is `onDelete: Restrict` — an
+    // unreleasable pin on a corpus its owner has already hidden.
+    const platform = await db.user.create({
+      data: { email: PLATFORM_OWNER_EMAIL, passwordHash: 'fixture-hash' },
+    });
+    const { dataset } = await t7Corpus(platform.id);
+    await t7Hide(dataset.id);
+
+    const importer = await mkUser();
+    mockSessionFor(importer);
+
+    const res = await createGoldenSet(
+      jsonRequest('http://localhost/api/golden-sets', 'POST', {
+        datasetId: dataset.id,
+        protocol: 'pairwise',
+        name: 'Minted from a hidden corpus',
+      })
+    );
+
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toBe('Dataset not found');
+    await expect(db.goldenSet.count()).resolves.toBe(0);
+    await expect(db.goldenItem.count()).resolves.toBe(0);
+  });
+
+  it('POST /api/datasets/[id]/versions 404s on a hidden parent and forks nothing', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset } = await t7Corpus(user.id);
+    await t7Hide(dataset.id);
+
+    const res = await createVersion(
+      jsonRequest(`http://localhost/api/datasets/${dataset.id}/versions`, 'POST', {}),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(404);
+    // Unfiltered this mints a CHILD dataset carrying a live copy of the corpus,
+    // which is a hidden dataset walking back into circulation under a new id.
+    await expect(db.dataset.count()).resolves.toBe(1);
+  });
+
+  it('GET /api/datasets/[id]/versions 404s on a hidden dataset', async () => {
+    // The one guard in the nine that gates a READ rather than a write, and it
+    // is in the list for a reason: without it the version ladder of a hidden
+    // corpus stays enumerable — id, version, sampleCount and timestamps for
+    // every sibling — to anyone, since this route is `optionalAuth` and the
+    // fixture is public. The list is served by the same handler whose POST
+    // twin above must 404, so leaving them disagreeing about whether the
+    // dataset exists is its own bug.
+    const user = await mkUser();
+    const { dataset } = await t7Corpus(user.id);
+    await t7Hide(dataset.id);
+
+    const res = await listVersions(
+      new Request(`http://localhost/api/datasets/${dataset.id}/versions`),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toBe('Dataset not found');
+  });
+
+  it('POST /api/datasets/[id]/refresh 404s on a hidden dataset BEFORE it reaches the source check', async () => {
+    // The discrimination is the whole test, and it needs no HuggingFace mock:
+    // the fixture is `source: 'local'`, so an unfiltered guard read falls
+    // through to `Only remote HuggingFace datasets can be refreshed` — a 400.
+    // A filtered one answers 404 first. 400 vs 404 is exactly the difference
+    // between "this dataset exists and cannot be refreshed" and "this dataset
+    // is gone", and refresh PERSISTS a new sampleCount and new remote
+    // metadata, so it is a write.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset } = await t7Corpus(user.id);
+    await t7Hide(dataset.id);
+
+    const res = await refreshDataset(
+      new Request(`http://localhost/api/datasets/${dataset.id}/refresh`, { method: 'POST' }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toBe('Dataset not found');
+  });
+
+  it('GET /api/datasets/[id]/export 404s on a hidden dataset', async () => {
+    // No session is mocked: this route is `optionalAuth` and serves public
+    // datasets to anonymous callers, which is exactly why it must stop serving
+    // a corpus its owner has hidden.
+    const user = await mkUser();
+    const { dataset } = await t7Corpus(user.id);
+    await t7Hide(dataset.id);
+
+    const res = await exportDataset(
+      new Request(`http://localhost/api/datasets/${dataset.id}/export?format=csv`),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(404);
+  });
+
+  it('an isTombstone: false row leaves the dataset OPEN to writes — the filter is `NOT`, not `{ tombstone: { is: null } }`', async () => {
+    // Vacuity shape 2. Every other test in this block uses an
+    // `isTombstone: true` fixture, so a filter written as the simpler
+    // `{ tombstone: { is: null } }` passes all of them — and leaves an
+    // un-deleted dataset closed to writes forever, with no way back. Only a
+    // Tombstone row that EXISTS and says `false` separates the two.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset } = await t7Corpus(user.id);
+    await db.tombstone.create({
+      data: { datasetId: dataset.id, isTombstone: false },
+    });
+
+    const res = await addSamples(
+      jsonRequest(`http://localhost/api/datasets/${dataset.id}/samples`, 'POST', {
+        samples: [{ input: 'a third question' }],
+      }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(201);
+    await expect(
+      db.datasetSample.count({ where: { datasetId: dataset.id } })
+    ).resolves.toBe(3);
+  });
+
+  it('an un-hidden platform corpus can still be imported into a golden set', async () => {
+    // The other half of shape 2, on the path that matters most: restoring the
+    // dataset must restore the import, not merely stop 404ing the list page.
+    const platform = await db.user.create({
+      data: { email: PLATFORM_OWNER_EMAIL, passwordHash: 'fixture-hash' },
+    });
+    const { dataset } = await t7Corpus(platform.id);
+    await db.tombstone.create({
+      data: { datasetId: dataset.id, isTombstone: false },
+    });
+
+    const importer = await mkUser();
+    mockSessionFor(importer);
+
+    const res = await createGoldenSet(
+      jsonRequest('http://localhost/api/golden-sets', 'POST', {
+        datasetId: dataset.id,
+        protocol: 'pairwise',
+        name: 'Restored corpus import',
+      })
+    );
+
+    expect(res.status).toBe(201);
+    await expect(db.goldenItem.count()).resolves.toBe(2);
   });
 });

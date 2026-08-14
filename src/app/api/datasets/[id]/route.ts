@@ -5,7 +5,49 @@ import { requireAuth, requireScope, optionalAuth, resolveResourceAccess, require
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicDataset } from '@/lib/serializers';
 import { findGoldenSetsPinningDataset } from '@/lib/golden-sets';
-import { tombstoneDataset } from '@/lib/tombstones';
+import { liveDatasetsOnly, tombstoneDataset } from '@/lib/tombstones';
+
+/**
+ * DECISION 15 — A HIDDEN DATASET IS CLOSED TO WRITES, at the two sites the
+ * shared ownership helper cannot cover.
+ *
+ * The other seven mutation handlers on this branch spread `liveDatasetsOnly()`
+ * straight into their own guard read. PATCH and DELETE here do not have one:
+ * they gate on `requireOwnership('dataset', …)` (src/lib/auth-guard.ts), whose
+ * read is UNFILTERED and which is shared with eight other resource types whose
+ * access-matrix rows pin exactly that behaviour. Pushing the overlay into the
+ * helper would silently change what `rubric`, `project`, `evaluation` … mean,
+ * so the liveness check is EXPLICIT AND LOCAL instead — the same shape as A0's
+ * `assertGoldenSetInCirculation` (src/lib/golden-sets.ts): a named assertion
+ * the write handlers run immediately after the ownership gate.
+ *
+ * Without it a hidden dataset stays PATCHable: you could rename a corpus you
+ * had already deleted, and the rename would land on a row no read path
+ * returns.
+ *
+ * IT ANSWERS 404, NOT 409, unlike its golden-set counterpart, and the
+ * difference is not cosmetic. A retired golden set is still listed to its
+ * owner under `?includeRetired=true` and has an un-retire verb, so a bare 404
+ * would confuse someone looking straight at it; a hidden dataset is absent
+ * from every read path this branch has, with no escape flag and no un-delete
+ * verb, so "not found" is what its owner has already been told everywhere
+ * else. It is also the answer the other seven handlers give.
+ *
+ * Not exported: Next.js 15 validates a `route.ts`'s named exports against a
+ * fixed allowlist. Module-local is the same accommodation `resolveJudgeVersionIds`
+ * (evaluations/route.ts) and `tombstoneReplacedGoldenItems` (config/import/route.ts)
+ * already make.
+ */
+async function assertDatasetLive(id: string): Promise<NextResponse | null> {
+  const live = await prisma.dataset.findFirst({
+    where: { id, ...liveDatasetsOnly() },
+    select: { id: true },
+  });
+  if (!live) {
+    return NextResponse.json({ error: 'Dataset not found' }, { status: 404 });
+  }
+  return null;
+}
 
 const updateDatasetSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -93,6 +135,8 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
   try {
     const ownershipError = await requireOwnership('dataset', params.id, session);
     if (ownershipError) return ownershipError;
+    const hiddenError = await assertDatasetLive(params.id);
+    if (hiddenError) return hiddenError;
 
     const body = await request.json();
     const data = updateDatasetSchema.parse(body);
@@ -141,6 +185,16 @@ export async function DELETE(_request: Request, props: { params: Promise<{ id: s
   try {
     const ownershipError = await requireOwnership('dataset', params.id, session);
     if (ownershipError) return ownershipError;
+    // A STRAIGHT RETRY ON AN ALREADY-HIDDEN DATASET 404s, and that is not in
+    // tension with the convergence property the tombstone writers guarantee.
+    // `tombstoneDataset` converges on hidden for delete → RESTORE → delete,
+    // which is the sequence that would otherwise leave a deleted dataset
+    // visible; the restore in the middle makes this check pass. A retry with
+    // the row still hidden is a write onto a hidden row like any other, and
+    // letting it through would overwrite the first delete's `reason` with this
+    // one's — losing the only record of why the corpus went away.
+    const hiddenError = await assertDatasetLive(params.id);
+    if (hiddenError) return hiddenError;
 
     // A0: `GoldenSet.datasetId` and `GoldenItem.sourceDatasetSampleId` are both
     // `onDelete: Restrict` (schema.prisma:671, :717), so this delete aborts on

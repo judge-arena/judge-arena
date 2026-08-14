@@ -20,6 +20,7 @@ import {
   goldenSetLifecycleWhere,
   parseIncludeRetired,
 } from '@/lib/golden-sets';
+import { liveDatasetsOnly } from '@/lib/tombstones';
 import { createGoldenSetSchema, goldenSetInclude } from './shared';
 
 // GET /api/golden-sets — list golden sets visible to the caller.
@@ -102,8 +103,12 @@ export async function POST(request: Request) {
     const body = await request.json();
     const data = createGoldenSetSchema.parse(body);
 
-    const dataset = await prisma.dataset.findUnique({
-      where: { id: data.datasetId },
+    // Decision 15. This is the guard whose absence costs the most: unfiltered,
+    // a golden set can still be minted from a hidden corpus, and
+    // `GoldenItem.sourceDatasetSampleId` is `onDelete: Restrict` — so the pin
+    // survives the hide, survives retirement, and has no in-product remedy.
+    const dataset = await prisma.dataset.findFirst({
+      where: { id: data.datasetId, ...liveDatasetsOnly() },
       select: { id: true, userId: true, visibility: true },
     });
     if (!dataset) {

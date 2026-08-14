@@ -5,7 +5,12 @@ import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
 import { findGoldenSetsPinningDataset } from '@/lib/golden-sets';
-import { liveSamplesOnly, nextSampleIndex, tombstoneSamples } from '@/lib/tombstones';
+import {
+  liveDatasetsOnly,
+  liveSamplesOnly,
+  nextSampleIndex,
+  tombstoneSamples,
+} from '@/lib/tombstones';
 
 const addSamplesSchema = z.object({
   samples: z.array(z.object({
@@ -34,6 +39,25 @@ const bulkReplaceSamplesSchema = z.object({
   })),
 });
 
+// DECISION 15 — A HIDDEN DATASET IS CLOSED TO WRITES. All four verbs in this
+// file open with the same ownership guard read, and all four now spread
+// `liveDatasetsOnly()` into it, so a tombstoned dataset 404s on write exactly
+// as it already 404s on every list and detail read. `findFirst` rather than
+// `findUnique` so the id and the overlay predicate travel in one plain
+// `where`.
+//
+// TWO OF THE FOUR WERE ACTIVELY BROKEN WITHOUT IT, not merely permissive, and
+// for the same reason: `liveSamplesOnly()` carries a PARENT arm, so the sample
+// reads INSIDE these handlers already saw nothing under a hidden dataset while
+// the writes around them still landed.
+//   POST  wrote `sampleCount: 0` over a live corpus and returned 201.
+//   PUT   answered `replaced: 0` with an empty `samples` array while appending
+//         the incoming document AND never tombstoning the outgoing rows — so
+//         un-hiding the dataset returned BOTH sets, live, with a `sampleCount`
+//         describing only the later one and nothing recording which was which.
+// The guard closes both by refusing before the transaction opens. Both are
+// pinned in tests/db/dataset-sample-tombstone.test.ts.
+//
 // POST /api/datasets/[id]/samples — add new samples to the dataset
 export async function POST(request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
@@ -43,8 +67,8 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
   if (scopeCheck) return scopeCheck;
 
   try {
-    const dataset = await prisma.dataset.findUnique({
-      where: { id: params.id },
+    const dataset = await prisma.dataset.findFirst({
+      where: { id: params.id, ...liveDatasetsOnly() },
       // `_count.samples` is UNFILTERED and stays that way. Do not spread
       // `liveSamplesOnly()` into it.
       //
@@ -178,8 +202,8 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
   if (scopeCheck) return scopeCheck;
 
   try {
-    const dataset = await prisma.dataset.findUnique({
-      where: { id: params.id },
+    const dataset = await prisma.dataset.findFirst({
+      where: { id: params.id, ...liveDatasetsOnly() },
       select: { userId: true },
     });
 
@@ -240,8 +264,8 @@ export async function DELETE(request: Request, props: { params: Promise<{ id: st
   if (scopeCheck) return scopeCheck;
 
   try {
-    const dataset = await prisma.dataset.findUnique({
-      where: { id: params.id },
+    const dataset = await prisma.dataset.findFirst({
+      where: { id: params.id, ...liveDatasetsOnly() },
       select: { userId: true },
     });
 
@@ -430,8 +454,8 @@ export async function PUT(request: Request, props: { params: Promise<{ id: strin
   if (scopeCheck) return scopeCheck;
 
   try {
-    const dataset = await prisma.dataset.findUnique({
-      where: { id: params.id },
+    const dataset = await prisma.dataset.findFirst({
+      where: { id: params.id, ...liveDatasetsOnly() },
       select: { userId: true },
     });
 

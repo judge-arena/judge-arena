@@ -5,6 +5,7 @@ import { requireAuth, requireScope, isAdmin, optionalAuth, resolveResourceAccess
 import { logger, serializeError } from '@/lib/logger';
 import { createVersionSchema } from './schema';
 import { createDatasetVersion, DatasetVersionConflictError } from '@/lib/dataset-versions';
+import { liveDatasetsOnly } from '@/lib/tombstones';
 
 // POST /api/datasets/[id]/versions — create a new version from the current dataset
 export async function POST(request: Request, props: { params: Promise<{ id: string }> }) {
@@ -15,8 +16,11 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
   if (scopeCheck) return scopeCheck;
 
   try {
-    const existing = await prisma.dataset.findUnique({
-      where: { id: params.id },
+    // Decision 15: forking a hidden parent would mint a live child carrying a
+    // copy of the whole corpus — a hidden dataset walking back into
+    // circulation under a new id.
+    const existing = await prisma.dataset.findFirst({
+      where: { id: params.id, ...liveDatasetsOnly() },
       include: {
         samples: { orderBy: { index: 'asc' } },
       },
@@ -132,8 +136,8 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
       if (scopeCheck) return scopeCheck;
     }
 
-    const dataset = await prisma.dataset.findUnique({
-      where: { id: params.id },
+    const dataset = await prisma.dataset.findFirst({
+      where: { id: params.id, ...liveDatasetsOnly() },
       select: { id: true, parentId: true, userId: true, visibility: true },
     });
 

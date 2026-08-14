@@ -9,6 +9,7 @@ import {
   jsonlResponse,
 } from '@/lib/export';
 import { logger, serializeError } from '@/lib/logger';
+import { liveDatasetsOnly } from '@/lib/tombstones';
 
 /**
  * GET /api/datasets/[id]/export?format=csv|jsonl
@@ -37,8 +38,11 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
       );
     }
 
-    const dataset = await prisma.dataset.findUnique({
-      where: { id: params.id },
+    // Decision 15. This route is `optionalAuth` and serves public datasets to
+    // anonymous callers, so an unfiltered read here keeps handing out a corpus
+    // its owner has hidden — to people with no session at all.
+    const dataset = await prisma.dataset.findFirst({
+      where: { id: params.id, ...liveDatasetsOnly() },
       include: {
         samples: { orderBy: { index: 'asc' } },
       },
