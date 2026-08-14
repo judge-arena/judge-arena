@@ -138,7 +138,9 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
 // ALSO LIFECYCLE-GUARDED, closing the gap recorded when this handler landed:
 // GET filtered `retiredAt`/`tombstonedAt` from the start and these verbs did
 // not, so a retired set's items were unreadable through the API and still
-// freely editable through it. See assertGoldenSetInCirculation below.
+// freely editable through it. See assertGoldenSetInCirculation in
+// src/lib/golden-sets.ts — it moved out of this file once PATCH
+// /api/golden-sets/[id] and the fork route needed the same rule.
 export async function PATCH(request: Request, props: { params: Promise<{ id: string }> }) {
   const params = await props.params;
   const session = await requireAuth();
