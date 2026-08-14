@@ -507,6 +507,37 @@ const COVERAGE: Record<string, Coverage> = {
     },
     knownGaps: {},
   },
+
+  // Listed with an EMPTY `exported` array, like GoldenLabel above, and for a
+  // related reason: a Tombstone records that a Dataset or DatasetSample is
+  // HIDDEN on this instance, and the exporter never sees a hidden row in the
+  // first place — the dataset loop and the nested `samples` include both
+  // filter. The document therefore represents a tombstone by ABSENCE, which
+  // is the correct portable form: carrying the row would let a re-import hide
+  // rows on another instance that its owner there never deleted.
+  //
+  // This is deliberately NOT a knownGap. `knownGaps` means "should round-trip
+  // and does not yet"; nothing on this model should round-trip. Recording one
+  // here would also fail the gap ledger below, whose expected object is
+  // locked to exactly {Rubric, Dataset, GoldenSet} — and that lock is
+  // correct, so the entry is shaped to leave it alone rather than to edit it.
+  Tombstone: {
+    exported: [],
+    excludedByDesign: {
+      id: SURROGATE,
+      datasetSampleId:
+        'the hidden sample is absent from the document entirely (the nested `samples` include is filtered), so there is nothing on the other side for this FK to point at — and a DatasetSample id is instance-local regardless, the same argument as GoldenItem.sourceDatasetSampleId',
+      datasetId:
+        'same as datasetSampleId one column up: a hidden dataset is filtered out of the export loop, so the document carries no dataset for this FK to name',
+      isTombstone:
+        'the hide/un-hide flag itself. Instance-local curation state in the same register as GoldenItem.tombstonedAt: a row hidden HERE must not arrive hidden on another instance, and a re-import must neither resurrect nor re-bury anything. Absence from the document IS the representation.',
+      reason:
+        'free-text audit of WHY a row was hidden on THIS instance — same argument as GoldenLabel.tombstonedReason. Carrying it would misattribute a deletion that happened here to an import that happened elsewhere.',
+      createdAt: TIMESTAMP,
+      updatedAt: TIMESTAMP,
+    },
+    knownGaps: {},
+  },
 };
 
 describe('Config export/import — schema coverage', () => {

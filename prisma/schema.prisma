@@ -588,6 +588,7 @@ model Dataset {
   samples     DatasetSample[]
   evaluations Evaluation[]
   goldenSets  GoldenSet[]
+  tombstone   Tombstone?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -612,6 +613,7 @@ model DatasetSample {
 
   evaluations Evaluation[]
   goldenItems GoldenItem[]
+  tombstone   Tombstone?
   createdAt   DateTime     @default(now())
 
   @@unique([datasetId, index])
@@ -814,4 +816,52 @@ model CalibrationRun {
 
   @@index([judgeModelVersionId])
   @@index([goldenSetId])
+}
+
+// ─── The tombstone overlay (A1) ─────────────────────────────────────────────
+// One row per HIDDEN entity. "No row" means live, so this table is empty until
+// something is deleted. Adopted by both Dataset and DatasetSample; a sample
+// inherits its parent dataset's hidden state through the read filter in
+// src/lib/tombstones.ts, never through a second row here.
+//
+// Deliberately NOT A0's `tombstonedAt` column form (GoldenSet, GoldenItem,
+// GoldenLabel). Those are one-way on purpose: goldenSetLifecycleWhere pins
+// `tombstonedAt: null` in BOTH arms so a tombstoned set has no way back. This
+// overlay is REVERSIBLE — un-hiding flips the flag rather than deleting the
+// row, so createdAt/updatedAt still record that the entity was once hidden.
+// Two mechanisms with different capabilities, coexisting on purpose. Do not
+// harmonise them.
+
+model Tombstone {
+  id String @id @default(cuid())
+
+  // Exactly one of these is non-null. That is a REAL constraint, not a
+  // comment: `Tombstone_exactly_one_entity`, a CHECK hand-edited into
+  // 20260814120000_v2f_tombstone_overlay because Prisma's DSL cannot express
+  // a CHECK at all. Without it Postgres accepts both-null orphans (a
+  // tombstone hiding nothing) and both-set rows (one row claiming to hide a
+  // dataset AND a sample), because a unique index permits unlimited NULLs.
+  // See CONTRIBUTING.md's "Known migrate-diff pseudo-drift" table.
+  //
+  // Each FK is @unique so the relation is to-ONE. That is what makes `upsert`
+  // correct and what makes `{ tombstone: { is: ... } }` match at most one row
+  // per entity. No @@index on either column: @unique already creates one.
+  //
+  // No @relation("name") on either side. Prisma demands a named relation only
+  // when TWO relations connect the SAME PAIR of models; these connect
+  // Tombstone↔DatasetSample and Tombstone↔Dataset — different pairs — so the
+  // disambiguation is not required and adding it would only add a name to
+  // keep in sync. Confirmed with `prisma validate` before landing.
+  datasetSampleId String?        @unique
+  datasetSample   DatasetSample? @relation(fields: [datasetSampleId], references: [id], onDelete: Cascade)
+  datasetId       String?        @unique
+  dataset         Dataset?       @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+
+  // Defaults to true because the only code that INSERTs here is a delete; a
+  // restore UPDATEs an existing row rather than creating one.
+  isTombstone Boolean @default(true)
+  reason      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
