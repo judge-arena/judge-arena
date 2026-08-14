@@ -510,11 +510,21 @@ const COVERAGE: Record<string, Coverage> = {
 
   // Listed with an EMPTY `exported` array, like GoldenLabel above, and for a
   // related reason: a Tombstone records that a Dataset or DatasetSample is
-  // HIDDEN on this instance, and the exporter never sees a hidden row in the
-  // first place — the dataset loop and the nested `samples` include both
-  // filter. The document therefore represents a tombstone by ABSENCE, which
-  // is the correct portable form: carrying the row would let a re-import hide
-  // rows on another instance that its owner there never deleted.
+  // HIDDEN on this instance, and the exporter is not meant to see a hidden
+  // row in the first place. The document therefore represents a tombstone by
+  // ABSENCE, which is the correct portable form: carrying the row would let a
+  // re-import hide rows on another instance that its owner there never
+  // deleted.
+  //
+  // STATE OF PLAY, so this comment is not read as a description of today's
+  // exporter: the filtering it depends on does NOT exist yet. As of this
+  // task, src/app/api/config/export/route.ts's dataset loop takes only an
+  // ownership `where`, and its nested `samples` include is
+  // `{ orderBy: { index: 'asc' } }` with no `where` at all. A1 Tasks 8 and 9
+  // add the tombstone filter to both. Until they land, a hidden row would
+  // still be exported — which is precisely why `exported: []` here is a
+  // statement about what this model SHOULD contribute to the document
+  // (nothing), not a claim that the current exporter already achieves it.
   //
   // This is deliberately NOT a knownGap. `knownGaps` means "should round-trip
   // and does not yet"; nothing on this model should round-trip. Recording one
@@ -526,9 +536,9 @@ const COVERAGE: Record<string, Coverage> = {
     excludedByDesign: {
       id: SURROGATE,
       datasetSampleId:
-        'the hidden sample is absent from the document entirely (the nested `samples` include is filtered), so there is nothing on the other side for this FK to point at — and a DatasetSample id is instance-local regardless, the same argument as GoldenItem.sourceDatasetSampleId',
+        'a DatasetSample id is instance-local and meaningless across instances, the same argument as GoldenItem.sourceDatasetSampleId — that alone excludes it today. It is additionally pointless once A1 Task 9 filters the nested `samples` include, because the hidden sample will then be absent from the document entirely, leaving nothing on the other side for this FK to point at.',
       datasetId:
-        'same as datasetSampleId one column up: a hidden dataset is filtered out of the export loop, so the document carries no dataset for this FK to name',
+        'same as datasetSampleId one column up, in both halves: the id is instance-local regardless, and once A1 Task 8 filters the dataset export loop the document will carry no hidden dataset for this FK to name',
       isTombstone:
         'the hide/un-hide flag itself. Instance-local curation state in the same register as GoldenItem.tombstonedAt: a row hidden HERE must not arrive hidden on another instance, and a re-import must neither resurrect nor re-bury anything. Absence from the document IS the representation.',
       reason:

@@ -468,21 +468,30 @@ rows):
 | `20260729180000_v2b_email_partial_unique` | `User_email_credentials_key`, a unique index on `User(email)` restricted to `WHERE "passwordHash" NOT LIKE '!%'` (real-credentials rows only, 1b Task 13 review fix) | Prisma's schema DSL has no syntax for a partial index (`WHERE` clause) at all — not specific to this predicate |
 | `20260812190000_v2d_golden_substrate` | `GoldenSet_ownerId_slug_key` created `NULLS NOT DISTINCT` (ownerless golden sets can't share a slug — A0 step 1) | `@@unique([ownerId, slug])` has no Prisma DSL syntax for `NULLS NOT DISTINCT` (PG15+), same as the idempotency case above. Re-verified empirically on Prisma 6.19.2 against a database with this migration applied: `migrate diff --from-url ... --to-schema-datamodel` reports an empty migration. A partial variant (`... NULLS NOT DISTINCT WHERE "slug" IS NOT NULL`) was tried and REJECTED — it produces REAL drift, with `migrate diff` proposing `CREATE UNIQUE INDEX "GoldenSet_ownerId_slug_key" ON "GoldenSet"("ownerId", "slug");` to "fix" it. A partial unique index does not satisfy a Prisma `@@unique`; the email row above only escapes this because its schema declares no `@unique` at all. |
 | `20260813120000_v2e_golden_item_label_tombstones` | `GoldenLabel_goldenItemId_annotatorId_live_key`, a unique index on `GoldenLabel(goldenItemId, annotatorId)` restricted to `WHERE "tombstonedAt" IS NULL` (one LIVE label per annotator per item — A0, tombstone-not-delete ruling) | Prisma's schema DSL has no syntax for a partial index, same as the email row above. Unlike that row, this one REPLACES a declared `@@unique`, which is therefore deleted from `prisma/schema.prisma` — so the Prisma client no longer offers the `goldenItemId_annotatorId` compound where-input (verified unused before landing), and P2002 from this index reports `meta.target` as the index name string rather than a field array. The `NULLS NOT DISTINCT` variant (`@@unique([goldenItemId, annotatorId, tombstonedAt])`) was tried and REJECTED: it equates `annotatorId`'s nulls too, so account deletion's `SetNull` would collide for two deleted annotators on one item. |
-| `20260814120000_v2f_tombstone_overlay` | `Tombstone_exactly_one_entity`, a table `CHECK` asserting `num_nonnulls("datasetSampleId", "datasetId") = 1` — every tombstone row hides exactly one entity (A1, the tombstone overlay) | Prisma's schema DSL has no syntax for a `CHECK` constraint of any kind — no attribute, no `@@check`, no escape hatch short of raw SQL in the migration. Unlike the four rows above, this one is **not an index**, so `db pull` leaves nothing behind at all: `schema.prisma` can only say that the two FK columns are optional and `@unique`, and Postgres permits unlimited NULLs in a unique index, so without this constraint both-null orphans and both-set rows are both accepted. Re-verified empirically on Prisma 6.19.2 against a database with the migration applied: `migrate diff --from-url ... --to-schema-datamodel` reports an empty migration. The invariant is pinned by direct `INSERT` probes (see that migration's header), not by a Prisma-level test — the client cannot construct a violating row through a typed API that does not model the invariant. |
+| `20260814120000_v2f_tombstone_overlay` | `Tombstone_exactly_one_entity`, a table `CHECK` asserting `num_nonnulls("datasetSampleId", "datasetId") = 1` — every tombstone row hides exactly one entity (A1, the tombstone overlay) | Prisma's schema DSL has no syntax for a `CHECK` constraint of any kind — no attribute, no `@@check`, no escape hatch short of raw SQL in the migration. Unlike the four rows above, this one is **not an index**, so `db pull` leaves nothing behind at all: `schema.prisma` can only say that the two FK columns are optional and `@unique`, and Postgres permits unlimited NULLs in a unique index, so without this constraint both-null orphans and both-set rows are both accepted. Re-verified empirically on Prisma 6.19.2 against a database with the migration applied: `migrate diff --from-url ... --to-schema-datamodel` reports an empty migration. The invariant cannot be pinned through the typed client, which has no way to construct a violating row — `datasetSample` and `dataset` are separate optional relation inputs — so it is pinned by raw `INSERT`s in `tests/db/tombstone-check-constraint.test.ts`, run after `npm run test:db` has replayed the full chain. That test is the only thing in this repo that notices if the constraint goes missing; it was itself verified to fail with the constraint dropped. |
 
 The real hazard is the opposite direction from "drift tooling nags you to
-revert it": because `schema.prisma` can never re-declare this attribute,
-the migration file's raw SQL is the ONLY record of it. If a future
-migration ever needs to recreate this same index for an unrelated reason
-(e.g. touching a column it covers), that migration must hand-add `NULLS
-NOT DISTINCT` again — nothing in the toolchain will warn if it's
-forgotten, for the same reason nothing warns about drift today: Prisma
-can't see the attribute either way. Anyone adding a NEW schema change that
-also needs a Prisma-inexpressible SQL clause should add a row to this
-table and re-verify (`db pull`/`migrate diff`/`db push` against a database
-that has the migration applied) rather than assume the "pseudo-drift"
-framing without checking — as this section itself originally did, before
-being corrected against real `psql`/Prisma output while landing 1b Task 6.
+revert it": because `schema.prisma` can never re-declare any of these —
+neither an index attribute nor a table constraint — the migration file's
+raw SQL is the ONLY record of it. If a future migration ever needs to
+recreate one of these objects for an unrelated reason (e.g. touching a
+column it covers, or rebuilding the table it sits on), that migration must
+hand-add the missing clause again — `NULLS NOT DISTINCT`, the partial
+`WHERE`, or the whole `CHECK` — and nothing in the toolchain will warn if
+it's forgotten, for the same reason nothing warns about drift today:
+Prisma can't see any of them either way. The `CHECK` row is the sharpest
+case, because it is not an index at all and so leaves nothing behind for
+introspection to half-notice; it is also the only row here with an
+automated guard, `tests/db/tombstone-check-constraint.test.ts`, which
+attempts violating rows through raw SQL after `npm run test:db` has
+replayed the whole chain. That guard is a model worth copying for the
+next inexpressible constraint — the drift gate will not do it for you.
+Anyone adding a NEW schema change that also needs a Prisma-inexpressible
+SQL clause should add a row to this table and re-verify (`db pull`/`migrate
+diff`/`db push` against a database that has the migration applied) rather
+than assume the "pseudo-drift" framing without checking — as this section
+itself originally did, before being corrected against real `psql`/Prisma
+output while landing 1b Task 6.
 
 ### Schema conventions
 
