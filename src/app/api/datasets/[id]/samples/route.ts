@@ -95,44 +95,63 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
     // FROM A FILTERED EXPORT: src/lib/config.ts:389 emits `index: s.index`
     // verbatim and the importer writes it back, so the rows arrive with GAPS,
     // count < max + 1, and the first append lands on an occupied ordinal.
-    const created = await prisma.$transaction(async (tx) => {
-      const startIndex = await nextSampleIndex(tx, params.id);
+    const created = await prisma.$transaction(
+      async (tx) => {
+        const startIndex = await nextSampleIndex(tx, params.id);
 
-      const rows: DatasetSample[] = [];
-      for (let i = 0; i < data.samples.length; i++) {
-        const s = data.samples[i];
-        rows.push(
-          await tx.datasetSample.create({
-            data: {
-              datasetId: params.id,
-              index: startIndex + i,
-              input: s.input,
-              expected: s.expected ?? undefined,
-              metadata: s.metadata ? JSON.stringify(s.metadata) : undefined,
-            },
-          })
-        );
-      }
+        const rows: DatasetSample[] = [];
+        for (let i = 0; i < data.samples.length; i++) {
+          const s = data.samples[i];
+          rows.push(
+            await tx.datasetSample.create({
+              data: {
+                datasetId: params.id,
+                index: startIndex + i,
+                input: s.input,
+                expected: s.expected ?? undefined,
+                metadata: s.metadata ? JSON.stringify(s.metadata) : undefined,
+              },
+            })
+          );
+        }
 
-      // `sampleCount` becomes a LIVE count. It was
-      // `startIndex + data.samples.length`, which is the row count exactly
-      // while ordinals are dense and drifts the moment `startIndex` is a
-      // high-water mark: append 2 rows onto a 4-row corpus with a hole and a
-      // hidden row and it stores 7 where the live answer is 5. The UI ladder
-      // reads the stored value FIRST, so a wrong one shadows the live count
-      // beneath it — the import picker advertises 620 and the import yields
-      // 610.
-      const live = await tx.datasetSample.count({
-        where: { datasetId: params.id, ...liveSamplesOnly() },
-      });
+        // `sampleCount` becomes a LIVE count. It was
+        // `startIndex + data.samples.length`, which is the row count exactly
+        // while ordinals are dense and drifts the moment `startIndex` is a
+        // high-water mark: append 2 rows onto a 4-row corpus with a hole and a
+        // hidden row and it stores 7 where the live answer is 5. The UI ladder
+        // reads the stored value FIRST, so a wrong one shadows the live count
+        // beneath it — the import picker advertises 620 and the import yields
+        // 610.
+        const live = await tx.datasetSample.count({
+          where: { datasetId: params.id, ...liveSamplesOnly() },
+        });
 
-      await tx.dataset.update({
-        where: { id: params.id },
-        data: { sampleCount: live },
-      });
+        await tx.dataset.update({
+          where: { id: params.id },
+          data: { sampleCount: live },
+        });
 
-      return rows;
-    });
+        return rows;
+      },
+      // This is an INTERACTIVE transaction doing N sequential round trips, and
+      // `addSamplesSchema` above puts no upper bound on N. Prisma's defaults
+      // (maxWait 2s, timeout 5s) would therefore cap the endpoint at whatever
+      // fits in 5s and fail the rest with P2028 -> a generic 500. The array-
+      // form `$transaction([...])` this replaced was batched and NOT governed
+      // by these options, so the ceiling is a behaviour change introduced with
+      // the callback form and has to be raised deliberately rather than
+      // inherited.
+      //
+      // Same ceiling and same reasoning as the other bulk-write path in this
+      // tree, `POST /api/golden-sets` (src/app/api/golden-sets/route.ts:257),
+      // whose comment states the rule outright: "an interactive transaction's
+      // default 5s timeout will not survive 620 round trips". That route earns
+      // its margin with `createMany`; this one CANNOT — the response body
+      // returns the created rows and `createMany` returns only a count — so it
+      // pays a round trip per row and needs the raised ceiling MORE, not less.
+      { maxWait: 10_000, timeout: 60_000 }
+    );
 
     return NextResponse.json({ added: created.length, samples: created }, { status: 201 });
   } catch (error) {
