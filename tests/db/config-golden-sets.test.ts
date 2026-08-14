@@ -931,6 +931,69 @@ describe('Config import — the guards the later sweeps never reached (M1-M3)', 
     expect(live.map((s) => s.index)).toEqual([2, 3]);
   });
 
+  it('M1: a HIDDEN dataset is closed to writes — the import skips it, and re-importing does not grow the corpus', async () => {
+    // Decision 15 reaches the importer. The sibling of the case above, and the
+    // one it does not cover: there the ROWS are hidden, here the DATASET is.
+    //
+    // NON-VACUITY — why TWO imports, and why the row count is the assertion.
+    // One import proves nothing: the first pass of the unguarded code also
+    // reports 200 and looks plausible. The growth is what identifies the bug.
+    // Both reads the section relies on are blinded the same way — every sample
+    // of a hidden dataset is hidden BY INHERITANCE through
+    // `liveSamplesOnly()`'s parent clause — so `_count.samples` reads 0, never
+    // equals the document length, `changes` is never empty, and the action is
+    // never `skip`; while `outgoing` is empty, so the append tombstones
+    // nothing and stacks another generation. Measured on the unguarded code:
+    // 4 → 6 → 8 rows over three identical imports, `sampleCount` pinned at 2.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await mkAnnotatedDataset(user.id, { slug: 'ds-hidden-write' });
+
+    // Exported BEFORE hiding: the export is lifecycle-filtered, so a document
+    // naming a hidden corpus cannot be produced after the fact.
+    const doc = await exportDoc();
+    doc.datasets[0].name = 'Renamed Corpus';
+    doc.datasets[0].samples[0].input = 'a wholly different question';
+
+    await db.tombstone.create({ data: { datasetId: dataset.id, isTombstone: true } });
+
+    const first = await importConfig(importRequest(JSON.stringify(doc)));
+    expect(first.status).toBe(200);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const firstDiff = (await first.json()).items.find((i: any) => i.type === 'dataset');
+    expect(firstDiff.action).toBe('skip');
+    expect(firstDiff.changes.join(' | ')).toContain('closed to writes');
+
+    // NOTHING was applied — not the samples, and not the other fields. A guard
+    // placed only around the sample replace would leave the rename landing on
+    // a row nothing returns, which is the exact wrong Decision 15 names.
+    const untouched = await db.dataset.findUniqueOrThrow({ where: { id: dataset.id } });
+    expect(untouched.name).toBe(dataset.name);
+    expect(untouched.sampleCount).toBe(2);
+    expect(await db.datasetSample.count({ where: { datasetId: dataset.id } })).toBe(2);
+    // Nothing was hidden either: an append that tombstoned nothing would leave
+    // every generation live at once if a restore verb ever lands.
+    expect(await db.tombstone.count({ where: { datasetSampleId: { not: null } } })).toBe(0);
+
+    // The second import is the real assertion: unbounded growth, not a
+    // one-off. Unguarded this reads 6.
+    const second = await importConfig(importRequest(JSON.stringify(doc)));
+    expect(second.status).toBe(200);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const secondDiff = (await second.json()).items.find((i: any) => i.type === 'dataset');
+    expect(secondDiff.action).toBe('skip');
+    expect(await db.datasetSample.count({ where: { datasetId: dataset.id } })).toBe(2);
+
+    // The dryRun preview says the same thing the real import does — the rule
+    // the pin-skip on this branch already follows.
+    const preview = await importConfig(importRequest(JSON.stringify(doc), true));
+    expect(preview.status).toBe(200);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const previewDiff = (await preview.json()).items.find((i: any) => i.type === 'dataset');
+    expect(previewDiff.action).toBe('skip');
+    expect(previewDiff.changes.join(' | ')).toContain('closed to writes');
+  });
+
   it('M2: the public-dataset fallback resolves the PLATFORM owner only, never a stranger\'s corpus', async () => {
     // Arm (b) of the importer's dataset resolution was `{ slug, visibility:
     // 'public' }` with no owner predicate, so any session-authenticated caller

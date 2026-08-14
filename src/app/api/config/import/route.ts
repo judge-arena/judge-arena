@@ -482,6 +482,58 @@ export async function POST(request: Request) {
       }
 
       if (existing) {
+        // ── DECISION 15 — A HIDDEN DATASET IS CLOSED TO WRITES — reaches the
+        // importer, which is the SECOND write path onto dataset samples and
+        // never received the guard the HTTP verbs got in 342bde6.
+        //
+        // The upsert read above MUST stay unfiltered (see its comment), so
+        // there is no filtered guard read to lean on here — exactly the
+        // situation `assertDatasetLive` (datasets/[id]/route.ts) was written
+        // for, and this is the same shape: a named, explicit, LOCAL liveness
+        // check run immediately after the row is resolved. Through
+        // `liveDatasetsOnly()` rather than by testing `existing.tombstone`
+        // inline, because src/lib/tombstones.ts is the single definition of
+        // "hidden" and a second one here would be a second thing to keep in
+        // step. It reports a skip rather than the 404 its HTTP counterpart
+        // answers: this route reports per-entity outcomes in a diff and has no
+        // `$transaction` over the document, so refusing the whole import over
+        // one dead slug would strand everything already committed.
+        //
+        // WITHOUT THIS the section does not merely write where it should not,
+        // it grows WITHOUT BOUND. Both reads it relies on are blinded the same
+        // way — every sample of a hidden dataset is hidden BY INHERITANCE
+        // through `liveSamplesOnly()`'s parent clause — so `_count.samples`
+        // reads 0, never equals the document length, `changes` is never empty
+        // and the action is never `skip`; meanwhile `outgoing` inside the
+        // replace is empty, so it tombstones nothing and simply stacks another
+        // generation above the high-water mark. Measured before this guard:
+        // 4 → 6 → 8 rows over three identical imports, `sampleCount` pinned at
+        // 2. Filtering `outgoing` on the sample's own tombstone would make that
+        // growth tidier and exactly as unbounded — the diff is the half that
+        // has to stop, and a corpus closed to writes has no business being
+        // diffed at all.
+        //
+        // Checked BEFORE `items.push` so the dryRun preview says the same thing
+        // the real import will do — the rule the pin-skip below follows.
+        const live = await prisma.dataset.findFirst({
+          where: { id: existing.id, ...liveDatasetsOnly() },
+          select: { id: true },
+        });
+        if (!live) {
+          items.push({
+            type: 'dataset',
+            slug,
+            name: configDataset.name,
+            action: 'skip',
+            changes: [
+              `dataset "${slug}" is deleted on this instance and is closed to writes. Nothing was ` +
+                'applied — not the samples, and not the other fields. The slug is still held by the ' +
+                'deleted row, so import this corpus under a different one.',
+            ],
+          });
+          continue;
+        }
+
         const changes: string[] = [];
         if (existing.name !== configDataset.name) changes.push(`name: "${existing.name}" → "${configDataset.name}"`);
         if ((existing.description ?? '') !== (configDataset.description ?? '')) changes.push('description updated');
