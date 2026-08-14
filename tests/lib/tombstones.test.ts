@@ -198,6 +198,23 @@ describe('tombstoneSamples', () => {
     expect(updateMany).not.toHaveBeenCalled();
     expect(createMany).not.toHaveBeenCalled();
   });
+
+  it('normalises a missing reason to null in BOTH statements', async () => {
+    const { tx, updateMany, createMany } = stubTx();
+    await tombstoneSamples(tx, ['a']);
+
+    // THE PATH THE NEXT-BUT-ONE TASK WALKS DOWN. Task 11 may call this
+    // without a reason, and the reason-bearing test above cannot see the
+    // fallback at all — delete `?? null` from either statement and it stays
+    // green. `reason: undefined` in the updateMany's `data` means "leave the
+    // column alone", so a reasonless bulk re-delete would silently inherit
+    // whatever justification an earlier delete gave, on rows nobody named.
+    // Asserted with toBeNull() rather than by key presence for the same
+    // reason as tombstoneSample's case: toEqual cannot tell undefined from
+    // null, so only the strict assertion discriminates.
+    expect(updateMany.mock.calls[0][0].data.reason).toBeNull();
+    expect(createMany.mock.calls[0][0].data[0].reason).toBeNull();
+  });
 });
 
 describe('tombstoneDataset', () => {
@@ -215,6 +232,19 @@ describe('tombstoneDataset', () => {
     // Tombstone_exactly_one_entity — a 500 out of DELETE /api/datasets/[id],
     // not a validation error the client could explain.
     expect(JSON.stringify(upsert.mock.calls[0][0])).not.toContain('datasetSampleId');
+  });
+
+  it('normalises a missing reason to null in both arms', async () => {
+    const { tx, upsert } = stubTx();
+    await tombstoneDataset(tx, 'ds-1');
+
+    // Same gap as tombstoneSamples above: the reason-bearing test cannot see
+    // the `?? null` fallback, so deleting it leaves the suite green. The
+    // update arm is the one that bites — `reason: undefined` there means
+    // "leave the column alone", so re-deleting a dataset with no reason would
+    // leave an earlier delete's justification standing on the row.
+    expect(upsert.mock.calls[0][0].create.reason).toBeNull();
+    expect(upsert.mock.calls[0][0].update.reason).toBeNull();
   });
 });
 
