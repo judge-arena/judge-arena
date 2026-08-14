@@ -96,13 +96,21 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
           take: 100,
         },
         versions: {
+          // The stored `sampleCount` only — there is no `_count` here to
+          // filter. The version-history panel does not read this: it fetches
+          // GET /api/datasets/[id]/versions, whose `_count` IS filtered.
+          // Keeping this rung truthful is the write side's job, not this
+          // read's.
           select: { id: true, version: true, createdAt: true, sampleCount: true },
           orderBy: { version: 'desc' },
         },
         parent: {
           select: { id: true, version: true },
         },
-        _count: { select: { samples: true } },
+        // A1: the LIVE sample count, for both the owner branch (returned
+        // verbatim) and the public branch (via toPublicDataset's
+        // `sampleTotal`).
+        _count: { select: { samples: { where: liveSamplesOnly() } } },
       },
     });
 
@@ -169,7 +177,10 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
       include: {
         user: { select: { id: true, name: true, email: true } },
         project: { select: { id: true, name: true } },
-        _count: { select: { samples: true } },
+        // A1: the LIVE sample count. The dataset page re-renders from this
+        // response, so an unfiltered count here shows a stale number until
+        // the next full reload.
+        _count: { select: { samples: { where: liveSamplesOnly() } } },
       },
     });
 

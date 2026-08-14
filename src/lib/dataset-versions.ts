@@ -228,6 +228,11 @@ export async function createDatasetVersion(
             user: { select: { id: true, name: true, email: true } },
             project: { select: { id: true, name: true } },
             samples: { orderBy: { index: 'asc' } },
+            // A1: NEEDS NOTHING. The child dataset and every one of its
+            // samples are created by this very `create`, so no row reachable
+            // from here can carry a tombstone. Same disposition as the
+            // POST-create include in datasets/route.ts, and for the same
+            // reason. The nested `samples:` above needs no filter either.
             _count: { select: { samples: true } },
           },
         });

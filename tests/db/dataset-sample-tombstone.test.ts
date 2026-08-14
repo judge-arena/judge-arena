@@ -28,7 +28,12 @@ import {
 } from '@/app/api/datasets/[id]/versions/route';
 import { GET as exportDataset } from '@/app/api/datasets/[id]/export/route';
 import { POST as refreshDataset } from '@/app/api/datasets/[id]/refresh/route';
-import { liveDatasetsOnly, liveSamplesOnly, tombstoneDataset } from '@/lib/tombstones';
+import {
+  liveDatasetsOnly,
+  liveSamplesOnly,
+  tombstoneDataset,
+  tombstoneSample,
+} from '@/lib/tombstones';
 import { PLATFORM_OWNER_EMAIL } from '@/lib/golden-sets';
 
 // A1, the tombstone overlay. DELETE /api/datasets/[id]/samples HIDES the named
@@ -57,6 +62,43 @@ vi.mock('@/lib/rate-limit-redis', async (importOriginal) => {
   return {
     ...actual,
     apiLimiter: { check: vi.fn(async () => ({ ok: true, remaining: 999, resetAt: Date.now() + 60_000 })) },
+  };
+});
+
+// POST /api/datasets/[id]/refresh calls out to the HuggingFace API before it
+// reaches the `_count` this suite cares about, so ONE function is stubbed —
+// `importOriginal` keeps `fetchNRows` and everything else real, which matters
+// because the evaluations route in this same file imports from here too. The
+// Task 7 refresh test deliberately needs no stub (it uses a `source: 'local'`
+// fixture and never gets past the guard); the Task 10 one does, because it
+// asserts what the route PERSISTS after a successful fetch.
+vi.mock('@/lib/huggingface', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/huggingface')>();
+  return {
+    ...actual,
+    fetchDatasetMetadata: vi.fn(async (id: string) => ({
+      id,
+      name: id,
+      author: 'fixture',
+      description: 'fixture dataset',
+      lastModified: '2026-08-14T00:00:00.000Z',
+      isPrivate: false,
+      downloads: 0,
+      likes: 0,
+      tags: [],
+      cardData: {},
+      splits: ['train'],
+      features: [],
+      // The HF CORPUS total, deliberately a number nothing local could
+      // produce: `buildRefreshUpdate` ignores it and persists the local count
+      // it was handed, so a 9999 landing in `Dataset.sampleCount` would mean
+      // the route stopped using the `_count` this task filters.
+      sampleCount: 9999,
+      configs: ['default'],
+      configSplits: { default: ['train'] },
+      serverCapabilities: null,
+      hasDatasetScript: false,
+    })),
   };
 });
 
@@ -1772,5 +1814,193 @@ describe('the dataset read sweep — a hidden dataset leaves every list (A1 Task
     // Both rows exist and both hold a slug — the constraint was never tested
     // by luck.
     await expect(db.dataset.count({ where: { userId: user.id } })).resolves.toBe(2);
+  });
+});
+
+// ─── A1 Task 10: the _count.samples sweep ───────────────────────────────────
+// Seven `_count: { select: { samples: true } }` producers take
+// `liveSamplesOnly()`. The UI ladder is `sampleCount ?? sampleTotal ??
+// _count.samples` and `sampleTotal` IS `_count.samples` (serializers.ts's
+// toPublicDataset), so one unfiltered producer feeds a stale number to
+// whichever rung the caller reaches first.
+//
+// THE ELEVEN LADDER EXPRESSIONS THEMSELVES NEED NO CHANGE and this task does
+// not touch one: datasets/page.tsx; datasets/[id]/page.tsx ×4;
+// golden-sets/page.tsx; projects/[id]/page.tsx ×4. Nor `hfMeta.sampleCount` (a
+// HuggingFace remote count) or `summary.sampleCount` (which is
+// `evaluations.length`). The ladder is right once its producers are.
+//
+// THREE `_count`s STAY UNFILTERED, all three because nothing hidden can reach
+// them or because filtering breaks a write:
+//   * datasets/route.ts's POST-create include — a row created microseconds ago
+//     cannot carry a tombstone, and neither can the samples created with it in
+//     the same statement.
+//   * dataset-versions.ts's child-create include — same reason.
+//   * samples/route.ts's POST guard read — Task 4's, already commented there.
+//     Filtering it would collide ordinals. It is INERT (nothing consumes it),
+//     so no test can enforce that it stays unfiltered; the enforcement lives
+//     on `nextSampleIndex`'s aggregate instead, pinned by the Task 4 block.
+
+let countCounter = 0;
+
+/** A dataset with `n` dense samples and a STORED sampleCount of `n`. */
+async function mkCountDataset(userId: string, name: string, n: number) {
+  countCounter += 1;
+  return db.dataset.create({
+    data: {
+      name,
+      slug: `${name}-${countCounter}`,
+      userId,
+      source: 'local',
+      visibility: 'private',
+      sampleCount: n,
+      samples: {
+        create: Array.from({ length: n }, (_, i) => ({
+          index: i,
+          input: `question-${i}`,
+          expected: 'A>B',
+        })),
+      },
+    },
+    include: { samples: { orderBy: { index: 'asc' } } },
+  });
+}
+
+function countSessionFor(user: { id: string; email: string }) {
+  (getServerSession as unknown as Mock).mockResolvedValue({
+    user: { id: user.id, email: user.email },
+  });
+}
+
+describe('the _count.samples sweep — a hidden sample stops being counted (A1 Task 10)', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('GET /api/datasets and GET /api/datasets/[id] both report the LIVE sample count', async () => {
+    const user = await mkUser();
+    countSessionFor(user);
+    const ds = await mkCountDataset(user.id, 'count-sweep', 4);
+
+    // NON-VACUITY, two vacuous shapes closed on one fixture:
+    //   * sample 3 is genuinely hidden — without it `_count` is 4 whether or
+    //     not the producer is filtered, and every assertion below passes on
+    //     unchanged code.
+    //   * sample 1 carries a Tombstone row with isTombstone: FALSE. It is
+    //     the only fixture that separates the required `NOT` formulation from
+    //     the simpler `{ tombstone: { is: null } }` — that one counts 2 here
+    //     and would sail through a fixture built only from hidden rows.
+    await tombstoneSample(db, ds.samples[3].id, 'count-sweep fixture');
+    await db.tombstone.create({ data: { datasetSampleId: ds.samples[1].id, isTombstone: false } });
+
+    const listRes = await listDatasets(new Request('http://localhost/api/datasets'));
+    expect(listRes.status).toBe(200);
+    const listBody = await listRes.json();
+    expect(listBody.data).toHaveLength(1);
+    expect(listBody.data[0]._count.samples).toBe(3);
+
+    const oneRes = await getDataset(new Request(`http://localhost/api/datasets/${ds.id}`), {
+      params: Promise.resolve({ id: ds.id }),
+    });
+    expect(oneRes.status).toBe(200);
+    const oneBody = await oneRes.json();
+    expect(oneBody._count.samples).toBe(3);
+
+    // The STORED rung is deliberately untouched by this task. Keeping
+    // `sampleCount` truthful is the write side's job (the POST/DELETE/PUT
+    // sampleCount writes); this task only fixes the read that feeds the
+    // ladder's second and third rungs.
+    expect(oneBody.sampleCount).toBe(4);
+  });
+
+  it('PATCH /api/datasets/[id] returns the LIVE count in its own response', async () => {
+    // The dataset page re-renders straight from this response, so an
+    // unfiltered `_count` here shows a stale total until the next full reload
+    // — a different producer from the GET above, in the same file, easy to
+    // filter one of and not the other.
+    const user = await mkUser();
+    countSessionFor(user);
+    const ds = await mkCountDataset(user.id, 'count-sweep-patch', 3);
+    await tombstoneSample(db, ds.samples[1].id, 'count-sweep fixture');
+
+    const res = await patchDataset(
+      jsonRequest(`http://localhost/api/datasets/${ds.id}`, 'PATCH', {
+        description: 'edited metadata',
+      }),
+      { params: Promise.resolve({ id: ds.id }) }
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.description).toBe('edited metadata');
+    expect(body._count.samples).toBe(2);
+  });
+
+  it('GET /api/datasets/[id]/versions reports the live _count beside the untouched stored sampleCount', async () => {
+    const user = await mkUser();
+    countSessionFor(user);
+    const ds = await mkCountDataset(user.id, 'count-sweep-versions', 3);
+    await tombstoneSample(db, ds.samples[2].id, 'count-sweep fixture');
+
+    const res = await listVersions(
+      new Request(`http://localhost/api/datasets/${ds.id}/versions`),
+      { params: Promise.resolve({ id: ds.id }) }
+    );
+    expect(res.status).toBe(200);
+    const rows = await res.json();
+    expect(rows).toHaveLength(1);
+
+    // This one `select` carries BOTH rungs, which is exactly why it is easy
+    // to filter neither: the panel reads `v.sampleCount ?? v._count?.samples`
+    // and the first rung hides the second.
+    expect(rows[0]._count.samples).toBe(2);
+    expect(rows[0].sampleCount).toBe(3);
+  });
+
+  it('POST /api/datasets/[id]/refresh PERSISTS the live count, not the raw row count', async () => {
+    // The refresh read's `_count.samples` is handed to `buildRefreshUpdate`,
+    // whose result is WRITTEN to `Dataset.sampleCount`. So filtering that read
+    // fixes the stored rung for free — and leaving it unfiltered writes a
+    // number that counts withdrawn rows into the column the whole ladder
+    // starts at. The response include is a second producer and is asserted
+    // alongside, so a fix to one does not cover for the other.
+    const user = await mkUser();
+    countSessionFor(user);
+    const ds = await db.dataset.create({
+      data: {
+        name: `count-sweep-refresh-${(countCounter += 1)}`,
+        slug: `count-sweep-refresh-${countCounter}`,
+        userId: user.id,
+        source: 'remote',
+        huggingFaceId: 'acme/probe',
+        visibility: 'private',
+        sampleCount: 3,
+        samples: {
+          create: [0, 1, 2].map((i) => ({ index: i, input: `question-${i}`, expected: 'A>B' })),
+        },
+      },
+      include: { samples: { orderBy: { index: 'asc' } } },
+    });
+    await tombstoneSample(db, ds.samples[1].id, 'count-sweep fixture');
+
+    const res = await refreshDataset(
+      new Request(`http://localhost/api/datasets/${ds.id}/refresh`, { method: 'POST' }),
+      { params: Promise.resolve({ id: ds.id }) }
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    // Producer 2 of 2 in this file: the response the client re-renders from.
+    expect(body._count.samples).toBe(2);
+
+    // And the PERSISTED column, which is the point of this test.
+    // `buildRefreshUpdate` returns `sampleCount: localSampleCount` verbatim —
+    // it never uses the HF corpus total (9999 in the stub above) — so this
+    // column IS the `_count.samples` handed to it, and nothing else.
+    const stored = await db.dataset.findUniqueOrThrow({
+      where: { id: ds.id },
+      select: { sampleCount: true },
+    });
+    expect(stored.sampleCount).toBe(2);
   });
 });

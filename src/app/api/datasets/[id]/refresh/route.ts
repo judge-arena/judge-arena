@@ -4,7 +4,7 @@ import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { fetchDatasetMetadata } from '@/lib/huggingface';
 import { buildRefreshUpdate } from '@/lib/dataset-refresh-update';
 import { logger, serializeError } from '@/lib/logger';
-import { liveDatasetsOnly } from '@/lib/tombstones';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 // POST /api/datasets/[id]/refresh - Refresh metadata from remote source
 export async function POST(_request: Request, props: { params: Promise<{ id: string }> }) {
@@ -23,7 +23,12 @@ export async function POST(_request: Request, props: { params: Promise<{ id: str
     const dataset = await prisma.dataset.findFirst({
       where: { id: params.id, ...liveDatasetsOnly() },
       include: {
-        _count: { select: { samples: true } },
+        // A1: the LIVE sample count. This value is handed to
+        // `buildRefreshUpdate` below and its result is PERSISTED into
+        // `Dataset.sampleCount` — so the stored row count is fixed for free
+        // by filtering here, and only by filtering here. That write needed no
+        // change of its own precisely because of this line.
+        _count: { select: { samples: { where: liveSamplesOnly() } } },
       },
     });
 
@@ -63,7 +68,9 @@ export async function POST(_request: Request, props: { params: Promise<{ id: str
       include: {
         user: { select: { id: true, name: true, email: true } },
         project: { select: { id: true, name: true } },
-        _count: { select: { samples: true } },
+        // A1: the LIVE sample count in the response the client re-renders
+        // from, matching the value just persisted above.
+        _count: { select: { samples: { where: liveSamplesOnly() } } },
       },
     });
 

@@ -11,7 +11,7 @@ import {
 import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib/pagination';
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicDataset } from '@/lib/serializers';
-import { liveDatasetsOnly } from '@/lib/tombstones';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 const createDatasetSchema = z.object({
   name: z.string().min(1, 'Name is required').max(200),
@@ -99,7 +99,12 @@ export async function GET(request: Request) {
         include: {
           user: { select: { id: true, name: true, email: true } },
           project: { select: { id: true, name: true } },
-          _count: { select: { samples: true } },
+          // A1: the LIVE sample count. `toPublicDataset` publishes this as
+          // `sampleTotal` (src/lib/serializers.ts), which is the second rung
+          // of the `sampleCount ?? sampleTotal ?? _count.samples` ladder every
+          // dataset card reads. Unfiltered it advertises rows the export will
+          // not deliver.
+          _count: { select: { samples: { where: liveSamplesOnly() } } },
         },
         orderBy: { updatedAt: 'desc' },
         ...pageArgs,
@@ -253,6 +258,12 @@ export async function POST(request: Request) {
       include: {
         user: { select: { id: true, name: true, email: true } },
         project: { select: { id: true, name: true } },
+        // A1: NEEDS NOTHING, unlike the list `_count` above and the five other
+        // producers this sweep filtered. A dataset created microseconds ago
+        // cannot carry a tombstone, and neither can the samples created with
+        // it in this very `create` — there is no window in which a row here is
+        // hidden. Adding `where: liveSamplesOnly()` would be a no-op join on
+        // the hottest path in this route.
         _count: { select: { samples: true } },
       },
     });

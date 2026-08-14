@@ -458,7 +458,14 @@ export async function POST(request: Request) {
       // `$transaction`, so the document lands half-applied.
       const existing = await prisma.dataset.findFirst({
         where: { userId, slug },
-        include: { _count: { select: { samples: true } } },
+        // A1: the LIVE sample count — a different question from the `where`
+        // above, which must stay unfiltered. This feeds the
+        // `existing._count.samples !== configDataset.samples.length` diff
+        // below. Unfiltered, re-importing an UNCHANGED document onto a corpus
+        // that has any hidden row reports a spurious `samples: N → M` change,
+        // which flips the action from `skip` to a full — and entirely
+        // needless — sample replace.
+        include: { _count: { select: { samples: { where: liveSamplesOnly() } } } },
       });
 
       // Resolve project reference

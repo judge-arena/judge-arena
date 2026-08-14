@@ -180,10 +180,16 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
       select: {
         id: true,
         version: true,
+        // The stored rung, deliberately left as it stands — the panel reads
+        // `v.sampleCount ?? v._count?.samples`, so this value shadows the one
+        // below and the write side is what keeps it honest.
         sampleCount: true,
         createdAt: true,
         updatedAt: true,
-        _count: { select: { samples: true } },
+        // A1: the LIVE sample count — the panel's fallback rung, and the
+        // only one this read can fix. This one `select` carries BOTH rungs,
+        // which is exactly why it was easy to filter neither.
+        _count: { select: { samples: { where: liveSamplesOnly() } } },
       },
       orderBy: { version: 'desc' },
     });
