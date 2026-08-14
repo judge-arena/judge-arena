@@ -290,6 +290,60 @@ export class GoldenSetFrozenError extends Error {
   }
 }
 
+/* ─── The dataset pin ───────────────────────────────────────────────────────
+ *
+ * A golden set holds its corpus down with TWO `onDelete: Restrict` FKs, and
+ * both were added by A0:
+ *
+ *   GoldenSet.datasetId            (schema.prisma:671) — the set is the
+ *                                  annotation layer over exactly one Dataset,
+ *                                  so that Dataset cannot be deleted.
+ *   GoldenItem.sourceDatasetSampleId (schema.prisma:717) — the row an item was
+ *                                  imported from cannot be deleted.
+ *
+ * Four handlers destroy one or the other, and the design doc states the
+ * requirement for all of them (2026-08-12-a0-golden-set-substrate-design.md:
+ * 236-240): the refusal "must fail as a deliberate 409 with a message naming
+ * the golden sets that pinned it, not as a raw P2003". Only `PUT
+ * /api/datasets/[id]/samples` did. `DELETE /api/datasets/[id]/samples`,
+ * `DELETE /api/datasets/[id]` and the config importer's sample replace each
+ * surfaced the P2003 as a generic 500 — the importer's worst of all, because
+ * that route commits incrementally and has no `$transaction`, so the throw
+ * left the document half-applied.
+ *
+ * ONE PREDICATE, FOUR CALLERS, so they cannot drift.
+ *
+ * DELIBERATELY NOT LIFECYCLE-FILTERED, on either level. A TOMBSTONED golden
+ * item still holds `sourceDatasetSampleId`, and a RETIRED or TOMBSTONED golden
+ * set still holds `datasetId`; Postgres does not care that a row is logically
+ * dead. Sweeping a `tombstonedAt: null` through here would make the guard
+ * report "not pinned", let the delete proceed, and convert a clean 409 into
+ * the raw P2003 this exists to prevent. Pinned by 'a TOMBSTONED golden item
+ * still pins the dataset' in tests/db/dataset-sample-freeze.test.ts.
+ *
+ * BOTH FK ARMS ARE IN THE PREDICATE, not just the item one. For any set with
+ * items over this corpus the two arms agree — a set's items source its own
+ * dataset's samples, which POST /api/golden-sets guarantees and the importer's
+ * `datasetId`-immutability refusal preserves. The `datasetId` arm therefore
+ * adds exactly one case: a set with NO items (reachable, `items` defaults to
+ * `[]` in `configDocumentSchema`), which the item arm would report as
+ * unpinned while `dataset.delete` still raised P2003. On the sample paths that
+ * arm can only ever over-report, and "this corpus is annotated by set X" is
+ * true of an empty set too — it declared itself the annotation layer over it.
+ */
+export async function findGoldenSetsPinningDataset(
+  client: Prisma.TransactionClient,
+  datasetId: string
+): Promise<{ id: string; name: string }[]> {
+  return client.goldenSet.findMany({
+    where: {
+      OR: [{ datasetId }, { items: { some: { sourceSample: { datasetId } } } }],
+    },
+    select: { id: true, name: true },
+    orderBy: { name: 'asc' },
+  });
+}
+
 /* ─── Set lifecycle read filter ─────────────────────────────────────────────
  *
  * GoldenSet carries two nullable timestamps that are NOT synonyms:

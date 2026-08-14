@@ -3,6 +3,7 @@ import type { Prisma } from '@prisma/client';
 import {
   GoldenSetFrozenError,
   PLATFORM_OWNER_EMAIL,
+  findGoldenSetsPinningDataset,
   goldenItemLifecycleWhere,
   goldenSetLifecycleWhere,
   isGoldenSetFrozen,
@@ -229,6 +230,52 @@ describe('isGoldenSetFrozen', () => {
   it('is true as soon as one calibration run references the set', async () => {
     const { tx } = stubTx(1);
     expect(await isGoldenSetFrozen(tx, 'gs-1')).toBe(true);
+  });
+});
+
+describe('findGoldenSetsPinningDataset', () => {
+  function stubClient(rows: { id: string; name: string }[]) {
+    const findMany = vi.fn().mockResolvedValue(rows);
+    return { client: { goldenSet: { findMany } } as unknown as Prisma.TransactionClient, findMany };
+  }
+
+  it('asks for BOTH Restrict FKs, unfiltered on lifecycle, ordered by name', async () => {
+    const { client, findMany } = stubClient([{ id: 'gs-1', name: 'Alpha' }]);
+
+    expect(await findGoldenSetsPinningDataset(client, 'ds-1')).toEqual([
+      { id: 'gs-1', name: 'Alpha' },
+    ]);
+
+    // The whole guard is this predicate, so it is asserted verbatim rather
+    // than by behaviour. Two properties are load-bearing and neither is
+    // visible from a passing 409:
+    //
+    //   1. NO `tombstonedAt` ANYWHERE. A tombstoned GoldenItem still holds
+    //      `sourceDatasetSampleId` and a retired/tombstoned GoldenSet still
+    //      holds `datasetId`; Postgres refuses the delete either way. Sweep a
+    //      lifecycle filter through here and the guard reports "not pinned",
+    //      the delete proceeds, and the deliberate 409 becomes the raw P2003
+    //      it exists to replace.
+    //   2. BOTH arms. The item arm alone misses a set with no items, which
+    //      `configDocumentSchema` (items defaults to []) can create and
+    //      `GoldenSet.datasetId`'s Restrict still blocks.
+    expect(findMany).toHaveBeenCalledWith({
+      where: {
+        OR: [
+          { datasetId: 'ds-1' },
+          { items: { some: { sourceSample: { datasetId: 'ds-1' } } } },
+        ],
+      },
+      select: { id: true, name: true },
+      orderBy: { name: 'asc' },
+    });
+    expect(JSON.stringify(findMany.mock.calls[0][0])).not.toContain('tombstonedAt');
+    expect(JSON.stringify(findMany.mock.calls[0][0])).not.toContain('retiredAt');
+  });
+
+  it('returns the empty list for an unpinned dataset, so callers can gate on length', async () => {
+    const { client } = stubClient([]);
+    expect(await findGoldenSetsPinningDataset(client, 'ds-2')).toEqual([]);
   });
 });
 

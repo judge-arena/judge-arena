@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { getServerSession } from 'next-auth';
 import { db, truncateAll, mkUser } from './helpers';
-import { PUT } from '@/app/api/datasets/[id]/samples/route';
+import { PUT, DELETE as deleteSamples } from '@/app/api/datasets/[id]/samples/route';
+import { DELETE as deleteDataset } from '@/app/api/datasets/[id]/route';
 
 // A0 Task 1. GoldenItem.sourceDatasetSampleId is `onDelete: Restrict`, so the
 // moment 20260812190000_v2d_golden_substrate lands, PUT /api/datasets/[id]/samples
@@ -9,9 +10,29 @@ import { PUT } from '@/app/api/datasets/[id]/samples/route';
 // on any dataset a golden set has annotated. That failure is INTENDED (a corpus
 // somebody has annotated must not drift under the annotation), but it must be a
 // deliberate 409 naming the pinning sets, not a raw P2003 surfacing as a 500.
+//
+// FINAL-WAVE FIX (M1): the guard existed on exactly ONE of the four
+// destructive paths. `GoldenSet.datasetId` and `GoldenItem.sourceDatasetSampleId`
+// are BOTH `onDelete: Restrict`, so DELETE /api/datasets/[id]/samples, DELETE
+// /api/datasets/[id] and the config importer's sample replace each surfaced a
+// raw P2003 as a generic 500. All four now share ONE predicate,
+// `findGoldenSetsPinningDataset` (src/lib/golden-sets.ts).
 
 vi.mock('next-auth', () => ({ getServerSession: vi.fn() }));
 vi.mock('next/headers', () => ({ headers: vi.fn(async () => new Headers()) }));
+
+// Same fake, same reason, as tests/db/access-matrix.test.ts:78-98: requireAuth()
+// hits a REAL Redis sliding window keyed by client IP (always '127.0.0.1'
+// here), and `fileParallelism: false` makes that 120/min budget shared by every
+// file in one `npm run test:db` run. This file drives three route handlers per
+// test now rather than one.
+vi.mock('@/lib/rate-limit-redis', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/rate-limit-redis')>();
+  return {
+    ...actual,
+    apiLimiter: { check: vi.fn(async () => ({ ok: true, remaining: 999, resetAt: Date.now() + 60_000 })) },
+  };
+});
 
 function mockSessionFor(user: { id: string; email: string }) {
   (getServerSession as unknown as Mock).mockResolvedValue({
@@ -178,5 +199,120 @@ describe('PUT /api/datasets/[id]/samples — golden-set freeze guard (A0 Task 1)
     expect(res.status).toBe(409);
     expect((await res.json()).goldenSets).toEqual([{ id: goldenSet.id, name: 'pinning set' }]);
     await expect(db.datasetSample.count({ where: { datasetId: dataset.id } })).resolves.toBe(1);
+  });
+});
+
+// ─── M1: the same guard on the OTHER destructive paths ──────────────────────
+// The PUT above was guarded when the migration landed; the three paths below
+// were not, and every one of them destroys rows an `onDelete: Restrict` FK is
+// holding. Each test asserts the 409 AND that the rows survived — a guard that
+// answers 409 after the damage is done would pass the status assertion alone.
+describe('the other destructive paths onto a golden-set-pinned corpus (M1)', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('DELETE /api/datasets/[id]/samples 409s naming the pinning sets, instead of a bare P2003 in a 500', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset, sample } = await mkDatasetWithSample(user.id);
+    const pinning = await mkGoldenSetOver(user.id, dataset.id, sample.id, 'Alpha golden set');
+
+    const res = await deleteSamples(
+      jsonRequest(`http://localhost/api/datasets/${dataset.id}/samples`, 'DELETE', {
+        sampleIds: [sample.id],
+      }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toContain('Alpha golden set');
+    expect(body.goldenSets).toEqual([{ id: pinning.id, name: 'Alpha golden set' }]);
+    // The sample is still there and still carries the id the golden item cites.
+    const survived = await db.datasetSample.findMany({ where: { datasetId: dataset.id } });
+    expect(survived.map((s) => s.id)).toEqual([sample.id]);
+  });
+
+  it('DELETE /api/datasets/[id]/samples still deletes when nothing pins the dataset', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset, sample } = await mkDatasetWithSample(user.id);
+
+    const res = await deleteSamples(
+      jsonRequest(`http://localhost/api/datasets/${dataset.id}/samples`, 'DELETE', {
+        sampleIds: [sample.id],
+      }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ deleted: 1, remaining: 0 });
+    await expect(db.datasetSample.count({ where: { datasetId: dataset.id } })).resolves.toBe(0);
+  });
+
+  it('DELETE /api/datasets/[id] 409s naming the pinning sets, and the dataset survives', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset, sample } = await mkDatasetWithSample(user.id);
+    await mkGoldenSetOver(user.id, dataset.id, sample.id, 'Alpha golden set');
+    await mkGoldenSetOver(user.id, dataset.id, sample.id, 'Beta golden set');
+
+    const res = await deleteDataset(
+      new Request(`http://localhost/api/datasets/${dataset.id}`, { method: 'DELETE' }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toContain('Alpha golden set');
+    expect(body.error).toContain('Beta golden set');
+    expect(body.goldenSets).toHaveLength(2);
+    await expect(db.dataset.count({ where: { id: dataset.id } })).resolves.toBe(1);
+  });
+
+  it('DELETE /api/datasets/[id] still deletes an unpinned dataset', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset } = await mkDatasetWithSample(user.id);
+
+    const res = await deleteDataset(
+      new Request(`http://localhost/api/datasets/${dataset.id}`, { method: 'DELETE' }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(200);
+    await expect(db.dataset.count({ where: { id: dataset.id } })).resolves.toBe(0);
+  });
+
+  it('a golden set with NO items still blocks the dataset delete — GoldenSet.datasetId is the other Restrict FK', async () => {
+    // The item-level FK is not the only one. `GoldenSet.datasetId` is
+    // `onDelete: Restrict` too, so a set that declares itself the annotation
+    // layer over this corpus blocks the delete even with zero items — and the
+    // config importer can create exactly that (`items` defaults to `[]` in
+    // configDocumentSchema). A pin predicate that only looked at items would
+    // report "not pinned" here and hand the caller a 500.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset } = await mkDatasetWithSample(user.id);
+    const empty = await db.goldenSet.create({
+      data: {
+        name: 'Empty golden set',
+        slug: 'empty-golden-set',
+        ownerId: user.id,
+        datasetId: dataset.id,
+        protocol: 'pairwise',
+      },
+    });
+
+    const res = await deleteDataset(
+      new Request(`http://localhost/api/datasets/${dataset.id}`, { method: 'DELETE' }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).goldenSets).toEqual([{ id: empty.id, name: 'Empty golden set' }]);
+    await expect(db.dataset.count({ where: { id: dataset.id } })).resolves.toBe(1);
   });
 });

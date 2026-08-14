@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
+import { findGoldenSetsPinningDataset } from '@/lib/golden-sets';
 
 const addSamplesSchema = z.object({
   samples: z.array(z.object({
@@ -191,6 +192,32 @@ export async function DELETE(request: Request, props: { params: Promise<{ id: st
       );
     }
 
+    // Same guard as PUT, and it was missing here — recorded as a known gap in
+    // the migration header and closed now. The delete below is `Restrict`-ed by
+    // GoldenItem.sourceDatasetSampleId exactly as the bulk replace is.
+    //
+    // The check is DATASET-WIDE rather than per-sampleId, deliberately: this
+    // handler re-indexes every surviving row afterwards, so deleting an
+    // unpinned sample still renumbers the ones a golden item cites, and
+    // `GoldenItem.index`/the ordinal an annotator worked against would drift
+    // under the annotation. Same rule as PUT — an annotated corpus is frozen,
+    // not partially editable.
+    const pinningGoldenSets = await findGoldenSetsPinningDataset(prisma, params.id);
+
+    if (pinningGoldenSets.length > 0) {
+      return NextResponse.json(
+        {
+          error:
+            'Cannot delete samples from this dataset: it is annotated by golden set(s) ' +
+            `${pinningGoldenSets.map((g) => g.name).join(', ')}. ` +
+            'Golden items were imported from these rows, and the surviving samples would be re-indexed. ' +
+            'Retire the golden set, or create a new dataset version instead.',
+          goldenSets: pinningGoldenSets,
+        },
+        { status: 409 }
+      );
+    }
+
     await prisma.datasetSample.deleteMany({
       where: { id: { in: data.sampleIds }, datasetId: params.id },
     });
@@ -262,20 +289,13 @@ export async function PUT(request: Request, props: { params: Promise<{ id: strin
     // the annotation. Refuse deliberately, naming the sets that pinned it,
     // rather than letting Postgres raise a P2003 the catch below reports as a
     // generic 500. Checked BEFORE the transaction so nothing is deleted.
-    // Not covered here: DELETE on this route can still surface a bare P2003
-    // for a pinned sampleId — recorded in the migration header, out of A0.
     //
-    // DELIBERATELY NOT lifecycle-filtered. A tombstoned GoldenItem still
-    // holds `sourceDatasetSampleId` (onDelete: Restrict), so Postgres still
-    // refuses the delete below. Adding `items: { some: { tombstonedAt: null,
-    // ... } }` here would turn this deliberate 409 into a raw P2003 reported
-    // as a 500. Pinned by 'a TOMBSTONED golden item still pins the dataset'
-    // in tests/db/dataset-sample-freeze.test.ts.
-    const pinningGoldenSets = await prisma.goldenSet.findMany({
-      where: { items: { some: { sourceSample: { datasetId: params.id } } } },
-      select: { id: true, name: true },
-      orderBy: { name: 'asc' },
-    });
+    // The predicate — including why it is NOT lifecycle-filtered — now lives in
+    // `findGoldenSetsPinningDataset` (src/lib/golden-sets.ts), shared with the
+    // three other destructive paths that were missing this guard entirely:
+    // DELETE below, DELETE /api/datasets/[id], and the config importer's
+    // sample replace.
+    const pinningGoldenSets = await findGoldenSetsPinningDataset(prisma, params.id);
 
     if (pinningGoldenSets.length > 0) {
       return NextResponse.json(

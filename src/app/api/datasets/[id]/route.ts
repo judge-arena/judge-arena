@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { requireAuth, requireScope, optionalAuth, resolveResourceAccess, requireOwnership, RateLimitedError } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicDataset } from '@/lib/serializers';
+import { findGoldenSetsPinningDataset } from '@/lib/golden-sets';
 
 const updateDatasetSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -139,6 +140,27 @@ export async function DELETE(_request: Request, props: { params: Promise<{ id: s
   try {
     const ownershipError = await requireOwnership('dataset', params.id, session);
     if (ownershipError) return ownershipError;
+
+    // A0: `GoldenSet.datasetId` and `GoldenItem.sourceDatasetSampleId` are both
+    // `onDelete: Restrict` (schema.prisma:671, :717), so this delete aborts on
+    // any annotated corpus — via the set FK directly, or via the item FK when
+    // the samples cascade. Unguarded that was a raw P2003 in a generic 500.
+    // Same predicate, same 409 shape, as PUT /api/datasets/[id]/samples.
+    const pinningGoldenSets = await findGoldenSetsPinningDataset(prisma, params.id);
+
+    if (pinningGoldenSets.length > 0) {
+      return NextResponse.json(
+        {
+          error:
+            'Cannot delete this dataset: it is annotated by golden set(s) ' +
+            `${pinningGoldenSets.map((g) => g.name).join(', ')}. ` +
+            'A golden set is the annotation layer over exactly one dataset, and its items were ' +
+            'imported from these samples. Delete the golden set first.',
+          goldenSets: pinningGoldenSets,
+        },
+        { status: 409 }
+      );
+    }
 
     await prisma.dataset.delete({ where: { id: params.id } });
     return NextResponse.json({ success: true });
