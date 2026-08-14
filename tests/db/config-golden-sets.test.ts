@@ -5,6 +5,7 @@ import { forkGoldenSet } from '@/lib/golden-set-versions';
 import { POST as importConfig } from '@/app/api/config/import/route';
 import { GET as exportConfig } from '@/app/api/config/export/route';
 import { PUT as replaceSamples } from '@/app/api/datasets/[id]/samples/route';
+import { liveSamplesOnly } from '@/lib/tombstones';
 
 // ─── Why every assertion here is on ROWS ────────────────────────────────────
 // `configDocumentSchema` is a plain `z.object` with no `.strict()`, so an
@@ -849,7 +850,7 @@ describe('Config import — the guards the later sweeps never reached (M1-M3)', 
     expect(await db.goldenItem.count({ where: { goldenSetId: goldenSet.id } })).toBe(2);
   });
 
-  it('M1: an UNPINNED dataset still has its samples replaced wholesale', async () => {
+  it('M1: an UNPINNED dataset still has its samples replaced — tombstone-and-append, never delete-and-recreate', async () => {
     // The other half of the guard: skipping every replace would also make the
     // test above pass, and would silently break config-driven corpus updates.
     const user = await mkUser();
@@ -862,13 +863,72 @@ describe('Config import — the guards the later sweeps never reached (M1-M3)', 
 
     expect((await importConfig(importRequest(JSON.stringify(doc)))).status).toBe(200);
 
-    const samples = await db.datasetSample.findMany({
-      where: { datasetId: dataset.id },
+    // NON-VACUITY: the fixture holds the sample ids from BEFORE the import, so
+    // "nothing was destroyed" is a claim this test can actually falsify. The
+    // delete-and-recreate shape returns ZERO rows here; a shape that hid the
+    // rows but forgot the `reason` returns two rows with a null reason.
+    const outgoing = await db.datasetSample.findMany({
+      where: { id: { in: dataset.samples.map((s) => s.id) } },
+      include: { tombstone: true },
       orderBy: { index: 'asc' },
     });
-    expect(samples.map((s) => s.input)).toEqual(['a wholly different question', 'what is 2 + 2']);
-    // Deleted and recreated, so the ids are new — proof the replace ran.
-    expect(samples.map((s) => s.id)).not.toEqual(dataset.samples.map((s) => s.id));
+    expect(outgoing).toHaveLength(2);
+    expect(outgoing.map((s) => s.index)).toEqual([0, 1]);
+    expect(outgoing.map((s) => s.tombstone?.isTombstone)).toEqual([true, true]);
+    expect(outgoing.map((s) => s.tombstone?.reason)).toEqual([
+      'config-import-replace',
+      'config-import-replace',
+    ]);
+
+    // …and the LIVE set is exactly the document, appended ABOVE the retained
+    // ordinals. Written at the document's raw 0..n-1 this createMany would
+    // have collided with the two rows above on @@unique([datasetId, index]).
+    const live = await db.datasetSample.findMany({
+      where: { datasetId: dataset.id, ...liveSamplesOnly() },
+      orderBy: { index: 'asc' },
+    });
+    expect(live.map((s) => s.input)).toEqual(['a wholly different question', 'what is 2 + 2']);
+    expect(live.map((s) => s.index)).toEqual([2, 3]);
+    // New rows, not edits in place — proof the replace ran at all.
+    expect(live.map((s) => s.id)).not.toEqual(dataset.samples.map((s) => s.id));
+
+    // The stored count follows the LIVE set, not the row count.
+    const after = await db.dataset.findUniqueOrThrow({ where: { id: dataset.id } });
+    expect(after.sampleCount).toBe(2);
+    expect(await db.datasetSample.count({ where: { datasetId: dataset.id } })).toBe(4);
+  });
+
+  it('M1: re-importing the SAME document is a skip, not a second replace — hidden rows must not inflate the diff', async () => {
+    // NON-VACUITY: this shape only bites AFTER something is hidden. On a clean
+    // corpus the diff reads count == document length both times and skips, so
+    // a fixture that imports once proves nothing. The FIRST import here is the
+    // fixture — it is what creates the hidden rows — and the second is the
+    // assertion. Unfiltered, the diff sees 4 != 2, replaces again, and the
+    // table grows by n rows per run forever.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await mkAnnotatedDataset(user.id, { slug: 'ds-reimport' });
+
+    const doc = await exportDoc();
+    doc.datasets[0].name = 'Renamed Corpus';
+    doc.datasets[0].samples[0].input = 'a wholly different question';
+
+    expect((await importConfig(importRequest(JSON.stringify(doc)))).status).toBe(200);
+    // 2 hidden + 2 appended. A 2 here means the replace still deletes.
+    expect(await db.datasetSample.count({ where: { datasetId: dataset.id } })).toBe(4);
+
+    const second = await importConfig(importRequest(JSON.stringify(doc)));
+    expect(second.status).toBe(200);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const secondDiff = (await second.json()).items.find((i: any) => i.type === 'dataset');
+    expect(secondDiff.action).toBe('skip');
+    // Unchanged: no third generation of rows, no re-tombstoning of the second.
+    expect(await db.datasetSample.count({ where: { datasetId: dataset.id } })).toBe(4);
+    const live = await db.datasetSample.findMany({
+      where: { datasetId: dataset.id, ...liveSamplesOnly() },
+      orderBy: { index: 'asc' },
+    });
+    expect(live.map((s) => s.index)).toEqual([2, 3]);
   });
 
   it('M2: the public-dataset fallback resolves the PLATFORM owner only, never a stranger\'s corpus', async () => {

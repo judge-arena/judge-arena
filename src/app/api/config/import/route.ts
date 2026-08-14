@@ -23,7 +23,7 @@ import { forkGoldenSet } from '@/lib/golden-set-versions';
 import { createCustomJudgeModel } from '@/lib/model-catalog';
 import { logger, serializeError } from '@/lib/logger';
 import { audit, getRequestContext } from '@/lib/audit';
-import { liveSamplesOnly } from '@/lib/tombstones';
+import { liveSamplesOnly, nextSampleIndex, tombstoneSamples } from '@/lib/tombstones';
 
 /** Old config exports (pre Task 12 review fix) only ever wrote one of the
  * three legacy `ModelConfig.provider` values — translate those the same
@@ -181,9 +181,11 @@ async function tombstoneReplacedGoldenItems(
  *   - If slug doesn't exist → create new entity.
  *   - API keys are NEVER imported (imported models get a keyless
  *     ModelEndpoint, same as every other field in this file).
- *   - Dataset samples are imported if present in the config — EXCEPT onto a
- *     dataset a golden set has annotated, where the wholesale replace is
- *     skipped and reported rather than raising a P2003 mid-document.
+ *   - Dataset samples are imported if present in the config. A replace
+ *     TOMBSTONES the live rows and appends the document's above the corpus
+ *     high-water mark — nothing is deleted, so nothing collides with the
+ *     ordinals the hidden rows keep. It is still skipped and reported onto a
+ *     dataset a golden set has annotated; see the note on that branch.
  *   - Projects referenced by datasets are resolved by slug.
  *   - Golden sets match by (ownerId, slug) and are ordered after datasets;
  *     their items are ALWAYS embedded, and each item's source DatasetSample
@@ -487,22 +489,27 @@ export async function POST(request: Request) {
         if (changes.length === 0) {
           items.push({ type: 'dataset', slug, name: configDataset.name, action: 'skip' });
         } else {
-          // ── The sample replace is the SECOND destructive path onto dataset
+          // ── The sample replace is the second bulk-write path onto dataset
           // samples, and it carried none of the guard PUT /api/datasets/[id]/
-          // samples has. Two things make it worse than that PUT:
+          // samples has. Two things made it worse than that PUT:
           //
           //   1. It is gated on `changes.length > 0`, NOT on a sample diff.
-          //      Merely RENAMING an annotated dataset reaches the deleteMany.
-          //   2. This route has no `$transaction`. Projects, rubrics, models
-          //      and the dataset row above are already committed when a P2003
-          //      lands, and the golden-set section — ordered after this loop —
-          //      never runs. The user gets a 500 saying nothing useful over a
-          //      half-applied document.
+          //      Merely RENAMING an annotated dataset reaches the replace.
+          //   2. It ran outside any transaction. Projects, rubrics, models and
+          //      the dataset row above are already committed, so a failure
+          //      mid-replace stranded a half-applied document with a 500 that
+          //      said nothing useful. The replace below now runs in one.
           //
-          // So this SKIPS the replace and reports it, rather than throwing:
-          // a refusal that strands the import half-applied is not an
-          // improvement on the P2003. Checked before `items.push` so the
-          // dryRun preview says the same thing the real import will do.
+          // The replace no longer DELETES — it tombstones the live rows and
+          // appends the document's above the high-water mark — so it can no
+          // longer raise the P2003 that `GoldenItem.sourceDatasetSampleId`
+          // (`onDelete: Restrict`) used to raise here. THE SKIP STAYS ANYWAY,
+          // and is now conservative rather than defensive: replacing under a
+          // golden set would hide every row that set's items cite, and whether
+          // an annotated corpus may be swapped out from under its annotations
+          // is the lifecycle plan's call, not this route's. Checked before
+          // `items.push` so the dryRun preview says the same thing the real
+          // import will do.
           const wantsSampleReplace = !!configDataset.samples && configDataset.samples.length > 0;
           const pinningGoldenSets = wantsSampleReplace
             ? await findGoldenSetsPinningDataset(prisma, existing.id)
@@ -535,20 +542,70 @@ export async function POST(request: Request) {
 
             // Replace samples if provided, and if no golden set pins them.
             if (replaceSamples && configDataset.samples) {
-              await prisma.datasetSample.deleteMany({ where: { datasetId: existing.id } });
-              await prisma.datasetSample.createMany({
-                data: configDataset.samples.map((s) => ({
-                  datasetId: existing.id,
-                  index: s.index,
-                  input: s.input,
-                  expected: s.expected ?? null,
-                  metadata: s.metadata ? JSON.stringify(s.metadata) : null,
-                })),
-              });
-              await prisma.dataset.update({
-                where: { id: existing.id },
-                data: { sampleCount: configDataset.samples.length },
-              });
+              // Sorted by the document's own `index`, so this array's ORDINAL
+              // POSITIONS are the corpus's intended order — the same
+              // discipline the golden-item replace applies to `itemData`.
+              const incoming = [...configDataset.samples].sort((a, b) => a.index - b.index);
+
+              // ONE transaction — this section never had one, so a failure
+              // between the two writes below used to leave a corpus with every
+              // row hidden and nothing to show. Everything BEFORE this in the
+              // document (projects, rubrics, models, the dataset row) is still
+              // committed independently, which is why the pinned case above is
+              // a reported skip and not a throw. The `{ maxWait, timeout }`
+              // ceiling is the one the other bulk-write paths use
+              // (golden-sets/route.ts's POST, golden-set-versions.ts's
+              // forkGoldenSet): a document may carry a 620-row corpus today
+              // and an order of magnitude more later, and 5s is thin for that.
+              await prisma.$transaction(
+                async (tx) => {
+                  // Filtered on lifecycle, exactly as
+                  // tombstoneReplacedGoldenItems filters `tombstonedAt: null`:
+                  // a row hidden by an earlier delete keeps the reason it was
+                  // hidden with, rather than having this one written over it.
+                  const outgoing = await tx.datasetSample.findMany({
+                    where: { datasetId: existing.id, ...liveSamplesOnly() },
+                    select: { id: true },
+                  });
+                  if (outgoing.length > 0) {
+                    await tombstoneSamples(
+                      tx,
+                      outgoing.map((s) => s.id),
+                      'config-import-replace'
+                    );
+                  }
+
+                  // Retained rows KEEP their ordinals — `@@unique([datasetId,
+                  // index])` is deliberately not partial — so the replacements
+                  // cannot land at the document's raw index values without
+                  // colliding with the rows just hidden (P2002, aborting the
+                  // whole import). POSITION + high-water mark, not raw index +
+                  // mark, for the reason the golden-item replace gives: a
+                  // fresh export emits the indices this replace wrote, so
+                  // adding the mark to a raw index compounds it on every
+                  // export→edit→import cycle and an `Int` overflows after ~31
+                  // of them. Packing to positions also closes the gaps a
+                  // filtered export leaves behind.
+                  const offset = await nextSampleIndex(tx, existing.id);
+                  await tx.datasetSample.createMany({
+                    data: incoming.map((s, position) => ({
+                      datasetId: existing.id,
+                      index: position + offset,
+                      input: s.input,
+                      expected: s.expected ?? null,
+                      metadata: s.metadata ? JSON.stringify(s.metadata) : null,
+                    })),
+                  });
+
+                  // Still the document's length, and still correct: after
+                  // tombstone-and-append the LIVE set IS the incoming rows.
+                  await tx.dataset.update({
+                    where: { id: existing.id },
+                    data: { sampleCount: incoming.length },
+                  });
+                },
+                { maxWait: 10_000, timeout: 60_000 }
+              );
             }
           }
         }
