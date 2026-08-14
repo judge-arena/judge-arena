@@ -108,11 +108,27 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
       if (format === 'jsonl') {
         // In JSONL mode, append dataset samples with a _type discriminator
         const datasets = await prisma.dataset.findMany({
-          // A1, read 1 of 2 in this file: a hidden dataset exports nothing.
-          // The nested sample filter alone would already empty it out (the
-          // parent arm of `liveSamplesOnly()`), but the dataset would still
-          // appear — as a row with zero samples, which reads as a corpus that
-          // was emptied rather than one that was withdrawn.
+          // A1, read 1 of 2 in this file.
+          //
+          // THIS FILTER CHANGES NO OUTPUT TODAY, and saying so is the point.
+          // The consumer below is `flatMap(ds => ds.samples.map(…))` — one row
+          // per SAMPLE, never a per-dataset row — and a hidden dataset already
+          // yields zero live samples through the `dataset:` parent arm of
+          // `liveSamplesOnly()`. So it already contributed nothing.
+          //
+          // It is here because that coverage is INDIRECT: it holds only while
+          // `liveSamplesOnly()` keeps a parent arm (decision 16). Narrow that
+          // arm — a plausible future change, since it is the one clause in the
+          // helper that is about a DIFFERENT table than the filter names — and
+          // this read starts exporting a withdrawn corpus silently, with no
+          // test failing anywhere near here. Stating the requirement at the
+          // level this route is actually about costs one predicate and does
+          // not depend on the other helper's shape.
+          //
+          // Contrast `config/export/route.ts`, where the same filter is NOT
+          // redundant: that consumer emits a dataset entry regardless of
+          // samples, so an unfiltered read there exports a hidden dataset that
+          // re-imports as a fresh live row.
           where: { projectId: params.id, ...liveDatasetsOnly() },
           include: { samples: { where: liveSamplesOnly(), orderBy: { index: 'asc' } } },
         });
@@ -152,10 +168,17 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
       // The SECOND of two textually identical reads in this file — this one in
       // the `scope=datasets` branch, the other in the `scope=all` JSONL branch
       // above. Filtering one and not the other is invisible to anything that
-      // exercises a single branch, so both carry the filter and both carry a
-      // test.
+      // exercises a single branch, so both carry the filter.
+      //
+      // BOTH CARRY A TEST FOR THE **SAMPLE** FILTER (the Task 8 block in
+      // tests/db/dataset-sample-tombstone.test.ts drives each branch
+      // separately). The DATASET filter added beside it has no test on either
+      // branch, and cannot easily have one, for the reason spelled out above
+      // the first read: it changes no output while `liveSamplesOnly()` keeps
+      // its parent arm. It is defence in depth, not a behaviour.
       const datasets = await prisma.dataset.findMany({
-        // A1, read 2 of 2 in this file: same rule on the datasets scope.
+        // A1, read 2 of 2 in this file: same rule on the datasets scope, and
+        // the same "no output change today" disposition.
         where: { projectId: params.id, ...liveDatasetsOnly() },
         include: { samples: { where: liveSamplesOnly(), orderBy: { index: 'asc' } } },
       });

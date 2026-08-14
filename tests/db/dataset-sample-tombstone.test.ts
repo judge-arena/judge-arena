@@ -1770,6 +1770,59 @@ describe('the dataset read sweep — a hidden dataset leaves every list (A1 Task
     expect(ownedBody.datasets.map((d: { id: string }) => d.id)).toEqual([kept.id]);
   });
 
+  it('GET /api/config/export drops a hidden dataset from the portable document — OWNER arm and ADMIN arm', async () => {
+    // THE ONE FILTERED READ IN THIS SWEEP WHOSE CONSUMER EMITS A ROW
+    // REGARDLESS OF SAMPLES. `config.datasets = datasets.map(...)` — one entry
+    // per DATASET. Every other export A1 touches is
+    // `flatMap(ds => ds.samples.map(...))`, where a hidden corpus already
+    // contributes nothing through `liveSamplesOnly()`'s parent arm and the
+    // dataset filter changes no output. Here the ENTRY is the payload, so
+    // before this filter a hidden dataset was exported — and the config
+    // document is re-importable, so it would come back as a fresh, LIVE row on
+    // a new id with no tombstone and nothing recording it was ever withdrawn.
+    //
+    // `includeSamples` is deliberately OFF (its default). The existing Task 8
+    // test on this route turns it on and asserts on SAMPLE strings, which is a
+    // different property: it would pass unchanged with the dataset entry still
+    // present and merely empty.
+    const owner = await mkUser();
+    const hidden = await mkSweepDataset(owner.id, 'sweep-export-hidden');
+    await mkSweepDataset(owner.id, 'sweep-export-kept');
+    await tombstoneDataset(db, hidden.id, 'read-sweep fixture');
+
+    // ── Arm 1 of 2: the OWNER, whose `where` is `{ userId, ...liveDatasetsOnly() }`.
+    sweepSessionFor(owner);
+    const ownRes = await exportConfig(
+      new Request('http://localhost/api/config/export?include=datasets&format=json')
+    );
+    expect(ownRes.status).toBe(200);
+    const ownDoc = await ownRes.json();
+    expect(ownDoc.datasets.map((d: { name: string }) => d.name)).toEqual(['sweep-export-kept']);
+
+    // ── Arm 2 of 2: an ADMIN. This arm carried NO `where` at all before this
+    // task — it passed `undefined` — so it is a different expression rather
+    // than a spread onto an existing one, and nothing exercised it.
+    const admin = await mkUser({ role: 'admin' });
+    // `role` is not forwarded by this file's session helpers, and `isAdmin`
+    // reads exactly `session.user.role === 'admin'`. Same accommodation, for
+    // the same route, as tests/db/config-golden-sets.test.ts.
+    (getServerSession as unknown as Mock).mockResolvedValue({
+      user: { id: admin.id, email: admin.email, role: 'admin' },
+    });
+    const adminRes = await exportConfig(
+      new Request('http://localhost/api/config/export?include=datasets&format=json')
+    );
+    expect(adminRes.status).toBe(200);
+    const adminDoc = await adminRes.json();
+
+    // Two claims in one line, and both matter. The hidden dataset is gone —
+    // AND the admin still sees a dataset they DO NOT OWN, which is what fails
+    // if this arm is ever collapsed to `{ userId, ...liveDatasetsOnly() }`.
+    // That is the obvious simplification, it silently shrinks every admin
+    // export to the admin's own rows, and it returns 200 while doing it.
+    expect(adminDoc.datasets.map((d: { name: string }) => d.name)).toEqual(['sweep-export-kept']);
+  });
+
   it('creating a dataset whose name collides with a HIDDEN one still gets a unique slug', async () => {
     // THE P2002 CLASS. `datasets/route.ts`'s slug-dedup read must stay
     // UNFILTERED: a hidden dataset still occupies its row in
