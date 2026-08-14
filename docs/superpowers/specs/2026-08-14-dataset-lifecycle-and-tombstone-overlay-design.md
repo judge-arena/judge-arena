@@ -1,70 +1,75 @@
-# Dataset lifecycle and the tombstone overlay
+# Dataset lifecycle and the mutation record
 
-**Date:** 2026-08-14 · **Status:** approved design, ready to plan
-**Supersedes:** Ruling 9 of `docs/superpowers/plans/2026-08-13-a0-status-and-handoff.md` ("staged datasets"), which recorded the want and deferred the design to its own spec. This is that spec.
+**Date:** 2026-08-14 · **Status:** approved design, fact-checked, ready to plan
+**Supersedes:** Ruling 9 of `docs/superpowers/plans/2026-08-13-a0-status-and-handoff.md` ("staged datasets").
 **Depends on:** A0 (`feat/a0-golden-set-substrate`, PR #12) being merged first.
-**Ships as two plans.** See "Plan seam" — Plan A is the overlay, Plan B is the lifecycle, and B depends on A.
+**Ships as two plans.** Plan A is the mutation record; Plan B is the lifecycle. B depends on A.
+
+Every `file:line` in this document was opened and verified against the working tree at `af58c96`. Where a claim was found wrong during fact-checking, the corrected version is what appears here.
 
 ---
 
-## Why
+## The model
 
-Two holes remain after A0, and they are the same hole seen from two sides.
+A user edits a dataset freely while it is **in development**. Every mutation is *recorded* rather than destroying anything: deletes hide rows, edits keep the prior text. When the user publishes, the dataset becomes **immutable** — it is now something other people's annotations depend on. Editing a published dataset does not un-freeze it; it opens a **new version, in development**, to continue working in.
 
-**Datasets still destroy data.** A0 made golden sets tombstone rather than delete, on the owner's ruling that "hard deletion may lose data, and there are no existing users, so nothing justifies destruction." The dataset side never got that treatment: `DELETE /api/datasets/[id]/samples` hard-deletes, `PUT` bulk-replace hard-deletes everything, `PATCH` edits samples in place, and `DELETE /api/datasets/[id]` cascades a corpus away entirely.
+```
+draft  ──publish──▶  published (immutable)  ──edit──▶  v2, in development  ──publish──▶  …
+                            │
+                            └── frozen forever; annotations against it stay valid
+```
 
-**Nothing distinguishes a corpus under construction from one people depend on.** A0's answer was a pin guard: once any golden set annotates a dataset, its samples cannot be replaced. That is correct but blunt — it makes an annotated corpus *permanently* unable to shed a bad row, with no remedy short of a purge wave that does not exist.
-
-The insight this design turns on: **a dataset still in development needs no protection, and a published one needs a different kind.** Draft corpora are free. Published corpora become immutable, and deletion becomes hiding rather than removal — so a bad row can leave the view without leaving the record, and without breaking the annotations that reference it.
+Two holes after A0 motivate this. **Datasets still destroy data** — `DELETE` samples hard-deletes, `PUT` bulk-replace destroys everything, `PATCH` overwrites in place, and `DELETE /api/datasets/[id]` cascades a corpus away. And **nothing distinguishes a corpus under construction from one people depend on**, so A0's pin guard had to protect every annotated dataset permanently, leaving it unable to shed even a bad row.
 
 ---
 
 ## Decisions
 
-Thirteen decisions were made by the owner during design. They are the authority the plans argue from.
-
 | # | Decision |
 |---|---|
-| 1 | Deletion moves to a **tombstone overlay table**, adopted by **both `DatasetSample` and `Dataset`** at full parity. A0's `tombstonedAt` **columns stay exactly as shipped** — they are not migrated. |
-| 2 | The overlay is **one table with per-entity foreign-key columns**, not a polymorphic `(entityType, entityId)` key. |
-| 3 | Filtering is **one shared Prisma relation-filter helper per entity**, spread into each read site. Not a database view, not a global client extension. |
-| 4 | `Dataset.publishedAt` becomes the lifecycle marker: NULL = **in development**, set = **published**. |
-| 5 | Publication is **explicit and owner-only**. There is no auto-publish. |
-| 6 | Publication freezes **content and identity, but not visibility**. |
-| 7 | Editing a published dataset's content **forks to the next version**, using the versioning machinery that already exists. |
-| 8 | A golden set annotating a now-hidden sample **keeps showing it**. The golden set annotates a snapshot. |
-| 9 | The seeded platform corpora are **already published**, and freezing them is intended. The migration **backfills** them (see the caveat under Decision 9 below). |
-| 10 | `inputType` is **frozen** on publication — it is content, not metadata. |
-| 11 | `PUT /api/datasets/[id]/samples` **converts to tombstone-and-append**, on drafts as well as published. |
-| 12 | Publish **derives and persists a slug** before stamping `publishedAt`. |
-| 13 | This ships as **two plans**, A then B. |
+| 1 | Deletion moves to a **tombstone overlay table**, adopted by **both `DatasetSample` and `Dataset`**. A0's `tombstonedAt` columns stay as shipped — not migrated. |
+| 2 | The overlay is **one table with per-entity FK columns**, not a polymorphic key. |
+| 3 | Filtering is **one shared relation-filter helper per entity**, spread into each read site. Not a view, not a global extension. |
+| 4 | `Dataset.publishedAt` is the lifecycle marker: NULL = in development, set = published. |
+| 5 | Publication is **explicit and owner-only**. No auto-publish. |
+| 6 | Publication freezes **content and identity, not visibility**. |
+| 7 | Editing published content **forks to the next version**, which is **born in development**. |
+| 8 | A golden set annotating a hidden sample **keeps showing it** — it annotates a snapshot. |
+| 9 | The seeded corpora are already published; the migration **backfills** them. |
+| 10 | `inputType` is **frozen** on publication — it is content. |
+| 11 | `PUT /api/datasets/[id]/samples` **converts to tombstone-and-append**, on drafts too. |
+| 12 | Publish **derives and persists a slug** first. |
+| 13 | Two plans, A then B. |
+| 14 | **All mutations are recorded**, not only deletions: edits write a revision. |
+| 15 | A **hidden dataset is closed to writes**. |
+| 16 | **Samples inherit their parent dataset's hidden state.** |
+| 17 | "Exactly one FK non-null" is a **real CHECK constraint**, hand-edited into the migration. |
 
 ---
 
 ## Plan seam
 
-**Plan A — the tombstone overlay.** The `Tombstone` model and its migration, the two `liveOnly` helpers and their shape tests, every read-site disposition, the ordinal rework (including the two `sampleCount` writes that drift, which sit inside verbs it is already rewriting), and converting all four destructive verbs. Independently shippable; delivers the whole "datasets stop destroying data" half.
+**Plan A — the mutation record.** The `Tombstone` and `SampleRevision` models and their migration, the two filter helpers and their shape tests, every read-site disposition, the ordinal rework, and converting the four destructive verbs plus `PATCH` to record instead of destroy. Independently shippable.
 
-**Plan B — the dataset lifecycle.** `publishedAt` semantics, `POST /api/datasets/[id]/publish`, the freeze guards, fork-on-edit, the config-export backfill skip, retiring the pin-guard call sites, and the `account-deletion.ts` tombstone-plus-reassign.
+**Plan B — the lifecycle.** `publishedAt` semantics, `POST /api/datasets/[id]/publish`, the freeze guards, fork-on-edit, the config-export backfill skip, retiring the pin-guard call sites, and `account-deletion.ts`'s tombstone-plus-reassign.
 
-B depends on A only through "delete is a tombstone." A does not depend on B. Sections below are tagged **[A]** or **[B]**.
+Sections are tagged **[A]** or **[B]**.
 
 ---
 
-## The tombstone overlay **[A]**
+## The overlay and the log **[A]**
 
-### Schema
+Two tables, because they answer different questions and cannot be one. `Tombstone` is **current state** — one row per entity, `@unique`, which is what makes `upsert` correct and what lets the relation be declared to-one. `SampleRevision` is an **append-only log** — many rows per sample, so it cannot carry that uniqueness.
 
 ```prisma
 model Tombstone {
   id String @id @default(cuid())
 
-  // ── Per-entity foreign keys. Exactly one is non-null. ──
+  // Exactly one of these is non-null — enforced by a hand-edited CHECK.
   datasetSampleId String?        @unique
   datasetSample   DatasetSample? @relation(fields: [datasetSampleId], references: [id], onDelete: Cascade)
-
-  datasetId String?  @unique
-  dataset   Dataset? @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  datasetId       String?        @unique
+  dataset         Dataset?       @relation(fields: [datasetId], references: [id], onDelete: Cascade)
 
   isTombstone Boolean @default(true)
   reason      String?
@@ -72,21 +77,42 @@ model Tombstone {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+model SampleRevision {
+  id              String        @id @default(cuid())
+  datasetSampleId String
+  datasetSample   DatasetSample @relation(fields: [datasetSampleId], references: [id], onDelete: Cascade)
+
+  changeType String // 'edit' | 'delete' | 'restore'
+
+  // The values as they stood BEFORE this change. Null on a delete/restore,
+  // which change no content.
+  input    String?
+  expected String?
+  metadata String?
+
+  actorId String?
+  actor   User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  at      DateTime @default(now())
+
+  @@index([datasetSampleId, at])
+}
 ```
 
-`DatasetSample` and `Dataset` each gain a back-relation: `tombstone Tombstone?`.
+`actorId` is `SetNull` to match `GoldenLabel.annotatorId` — account deletion anonymises rather than destroying, and two deleted actors must be able to coexist on one sample's history.
 
-No index on `isTombstone`: nearly every row is `true`, so its selectivity is near zero, and the generated SQL joins on the FK column (already indexed by its `@unique`) rather than seeking on the flag.
+**The CHECK constraint** is hand-edited into the migration:
 
-### Why not polymorphic
+```sql
+ALTER TABLE "Tombstone" ADD CONSTRAINT "Tombstone_exactly_one_entity"
+  CHECK (num_nonnulls("datasetSampleId", "datasetId") = 1);
+```
 
-The original sketch was `(dataset_id, record_id, is_tombstone)`. It does not work: **Prisma relation filters require a declared `@relation` backed by a real foreign key**, and a polymorphic key has none — so such a table cannot appear in a `where` clause as a relation filter and cannot compile to `NOT EXISTS`. Decisions 2 and 3 were in direct tension; per-entity FK columns resolve it while keeping one table to audit.
+Prisma cannot express `CHECK`, so this is invisible to `migrate diff`/`db pull`/`db push` and earns a **fifth row in `CONTRIBUTING.md`'s pseudo-drift table**. Without it the invariant is only a comment: Postgres permits unlimited NULLs in a unique index, so both-null orphans and both-set rows would be accepted.
 
-The cost is honest: adopting a new entity needs a nullable FK column and a migration, not just a new string. That buys referential integrity on the overlay and a filter the planner understands.
+### Recording a mutation
 
-### Deleting, and un-deleting
-
-Deleting **upserts** a tombstone:
+**Delete** upserts a tombstone and appends a `delete` revision:
 
 ```ts
 tx.tombstone.upsert({
@@ -96,35 +122,39 @@ tx.tombstone.upsert({
 })
 ```
 
-The `update:` arm is **not** empty. An empty arm would make delete → un-delete → delete leave the row *visible* — a delete that silently does nothing. The property to state precisely is: **a repeated delete never raises `P2002` and always converges on hidden.** It is not a no-op; it writes, and it bumps `updatedAt`.
+The `update:` arm is **not** empty. An empty arm makes delete → un-delete → delete leave the row *visible* — a delete that silently does nothing. State the property precisely: **a repeated delete never raises `P2002` and always converges on hidden.** It is not a no-op; it writes.
 
-Un-deleting flips `isTombstone` to `false` and clears `reason`, rather than deleting the tombstone row. The row then records that this entity was once deleted and when its state last changed. It is **not** a full audit trail — a second delete→restore cycle overwrites `updatedAt` and the earlier history is gone. An events table would be a new decision and is out of scope.
+**Un-delete** flips `isTombstone` to `false`, clears `reason`, and appends a `restore` revision.
 
-**This is a deliberate divergence from A0's column form**, which has no un-delete at all — `goldenSetLifecycleWhere` pins `tombstonedAt: null` in both arms precisely so there is no way back. Two mechanisms with different capabilities will coexist. The plans must not "harmonise" them; A0's irreversibility is a property, not an oversight.
+**Edit** (`PATCH`) writes a revision carrying the values *before* the change, then updates in place. Reads always see current content; the log answers "what did this say before, and who changed it."
+
+This closes a gap A0 recorded and could not fix: a golden label preserves who/what/when but **not the text the annotator actually saw**. With the log, that text is recoverable.
+
+**This diverges from A0's column form deliberately.** `goldenSetLifecycleWhere` pins `tombstonedAt: null` in both arms precisely so there is no way back. Two mechanisms with different capabilities coexist; the plans must not "harmonise" them.
 
 ### The filter helpers
 
-One per entity, because the return types differ:
-
 ```ts
 /**
- * Live rows only: no tombstone row, or one that has been un-deleted.
+ * Live samples: not hidden themselves, and not owned by a hidden dataset.
  *
- * Returns a single `NOT` key. The obvious formulation —
+ * Returns a `NOT` key rather than the obvious
  * `{ OR: [{ tombstone: { is: null } }, { tombstone: { isTombstone: false } }] }`
- * — is a trap: an object literal cannot carry two `OR` keys, so spreading this
- * into a `where` that already builds its own `OR` would silently clobber one or
- * the other, with no type error and no test failure.
+ * because an object literal cannot carry two `OR` keys, and FOUR dataset read
+ * sites already build their own — `datasets/route.ts:67`, `stats/route.ts:47`,
+ * `datasets/[id]/versions/route.ts:155`, `dataset-versions.ts:157`. Spreading an
+ * `OR` into those would silently clobber one clause or the other, with no type
+ * error and no test failure.
  *
- * No CURRENT dataset or sample read site builds a `where.OR`, so this hazard is
- * prospective rather than live — but it is exactly the shape that has bitten
- * this repo before, and the helper is meant to be spread everywhere.
- *
- * The same caveat applies to `NOT` itself: two `NOT` keys collide identically.
- * A caller that already has a `NOT` must merge, not spread.
+ * `NOT` collides with `NOT` identically; the only `NOT:` in src/ today is
+ * `auth.ts:49`. A caller that already has one must merge, not spread. Same for
+ * the `dataset:` key below.
  */
 export function liveSamplesOnly(): Prisma.DatasetSampleWhereInput {
-  return { NOT: { tombstone: { is: { isTombstone: true } } } };
+  return {
+    NOT: { tombstone: { is: { isTombstone: true } } },
+    dataset: { NOT: { tombstone: { is: { isTombstone: true } } } },
+  };
 }
 
 export function liveDatasetsOnly(): Prisma.DatasetWhereInput {
@@ -132,189 +162,165 @@ export function liveDatasetsOnly(): Prisma.DatasetWhereInput {
 }
 ```
 
-**This expression is verified, not assumed.** Against Prisma 6.19.2 with no preview features, an equivalent optional to-one relation with a `@unique` FK (`EvaluationRun ← HumanJudgment`) generates:
+**The expression is verified, not assumed.** Against Prisma 6.19.2, an equivalent optional to-one with a `@unique` FK (`EvaluationRun ← HumanJudgment`) generates:
 
 ```sql
-FROM "EvaluationRun" LEFT JOIN "HumanJudgment" AS "j0" ON ("j0"."runId") = ("EvaluationRun"."id")
+LEFT JOIN "HumanJudgment" AS "j0" ON ("j0"."runId") = ("EvaluationRun"."id")
 WHERE (NOT ("j0"."overallScore" = $1 AND ("j0"."id" IS NOT NULL)))
 ```
 
-Prisma injects the `j0.id IS NOT NULL` conjunct, which is what makes the no-tombstone case work: no row → `NULL AND FALSE` → `FALSE` → `NOT FALSE` → returned; `isTombstone: false` → returned; `isTombstone: true` → excluded.
+Prisma injects `j0.id IS NOT NULL`, which is what makes the no-tombstone case work: no row → returned; `isTombstone: false` → returned; `true` → excluded. The `@unique` guarantees the join matches at most one tombstone.
 
-The `@unique` on each FK column is **load-bearing for correctness, not only for `upsert`** — it is what stops the LEFT JOIN fanning out and duplicating parent rows.
+**A type-safety warning the plan must carry:** `datasets/route.ts:62` declares `const where: any = {}`, so the helper's return type offers **zero** protection there. That same object is passed to both `findMany` (`:83`) and `count` (`:92`) — filtering one and not the other silently desynchronises the pagination total.
 
-Each helper gets a unit test deep-equalling its returned object, mirroring the guards at `tests/lib/golden-sets.test.ts:388-426` (`goldenSetLifecycleWhere` / `goldenItemLifecycleWhere`), which are the tests that assert a returned where-fragment. Note this is *not* the `findGoldenSetsPinningDataset` test at `:245-277` — that one captures arguments to a mocked client, a different shape.
-
----
-
-## The dataset lifecycle **[B]**
-
-### States
-
-**In development** (`publishedAt` NULL). Freely mutable.
-
-**Published** (`publishedAt` set). Derived from `updateDatasetSchema` (`src/app/api/datasets/[id]/route.ts:9-16`), which accepts exactly `name`, `description`, `visibility`, `inputType`, `projectId`, `tags`:
-
-| Field | Draft | Published |
-|---|---|---|
-| samples (content) | mutable | **frozen** — edits fork to v2 |
-| `name` | mutable | **frozen** |
-| `slug` | not settable via PATCH | **frozen** |
-| `inputType` | mutable | **frozen** |
-| `description` | mutable | mutable |
-| `tags` | mutable | mutable |
-| `projectId` | mutable | mutable |
-| `visibility` | mutable | mutable |
-
-`inputType` is frozen because it is content: it selects the golden-item mapping (`query` vs `query-response`), so flipping it on a published, annotated corpus changes what every derived golden item *means* without changing a row — drift that is invisible by construction.
-
-`visibility` stays mutable deliberately. A published dataset must remain able to become private; refusing that would make publication a trap rather than a promise, and no annotation depends on a corpus being public.
-
-`description`, `tags` and `projectId` stay mutable for A0's stated reason: refusing a typo fix is hostile and buys nothing.
-
-**Identity has two enforcement points, not one.** `name` needs a new guard in `PATCH /api/datasets/[id]`. `slug` needs **no** PATCH guard at all — it is not in `updateDatasetSchema`, and no route mutates a dataset slug today. Its only writes are the two create paths and the export backfill, so freezing `slug` is entirely satisfied by the export-backfill skip described below. An implementer looking for a `slug` field to reject in PATCH will not find one; that is correct.
-
-### Publishing
-
-`POST /api/datasets/[id]/publish` — owner-only, requires `datasets:write`.
-
-It **derives and persists a slug first** if the dataset has none, then stamps `publishedAt`. `Dataset.slug` is nullable and pre-existing rows can hold null; publishing a null-slug dataset and then freezing identity would lock in a permanently-unset portable identifier, and the one mechanism that would have fixed it — the export backfill — is what this design turns off.
-
-One-way: there is no un-publish, because publication grants an immutable identity and revoking it would break the promise the state exists to make. A dataset that should not have been published is superseded by a new version.
-
-**There is no auto-publish.** It was designed and then removed: `POST /api/golden-sets` refuses any dataset not owned by the platform user (`golden-sets/route.ts:127-136`), and the platform user carries `passwordHash: '!platform-system-user'` (`seed-core.ts:73`) which credentials login excludes via `NOT: { passwordHash: { startsWith: '!' } }` (`src/lib/auth.ts:49`), has no OIDC identity, and can mint no API key. So `dataset.userId === session.user.id` is unreachable at that hook point. The only path reaching a draft dataset is the config importer — the last place an implicit state transition belongs.
-
-### Editing published content
-
-Content edits on a published dataset **fork to the next version** via `createDatasetVersion` (`src/lib/dataset-versions.ts`).
-
-**The dataset fork already exists.** It is 228 lines, transactional, with a bounded `MAX_ATTEMPTS = 3` `P2002` retry, wired to a "New version" button and a version-history panel, and covered by `tests/db/dataset-version-race.test.ts` and `tests/db/dataset-version-samples.test.ts`. `forkGoldenSet`'s own header states "Structurally it mirrors `createDatasetVersion`" (`src/lib/golden-set-versions.ts:9`) — not the other way round. The work is bringing `createDatasetVersion` up to the newer standard (an explicit transaction timeout), **not** building a fork.
-
-`createDatasetVersion` takes its samples as an argument and never queries them; the read that must be filtered is the route's, at `datasets/[id]/versions/route.ts:21`. Unfiltered, a version-create silently **resurrects** every hidden sample as a live row in the child, because the overlay is keyed on row id and child rows are born untombstoned.
-
-**The version-history panel's "Revert to this" button does not go through `createDatasetVersion`.** `revertToVersion` (`src/app/datasets/[id]/page.tsx:416-435`) calls `PUT /api/datasets/[id]/samples` — the bulk-replace handler, which hard-deletes and recreates at `index: 0..n-1`. That is the same guaranteed-`P2002` shape diagnosed for the config importer, and Decision 11 converts it.
-
-`v1` stays frozen, so every golden set annotating it stays valid. Annotations are **not** migrated to `v2` — a golden set is the annotation layer over exactly one dataset, and that dataset is `v1`.
-
----
-
-## Ordinals **[A]**
-
-`DatasetSample.index` stops being dense the moment anything is tombstoned. `@@unique([datasetId, index])` remains satisfied because nothing is removed — every ordinal is still occupied, by a mix of live and hidden rows.
-
-**The re-index loop is deleted, not adapted.** `DELETE /api/datasets/[id]/samples` currently renumbers survivors `0..n-1`. Kept on top of tombstoning it is not redundant but *guaranteed to abort*: renumbering the first survivor to `0` collides with the hidden row still holding `0`, `P2002`, transaction rolled back, every delete 500s. The `v2e` migration header documents this failure verbatim for the golden-item case.
-
-**New samples append above a high-water mark.** `nextIndex = max(index) over ALL rows including tombstoned, + 1`. Never `count()`, never `max` over live rows. `POST /api/datasets/[id]/samples` currently uses `dataset._count.samples` as `startIndex` (`samples/route.ts:46,59`), which is the `count()` failure exactly: tombstone sample 0 of 3, live count is 2, index 2 is occupied, first append collides. The high-water read must happen **inside the same transaction** as the inserts, as `nextGoldenItemIndex` does.
-
-### The count diverges from the ordinal source
-
-`Dataset.sampleCount` is a denormalised **stored row count**. Today rows and visible samples are the same thing, so it is correct by accident. Tombstoning breaks that equality, and the UI reads it through a ladder — `sampleCount ?? sampleTotal ?? _count.samples ?? 0` (`golden-sets/page.tsx:101`) — whose **first** rung is the stored column. So a stale `sampleCount` shadows the live relation count beneath it.
-
-The concrete failure: the golden-set import picker advertises 620 samples, the import yields 610, and the user cannot see why. This is the same bug A0 fixed for `_count.items`; the read-path table above catches the `_count` half, and this catches the half that shadows it.
-
-**Only two write sites actually change**, and both are inside verbs this plan is already rewriting:
-
-| Site | Computes | Disposition |
-|---|---|---|
-| `samples/route.ts:77` (POST append) | `startIndex + n` | **Change to a live count.** `startIndex` becomes the high-water mark, so this drifts the moment anything is hidden. |
-| `samples/route.ts:245` (DELETE) | `remaining.length` from the re-index query | **Change to a live count**, as part of deleting the re-index loop. |
-
-Every other writer is already correct and must be left alone — verified individually rather than inferred from the fact that it touches the column:
-
-- `datasets/route.ts:208` (create) and `config/import/route.ts:557` (import create) — nothing is tombstoned on a fresh dataset.
-- `samples/route.ts:340` (PUT bulk replace) and `config/import/route.ts:537` (import replace) — after tombstone-and-append the live set **is** the incoming document, so the document's length is the live count.
-- `dataset-versions.ts:192` — the child is fresh and all its rows are live.
-- `refresh/route.ts:52` — it passes `_count.samples` through `buildRefreshUpdate` (`dataset-refresh-update.ts:43`), so filtering that read fixes this site for free.
-
-**The eleven ladder expressions need no change at all.** With `sampleCount` correct and `_count.samples` filtered, they read correct values as written. They are listed here only so a reader can confirm that, not as work: `datasets/page.tsx:652`; `datasets/[id]/page.tsx:694`, `:735`, `:765`, `:895`; `golden-sets/page.tsx:101`; `projects/[id]/page.tsx:228`, `:1156`, `:1164`, `:1634`, `:1659`.
-
-Do **not** touch `hfMeta.sampleCount` (`projects/[id]/page.tsx:1241`, `:1243`, `:1360`, `:1368`, `:1379` — a HuggingFace remote row count) or `summary.sampleCount` (`projects/[id]/page.tsx:841`, which is `evaluations.length`). Different quantities sharing a name.
-
-A third name exists for the live quantity: `sampleTotal`, set from `_count.samples` in `toPublicDataset` (`serializers.ts:187`) for the anonymous view. It is the ladder's middle rung and is correct once `_count.samples` is filtered.
+Each helper gets a unit test deep-equalling its returned object, mirroring `tests/lib/golden-sets.test.ts:388-426` (which assert a *returned* where-fragment). Not `:245-277`, which is argument capture on a mocked client — a different shape.
 
 ---
 
 ## Read-path dispositions **[A]**
 
-Nine sample read sites and the dataset-level set. Three must stay **unfiltered**, and all three are load-bearing.
+Ten sample read rows and the dataset-level set. **Two sample sites stay unfiltered, and a larger class must stay unfiltered because filtering it raises `P2002`.**
+
+### Sample reads
 
 | Site | Disposition |
 |---|---|
-| `PATCH /api/datasets/[id]/samples` lookup (`samples/route.ts:121`) | **Filter.** A hidden sample must 404, or it stays silently editable while every read path hides it. |
-| `DELETE /api/datasets/[id]/samples` **membership** lookup (`samples/route.ts:183`) | **UNFILTERED, deliberately.** An already-hidden id still belongs to this dataset, so a retried delete must converge on hidden rather than 400 claiming the sample is foreign. Note this is the membership lookup at `:183`, not the dataset ownership lookup at `:167`. |
-| `POST /api/datasets/[id]/samples` high-water read (`samples/route.ts:46`) | **UNFILTERED, deliberately.** It must see hidden rows or the ordinal collides. |
-| `GET /api/datasets/[id]` embedded samples | **Filter**, with `_count.samples`. |
-| `GET /api/config/export` nested `samples` include (`config/export/route.ts:196`) | **Filter.** The document is a portable view. |
-| Config importer sample re-resolution (`config/import/route.ts:652`) | **Filter.** It resolves `GoldenItem.sourceDatasetSampleId` by `inputText`, keeping the lowest-index match; unfiltered, an import binds a live golden item to a hidden row while a good live duplicate sits higher. |
-| `POST /api/datasets/[id]/versions` child copy (`versions/route.ts:21`) | **Filter**, or version-create resurrects every hidden sample. |
-| `POST /api/golden-sets` sample read (`golden-sets/route.ts:141`) | **Filter.** A0's primary flow — unfiltered, a hidden sample becomes a golden item, and the `Restrict` FK then pins that row forever. |
-| `POST /api/evaluations` batch read (`evaluations/route.ts:515-519`) | **Filter.** Unfiltered, every batch run scores hidden rows. |
-| CSV/JSONL data export (`datasets/[id]/export/route.ts:43`, `projects/[id]/export/route.ts:111`, `:148`) | **Filter.** The dataset one is `optionalAuth` and serves public datasets anonymously, so unfiltered leaves deleted samples downloadable by anyone. |
-| Dataset-level reads: `GET /api/datasets`, `GET /api/datasets/[id]`, `GET /api/projects/[id]`, the golden-set dataset picker, config export's dataset loop | **Filter** with `liveDatasetsOnly()`. |
+| `samples/route.ts:121` (PATCH lookup) | **Filter.** A hidden sample must 404, or it stays silently editable while every read hides it. |
+| `samples/route.ts:183` (DELETE **membership** lookup) | **UNFILTERED, deliberately.** An already-hidden id still belongs to this dataset, so a retried delete must converge on hidden rather than 400 claiming it is foreign. This is `:183`, not the dataset ownership read at `:167`. |
+| `samples/route.ts:46` (POST high-water read) | **UNFILTERED, deliberately.** It must see hidden rows or ordinals collide. |
+| `samples/route.ts:343` (PUT response read) | **Filter.** Returned at `:349` as `{ replaced, samples }`. Unfiltered it answers with the rows it just hid — a 4-row replace over a 4-row corpus reports `replaced: 8`. Sits *inside* the verb Plan A rewrites. |
+| `datasets/[id]/route.ts:36` (embedded samples) | **Filter.** |
+| `config/export/route.ts:196` (nested include) | **Filter.** The document is a portable view. |
+| `config/import/route.ts:652` (sample re-resolution) | **Filter.** Unfiltered, an import binds a live golden item to a hidden row while a good live duplicate sits higher. |
+| `versions/route.ts:21` (child copy) | **Filter**, or version-create **resurrects** every hidden sample as a live row in the child. |
+| `golden-sets/route.ts:141` (golden-set import) | **Filter.** A0's primary flow — unfiltered, a hidden sample becomes a golden item and the `Restrict` FK pins it forever. |
+| `evaluations/route.ts:515-519` (batch) | **Filter**, or every batch run scores hidden rows. |
+| `datasets/[id]/export/route.ts:43`, `projects/[id]/export/route.ts:111`, `:148` (CSV/JSONL) | **Filter.** The dataset one is `optionalAuth` and serves public datasets anonymously. |
 
-`src/lib/export.ts` needs no change — it imports no Prisma client and `flattenDatasetSample` is a pure row formatter over an already-fetched object.
+### Dataset reads
 
-Every unfiltered site carries a comment naming *why*. A0's evidence is that the exceptions are the part that needs to be visible.
+**Filter** with `liveDatasetsOnly()`: `datasets/route.ts:82` **and its pagination `count` at `:92`**; `datasets/[id]/route.ts:31`; **both** project reads — `projects/[id]/route.ts:70` (anonymous) *and* `:162` (owner); `config/export/route.ts:193`; `datasets/[id]/versions/route.ts:153`; `stats/route.ts:44`; `projects/[id]/export/route.ts:109`, `:146`.
+
+The golden-set dataset picker is **not** a distinct server read — `golden-sets/page.tsx:194` fetches `/api/datasets?…`, so filtering `datasets/route.ts:82` covers it.
+
+### MUST NOT be filtered — the `P2002` class
+
+Filtering any of these breaks writes rather than leaking reads, which is why it looks safe and is not:
+
+- **Slug-dedup reads.** Filtered, they mint a duplicate slug and violate `@@unique([userId, slug])` (`schema.prisma:595`): `datasets/route.ts:187`, `evaluations/route.ts:379`, `dataset-versions.ts:169`, `config/import/route.ts:453` (upsert-by-slug), `scripts/importer/artifacts.ts:393`.
+- **The version high-water read** `dataset-versions.ts:156`. Filtered, a hidden latest version lets the next fork reuse its number and collide on `@@unique([parentId, version])`. This is the spec's own `index` argument applied to `version`.
+- **Sample idempotency by ordinal** — `scripts/importer/artifacts.ts:447` (`datasetId_index`).
+- **`dataset-evaluation-summary.ts:119`** — `$queryRaw … FOR UPDATE`. Decision 3's "spread the helper" **cannot reach raw SQL**. Stated here so an implementer does not discover it.
+
+Note `config/import/route.ts:618-622` (golden-set dataset resolution by slug) is **not** in this class — filtering it merely means a golden set cannot bind to a hidden dataset, which is correct, and it raises no `P2002`.
+
+### `_count.samples`
+
+Every producer needs the filter, not just one:
+
+| Read | Consumer that breaks unfiltered |
+|---|---|
+| `datasets/route.ts:87` | `sampleTotal` (`serializers.ts:187`) and the `projects/[id]/page.tsx` ladders |
+| `datasets/[id]/route.ts:47` (GET), `:112` (PATCH response) | the dataset-page ladder, before and after a metadata edit |
+| `refresh/route.ts:20`, `:60` | `buildRefreshUpdate` → the persisted `sampleCount` at `:52` |
+| `versions/route.ts:166` | the version-history panel (`datasets/[id]/page.tsx:735`, `:765`) |
+| `config/import/route.ts:455` | the `!== configDataset.samples.length` diff at `:470` — unfiltered, re-importing an unchanged document onto a hidden-row corpus reports a spurious diff and triggers a needless replace |
+
+Also `datasets/[id]/versions/route.ts:153-169`, which selects **both** stored `sampleCount` (`:163`) and `_count.samples` (`:166`), and the nested `versions: { select: { …, sampleCount } }` at `datasets/[id]/route.ts:41`.
+
+`datasets/route.ts:232` (POST-create `_count`) needs nothing — a fresh row cannot carry a tombstone.
+
+Every unfiltered site carries a comment naming *why*.
 
 ---
 
-## The four destructive verbs **[A]**
+## Ordinals and counts **[A]**
+
+`DatasetSample.index` stops being dense once anything is hidden. `@@unique([datasetId, index])` stays satisfied because nothing is removed.
+
+**The re-index loop is deleted, not adapted**, and both failure modes should be named. *Adapted* (filtered to live rows) it renumbers the first survivor to `0`, collides with the hidden row still holding `0`, and every delete 500s. Kept **verbatim** it is worse in a quieter way: its query has no lifecycle filter, so `remaining` is every row, still dense, each update writes the index the row already holds — a silent no-op whose `remaining.length` becomes a stored *row* count. The `v2e` migration header documents the first mode for golden items.
+
+**New samples append above a high-water mark**: `max(index)` over ALL rows including hidden, `+1`. Never `count()`. The read must happen **inside the same transaction** as the inserts, as `nextGoldenItemIndex` does.
+
+The case that makes this bite is *not* a freshly-appended corpus — Prisma's `_count` is unfiltered by default and `samples/route.ts:46` stays unfiltered, so there `count == max+1` and nothing collides. It bites on a corpus **re-imported from a filtered export**: `config.ts:389` emits `index: s.index` verbatim and `import/route.ts:565` writes it back, so the rows arrive with gaps, `count < max+1`, and the first append collides.
+
+**`sampleCount` — two writes change, seven are already correct.** It is a stored row count, correct today only because nothing is hidden, and the UI ladder reads it *first*, so a stale value shadows the live count beneath. The visible failure: the import picker advertises 620, the import yields 610.
+
+| Site | Disposition |
+|---|---|
+| `samples/route.ts:77` (POST) | **Change to a live count.** `startIndex + n` drifts once `startIndex` is a high-water mark. |
+| `samples/route.ts:245` (DELETE) | **Change to a live count** — and note `:248` reads `remaining.length` for the response body too. |
+| `datasets/route.ts:208`, `config/import/route.ts:557` | Correct — nothing hidden on a fresh dataset. |
+| `samples/route.ts:340` (PUT), `config/import/route.ts:537` | Correct — after tombstone-and-append the live set **is** the incoming document. |
+| `dataset-versions.ts:192` | Correct — the child is fresh. |
+| `refresh/route.ts:52` | Fixed for free, **because `refresh/route.ts:20` is on the `_count` list above**. |
+
+**The eleven ladder expressions need no change**, listed only so a reader can confirm that: `datasets/page.tsx:652`; `datasets/[id]/page.tsx:694`, `:735`, `:765`, `:895`; `golden-sets/page.tsx:101`; `projects/[id]/page.tsx:228`, `:1156`, `:1164`, `:1634`, `:1659`. The third rung, `sampleTotal`, is set from `_count.samples` in `toPublicDataset` and is correct once that read is filtered.
+
+Do **not** touch `hfMeta.sampleCount` (`projects/[id]/page.tsx:1241`, `:1243`, `:1360`, `:1368`, `:1379` — a HuggingFace remote count) or `summary.sampleCount` (`:841`, which is `evaluations.length`).
+
+---
+
+## The mutating verbs **[A]**
 
 | Verb | Becomes |
 |---|---|
-| `DELETE /api/datasets/[id]/samples` | Tombstone the named ids; delete the re-index loop; wrap the handler in one `$transaction`. |
-| `PUT /api/datasets/[id]/samples` (bulk replace, and the revert path) | Tombstone the outgoing rows, append the incoming above the high-water mark. On drafts as well as published — otherwise the design's premise is false for the verb that destroys the most. |
+| `PATCH /api/datasets/[id]/samples` | Write a `SampleRevision` with the prior values, then update in place. |
+| `DELETE /api/datasets/[id]/samples` | Tombstone the named ids + `delete` revisions; delete the re-index loop; one `$transaction`. |
+| `PUT /api/datasets/[id]/samples` (bulk replace, and the revert path) | Tombstone the outgoing, append the incoming above the high-water mark, filter the response read at `:343`. On drafts too. |
 | `DELETE /api/datasets/[id]` | Tombstone the dataset. |
-| Config importer sample replace (`config/import/route.ts:525`) | Tombstone, then append above the high-water mark. Naively converted this is a guaranteed `P2002`: it re-creates the document's rows at their raw index values, which collide with the retained hidden rows. The route has no `$transaction`, so a failure strands a half-applied import. |
+| Config importer sample replace (`config/import/route.ts:525`) | Tombstone, then append above the high-water mark. Naively converted this is a guaranteed `P2002` — it re-creates rows at raw index values that collide with retained hidden rows. **The dataset section (≈`:450-600`) has no `$transaction`** (the two that exist, `:895` and `:964`, are in A0's golden-set section), so a failure strands a half-applied import. Correct the now-stale comment at `:483` in the same change. |
+
+**Every mutation handler's dataset guard read filters** (Decision 15) — `samples/route.ts:44`, `:105`, `:167`, `:273`; `golden-sets/route.ts:105`; `refresh/route.ts:17`; `versions/route.ts:18`, `:135`; `datasets/[id]/export/route.ts:40` — so a hidden dataset 404s on write and no golden set can be minted from one.
 
 ---
 
-## Consequences accepted, with their reasons
+## Consequences
 
-**`judgebench-v1` freezes on day one — but only if the migration backfills.** **[B]** Both seeded corpora stamp `publishedAt` in the **`create` arm only** (`seed-core.ts:230`, `seed-judgebench.ts:153`); the update arms deliberately do not re-assert it, and no migration backfills it. So a freshly-seeded instance has both corpora published, while **any instance seeded before `publishedAt` existed has NULL on both, and re-seeding will not fix it** — JudgeBench would be a freely-mutable draft, the exact opposite of Decision 9. The migration therefore backfills `publishedAt` on the two seeded ids where it is null, and carries a header saying why. Freezing them is the intended outcome: it is the shared substrate, and curation continues by creating `v2`.
+**`judgebench-v1` freezes on day one — but only if the migration backfills.** **[B]** Both seeds stamp `publishedAt` in the **`create` arm only**; the update arms deliberately do not re-assert it, and no migration backfills. So a freshly-seeded instance has both corpora published, while **any instance seeded before the column existed has NULL on both, and re-seeding will not fix it**. The migration backfills the two seeded ids where null, with a header saying why.
 
-**The pin guard is retired from its call sites but NOT deleted.** **[B]** Its FK justification evaporates where deletes become tombstones. But **one hard delete survives**: `src/lib/account-deletion.ts:141` runs `tx.dataset.deleteMany({ where: { userId, visibility: 'private' } })` inside the account-deletion transaction, has never called the guard, and trips `GoldenSet.datasetId`'s `Restrict` directly — rolling back the entire account deletion. It is currently unreachable (`deleteUserAccount` has no callers outside its own test), which makes it debt with a deadline rather than a live bug.
+**The pin guard is retired from its call sites but NOT deleted.** **[B]** One hard delete survives: `account-deletion.ts:141` runs `tx.dataset.deleteMany({ where: { userId, visibility: 'private' } })` inside the account-deletion transaction, has never called the guard, and trips `GoldenSet.datasetId`'s `Restrict` — rolling back the whole deletion. Currently unreachable (`deleteUserAccount` has no callers outside its test).
 
-**Converting that call to a tombstone does not fix it — it moves it.** `Dataset.userId` is `onDelete: Cascade`, so a tombstoned-but-still-owned dataset is hard-deleted by the `tx.user.delete()` at `account-deletion.ts:361`, hitting the same FK. Ownership must be reassigned to the archive user in the same step, exactly as public datasets already are at `:146-150`. The helper and its tests stay; the plan retires its *call sites*.
+**Converting it to a tombstone moves the delete rather than removing it.** `Dataset.userId` is `onDelete: Cascade`, so a tombstoned-but-still-owned dataset is hard-deleted by `tx.user.delete()` at `:361`, hitting the same FK. Ownership must be reassigned to the archive user in the same step, as public datasets already are at `:146-150`. `Dataset.parent` is `onDelete: NoAction` — a second, independent FK that also refuses, and the plan should not assume one fix covers both.
 
-**`Dataset.parent` is `onDelete: NoAction`**, a second, independent reason a hard delete can fail today: Postgres refuses to delete a root dataset with version children. It disappears for the same reason `Restrict` does, but it is a distinct FK and the plan should not assume one fix covers both.
+**Four existing tests break and must be updated deliberately.** **[A]** `config-golden-sets.test.ts:852` fails **once**, on its unfiltered row assertion at `:867` (counts 4, expects 2) — *not* on an index collision, since Plan A remaps above the high-water mark. Plus the three unpinned happy-path halves of the guard pairs, all asserting hard deletion by raw row count: `dataset-sample-freeze.test.ts:136` (`replaced`/`rows` expect 1, get 2), `:238` (`{deleted:1, remaining:0}` and `count()` → 0, gets 1), `:275` (`db.dataset.count()` → 0, gets 1). **`config-roundtrip-fidelity.test.ts:265` does *not* break** — the round trip yields `changes.length === 0` → `skip`, and `FULL_CONFIG`'s `gs-alpha` pins `ds-alpha` anyway.
 
-**A published dataset still round-trips as a draft.** **[B]** `publishedAt` is `excludedByDesign` in the fidelity COVERAGE map and the importer never writes it, so export → import onto a fresh instance produces a mutable copy of published content. Left as-is and recorded: making publication portable is a separate decision about what a config document means across instances.
+**The fidelity COVERAGE ledger moves in the same change.** **[A]** The suite iterates `Object.entries(COVERAGE)` and never the datamodel, so a model absent from the map is unchecked, and this design adds **no column** to `Dataset` or `DatasetSample` — so neither tripwire fires. Add `Tombstone` and `SampleRevision` deliberately. A `knownGaps` entry on `DatasetSample` is **impossible**: the stale-key guard requires every key to be a real scalar column of that model. And adding a gap entry also fails the ledger assertion at `:568-586`, whose expected object is locked at `:577-585` to exactly `{Rubric, Dataset, GoldenSet}`.
 
-**`GET /api/config/export` performs writes.** **[B]** Its slug-backfill loop (`config/export/route.ts:204-212`) `update`s rows with a null slug — which, under frozen identity, mutates a published dataset's `slug` from a read endpoint. The loop must **skip the write but still derive the slug in memory and still push it to the dedup array** (`:211`, `:213`), so a later dataset cannot claim the same slug. Skipping the row entirely would break in-document dedup. This is harmless for the document itself because `src/lib/config.ts:371` already falls back to `dataset.slug || generateSlug(dataset.name)`.
+**A published dataset still round-trips as a draft.** **[B]** `publishedAt` is `excludedByDesign` and the importer never writes it. Recorded, not fixed: making publication portable is a separate decision.
 
-**The "first N samples" import control breaks.** **[A]** `src/app/golden-sets/page.tsx:236-241` builds `sampleIndices: Array.from({ length: N }, (_, i) => i)` under a comment asserting sample indices are contiguous — the premise this design falsifies. Filtered, the request 400s at the first hidden ordinal (`golden-sets/route.ts:152-162`). **Both halves of the fix are Plan A's**: the server accepts a `limit` meaning "the first N live samples" alongside the existing explicit `sampleIndices`, and the client sends `limit` instead of synthesising ordinals.
+**`GET /api/config/export` performs writes.** **[B]** Its slug-backfill loop (`config/export/route.ts:204-212`) `update`s null-slug rows — under frozen identity, mutating a published dataset's `slug` from a read endpoint. It must **skip the write but still derive the slug in memory and still push to the dedup array** (`:211`, `:213`); skipping the row entirely breaks in-document dedup. Harmless for the document because `config.ts:371` already falls back.
 
-**`POST /api/datasets/[id]/refresh` straddles the freeze line.** **[B]** It writes `description` and `tags` (mutable when published) *and* `sampleCount` (`refresh/route.ts:48-56`), and reads `_count.samples` into `buildRefreshUpdate`. Its `sampleCount` write is Plan A's (live count); its behaviour on a published dataset is Plan B's — it must not refresh samples on a published dataset, only metadata.
+**The "first N samples" import control breaks.** **[A]** `golden-sets/page.tsx:236-241` builds `Array.from({length: N}, (_, i) => i)` under a comment asserting contiguity — the premise this design falsifies. Filtered, the request 400s at the first hidden ordinal (`golden-sets/route.ts:152-162`). Both halves are Plan A's: the server accepts a `limit` meaning "the first N *live* samples" alongside the existing explicit `sampleIndices`, and the client sends `limit`.
 
-**The fidelity COVERAGE map will not warn us.** **[A]** The suite iterates `Object.entries(COVERAGE)` and never the datamodel, so a model absent from the map is never checked — adding `Tombstone` trips nothing automatically. And because this design adds **no column** to `Dataset` or `DatasetSample`, the map's unclassified-column tripwire cannot fire either. The plan must add `Tombstone` to the map deliberately and record that sample deletion is not portable. A `knownGaps` entry on `DatasetSample` is **impossible** — the stale-key guard requires every key to be a real scalar column of that model, and there is no tombstone column. The note belongs on `Tombstone` itself.
+**`POST /api/datasets/[id]/refresh` straddles the freeze line.** Its `sampleCount` write is Plan A's; its behaviour on a published dataset is Plan B's — metadata only, never samples.
 
-**Two existing tests break and must be updated deliberately.** **[A]** `tests/db/config-golden-sets.test.ts:852` ("an UNPINNED dataset still has its samples replaced wholesale") fails twice — its document indices collide with retained rows, and its unfiltered assertion counts 4 where it expects 2. `tests/db/config-roundtrip-fidelity.test.ts:265` ("importing an export twice is idempotent") is the second.
-
-**Retiring the pin guard would delete coverage for an invariant that still matters.** **[B]** `tests/db/dataset-sample-freeze.test.ts:175` pins "a TOMBSTONED golden item still pins the dataset — the FK does not care that the row is dead," which is why `findGoldenSetsPinningDataset` is deliberately not lifecycle-filtered. That fact stays true and stays load-bearing for the eventual purge wave. Keep the test.
+**Retiring the pin guard would delete coverage for an invariant that still matters.** **[B]** `dataset-sample-freeze.test.ts:175` pins "a TOMBSTONED golden item still pins the dataset — the FK does not care that the row is dead," which is why `findGoldenSetsPinningDataset` is deliberately unfiltered. Keep the test.
 
 ---
 
 ## Out of scope
 
-- Migrating A0's `tombstonedAt` columns to the overlay. They stay.
-- A purge wave. Nothing here removes data; the eventual purge is a separate decision with its own authorisation story.
-- A full delete/restore audit trail (an events table).
+- Migrating A0's `tombstonedAt` columns. They stay.
+- A purge wave.
+- Revision history for `Dataset` rows themselves (only samples are logged).
 - Making publication portable across instances.
 - Widening who may create golden sets.
-- `PATCH /api/datasets/[id]/samples`'s in-place edit on **draft** datasets — a draft is meant to be mutable.
 
 ---
 
 ## Testing
 
-Every behavioural claim gets a test that would fail without it. Four have shapes that pass vacuously and need naming:
+Non-vacuity is demonstrated mechanically, per the standard A0 adopted: break the guard, observe the specific failure, restore, confirm byte-identical.
 
-- **The overlay hides rows.** The fixture must contain a genuinely tombstoned sample; a test over a clean dataset passes whether the filter is applied or not.
-- **The high-water mark.** The fixture must tombstone a **tail** sample. `count()`, `max` over live rows, and `max` over all rows agree until the tail is hidden.
-- **Un-delete converges.** delete → un-delete → delete must end hidden. A test that only does delete → un-delete passes with an empty `update:` arm.
-- **Publication freezes content.** Assert the row is unchanged after the refused write, not merely that the response was 409 — a handler that 409s *and* writes is the worse bug.
+Seven shapes pass vacuously unless the fixture is built deliberately. **All are Plan A's** except the last:
 
-Non-vacuity is demonstrated mechanically, per the standard this repo adopted during A0: break the guard, observe the specific failure, restore, confirm byte-identical.
+1. **The overlay hides rows.** The fixture must contain a genuinely tombstoned sample.
+2. **The un-deleted arm is visible.** Every other shape uses an `isTombstone: true` fixture, so a filter written as the simpler `{ tombstone: { is: null } }` passes all of them. Only an `isTombstone: false` fixture justifies the `NOT` formulation.
+3. **The high-water mark.** The fixture must tombstone a **tail** sample — `count()`, `max` over live, and `max` over all agree until the tail is hidden.
+4. **Repeated delete of an already-hidden id** returns 200 and stays hidden. This is the *sole* reason `samples/route.ts:183` stays unfiltered, and a delete → un-delete → delete test does **not** cover it: its second call hits the membership lookup against a live row and passes even filtered.
+5. **The two `sampleCount` writes** are unobservable unless the fixture contains a tombstone *before* the verb runs — on a clean dataset both formulations equal the live count.
+6. **The version-create resurrection guard.** A version test over a tombstone-free parent passes unfiltered.
+7. **Publication freezes content** **[B]** — assert the row is unchanged after the refused write, not merely that the response was 409. A handler that 409s *and* writes is the worse bug.
 
-UI verification is manual — all three vitest configs are `environment: 'node'` and there is no jsdom. A known and accepted limit.
+UI verification is manual — all three vitest configs are `environment: 'node'`, no jsdom. A known and accepted limit.
