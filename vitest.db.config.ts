@@ -56,6 +56,34 @@ export default defineConfig({
       // three-file glob moved 1.15pp. Aggregates barely move; small globs
       // swing. So the aggregate can afford a tighter floor than a glob can.
       //
+      // ── RUN-TO-RUN JITTER: WHY THE BUFFER BEATS THE POINT ESTIMATE ─────
+      // This suite's branch coverage is NOT reproducible run to run with the
+      // code held fixed. Both the numerator AND the denominator move, by up
+      // to ±2 branches, across runs with nothing changed:
+      //   Task 15      (2 runs)   685/865, 685/864
+      //   Task 18     (10 runs)   685/865 ×7, 687/866 ×2, 683/863 ×1
+      //   Tasks 19-22  (4 runs)   691/871 ×3, 693/872 ×1
+      //   This re-baseline (10)   691/871 ×8, 693/872 ×1, 689/869 ×1
+      // On a denominator near 870 that is roughly ±0.23pp of pure noise on a
+      // clean tree. A margin smaller than the jitter is not a margin — CI can
+      // land under the floor with nobody having touched a line. This is the
+      // strongest single argument for the buffers above: the point estimate
+      // is not stable enough to floor against. So do NOT re-baseline by
+      // pinning a floor to one lucky run — measure at least three times and
+      // take the LOWEST value observed, which is what the floors below are.
+      //
+      // At this re-baseline the jitter localises to exactly two files, both
+      // moving in the same shape (covered and total rising together):
+      // scripts/importer/artifacts.ts (105/116 <-> 107/118) and
+      // src/lib/golden-set-versions.ts (13/21 <-> 15/22). Root cause is still
+      // unidentified; v8 attributes a different branch set depending on which
+      // paths actually executed, so module-load ordering or a timing-dependent
+      // path remains the likely culprit. NOTE this also falsifies the claim
+      // made repeatedly in the prose this block replaces, that the per-glob
+      // entries were stable across runs: scripts/importer/** moves too
+      // (87.52 <-> 87.58). It is only the aggregate that anyone had watched
+      // closely enough to notice.
+      //
       // BE HONEST ABOUT WHAT THESE CATCH. They catch a large untested landing
       // or wholesale test removal. They do NOT reliably catch one deleted test
       // file — that moves the aggregate by a third of a point, and no
@@ -64,126 +92,51 @@ export default defineConfig({
       // .gitea/workflows/ci.yml, which asserts the suite actually ran.
       //
       // The ratchet is preserved by RE-BASELINING UPWARD when actuals rise
-      // materially — not by pinning to the last measurement.
+      // materially — not by pinning to the last measurement. Re-baselining a
+      // floor DOWNWARD is legitimate in exactly one situation: the floor is
+      // TIGHTER than the buffer this policy mandates, on a suite that is
+      // green. Restoring a mandated buffer on a passing gate is repairing the
+      // gate, not weakening it. Lowering a floor to turn a RED run green is
+      // never legitimate — that is the failure mode this whole block exists
+      // to prevent.
       //
-      // Actuals as of 2026-08-13 (stmts/branch/funcs/lines), re-measured in
-      // Task 12 (a0). The previous set recorded here (47.41 / 81.04 / 60.43,
-      // auth-guard 86.36 / 80.95 / 91.66) predated Tasks 9b-11 and was already
-      // stale before Task 12 touched anything — measured at Task 12's parent
-      // commit, all-files was 49.37 / 79.22 / 61.82. Task 12 itself moved only
-      // statements/lines (49.37 -> 48.50), and only by growing the denominator:
-      // it added statements to src/worker/**, which this run never imports,
-      // plus pairwise-only validation branches in run-launch.ts that the db
-      // suite's pointwise fixtures never reach. Prose only — no threshold
-      // below was touched.
+      // ── ACTUALS: END-OF-BRANCH RE-BASELINE (2026-08-13) ─────────────────
+      // Every floor in this file was re-measured and re-set here, once,
+      // deliberately, with both coverage configs visible at the same time, at
+      // the end of feat/a0-golden-set-substrate. Floors were frozen for that
+      // branch's 24 tasks precisely so that no single task could ratchet them
+      // and no later task could trip a floor a predecessor had tightened.
+      // This block replaces the per-task narration Tasks 12, 14, 18 and 19-22
+      // each layered on; several of those notes were stale by the time the
+      // branch ended, and one was wrong (see auth-guard below).
       //
-      // NOTE for the end-of-branch re-baseline: the branches actual (79.22)
-      // sits 0.22pp above its floor of 79, not the -2pp this file's own policy
-      // calls for. That margin predates Task 12 (79.22 at its parent commit
-      // too — this task is branch-neutral here); flagged rather than fixed,
-      // since floors are frozen mid-branch.
-      //   all-files            48.50 / 79.22 / 61.82 / 48.50
-      //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
-      //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
+      // Ten runs of `npm run test:db:coverage` (stmts / branch / funcs / lines):
+      //   all-files            49.17 / 79.28-79.47 / 62.58 / 49.17
+      //   auth-guard.ts        87.37 / 85.07       / 91.66 / 87.37
+      //   scripts/importer/**  96.42 / 87.52-87.58 / 98.63 / 96.42
+      // Only the branches column moved; statements, functions and lines were
+      // identical on all ten runs. Floors are the lowest value in each range
+      // minus the policy buffer, rounded DOWN to the integer style already in
+      // use here. Every resulting margin (2.17-3.63pp) exceeds the ±0.23pp
+      // jitter by at least 9x.
       //
-      // Re-measured 2026-08-13 in Task 24 (a0), which added the item-lifecycle
-      // helpers to src/lib/golden-sets.ts (nextGoldenItemIndex is exercised by
-      // tests/db/golden-item-tombstone.test.ts) and the tombstone filters to
-      // src/lib/golden-set-versions.ts. All four all-files keys moved UP; both
-      // per-glob entries are unchanged. Note the branches margin flagged above
-      // widened with it (79.37 against a floor of 79). Prose only — no
-      // threshold below was touched.
-      //   all-files            48.65 / 79.37 / 62.20 / 48.65
-      //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
-      //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
-      //
-      // Re-measured 2026-08-13 in Task 14 (a0), which added the goldenSets
-      // section of the config document to src/lib/config.ts. Both per-glob
-      // entries are unchanged; all-files rose on statements/lines/functions
-      // and FELL on branches, 79.37 -> 79.19 (measured 685/865 hit/found in
-      // coverage-db/lcov.info).
-      //
-      // READ THIS BEFORE ADDING ANOTHER src/lib CONVERTER. The branches
-      // margin flagged two entries above has now narrowed to 0.19pp over the
-      // floor of 79, and it narrowed for a structural reason rather than a
-      // testing lapse: `dbGoldenSetToConfig` carries the same defensive
-      // `??`/`||` fallbacks as the four converters beside it (see the
-      // uncovered arms on dbProjectToConfig/dbRubricToConfig/dbModelToConfig/
-      // dbDatasetToConfig), and those arms are unreachable from their only
-      // production caller — the export route always passes a full Prisma row
-      // with `dataset`, `items` and `candidates` included. The DB suite
-      // therefore cannot reach them at all; tests/lib/config.test.ts covers
-      // them, and that run is gated by vitest.config.ts, not this one. The
-      // next converter added here will push this below 79 no matter how well
-      // it is tested. Raised for the end-of-branch re-baseline; not fixed
-      // here, since floors are frozen mid-branch.
-      //
-      // Task 14's review round added the golden-label tombstone, the
-      // owner-scoped family lookup and the position-based item ordinals. All
-      // three live in the route, which no coverage config includes, so the
-      // branches figure is UNCHANGED at 685/865; only statements moved, by
-      // the one new constant in src/lib/golden-sets.ts.
-      //   all-files            49.11 / 79.19 / 62.33 / 49.11
-      //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
-      //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
-      //
-      // Re-measured 2026-08-13 in Task 18 (a0), which swapped the account-
-      // deletion GoldenSet branch from hard-delete to tombstone
-      // (src/lib/account-deletion.ts step 5). Branch-count-neutral by
-      // construction: the if/frozen-else/unpinned shape is unchanged, only
-      // the else arm's `.delete()` became `.update()`. Measured TEN times
-      // across two rounds: 685/865 (79.19%) seven times, 687/866 (79.33%)
-      // twice, and once 683/863 (79.14%) — the closest-to-floor value
-      // observed on this branch so far, still 0.14pp clear of the 79 floor.
-      // The numerator and denominator both move together and by more than
-      // one, e.g. 685/865 -> 683/863 is -2/-2: this is NOT a "denominator
-      // jitter" (same branch set, different total) but real run-to-run
-      // nondeterminism in which code path executes — some branch arm is
-      // reached on most runs and skipped on others (module-load ordering or
-      // a timing-dependent path is the likely cause, unconfirmed). Every one
-      // of the ten runs still passed the floor. A second task (Task 18) has
-      // now observed this instability against the Task 14 baseline
-      // (685/865); worth pinning down the source before the next
-      // re-baseline, since 79.14 leaves only 0.14pp of margin. Both per-glob
-      // entries unchanged.
-      //   all-files            49.13 / 79.19 / 62.33 / 49.13  (typical run; observed range 79.14-79.33)
-      //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
-      //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
-      //
-      // Re-measured 2026-08-13 in Tasks 19-22 (a0), which added
-      // goldenSetLifecycleWhere/parseIncludeRetired to src/lib/golden-sets.ts
-      // and routed the four golden-set read paths through them. Measured
-      // SEVEN times before review: 689/869 (79.28%) four times, 691/870
-      // (79.42%) three times. Re-measured FOUR more times after fix round 1,
-      // which added an admin-scoped config-export test and a stranger-on-a-
-      // private-retired-set test: 691/871 (79.33%) three times, 693/872
-      // (79.47%) once. Both per-glob entries byte-identical throughout.
-      //
-      // THE BRANCHES MARGIN WIDENED RATHER THAN NARROWED, which is worth
-      // stating because the note above predicted the opposite for the next
-      // src/lib addition. The predicate's ternary adds ONE branch (two arms)
-      // to the denominator and the DB suite reaches both — a retired-and-
-      // tombstoned list fixture drives the `false` arm and ?includeRetired=
-      // true drives the `true` arm — so this landed as roughly +2/+2 on a
-      // ~79% ratio, which pulls the ratio up. That is the shape to aim for:
-      // the earlier converters narrowed the margin because their defensive
-      // `??`/`||` arms are unreachable from any production caller, not
-      // because src/lib additions cost branches per se.
-      //
-      // The run-to-run nondeterminism recorded above is still present and
-      // still the same shape (numerator and denominator moving together, 2 at
-      // a time); its source remains unidentified. The observed spread on this
-      // branch is now 79.14-79.47 across nineteen runs over two tasks. Prose
-      // only — no threshold below was touched.
-      //   all-files            49.17 / 79.33 / 62.58 / 49.17  (observed range 79.33-79.47)
-      //   auth-guard.ts        87.37 / 84.61 / 91.66 / 87.37
-      //   scripts/importer/**  96.42 / 87.58 / 98.63 / 96.42
+      // Two corrections the frozen-floor rule had deferred landed here:
+      //   - branches: floor was 79 against an actual of 79.28-79.47. That is
+      //     a 0.28pp margin where policy calls for 2pp — six times too tight,
+      //     and only 0.05pp clear of the jitter's own low. Tasks 12, 14 and
+      //     18 each flagged it and correctly left it alone. Now 77.
+      //   - auth-guard.ts branches: floor was 77 against an actual of 85.07
+      //     (57/67), i.e. 8pp of slack where policy calls for 3. The prose
+      //     from Task 12 onward recorded this actual as 84.61 (55/65) and
+      //     asserted it never moved; it did, consistent with the golden-set
+      //     rows Tasks 19-22 added to tests/db/access-matrix.test.ts reaching
+      //     two further branches. Now 82.
       thresholds: {
-        lines: 45,
-        functions: 58,
-        branches: 79,
-        statements: 45,
-        'src/lib/auth-guard.ts': { statements: 83, functions: 88, branches: 77, lines: 83 },
+        lines: 47,
+        functions: 60,
+        branches: 77,
+        statements: 47,
+        'src/lib/auth-guard.ts': { statements: 84, functions: 88, branches: 82, lines: 84 },
         'scripts/importer/**': { statements: 93, functions: 95, branches: 84, lines: 93 },
       },
     },
