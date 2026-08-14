@@ -133,7 +133,7 @@ describe('PUT /api/datasets/[id]/samples — golden-set freeze guard (A0 Task 1)
     expect(survived[0].input).toBe('the question');
   });
 
-  it('still replaces samples when no golden set pins the dataset', async () => {
+  it('still replaces samples when no golden set pins the dataset — by HIDING the outgoing row, not destroying it', async () => {
     const user = await mkUser();
     mockSessionFor(user);
     const { dataset, sample } = await mkDatasetWithSample(user.id);
@@ -147,12 +147,42 @@ describe('PUT /api/datasets/[id]/samples — golden-set freeze guard (A0 Task 1)
 
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.replaced).toBe(1);
 
-    const rows = await db.datasetSample.findMany({ where: { datasetId: dataset.id } });
-    expect(rows).toHaveLength(1);
-    expect(rows[0].id).not.toBe(sample.id); // deleted + recreated, new id
-    expect(rows[0].input).toBe('replacement');
+    // The response read is FILTERED. Unfiltered it answers with the row it
+    // just hid: `replaced: 2` over a one-row corpus, and a hidden row handed
+    // back to the client as though it were live.
+    expect(body.replaced).toBe(1);
+    expect(body.samples).toHaveLength(1);
+    expect(body.samples[0].input).toBe('replacement');
+    expect(body.samples[0].id).not.toBe(sample.id);
+
+    // …and nothing was destroyed. The old assertion here was
+    // `expect(rows).toHaveLength(1)`, which passes under a hard delete — the
+    // exact behaviour this task removes — so it is inverted rather than
+    // adjusted: 2 rows on disk, one of them the ORIGINAL id, which is the id
+    // any golden item would cite.
+    const rows = await db.datasetSample.findMany({
+      where: { datasetId: dataset.id },
+      orderBy: { index: 'asc' },
+    });
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.id)).toContain(sample.id);
+    // Appended ABOVE the high-water mark: index 1, not 0. Recreating at 0
+    // collides with the hidden row that still holds 0 (@@unique([datasetId,
+    // index]), prisma/schema.prisma).
+    expect(rows.map((r) => r.index)).toEqual([0, 1]);
+    expect(rows[1].input).toBe('replacement');
+
+    const tomb = await db.tombstone.findUnique({ where: { datasetSampleId: sample.id } });
+    expect(tomb?.isTombstone).toBe(true);
+
+    // `sampleCount` is a LIVE count and is already correct here: after
+    // tombstone-and-append the live set IS the incoming document.
+    const after = await db.dataset.findUnique({
+      where: { id: dataset.id },
+      select: { sampleCount: true },
+    });
+    expect(after?.sampleCount).toBe(1);
   });
 
   it('a golden set over a DIFFERENT dataset does not block this one', async () => {

@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { getServerSession } from 'next-auth';
 import { db, truncateAll, mkUser } from './helpers';
-import { DELETE as deleteSamples, POST as addSamples } from '@/app/api/datasets/[id]/samples/route';
+import {
+  DELETE as deleteSamples,
+  POST as addSamples,
+  PUT as replaceSamples,
+} from '@/app/api/datasets/[id]/samples/route';
 import { liveSamplesOnly } from '@/lib/tombstones';
 
 // A1, the tombstone overlay. DELETE /api/datasets/[id]/samples HIDES the named
@@ -80,6 +84,13 @@ async function mkCorpus(userId: string, indices: number[]) {
 async function callDelete(datasetId: string, sampleIds: string[]) {
   return deleteSamples(
     jsonRequest(`http://localhost/api/datasets/${datasetId}/samples`, 'DELETE', { sampleIds }),
+    { params: Promise.resolve({ id: datasetId }) }
+  );
+}
+
+async function callPut(datasetId: string, samples: { input: string; expected?: string }[]) {
+  return replaceSamples(
+    jsonRequest(`http://localhost/api/datasets/${datasetId}/samples`, 'PUT', { samples }),
     { params: Promise.resolve({ id: datasetId }) }
   );
 }
@@ -394,5 +405,108 @@ describe('POST /api/datasets/[id]/samples — the high-water mark (A1 Task 4)', 
       select: { sampleCount: true },
     });
     expect(after?.sampleCount).toBe(4);
+  });
+});
+
+// ─── A1 Task 5: PUT is tombstone-and-append ─────────────────────────────────
+// Decision 11. Bulk replace hides the outgoing rows and appends the incoming
+// document above the high-water mark — on drafts as well as published corpora,
+// because otherwise the verb that destroys the most is the one still doing it.
+// This handler is also the revert path: src/app/datasets/[id]/page.tsx:416-435
+// PUTs a target version's samples here.
+describe('PUT /api/datasets/[id]/samples — tombstone-and-append (A1 Task 5)', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('counts only the LIVE set when the corpus already carries a hidden row, and leaves that row alone', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+
+    // The corpus carries a tombstone BEFORE the verb runs. Without that, the
+    // filtered and the unfiltered formulations return the same number and
+    // every assertion below passes vacuously — the spec's Testing shapes 1
+    // ("the overlay hides rows") and 5 ("the sampleCount writes"). It is also
+    // a TAIL row (index 1, the max), which is what makes the high-water
+    // assertion bite: with the tail live, count(), max over live and max over
+    // all agree.
+    const dataset = await mkCorpus(user.id, [0, 1]);
+    const live = dataset.samples[0];
+    const alreadyHidden = dataset.samples[1];
+    await db.tombstone.create({
+      data: { datasetSampleId: alreadyHidden.id, isTombstone: true, reason: 'deleted by hand' },
+    });
+
+    const res = await callPut(dataset.id, [
+      { input: 'first replacement' },
+      { input: 'second replacement' },
+    ]);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // Four rows will exist; exactly two are live. An unfiltered response read
+    // reports `replaced: 4` and hands back two hidden rows.
+    expect(body.replaced).toBe(2);
+    expect(body.samples.map((s: { input: string }) => s.input)).toEqual([
+      'first replacement',
+      'second replacement',
+    ]);
+
+    const rows = await db.datasetSample.findMany({
+      where: { datasetId: dataset.id },
+      orderBy: { index: 'asc' },
+    });
+    expect(rows).toHaveLength(4);
+    // The high-water mark is max(index) over ALL rows — including the hidden
+    // one at 1 — so the incoming pair lands at 2 and 3. Derived from a live
+    // count() it would be 1, and the first insert would collide.
+    expect(rows.map((r) => r.index)).toEqual([0, 1, 2, 3]);
+
+    // The outgoing read is filtered, so the already-hidden row is not
+    // re-tombstoned. Re-tombstoning it would overwrite the record of why it
+    // went away with this replace's reason.
+    const untouched = await db.tombstone.findUnique({
+      where: { datasetSampleId: alreadyHidden.id },
+    });
+    expect(untouched?.reason).toBe('deleted by hand');
+
+    // The row that WAS live is now hidden.
+    const hidden = await db.tombstone.findUnique({ where: { datasetSampleId: live.id } });
+    expect(hidden?.isTombstone).toBe(true);
+
+    // Live count, not row count: 2, not 4.
+    const after = await db.dataset.findUnique({
+      where: { id: dataset.id },
+      select: { sampleCount: true },
+    });
+    expect(after?.sampleCount).toBe(2);
+  });
+
+  it('hides an UN-DELETED row too — a tombstone row with isTombstone: false is live', async () => {
+    // Every other fixture in this file hides rows with `isTombstone: true`, so
+    // an outgoing read written as the simpler `{ tombstone: { is: null } }`
+    // passes all of them (spec, Testing shape 2). Here that filter skips this
+    // row: it is never tombstoned, so it stays LIVE underneath the
+    // replacement and the corpus quietly keeps a row the user replaced away —
+    // while the response, filtered the same wrong way, does not show it.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await mkCorpus(user.id, [0]);
+    const sample = dataset.samples[0];
+    await db.tombstone.create({
+      data: { datasetSampleId: sample.id, isTombstone: false },
+    });
+
+    const res = await callPut(dataset.id, [{ input: 'replacement' }]);
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).replaced).toBe(1);
+
+    const tomb = await db.tombstone.findUnique({ where: { datasetSampleId: sample.id } });
+    expect(tomb?.isTombstone).toBe(true);
+    // Converged rather than duplicated: one row per entity, upserted on a
+    // @unique FK, never P2002.
+    expect(await db.tombstone.count({ where: { datasetSampleId: sample.id } })).toBe(1);
   });
 });

@@ -443,17 +443,19 @@ export async function PUT(request: Request, props: { params: Promise<{ id: strin
     }
 
     // A0 (20260812190000_v2d_golden_substrate): GoldenItem.sourceDatasetSampleId
-    // is `onDelete: Restrict`. This handler deletes every sample and recreates
-    // them with new ids, so once a golden set has annotated this dataset the
-    // replace MUST fail — a corpus somebody has annotated must not drift under
-    // the annotation. Refuse deliberately, naming the sets that pinned it,
-    // rather than letting Postgres raise a P2003 the catch below reports as a
-    // generic 500. Checked BEFORE the transaction so nothing is deleted.
+    // is `onDelete: Restrict`. A1 made this handler tombstone-and-append, so
+    // that FK is no longer what would refuse — nothing is deleted here any
+    // more. THE GUARD STAYS ANYWAY, and deliberately: a corpus somebody has
+    // annotated must not drift under the annotation, and the replace below
+    // hides every live row of it. Retiring this guard belongs to the
+    // lifecycle work (Plan B), not to the overlay — do not remove it here.
+    // tests/db/dataset-sample-freeze.test.ts pins the 409 three times over,
+    // including for a set whose items are themselves tombstoned.
     //
-    // The predicate — including why it is NOT lifecycle-filtered — now lives in
+    // The predicate — including why it is NOT lifecycle-filtered — lives in
     // `findGoldenSetsPinningDataset` (src/lib/golden-sets.ts), shared with the
     // three other destructive paths that were missing this guard entirely:
-    // DELETE below, DELETE /api/datasets/[id], and the config importer's
+    // DELETE above, DELETE /api/datasets/[id], and the config importer's
     // sample replace.
     const pinningGoldenSets = await findGoldenSetsPinningDataset(prisma, params.id);
 
@@ -474,37 +476,79 @@ export async function PUT(request: Request, props: { params: Promise<{ id: strin
     const body = await request.json();
     const data = bulkReplaceSamplesSchema.parse(body);
 
-    // Atomic: delete old + create new + update count in one transaction
-    const newSamples = await prisma.$transaction(async (tx) => {
-      await tx.datasetSample.deleteMany({
-        where: { datasetId: params.id },
-      });
+    // Atomic: hide the outgoing rows + append the incoming above the
+    // high-water mark + update the live count, in one transaction.
+    const newSamples = await prisma.$transaction(
+      async (tx) => {
+        // Read the outgoing set FIRST. After the appends below, a dataset-wide
+        // read would sweep the rows we are about to create as well.
+        //
+        // Filtered, so an already-hidden row is not re-tombstoned: `upsert`'s
+        // update arm would overwrite the reason recording why it went away with
+        // this replace's reason.
+        const outgoing = await tx.datasetSample.findMany({
+          where: { datasetId: params.id, ...liveSamplesOnly() },
+          select: { id: true },
+        });
 
-      if (data.samples.length > 0) {
+        if (outgoing.length > 0) {
+          await tombstoneSamples(tx, outgoing.map((s) => s.id), 'bulk replace');
+        }
+
+        // Ordinals are no longer dense. The outgoing rows still hold 0..n-1, so
+        // the incoming document appends ABOVE max(index) over ALL rows —
+        // including hidden ones — or the first insert collides on
+        // @@unique([datasetId, index]). Never `count()`, and read inside this
+        // same tx as the inserts it feeds.
+        const startIndex = await nextSampleIndex(tx, params.id);
+
         for (let i = 0; i < data.samples.length; i++) {
           const s = data.samples[i];
           await tx.datasetSample.create({
             data: {
               datasetId: params.id,
-              index: i,
+              index: startIndex + i,
               input: s.input,
               expected: s.expected ?? undefined,
               metadata: s.metadata ? JSON.stringify(s.metadata) : undefined,
             },
           });
         }
-      }
 
-      await tx.dataset.update({
-        where: { id: params.id },
-        data: { sampleCount: data.samples.length },
-      });
+        // LEAVE THIS AS `data.samples.length`. `sampleCount` is a live row
+        // count, and after tombstone-and-append the live set IS the incoming
+        // document — every prior row was just hidden and every incoming row was
+        // just created. This is not the stale-count bug the other verbs have;
+        // "fixing" it to count rows would make it wrong.
+        await tx.dataset.update({
+          where: { id: params.id },
+          data: { sampleCount: data.samples.length },
+        });
 
-      return tx.datasetSample.findMany({
-        where: { datasetId: params.id },
-        orderBy: { index: 'asc' },
-      });
-    });
+        // FILTERED. Unfiltered this answers with the rows it just hid — a 4-row
+        // replace over a 4-row corpus reports `replaced: 8` at the return below
+        // and hands the client four hidden rows.
+        return tx.datasetSample.findMany({
+          where: { datasetId: params.id, ...liveSamplesOnly() },
+          orderBy: { index: 'asc' },
+        });
+      },
+      // Same ceiling, same reasoning, as the POST above and as
+      // `POST /api/golden-sets` (src/app/api/golden-sets/route.ts:257). This is
+      // an INTERACTIVE transaction doing a round trip PER INCOMING ROW, and
+      // `bulkReplaceSamplesSchema` puts no upper bound on N — so Prisma's
+      // defaults (maxWait 2s, timeout 5s) would cap the endpoint at whatever
+      // fits in 5s and fail the rest with P2028 -> a generic 500.
+      //
+      // It was already the callback form before A1, so unlike the POST this is
+      // not a ceiling introduced by a form change — it is one that was missing
+      // all along, on the path a 620-row REVERT goes through
+      // (src/app/datasets/[id]/page.tsx:416-435).
+      //
+      // These options exist ONLY on the callback overload; the array form takes
+      // `isolationLevel` alone (generated client, index.d.ts:402 and :404).
+      { maxWait: 10_000, timeout: 60_000 }
+    );
 
     return NextResponse.json({ replaced: newSamples.length, samples: newSamples });
   } catch (error) {
