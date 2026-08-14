@@ -4,6 +4,7 @@ import { db, truncateAll, mkUser } from './helpers';
 import { forkGoldenSet } from '@/lib/golden-set-versions';
 import { POST as importConfig } from '@/app/api/config/import/route';
 import { GET as exportConfig } from '@/app/api/config/export/route';
+import { PUT as replaceSamples } from '@/app/api/datasets/[id]/samples/route';
 
 // ─── Why every assertion here is on ROWS ────────────────────────────────────
 // `configDocumentSchema` is a plain `z.object` with no `.strict()`, so an
@@ -791,5 +792,287 @@ describe('Config export/import — golden sets', () => {
       where: { goldenSetId: goldenSet.id, sourceSample: { datasetId: { not: datasetA.id } } },
     });
     expect(foreign).toBe(0);
+  });
+});
+
+// ─── The final-wave findings, all three on this one route ───────────────────
+// Task 14 landed the importer's golden-set section BEFORE the lifecycle read
+// sweep (Tasks 19-22) and before `assertGoldenSetInCirculation`, and nobody
+// went back to it. It is the SECOND write path onto golden items and the
+// SECOND destructive path onto dataset samples, and it carried neither guard.
+describe('Config import — the guards the later sweeps never reached (M1-M3)', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('M1: RENAMING an annotated dataset skips the sample replace instead of detonating the corpus', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await mkAnnotatedDataset(user.id, { slug: 'ds-fixture' });
+    const goldenSet = await mkGoldenSet(user.id, dataset, { slug: 'gs-fixture', name: 'Fixture Golden Set' });
+
+    // The replace is gated on `changes.length > 0`, NOT on a sample diff — so
+    // a rename alone reaches `datasetSample.deleteMany`, which
+    // GoldenItem.sourceDatasetSampleId (`onDelete: Restrict`) refuses. The
+    // route has no $transaction, so on the unguarded code the rename is
+    // already committed when the P2003 lands, the golden-set section never
+    // runs, and the caller gets 'Failed to import configuration' in a 500.
+    const doc = await exportDoc();
+    doc.datasets[0].name = 'Renamed Corpus';
+
+    const res = await importConfig(importRequest(JSON.stringify(doc)));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const datasetDiff = body.items.find((i: any) => i.type === 'dataset');
+    expect(datasetDiff.action).toBe('update');
+    // The refusal is REPORTED, not silent: the entry names the pinning set.
+    expect(datasetDiff.changes.join(' | ')).toContain('Fixture Golden Set');
+
+    // Every sample still carries the id its golden item cites — the whole
+    // point of skipping rather than replacing.
+    const samples = await db.datasetSample.findMany({
+      where: { datasetId: dataset.id },
+      orderBy: { index: 'asc' },
+    });
+    expect(samples.map((s) => s.id)).toEqual(dataset.samples.map((s) => s.id));
+
+    // The rest of the document still applied: the rename landed…
+    const renamed = await db.dataset.findUniqueOrThrow({ where: { id: dataset.id } });
+    expect(renamed.name).toBe('Renamed Corpus');
+    // …and the golden-set section ran at all, which a throw here would have
+    // skipped entirely (it is ordered after datasets).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(body.items.some((i: any) => i.type === 'goldenSet')).toBe(true);
+    expect(await db.goldenItem.count({ where: { goldenSetId: goldenSet.id } })).toBe(2);
+  });
+
+  it('M1: an UNPINNED dataset still has its samples replaced wholesale', async () => {
+    // The other half of the guard: skipping every replace would also make the
+    // test above pass, and would silently break config-driven corpus updates.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await mkAnnotatedDataset(user.id, { slug: 'ds-unpinned' });
+
+    const doc = await exportDoc();
+    doc.datasets[0].name = 'Renamed Corpus';
+    doc.datasets[0].samples[0].input = 'a wholly different question';
+
+    expect((await importConfig(importRequest(JSON.stringify(doc)))).status).toBe(200);
+
+    const samples = await db.datasetSample.findMany({
+      where: { datasetId: dataset.id },
+      orderBy: { index: 'asc' },
+    });
+    expect(samples.map((s) => s.input)).toEqual(['a wholly different question', 'what is 2 + 2']);
+    // Deleted and recreated, so the ids are new — proof the replace ran.
+    expect(samples.map((s) => s.id)).not.toEqual(dataset.samples.map((s) => s.id));
+  });
+
+  it('M2: the public-dataset fallback resolves the PLATFORM owner only, never a stranger\'s corpus', async () => {
+    // Arm (b) of the importer's dataset resolution was `{ slug, visibility:
+    // 'public' }` with no owner predicate, so any session-authenticated caller
+    // could post a document binding their golden items to a stranger's
+    // DatasetSample rows. The pin is unreleasable by design — the tombstone
+    // keeps the FK and there is no purge wave — so the victim permanently
+    // loses bulk sample replace on their own dataset.
+    const platform = await mkUser({ email: 'platform@judgearena.local' });
+    const stranger = await mkUser({ email: 'cross-tenant-victim@test.local' });
+    const importer = await mkUser({ email: 'cross-tenant-attacker@test.local' });
+
+    // The platform user EXISTS and owns a corpus — just not this slug. So a
+    // fix that merely falls back when there is no platform user does not pass.
+    await mkAnnotatedDataset(platform.id, { slug: 'some-other-corpus', visibility: 'public' });
+    const victimDataset = await mkAnnotatedDataset(stranger.id, {
+      slug: 'judgebench-v1',
+      visibility: 'public',
+    });
+
+    // Hand-written rather than exported: the point is a document naming a
+    // dataset slug the importing user does not own, whose items resolve
+    // against rows that belong to somebody else.
+    const doc = {
+      version: '1.0',
+      exportedAt: '2026-08-13T00:00:00.000Z',
+      goldenSets: [
+        {
+          slug: 'gs-cross-tenant',
+          name: 'Cross Tenant Set',
+          visibility: 'private',
+          protocol: 'pairwise',
+          datasetSlug: 'judgebench-v1',
+          version: 1,
+          items: [
+            {
+              index: 0,
+              inputText: 'who wrote hamlet',
+              expected: 'A>B',
+              candidates: [
+                { position: 0, responseText: 'shakespeare' },
+                { position: 1, responseText: 'bacon' },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    mockSessionFor(importer);
+    const res = await importConfig(importRequest(JSON.stringify(doc)));
+    expect(res.status).toBe(200);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const diff = (await res.json()).items.find((i: any) => i.type === 'goldenSet');
+    expect(diff.action).toBe('skip');
+    expect(diff.changes[0]).toContain('not found on this instance');
+
+    // Nothing of the attacker's is bound to the victim's rows.
+    expect(await db.goldenSet.count({ where: { ownerId: importer.id } })).toBe(0);
+    expect(
+      await db.goldenItem.count({ where: { sourceSample: { datasetId: victimDataset.id } } })
+    ).toBe(0);
+
+    // And the victim still controls their own corpus: with the pin installed
+    // this PUT is a permanent 409 with no in-product remedy.
+    mockSessionFor(stranger);
+    const put = await replaceSamples(
+      new Request(`http://localhost/api/datasets/${victimDataset.id}/samples`, {
+        method: 'PUT',
+        body: JSON.stringify({ samples: [{ input: 'my corpus, my call' }] }),
+        headers: { 'content-type': 'application/json' },
+      }),
+      { params: Promise.resolve({ id: victimDataset.id }) }
+    );
+    expect(put.status).toBe(200);
+  });
+
+  it('M3: a RETIRED set is skipped, not silently rewritten with its labels invalidated', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await mkAnnotatedDataset(user.id, { slug: 'ds-fixture' });
+    const goldenSet = await mkGoldenSet(user.id, dataset, { slug: 'gs-fixture', name: 'Fixture Golden Set' });
+    const annotator = await mkUser({ email: 'retired-set-annotator@test.local' });
+    const before = await liveItems(goldenSet.id);
+    await db.goldenLabel.create({
+      data: { goldenItemId: before[0].id, annotatorId: annotator.id, overallScore: 3 },
+    });
+
+    await db.goldenSet.update({ where: { id: goldenSet.id }, data: { retiredAt: new Date() } });
+
+    // The documented round trip: the export deliberately emits a retired set
+    // under ?includeRetired=true. Unguarded, re-importing it took the update
+    // branch, tombstoned EVERY live GoldenLabel with reason
+    // 'config-import-replace', left `retiredAt` set, and reported `update: 1`.
+    const doc = await exportDoc('?format=json&include=all&includeSamples=true&includeRetired=true');
+    expect(doc.goldenSets).toHaveLength(1);
+    doc.goldenSets[0].items[0].candidates[0].responseText = 'A-0 (edited)';
+
+    const res = await importConfig(importRequest(JSON.stringify(doc)));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const diff = body.items.find((i: any) => i.type === 'goldenSet');
+    expect(diff.action).toBe('skip');
+    expect(diff.changes.join(' | ')).toMatch(/retired/i);
+    expect(body.summary.update).toBe(0);
+
+    // The irreplaceable artifact: still live, still applying.
+    const labels = await db.goldenLabel.findMany();
+    expect(labels).toHaveLength(1);
+    expect(labels[0].tombstonedAt).toBeNull();
+    expect(labels[0].tombstonedReason).toBeNull();
+
+    // The items are untouched — no tombstones, no appended replacements.
+    const after = await liveItems(goldenSet.id);
+    expect(after.map((i) => i.index)).toEqual([0, 1]);
+    expect(after[0].candidates[0].responseText).toBe('A-0');
+    expect(await db.goldenItem.count({ where: { goldenSetId: goldenSet.id } })).toBe(2);
+
+    // And the set is still retired: the import did not quietly un-retire it.
+    const reread = await db.goldenSet.findUniqueOrThrow({ where: { id: goldenSet.id } });
+    expect(reread.retiredAt).not.toBeNull();
+  });
+
+  it('M3: a TOMBSTONED set holding the slug is skipped BY NAME — never written, never a P2002 in a 500', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await mkAnnotatedDataset(user.id, { slug: 'ds-fixture' });
+    const goldenSet = await mkGoldenSet(user.id, dataset, { slug: 'gs-fixture', name: 'Fixture Golden Set' });
+    const annotator = await mkUser({ email: 'tombstoned-set-annotator@test.local' });
+    const before = await liveItems(goldenSet.id);
+    await db.goldenLabel.create({
+      data: { goldenItemId: before[0].id, annotatorId: annotator.id, overallScore: 5 },
+    });
+
+    const doc = await exportDoc();
+    doc.goldenSets[0].items[0].candidates[0].responseText = 'A-0 (edited)';
+
+    // DELETE /api/golden-sets/[id] leaves the OWNER intact, so `(ownerId,
+    // slug)` still matches the row every read path hides.
+    await db.goldenSet.update({
+      where: { id: goldenSet.id },
+      data: { tombstonedAt: new Date() },
+    });
+
+    const res = await importConfig(importRequest(JSON.stringify(doc)));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const diff = body.items.find((i: any) => i.type === 'goldenSet');
+    expect(diff.action).toBe('skip');
+    expect(diff.changes.join(' | ')).toMatch(/tombstoned/i);
+    expect(diff.changes.join(' | ')).toContain('Fixture Golden Set');
+
+    // The pending-purge row is inert: nothing written into it.
+    const after = await liveItems(goldenSet.id);
+    expect(after.map((i) => i.index)).toEqual([0, 1]);
+    expect(after[0].candidates[0].responseText).toBe('A-0');
+    expect(await db.goldenItem.count({ where: { goldenSetId: goldenSet.id } })).toBe(2);
+    expect((await db.goldenLabel.findMany())[0].tombstonedAt).toBeNull();
+
+    // And no live set was minted under that slug — neither by writing the
+    // tombstoned row nor by suffixing around it.
+    expect(await db.goldenSet.count({ where: { ownerId: user.id, tombstonedAt: null } })).toBe(0);
+  });
+
+  it('M3: a TOMBSTONED family MEMBER is skipped over — the write lands on the newest LIVE version', async () => {
+    // The slug lookup and the family lookup are two different queries and need
+    // two different treatments. `forkGoldenSet` derives `<slug>-v2`, so the
+    // document's slug matches the ROOT; the tombstone is on the newest member,
+    // which `orderBy: { version: 'desc' }` would otherwise select and rewrite.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await mkAnnotatedDataset(user.id, { slug: 'ds-fixture' });
+    const root = await mkGoldenSet(user.id, dataset, { slug: 'gs-fixture', name: 'Fixture Golden Set' });
+    const v2 = await forkGoldenSet(db, {
+      rootGoldenSetId: root.id,
+      sourceGoldenSetId: root.id,
+      ownerId: user.id,
+      name: 'Fixture Golden Set',
+      description: null,
+    });
+    expect(v2.version).toBe(2);
+    await db.goldenSet.update({ where: { id: v2.id }, data: { tombstonedAt: new Date() } });
+
+    const doc = await exportDoc();
+    expect(doc.goldenSets.map((g: { slug: string }) => g.slug)).toEqual(['gs-fixture']);
+    doc.goldenSets[0].items[0].candidates[0].responseText = 'A-0 (edited)';
+
+    const res = await importConfig(importRequest(JSON.stringify(doc)));
+    expect(res.status).toBe(200);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((await res.json()).items.find((i: any) => i.type === 'goldenSet').action).toBe('update');
+
+    // The pending-purge version is inert.
+    const v2Items = await liveItems(v2.id);
+    expect(v2Items.map((i) => i.index)).toEqual([0, 1]);
+    expect(v2Items[0].candidates[0].responseText).toBe('A-0');
+    expect(await db.goldenItem.count({ where: { goldenSetId: v2.id } })).toBe(2);
+
+    // The live root took the write.
+    const rootItems = await liveItems(root.id);
+    expect(rootItems.map((i) => i.index)).toEqual([2, 3]);
+    expect(rootItems[0].candidates[0].responseText).toBe('A-0 (edited)');
   });
 });

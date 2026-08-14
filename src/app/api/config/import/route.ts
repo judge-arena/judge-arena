@@ -12,8 +12,11 @@ import { legacyProviderToBackend } from '@/lib/llm';
 import {
   isGoldenSetFrozen,
   GoldenSetFrozenError,
+  findGoldenSetsPinningDataset,
   goldenItemLifecycleWhere,
+  goldenSetLifecycleWhere,
   nextGoldenItemIndex,
+  PLATFORM_OWNER_EMAIL,
   GOLDEN_LABEL_TOMBSTONE_REASON_CONFIG_IMPORT_REPLACE,
 } from '@/lib/golden-sets';
 import { forkGoldenSet } from '@/lib/golden-set-versions';
@@ -177,7 +180,9 @@ async function tombstoneReplacedGoldenItems(
  *   - If slug doesn't exist → create new entity.
  *   - API keys are NEVER imported (imported models get a keyless
  *     ModelEndpoint, same as every other field in this file).
- *   - Dataset samples are imported if present in the config.
+ *   - Dataset samples are imported if present in the config — EXCEPT onto a
+ *     dataset a golden set has annotated, where the wholesale replace is
+ *     skipped and reported rather than raising a P2003 mid-document.
  *   - Projects referenced by datasets are resolved by slug.
  *   - Golden sets match by (ownerId, slug) and are ordered after datasets;
  *     their items are ALWAYS embedded, and each item's source DatasetSample
@@ -185,6 +190,12 @@ async function tombstoneReplacedGoldenItems(
  *     reported as a `create`. `GoldenSet.datasetId` is immutable, so a
  *     document that would repoint an existing set is refused. Replaced items
  *     are tombstoned, never deleted. Human labels are never imported.
+ *   - A set's corpus resolves to THIS user's dataset or a PLATFORM-OWNED
+ *     public one, never a stranger's — the pin an imported item puts on a
+ *     DatasetSample is unreleasable, so binding one cross-tenant is not
+ *     undoable by the victim.
+ *   - RETIRED and TOMBSTONED sets are never written to: both are skipped with
+ *     a reason, mirroring `assertGoldenSetInCirculation` on the items routes.
  *   - Returns a diff report showing what was/would be created, updated, or skipped.
  */
 export async function POST(request: Request) {
@@ -463,6 +474,36 @@ export async function POST(request: Request) {
         if (changes.length === 0) {
           items.push({ type: 'dataset', slug, name: configDataset.name, action: 'skip' });
         } else {
+          // ── The sample replace is the SECOND destructive path onto dataset
+          // samples, and it carried none of the guard PUT /api/datasets/[id]/
+          // samples has. Two things make it worse than that PUT:
+          //
+          //   1. It is gated on `changes.length > 0`, NOT on a sample diff.
+          //      Merely RENAMING an annotated dataset reaches the deleteMany.
+          //   2. This route has no `$transaction`. Projects, rubrics, models
+          //      and the dataset row above are already committed when a P2003
+          //      lands, and the golden-set section — ordered after this loop —
+          //      never runs. The user gets a 500 saying nothing useful over a
+          //      half-applied document.
+          //
+          // So this SKIPS the replace and reports it, rather than throwing:
+          // a refusal that strands the import half-applied is not an
+          // improvement on the P2003. Checked before `items.push` so the
+          // dryRun preview says the same thing the real import will do.
+          const wantsSampleReplace = !!configDataset.samples && configDataset.samples.length > 0;
+          const pinningGoldenSets = wantsSampleReplace
+            ? await findGoldenSetsPinningDataset(prisma, existing.id)
+            : [];
+          if (pinningGoldenSets.length > 0) {
+            changes.push(
+              `samples: NOT replaced — this dataset is annotated by golden set(s) ` +
+                `${pinningGoldenSets.map((g) => g.name).join(', ')}, whose items were imported from ` +
+                'these rows. Every other field on the dataset was applied. Retire the golden set, or ' +
+                'import this corpus under a different slug.'
+            );
+          }
+          const replaceSamples = wantsSampleReplace && pinningGoldenSets.length === 0;
+
           items.push({ type: 'dataset', slug, name: configDataset.name, action: 'update', changes });
           if (!dryRun) {
             await prisma.dataset.update({
@@ -479,8 +520,8 @@ export async function POST(request: Request) {
               },
             });
 
-            // Replace samples if provided
-            if (configDataset.samples && configDataset.samples.length > 0) {
+            // Replace samples if provided, and if no golden set pins them.
+            if (replaceSamples && configDataset.samples) {
               await prisma.datasetSample.deleteMany({ where: { datasetId: existing.id } });
               await prisma.datasetSample.createMany({
                 data: configDataset.samples.map((s) => ({
@@ -535,27 +576,58 @@ export async function POST(request: Request) {
     // ── Golden sets ──
     // Ordered AFTER datasets on purpose: a set's items resolve their source
     // DatasetSample out of the dataset the loop above just created.
+    //
+    // The one owner a golden set's corpus may belong to besides this session,
+    // resolved ONCE for the document rather than per set. findFirst, not
+    // findUnique: User.email is deliberately NOT db-unique — identity is
+    // (oidcIssuer, oidcSubject) — and only prisma/seed-core.ts's
+    // resolvePlatformUser ever writes a row with this address. Same lookup,
+    // same reason, as POST /api/golden-sets:124-127.
+    const platformUser =
+      config.goldenSets.length > 0
+        ? await prisma.user.findFirst({
+            where: { email: PLATFORM_OWNER_EMAIL },
+            select: { id: true },
+          })
+        : null;
+
     for (const configGoldenSet of config.goldenSets) {
       const slug = configGoldenSet.slug;
       const name = configGoldenSet.name;
 
-      // Dataset resolution is deliberately WIDER than `POST /api/golden-sets`,
-      // which admits only platform-owned public corpora. Both arms are load-
-      // bearing:
+      // Dataset resolution is WIDER than `POST /api/golden-sets` in exactly one
+      // respect — it admits a private, user-owned corpus — and NO wider. Both
+      // arms are load-bearing:
       //   (a) fresh self-hosted instance — the dataset came in this same
       //       document and is now owned by the importing user;
       //   (b) re-import into the SAME instance — the set is over
       //       judgebench-v1, owned by platform@judgearena.local, which the
       //       exporter never emitted (datasets are scoped `{ userId }`).
       // Drop (b) and every real golden set fails to resolve on re-import.
+      //
+      // ARM (b) IS OWNER-SCOPED, and that predicate is the whole guard. It was
+      // `{ slug, visibility: 'public' }` — no owner — so any
+      // session-authenticated caller could post a document binding their golden
+      // items to a STRANGER's `DatasetSample` rows. The resulting pin is
+      // unreleasable by design (a tombstoned item still holds the `Restrict`
+      // FK, and purge is a later wave), so the victim permanently lost bulk
+      // sample replace and dataset delete on their own resource with no
+      // in-product remedy. `POST /api/golden-sets` refuses this exact widening
+      // at :128-136 — "Widening this is a dropped check, not a migration."
       const dataset =
         (await prisma.dataset.findFirst({
           where: { userId, slug: configGoldenSet.datasetSlug },
         })) ??
-        (await prisma.dataset.findFirst({
-          where: { slug: configGoldenSet.datasetSlug, visibility: 'public' },
-          orderBy: { createdAt: 'asc' },
-        }));
+        (platformUser
+          ? await prisma.dataset.findFirst({
+              where: {
+                slug: configGoldenSet.datasetSlug,
+                visibility: 'public',
+                userId: platformUser.id,
+              },
+              orderBy: { createdAt: 'asc' },
+            })
+          : null);
 
       if (!dataset) {
         items.push({
@@ -563,7 +635,11 @@ export async function POST(request: Request) {
           slug,
           name,
           action: 'skip',
-          changes: [`dataset "${configGoldenSet.datasetSlug}" not found on this instance — import or seed it first`],
+          changes: [
+            `dataset "${configGoldenSet.datasetSlug}" not found on this instance — import it in this ` +
+              'document, or seed the platform-owned corpus first. Only your own datasets and ' +
+              'platform-curated public ones can be annotated.',
+          ],
         });
         continue;
       }
@@ -627,10 +703,46 @@ export async function POST(request: Request) {
       // that version family. Comparing against the slug-matched root instead
       // would re-fork a frozen set on every re-import of the same document,
       // growing versions without bound.
+      //
+      // THIS LOOKUP IS DELIBERATELY UNFILTERED ON LIFECYCLE, and the
+      // classification immediately below is why. `@@unique([ownerId, slug])`
+      // is not partial, so a TOMBSTONED set still holds this slug; filtering it
+      // out here would send the document down the create branch and into a
+      // P2002 the catch reports as a generic 500. It is classified instead.
       const matched = await prisma.goldenSet.findFirst({
         where: { ownerId: userId, slug },
-        select: { id: true, parentId: true },
+        select: { id: true, name: true, parentId: true, tombstonedAt: true },
       });
+
+      // A TOMBSTONED set is pending purge: every read path hides it
+      // (`goldenSetLifecycleWhere` pins `tombstonedAt: null` in BOTH arms) and
+      // nothing may hand one back. Writing the document into it would resurrect
+      // content into a row nobody can see, and tombstone its labels on the way.
+      //
+      // SKIP, RATHER THAN SUFFIX THE SLUG the way POST /api/golden-sets:189-191
+      // does on collision. That route is a one-shot interactive create where a
+      // derived slug is a cosmetic detail. This one is an idempotent document
+      // sync keyed on (ownerId, slug): a suffixed set no longer matches the
+      // slug in the document, so the NEXT import of the same file would not
+      // find it and would mint another one, and another — unbounded growth from
+      // re-running an unchanged import, which is exactly the failure mode the
+      // fingerprint comparison exists to prevent. A named skip is idempotent,
+      // writes nothing, and tells the user the one thing they can act on.
+      if (matched?.tombstonedAt) {
+        items.push({
+          type: 'goldenSet',
+          slug,
+          name,
+          action: 'skip',
+          changes: [
+            `slug "${slug}" is held by golden set "${matched.name}", which is tombstoned and pending ` +
+              'purge. A tombstoned set is never written to and never handed back. Import this set ' +
+              'under a different slug.',
+          ],
+        });
+        continue;
+      }
+
       const rootId = matched ? matched.parentId ?? matched.id : null;
       const existing = rootId
         ? await prisma.goldenSet.findFirst({
@@ -643,7 +755,19 @@ export async function POST(request: Request) {
             // and the content differs — rewrites another user's golden set and
             // replaces all of its items. An import may only ever write sets
             // this session owns.
-            where: { ownerId: userId, OR: [{ id: rootId }, { parentId: rootId }] },
+            //
+            // LIFECYCLE-FILTERED, the same predicate the four read paths and
+            // the config export spread. `true` is the tombstone-only arm:
+            // retired sets ARE fetched, on purpose, so the check below can
+            // refuse one BY NAME instead of silently resolving to an older
+            // live version of the family and rewriting that instead. A
+            // tombstoned family member is skipped over entirely — it is
+            // pending purge, so the newest LIVE version is the right target.
+            where: {
+              ownerId: userId,
+              OR: [{ id: rootId }, { parentId: rootId }],
+              ...goldenSetLifecycleWhere(true),
+            },
             orderBy: { version: 'desc' },
             include: {
               items: {
@@ -677,6 +801,38 @@ export async function POST(request: Request) {
             },
           });
         }
+        continue;
+      }
+
+      // A RETIRED set is the case that made this whole filter urgent. It is
+      // live ground truth with live items and live human labels; the items
+      // routes 409 on it via `assertGoldenSetInCirculation`; and the config
+      // export DELIBERATELY emits it under `?includeRetired=true`. So
+      // `export?includeRetired=true` -> edit -> import took the update branch,
+      // called `tombstoneReplacedGoldenItems`, stamped `tombstonedReason:
+      // 'config-import-replace'` on EVERY live GoldenLabel of the set, did not
+      // clear `retiredAt`, and reported `update: 1` — a silent, un-undoable
+      // wholesale invalidation of the one artifact this feature exists to
+      // protect, through a documented round trip, reported as success.
+      //
+      // Checked BEFORE the datasetId guard below: the set's lifecycle decides
+      // whether ANYTHING can be written to it, which is the more fundamental
+      // refusal. The route out is the same pair the items routes offer —
+      // un-retire, or fork — and neither is something an import may do on the
+      // user's behalf.
+      if (existing.retiredAt) {
+        items.push({
+          type: 'goldenSet',
+          slug,
+          name,
+          action: 'skip',
+          changes: [
+            `golden set "${existing.name}" is retired: out of circulation, but still valid ground ` +
+              'truth with live human labels. An import will not rewrite it. Un-retire it (POST ' +
+              `/api/golden-sets/${existing.id}/retire with { "retired": false }), or fork it to a new ` +
+              'version, then re-import.',
+          ],
+        });
         continue;
       }
 
