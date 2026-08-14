@@ -43,7 +43,7 @@ Thirteen decisions were made by the owner during design. They are the authority 
 
 ## Plan seam
 
-**Plan A — the tombstone overlay.** The `Tombstone` model and its migration, the two `liveOnly` helpers and their shape tests, every read-site disposition, the ordinal rework, the `sampleCount` rework, and converting all four destructive verbs. Independently shippable; delivers the whole "datasets stop destroying data" half.
+**Plan A — the tombstone overlay.** The `Tombstone` model and its migration, the two `liveOnly` helpers and their shape tests, every read-site disposition, the ordinal rework (including the two `sampleCount` writes that drift, which sit inside verbs it is already rewriting), and converting all four destructive verbs. Independently shippable; delivers the whole "datasets stop destroying data" half.
 
 **Plan B — the dataset lifecycle.** `publishedAt` semantics, `POST /api/datasets/[id]/publish`, the freeze guards, fork-on-edit, the config-export backfill skip, retiring the pin-guard call sites, and the `account-deletion.ts` tombstone-plus-reassign.
 
@@ -206,17 +206,31 @@ Content edits on a published dataset **fork to the next version** via `createDat
 
 **New samples append above a high-water mark.** `nextIndex = max(index) over ALL rows including tombstoned, + 1`. Never `count()`, never `max` over live rows. `POST /api/datasets/[id]/samples` currently uses `dataset._count.samples` as `startIndex` (`samples/route.ts:46,59`), which is the `count()` failure exactly: tombstone sample 0 of 3, live count is 2, index 2 is occupied, first append collides. The high-water read must happen **inside the same transaction** as the inserts, as `nextGoldenItemIndex` does.
 
-**The count and the ordinal source diverge permanently**, and this is a three-name problem, not a two-name one:
+### The count diverges from the ordinal source
 
-- `Dataset.sampleCount` — a denormalised `Int?` written at **eight sites** in `src/`: `datasets/route.ts:208`, `datasets/[id]/samples/route.ts:77`, `:245`, `:340`, `datasets/[id]/refresh/route.ts:52`, `dataset-versions.ts:192`, `config/import/route.ts:537`, `:557`. Plus `prisma/seed-judgebench.ts:135`, `:176` and `scripts/importer/artifacts.ts:429`.
-- `_count.samples` — the live relation count, read at `datasets/route.ts:87`, `datasets/[id]/versions/route.ts:166`, `projects/[id]/route.ts:77`, `:168`, `datasets/[id]/refresh/route.ts:20`, `:60`, `datasets/[id]/route.ts:112`, `config/import/route.ts:455`.
-- `sampleTotal` — set from `_count.samples` in `toPublicDataset` (`serializers.ts:187`), the anonymous/public view.
+`Dataset.sampleCount` is a denormalised **stored row count**. Today rows and visible samples are the same thing, so it is correct by accident. Tombstoning breaks that equality, and the UI reads it through a ladder — `sampleCount ?? sampleTotal ?? _count.samples ?? 0` (`golden-sets/page.tsx:101`) — whose **first** rung is the stored column. So a stale `sampleCount` shadows the live relation count beneath it.
 
-**Eleven ladder expressions** read these, across four files: `datasets/page.tsx:652`; `datasets/[id]/page.tsx:694`, `:735`, `:765`, `:895`; `golden-sets/page.tsx:101`; `projects/[id]/page.tsx:228`, `:1156`, `:1164`, `:1634`, `:1659`. The golden-sets one has all three rungs: `d.sampleCount ?? d.sampleTotal ?? d._count?.samples ?? 0`.
+The concrete failure: the golden-set import picker advertises 620 samples, the import yields 610, and the user cannot see why. This is the same bug A0 fixed for `_count.items`; the read-path table above catches the `_count` half, and this catches the half that shadows it.
 
-Both halves move together — `sampleCount` becomes a **live** count while the ordinal source becomes a high-water mark — or the import picker advertises 620 samples for a corpus that yields 610. Filtering `_count.samples` alone fixes nothing because the ladder prefers the stored column; fixing only the column fixes nothing where it is null.
+**Only two write sites actually change**, and both are inside verbs this plan is already rewriting:
 
-Do **not** touch `hfMeta.sampleCount` (`projects/[id]/page.tsx:1241`, `:1243`, `:1360`, `:1368`, `:1379` — a HuggingFace remote row count) or `summary.sampleCount` (`projects/[id]/page.tsx:841`, which is `evaluations.length`). Different quantities that share a name.
+| Site | Computes | Disposition |
+|---|---|---|
+| `samples/route.ts:77` (POST append) | `startIndex + n` | **Change to a live count.** `startIndex` becomes the high-water mark, so this drifts the moment anything is hidden. |
+| `samples/route.ts:245` (DELETE) | `remaining.length` from the re-index query | **Change to a live count**, as part of deleting the re-index loop. |
+
+Every other writer is already correct and must be left alone — verified individually rather than inferred from the fact that it touches the column:
+
+- `datasets/route.ts:208` (create) and `config/import/route.ts:557` (import create) — nothing is tombstoned on a fresh dataset.
+- `samples/route.ts:340` (PUT bulk replace) and `config/import/route.ts:537` (import replace) — after tombstone-and-append the live set **is** the incoming document, so the document's length is the live count.
+- `dataset-versions.ts:192` — the child is fresh and all its rows are live.
+- `refresh/route.ts:52` — it passes `_count.samples` through `buildRefreshUpdate` (`dataset-refresh-update.ts:43`), so filtering that read fixes this site for free.
+
+**The eleven ladder expressions need no change at all.** With `sampleCount` correct and `_count.samples` filtered, they read correct values as written. They are listed here only so a reader can confirm that, not as work: `datasets/page.tsx:652`; `datasets/[id]/page.tsx:694`, `:735`, `:765`, `:895`; `golden-sets/page.tsx:101`; `projects/[id]/page.tsx:228`, `:1156`, `:1164`, `:1634`, `:1659`.
+
+Do **not** touch `hfMeta.sampleCount` (`projects/[id]/page.tsx:1241`, `:1243`, `:1360`, `:1368`, `:1379` — a HuggingFace remote row count) or `summary.sampleCount` (`projects/[id]/page.tsx:841`, which is `evaluations.length`). Different quantities sharing a name.
+
+A third name exists for the live quantity: `sampleTotal`, set from `_count.samples` in `toPublicDataset` (`serializers.ts:187`) for the anonymous view. It is the ladder's middle rung and is correct once `_count.samples` is filtered.
 
 ---
 
