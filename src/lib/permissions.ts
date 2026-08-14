@@ -38,6 +38,25 @@ export const PERMISSION_SCOPES = {
   // is ground truth a calibration run is scored against, and reusing the
   // dataset scopes would silently hand every existing "Dataset Manager" key
   // write access to it.
+  //
+  // THE SEPARATION IS NOT TRANSITIVE, and the honest rule is worth stating
+  // because the shape above implies otherwise. These two scopes gate
+  // `/api/golden-sets/**` and nothing else. The config routes gate on
+  // `config:*` and reach golden sets THROUGH it:
+  //
+  //   POST /api/config/import (import/route.ts:193, `config:write`) creates
+  //     golden sets, replaces their items wholesale, forks a frozen one, and
+  //     tombstones every live GoldenLabel it supersedes.
+  //   GET /api/config/export (export/route.ts:47, `config:read`) emits every
+  //     golden set the caller owns, items and candidates included.
+  //
+  // So a `config:write`-only key can invalidate human labels that a key
+  // holding neither golden-sets scope would be refused for, and a
+  // `config:read`-only key can read set contents `golden-sets:read` also
+  // guards. DESCRIBED, NOT ENDORSED: it is what a whole-config import IS —
+  // one document, every domain, one scope — and narrowing it is a product
+  // decision the owner has not been asked. Do not add a golden-sets check to
+  // the config routes without that ruling; amend this comment when it comes.
   'golden-sets:read': 'List and view golden sets and their items',
   'golden-sets:write': 'Create, update, fork, and retire golden sets',
 

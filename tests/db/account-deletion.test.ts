@@ -51,10 +51,12 @@ async function mkModelConfig(userId: string) {
 }
 
 // A0: GoldenSet.datasetId is required and `onDelete: Restrict`. The corpus is
-// owned by a SEPARATE user and marked public, mirroring production (golden
-// sets may only be built over public platform-owned datasets) — deleteUserAccount
+// owned by a SEPARATE user and marked public, mirroring the shape POST
+// /api/golden-sets admits (platform-owned public datasets) — deleteUserAccount
 // hard-deletes a departing user's PRIVATE datasets, which would abort on the
-// Restrict FK if the fixture put the corpus under the same owner.
+// Restrict FK if the fixture put the corpus under the same owner. That
+// same-owner combination is REACHABLE — see the note on mkGoldenSet below —
+// and is a gap in deleteUserAccount, not in this fixture.
 let goldenCorpusCounter = 0;
 
 async function mkGoldenCorpus() {
@@ -100,9 +102,23 @@ async function mkJudgeModelVersion() {
 // golden sets are built from platform-curated public corpora, and a source
 // dataset owned by the *deleting* user would be hard-deleted by step 4 of
 // deleteUserAccount before step 5 ever runs — aborting on
-// GoldenSet.datasetId's Restrict FK. POST /api/golden-sets only accepts
-// platform-owned public datasets, so that combination is unreachable
-// through the API and is not what this file is testing.
+// GoldenSet.datasetId's Restrict FK.
+//
+// THE SAME-OWNER COMBINATION IS REACHABLE, and an earlier version of this
+// comment claimed otherwise ("POST /api/golden-sets only accepts
+// platform-owned public datasets, so that combination is unreachable through
+// the API"). POST /api/golden-sets does restrict its source that way, but it
+// is not the only creation path: POST /api/config/import resolves a set's
+// corpus to THIS USER's dataset first (arm (a) of its dataset resolution),
+// and one document can carry both a private dataset and a golden set over it.
+// So a user can end up owning a private dataset pinned by their own golden
+// set, which is exactly the shape this fixture avoids.
+//
+// It is left avoided here on purpose. `deleteUserAccount` has NO CALLERS
+// today — there is no account-deletion route — so the P2003 that shape would
+// raise cannot fire in production, and partitioning step 4 to leave pinned
+// private datasets alone is a change that belongs with whoever wires the
+// route up, tested against the real caller rather than inferred here.
 let goldenSetCounter = 0;
 
 async function mkGoldenSet(
