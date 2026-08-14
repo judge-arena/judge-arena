@@ -1007,6 +1007,53 @@ describe('Config import — the guards the later sweeps never reached (M1-M3)', 
     expect(put.status).toBe(200);
   });
 
+  it('a golden set naming a HIDDEN corpus is skipped, never bound to it — an empty items array is not a way past the guard', async () => {
+    // UNOWNED DEFECT (not part of any A1 task): both arms of the golden-set
+    // dataset resolution read `Dataset` by slug with no lifecycle filter.
+    //
+    // NON-VACUITY — why the `items` array is EMPTY, and why that is the only
+    // shape that reaches the bug. With items present, the item re-resolution
+    // below the read spreads `liveSamplesOnly()`, whose `dataset` clause
+    // already excludes a hidden corpus: every item resolves to nothing and the
+    // set takes the `unresolved.length > 0` skip. `configGoldenSetSchema`
+    // declares `items: z.array(...).default([])` with no `.min(1)`, so an
+    // empty array parses clean, `unresolved` is empty, that skip is not taken,
+    // and the create branch binds `GoldenSet.datasetId` to the hidden dataset
+    // through an `onDelete: Restrict` FK — durable, with no in-product remedy.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await mkAnnotatedDataset(user.id, { slug: 'ds-hidden' });
+    await db.tombstone.create({ data: { datasetId: dataset.id, isTombstone: true } });
+
+    const doc = {
+      version: '1.0',
+      exportedAt: '2026-08-13T00:00:00.000Z',
+      goldenSets: [
+        {
+          slug: 'gs-over-hidden',
+          name: 'Set Over A Hidden Corpus',
+          visibility: 'private',
+          protocol: 'pairwise',
+          datasetSlug: 'ds-hidden',
+          version: 1,
+          items: [],
+        },
+      ],
+    };
+
+    const res = await importConfig(importRequest(JSON.stringify(doc)));
+    expect(res.status).toBe(200);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const diff = (await res.json()).items.find((i: any) => i.type === 'goldenSet');
+    expect(diff.action).toBe('skip');
+    expect(diff.changes[0]).toContain('not found on this instance');
+
+    // The row itself is the assertion: a reported skip that still wrote the
+    // set would satisfy the two lines above.
+    expect(await db.goldenSet.count({ where: { slug: 'gs-over-hidden' } })).toBe(0);
+    expect(await db.goldenSet.count({ where: { datasetId: dataset.id } })).toBe(0);
+  });
+
   it('M3: a RETIRED set is skipped, not silently rewritten with its labels invalidated', async () => {
     const user = await mkUser();
     mockSessionFor(user);

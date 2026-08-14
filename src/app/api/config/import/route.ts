@@ -23,7 +23,12 @@ import { forkGoldenSet } from '@/lib/golden-set-versions';
 import { createCustomJudgeModel } from '@/lib/model-catalog';
 import { logger, serializeError } from '@/lib/logger';
 import { audit, getRequestContext } from '@/lib/audit';
-import { liveSamplesOnly, nextSampleIndex, tombstoneSamples } from '@/lib/tombstones';
+import {
+  liveDatasetsOnly,
+  liveSamplesOnly,
+  nextSampleIndex,
+  tombstoneSamples,
+} from '@/lib/tombstones';
 
 /** Old config exports (pre Task 12 review fix) only ever wrote one of the
  * three legacy `ModelConfig.provider` values — translate those the same
@@ -684,9 +689,22 @@ export async function POST(request: Request) {
       // sample replace and dataset delete on their own resource with no
       // in-product remedy. `POST /api/golden-sets` refuses this exact widening
       // at :128-136 — "Widening this is a dropped check, not a migration."
+      //
+      // BOTH ARMS ARE LIFECYCLE-FILTERED (A1), matching the same read in
+      // `POST /api/golden-sets`. This is NOT the dataset section's upsert read
+      // above, which must stay unfiltered so a hidden slug does not read as
+      // free: this one BINDS, and `GoldenSet.datasetId` is `onDelete: Restrict`
+      // and immutable, so a set minted over a hidden corpus is durable with no
+      // in-product remedy. The item re-resolution below already refuses it via
+      // `liveSamplesOnly()`'s `dataset` clause — but only when the document
+      // carries items. `items` defaults to `[]` with no `.min(1)`
+      // (config.ts's goldenSetSchema), so an empty array walks straight past
+      // that check and into the create branch. Unresolvable now falls to the
+      // reported skip below, which is what a corpus this instance cannot
+      // annotate should have been all along.
       const dataset =
         (await prisma.dataset.findFirst({
-          where: { userId, slug: configGoldenSet.datasetSlug },
+          where: { userId, slug: configGoldenSet.datasetSlug, ...liveDatasetsOnly() },
         })) ??
         (platformUser
           ? await prisma.dataset.findFirst({
@@ -694,6 +712,7 @@ export async function POST(request: Request) {
                 slug: configGoldenSet.datasetSlug,
                 visibility: 'public',
                 userId: platformUser.id,
+                ...liveDatasetsOnly(),
               },
               orderBy: { createdAt: 'asc' },
             })
