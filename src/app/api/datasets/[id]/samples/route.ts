@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import type { DatasetSample } from '@prisma/client';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
 import { findGoldenSetsPinningDataset } from '@/lib/golden-sets';
-import { liveSamplesOnly, tombstoneSamples } from '@/lib/tombstones';
+import { liveSamplesOnly, nextSampleIndex, tombstoneSamples } from '@/lib/tombstones';
 
 const addSamplesSchema = z.object({
   samples: z.array(z.object({
@@ -44,6 +45,24 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
   try {
     const dataset = await prisma.dataset.findUnique({
       where: { id: params.id },
+      // `_count.samples` is UNFILTERED and stays that way. Do not spread
+      // `liveSamplesOnly()` into it.
+      //
+      // The instinct this comment exists to stop is "sampleCount became a live
+      // count, so filter this too" — and the step straight after that is
+      // re-deriving `startIndex` from it, which is the exact formulation that
+      // collides: hide sample 0 of 3 and a live count says 2 while index 2 is
+      // occupied, so the very first insert P2002s on
+      // @@unique([datasetId, index]). A tombstone frees no ordinal.
+      //
+      // Be clear about what this value is NOT: since A1 it is no longer the
+      // ordinal source. `nextSampleIndex` below is, and it does its own
+      // unfiltered read inside the insert transaction, which is where the
+      // race-free high-water mark has to be read anyway. Nothing in this
+      // handler consumes `_count.samples` any more; it is kept as the site
+      // this disposition attaches to, and it is deliberately NOT one of the
+      // `_count.samples` producers the rest of A1 filters — those all feed a
+      // displayed total, and this one feeds nothing.
       select: { userId: true, _count: { select: { samples: true } } },
     });
 
@@ -57,25 +76,62 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
     const body = await request.json();
     const data = addSamplesSchema.parse(body);
 
-    const startIndex = dataset._count.samples;
-    const created = await prisma.$transaction(
-      data.samples.map((s, i) =>
-        prisma.datasetSample.create({
-          data: {
-            datasetId: params.id,
-            index: startIndex + i,
-            input: s.input,
-            expected: s.expected ?? undefined,
-            metadata: s.metadata ? JSON.stringify(s.metadata) : undefined,
-          },
-        })
-      )
-    );
+    // A1: the high-water read and the inserts it feeds are ONE transaction,
+    // and so is the count they leave behind. Before this, the creates were an
+    // array-form $transaction and the count update was a separate round trip
+    // after it.
+    //
+    // `nextSampleIndex` is max(index) over ALL rows INCLUDING HIDDEN, + 1. It
+    // takes this callback's `tx` for the same reason `nextGoldenItemIndex`
+    // does (src/lib/golden-sets.ts): a read-then-insert across a commit
+    // boundary races a concurrent append, and the loser gets P2002 on
+    // @@unique([datasetId, index]).
+    //
+    // This replaces `startIndex = dataset._count.samples`. A count is only
+    // right while ordinals are dense, and they stop being dense the first time
+    // anything is hidden — but the case that actually BITES is not a
+    // tombstoned corpus, because `_count` is unfiltered and there
+    // count == max + 1 so nothing collides. It bites on a corpus RE-IMPORTED
+    // FROM A FILTERED EXPORT: src/lib/config.ts:389 emits `index: s.index`
+    // verbatim and the importer writes it back, so the rows arrive with GAPS,
+    // count < max + 1, and the first append lands on an occupied ordinal.
+    const created = await prisma.$transaction(async (tx) => {
+      const startIndex = await nextSampleIndex(tx, params.id);
 
-    // Update sample count
-    await prisma.dataset.update({
-      where: { id: params.id },
-      data: { sampleCount: startIndex + data.samples.length },
+      const rows: DatasetSample[] = [];
+      for (let i = 0; i < data.samples.length; i++) {
+        const s = data.samples[i];
+        rows.push(
+          await tx.datasetSample.create({
+            data: {
+              datasetId: params.id,
+              index: startIndex + i,
+              input: s.input,
+              expected: s.expected ?? undefined,
+              metadata: s.metadata ? JSON.stringify(s.metadata) : undefined,
+            },
+          })
+        );
+      }
+
+      // `sampleCount` becomes a LIVE count. It was
+      // `startIndex + data.samples.length`, which is the row count exactly
+      // while ordinals are dense and drifts the moment `startIndex` is a
+      // high-water mark: append 2 rows onto a 4-row corpus with a hole and a
+      // hidden row and it stores 7 where the live answer is 5. The UI ladder
+      // reads the stored value FIRST, so a wrong one shadows the live count
+      // beneath it — the import picker advertises 620 and the import yields
+      // 610.
+      const live = await tx.datasetSample.count({
+        where: { datasetId: params.id, ...liveSamplesOnly() },
+      });
+
+      await tx.dataset.update({
+        where: { id: params.id },
+        data: { sampleCount: live },
+      });
+
+      return rows;
     });
 
     return NextResponse.json({ added: created.length, samples: created }, { status: 201 });

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { getServerSession } from 'next-auth';
 import { db, truncateAll, mkUser } from './helpers';
-import { DELETE as deleteSamples } from '@/app/api/datasets/[id]/samples/route';
+import { DELETE as deleteSamples, POST as addSamples } from '@/app/api/datasets/[id]/samples/route';
 import { liveSamplesOnly } from '@/lib/tombstones';
 
 // A1, the tombstone overlay. DELETE /api/datasets/[id]/samples HIDES the named
@@ -280,5 +280,119 @@ describe('DELETE /api/datasets/[id]/samples — the overlay (A1 Task 3)', () => 
     await expect(
       db.dataset.findUnique({ where: { id: target.id }, select: { sampleCount: true } })
     ).resolves.toEqual({ sampleCount: 1 });
+  });
+});
+
+// ─── A1 Task 4: POST appends above the high-water mark ──────────────────────
+// New samples land at max(index) over ALL rows including hidden, + 1. Never a
+// count: a tombstone frees no ordinal, so the count and the high-water mark
+// diverge the moment anything is hidden OR the moment the corpus arrives with
+// gaps from a filtered re-import.
+describe('POST /api/datasets/[id]/samples — the high-water mark (A1 Task 4)', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('appends above max(index) over ALL rows on a GAPPED corpus with a hidden tail', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+
+    // Indices 0, 1, 3, 4 — a HOLE at 2. This is what a corpus re-imported from
+    // a filtered export looks like: src/lib/config.ts:389 emits
+    // `index: s.index` verbatim and the importer writes it back, so the rows
+    // arrive with gaps and count < max + 1. A freshly-appended corpus has
+    // count == max + 1 and NOTHING collides, which is why this bug is
+    // invisible without this shape and why a test over a dense corpus would
+    // pass against the unchanged handler.
+    const dataset = await mkCorpus(user.id, [0, 1, 3, 4]);
+
+    // …and the TAIL is hidden, which is what defeats the other two wrong
+    // formulations. With the tail live, count(), max over live rows and max
+    // over all rows all agree, and only the unfiltered-count bug shows.
+    await db.tombstone.create({
+      data: {
+        datasetSampleId: dataset.samples[3].id,
+        isTombstone: true,
+        reason: 'deleted by hand',
+      },
+    });
+
+    // Every wrong formulation lands on an OCCUPIED ordinal here:
+    //   unfiltered count()   = 4  -> index 4 is taken   (this is the old code)
+    //   live count()         = 3  -> index 3 is taken
+    //   max over LIVE  + 1   = 4  -> index 4 is taken
+    //   max over ALL   + 1   = 5  -> free. This is the rule.
+    const res = await addSamples(
+      jsonRequest(`http://localhost/api/datasets/${dataset.id}/samples`, 'POST', {
+        samples: [{ input: 'appended one' }, { input: 'appended two' }],
+      }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.added).toBe(2);
+    expect(body.samples.map((s: { index: number }) => s.index)).toEqual([5, 6]);
+
+    const rows = await db.datasetSample.findMany({
+      where: { datasetId: dataset.id },
+      orderBy: { index: 'asc' },
+    });
+    // The hole at 2 stays a hole. `index` is not a position into the live
+    // array and nothing back-fills it — its only guarantees are uniqueness
+    // within the dataset and monotonic insertion order.
+    expect(rows.map((r) => r.index)).toEqual([0, 1, 3, 4, 5, 6]);
+
+    // The hidden tail is untouched: still on disk, still hidden, still holding
+    // ordinal 4.
+    const tail = await db.datasetSample.findUnique({ where: { id: dataset.samples[3].id } });
+    expect(tail?.index).toBe(4);
+    const tomb = await db.tombstone.findUnique({
+      where: { datasetSampleId: dataset.samples[3].id },
+    });
+    expect(tomb?.isTombstone).toBe(true);
+  });
+
+  it('stores a LIVE sampleCount, not startIndex + n and not a row count', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+
+    // A dense corpus with a hidden HEAD this time, so the append itself
+    // succeeds even against the unchanged handler. That isolates the count
+    // from the ordinal: this test fails on exactly one assertion, and it is
+    // the one about sampleCount.
+    const dataset = await mkCorpus(user.id, [0, 1, 2]);
+    await db.tombstone.create({
+      data: {
+        datasetSampleId: dataset.samples[0].id,
+        isTombstone: true,
+        reason: 'deleted by hand',
+      },
+    });
+
+    const res = await addSamples(
+      jsonRequest(`http://localhost/api/datasets/${dataset.id}/samples`, 'POST', {
+        samples: [{ input: 'appended one' }, { input: 'appended two' }],
+      }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+    expect(res.status).toBe(201);
+    expect((await res.json()).samples.map((s: { index: number }) => s.index)).toEqual([3, 4]);
+
+    // Five rows on disk, four of them live. `startIndex + n` is 3 + 2 = 5 —
+    // the ROW count, which is what the replaced line stored, and the number
+    // the UI ladder would then read FIRST and display over the live count
+    // beneath it.
+    await expect(db.datasetSample.count({ where: { datasetId: dataset.id } })).resolves.toBe(5);
+    await expect(
+      db.datasetSample.count({ where: { datasetId: dataset.id, ...liveSamplesOnly() } })
+    ).resolves.toBe(4);
+
+    const after = await db.dataset.findUnique({
+      where: { id: dataset.id },
+      select: { sampleCount: true },
+    });
+    expect(after?.sampleCount).toBe(4);
   });
 });
