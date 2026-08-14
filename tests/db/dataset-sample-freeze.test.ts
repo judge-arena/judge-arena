@@ -235,7 +235,7 @@ describe('the other destructive paths onto a golden-set-pinned corpus (M1)', () 
     expect(survived.map((s) => s.id)).toEqual([sample.id]);
   });
 
-  it('DELETE /api/datasets/[id]/samples still deletes when nothing pins the dataset', async () => {
+  it('DELETE /api/datasets/[id]/samples HIDES the sample when nothing pins the dataset', async () => {
     const user = await mkUser();
     mockSessionFor(user);
     const { dataset, sample } = await mkDatasetWithSample(user.id);
@@ -248,8 +248,26 @@ describe('the other destructive paths onto a golden-set-pinned corpus (M1)', () 
     );
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ deleted: 1, remaining: 0 });
-    await expect(db.datasetSample.count({ where: { datasetId: dataset.id } })).resolves.toBe(0);
+    // `deleted` became `tombstoned` — nothing is deleted here any more, and a
+    // key called `deleted` is the one word that would let a caller conclude
+    // the row is gone. Same rename A0 made on the sibling endpoint
+    // (src/app/api/golden-sets/[id]/items/route.ts:313).
+    expect(await res.json()).toEqual({ tombstoned: 1, remaining: 0 });
+
+    // The old assertion here was `count()` → 0. It is inverted rather than
+    // adjusted: the row survives, carrying the id any golden item would cite,
+    // and it is the Tombstone row that makes it invisible.
+    await expect(db.datasetSample.count({ where: { datasetId: dataset.id } })).resolves.toBe(1);
+    const tomb = await db.tombstone.findUnique({ where: { datasetSampleId: sample.id } });
+    expect(tomb?.isTombstone).toBe(true);
+
+    // `sampleCount` is a live count, and the response body reads the same
+    // value — they move together.
+    const after = await db.dataset.findUnique({
+      where: { id: dataset.id },
+      select: { sampleCount: true },
+    });
+    expect(after?.sampleCount).toBe(0);
   });
 
   it('DELETE /api/datasets/[id] 409s naming the pinning sets, and the dataset survives', async () => {

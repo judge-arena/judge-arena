@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
 import { findGoldenSetsPinningDataset } from '@/lib/golden-sets';
+import { liveSamplesOnly, tombstoneSamples } from '@/lib/tombstones';
 
 const addSamplesSchema = z.object({
   samples: z.array(z.object({
@@ -179,7 +180,23 @@ export async function DELETE(request: Request, props: { params: Promise<{ id: st
     const body = await request.json();
     const data = deleteSamplesSchema.parse(body);
 
-    // Verify all samples belong to this dataset
+    // Verify all samples belong to this dataset.
+    //
+    // UNFILTERED, DELIBERATELY — do not spread `liveSamplesOnly()` in here.
+    // An already-hidden id STILL BELONGS to this dataset, so a retried delete
+    // must converge on hidden rather than answer 400 claiming the id is
+    // foreign. Same rule, same wording, as the golden-item membership lookup
+    // at src/app/api/golden-sets/[id]/items/route.ts:290-296.
+    //
+    // It is also what keeps `tombstoneSamples` usable: that helper raises
+    // P2003 for an id that is not a real DatasetSample, because
+    // `skipDuplicates` skips unique conflicts and not foreign-key ones. This
+    // read is what turns a foreign id into the clean 400 below instead of a
+    // generic 500 — deliberately loud in the helper, deliberately handled
+    // here.
+    //
+    // NOTE this is the MEMBERSHIP read. The dataset OWNERSHIP read above is a
+    // different site with a different disposition; leave it alone.
     const samples = await prisma.datasetSample.findMany({
       where: { id: { in: data.sampleIds }, datasetId: params.id },
       select: { id: true },
@@ -193,15 +210,30 @@ export async function DELETE(request: Request, props: { params: Promise<{ id: st
     }
 
     // Same guard as PUT, and it was missing here — recorded as a known gap in
-    // the migration header and closed now. The delete below is `Restrict`-ed by
-    // GoldenItem.sourceDatasetSampleId exactly as the bulk replace is.
+    // the migration header and closed in A0. A1 made this handler tombstone
+    // the named rows, so GoldenItem.sourceDatasetSampleId's `Restrict` is no
+    // longer what would refuse: nothing is deleted below any more, and the
+    // re-index loop that used to renumber the survivors is gone too.
     //
-    // The check is DATASET-WIDE rather than per-sampleId, deliberately: this
-    // handler re-indexes every surviving row afterwards, so deleting an
-    // unpinned sample still renumbers the ones a golden item cites, and
-    // `GoldenItem.index`/the ordinal an annotator worked against would drift
-    // under the annotation. Same rule as PUT — an annotated corpus is frozen,
-    // not partially editable.
+    // THE GUARD STAYS ANYWAY, deliberately. Hiding a row removes it from every
+    // filtered read exactly as deleting it did, so a corpus somebody has
+    // annotated would still change shape under the annotation. Retiring this
+    // guard belongs to the lifecycle work (Plan B), not to the overlay.
+    //
+    // The check stays DATASET-WIDE rather than per-sampleId. Its original
+    // reason — "this handler re-indexes every surviving row afterwards" — is
+    // now false, and the replacement is narrower but real: a golden item's
+    // sourceDatasetSampleId may cite any row of the corpus, and hiding any row
+    // changes what every filtered read of that corpus returns, including the
+    // sample list an annotator reviews. Narrowing the scope to the named ids
+    // is a behaviour change, and it belongs with the guard's retirement rather
+    // than with the overlay.
+    //
+    // The predicate — including why it is NOT lifecycle-filtered — lives in
+    // `findGoldenSetsPinningDataset` (src/lib/golden-sets.ts), shared with the
+    // three other destructive paths that were missing this guard entirely:
+    // PUT below, DELETE /api/datasets/[id], and the config importer's sample
+    // replace.
     const pinningGoldenSets = await findGoldenSetsPinningDataset(prisma, params.id);
 
     if (pinningGoldenSets.length > 0) {
@@ -210,7 +242,7 @@ export async function DELETE(request: Request, props: { params: Promise<{ id: st
           error:
             'Cannot delete samples from this dataset: it is annotated by golden set(s) ' +
             `${pinningGoldenSets.map((g) => g.name).join(', ')}. ` +
-            'Golden items were imported from these rows, and the surviving samples would be re-indexed. ' +
+            'Golden items were imported from these rows. ' +
             'Retire the golden set, or create a new dataset version instead.',
           goldenSets: pinningGoldenSets,
         },
@@ -218,34 +250,87 @@ export async function DELETE(request: Request, props: { params: Promise<{ id: st
       );
     }
 
-    await prisma.datasetSample.deleteMany({
-      where: { id: { in: data.sampleIds }, datasetId: params.id },
-    });
-
-    // Re-index remaining samples
-    const remaining = await prisma.datasetSample.findMany({
-      where: { datasetId: params.id },
-      orderBy: { index: 'asc' },
-      select: { id: true },
-    });
-
-    if (remaining.length > 0) {
-      await prisma.$transaction(
-        remaining.map((s, i) =>
-          prisma.datasetSample.update({
-            where: { id: s.id },
-            data: { index: i },
-          })
-        )
+    // A1: hide + live count + persist, in ONE transaction. Before this, the
+    // delete, the re-index and the count update were three separate round
+    // trips, so a failure between them left a corpus whose stored count
+    // disagreed with its rows. Same shape as the golden-items DELETE
+    // (src/app/api/golden-sets/[id]/items/route.ts:284).
+    //
+    // The membership lookup and the pin guard stay OUTSIDE this transaction,
+    // unlike their golden-items counterparts. Two reasons: they are reads that
+    // gate the write and neither races anything (nothing hard-deletes a
+    // DatasetSample on this branch any more), and keeping them out preserves
+    // the existing precedence — a foreign id is a 400 even on a pinned
+    // dataset. Moving them in would mean throwing typed errors out of the
+    // callback, which Next.js 15 forces to be module-local classes because it
+    // validates route.ts exports against a known allowlist.
+    const result = await prisma.$transaction(async (tx) => {
+      // `samples` rather than `data.sampleIds`: the lookup above already
+      // resolved exactly the ids that belong here, and passing the resolved
+      // set is what keeps the P2003 in `tombstoneSamples` unreachable.
+      const tombstoned = await tombstoneSamples(
+        tx,
+        samples.map((s) => s.id),
+        'sample deleted'
       );
-    }
 
-    await prisma.dataset.update({
-      where: { id: params.id },
-      data: { sampleCount: remaining.length },
+      // ── THE RE-INDEX LOOP IS DELETED, NOT ADAPTED ──────────────────────
+      // What stood here read every surviving row and renumbered it 0..n-1.
+      // Neither form of it survives A1, and both failure modes are worth
+      // naming because each looks plausible:
+      //
+      //   ADAPTED (filtered to live rows) it renumbers the first survivor to
+      //   0 — which collides with the hidden row still holding 0, because
+      //   @@unique([datasetId, index]) is not partial and a tombstone frees
+      //   no ordinal. P2002, the transaction rolls back, and EVERY delete
+      //   500s. The 20260813120000_v2e_golden_item_label_tombstones header
+      //   documents the identical trap for golden items.
+      //
+      //   KEPT VERBATIM it is worse in a quieter way: its query has no
+      //   lifecycle filter, so `remaining` is every row, still dense, and
+      //   each update writes the index the row already holds — a silent
+      //   no-op whose `remaining.length` then becomes a stored ROW count in
+      //   `sampleCount` and in the response body.
+      //
+      // Ordinals are simply no longer dense. `index` guarantees only
+      // uniqueness within the dataset and monotonic insertion order; the next
+      // one is a high-water mark (`nextSampleIndex`, src/lib/tombstones.ts),
+      // never a count and never a reused ordinal.
+
+      // `sampleCount` becomes a LIVE count — and the response body reads the
+      // same value, so the two move together. Both used to come from
+      // `remaining.length`, the length of the re-index read, which is a ROW
+      // count: on a corpus carrying any hidden row it over-reports. The UI
+      // ladder reads the stored `sampleCount` FIRST, so a stale value shadows
+      // the live count beneath it — the import picker advertises 620 and the
+      // import yields 610.
+      const remaining = await tx.datasetSample.count({
+        where: { datasetId: params.id, ...liveSamplesOnly() },
+      });
+
+      await tx.dataset.update({
+        where: { id: params.id },
+        data: { sampleCount: remaining },
+      });
+
+      // `deleted` is renamed to `tombstoned`, matching what A0 did to the
+      // sibling endpoint (golden-sets/[id]/items/route.ts:313). Nothing is
+      // deleted here any more, and `deleted` is the one word that would let a
+      // caller conclude the row is gone. No client reads the key — the only
+      // caller in the tree, src/app/datasets/[id]/page.tsx:332-357, checks
+      // `res.ok` and `data.error` and nothing else — so an external script
+      // gets `undefined`, a loud break rather than a quiet lie.
+      //
+      // The counting rule differs from the golden-items route ON PURPOSE:
+      // `tombstoneSamples` returns the number of DISTINCT ids NOW HIDDEN, so a
+      // repeated delete reports `tombstoned: 1`, whereas golden-items'
+      // `updateMany … tombstonedAt: null` reports 0 on the retry
+      // (tests/db/golden-sets.test.ts:1123). "Now hidden" is the property this
+      // handler converges on.
+      return { tombstoned, remaining };
     });
 
-    return NextResponse.json({ deleted: data.sampleIds.length, remaining: remaining.length });
+    return NextResponse.json(result);
   } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json(
