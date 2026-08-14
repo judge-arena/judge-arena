@@ -716,9 +716,11 @@ describe('DELETE /api/datasets/[id] — the overlay (A1 Task 6)', () => {
 
 // ─── A1 Task 7: a hidden dataset is closed to writes (Decision 15) ──────────
 // Every mutation handler opens with an ownership guard read of its dataset,
-// and not one of them filtered. So the moment Task 6 landed, a tombstoned
-// dataset vanished from every list and detail read while staying completely
-// writable through the API.
+// and not one of them filtered — so once Task 6 made DELETE hide a dataset
+// rather than destroy it, a tombstoned corpus stayed completely writable
+// through the API. (The list and detail READS are still unfiltered at this
+// commit too; closing those is Task 9. The two halves land in that order, so
+// for one commit a hidden dataset is readable and unwritable.)
 //
 // TWO OF THESE ARE LIVE DEFECTS ON THIS BRANCH, not hypotheticals, and both
 // are the same shape: `liveSamplesOnly()` carries a PARENT arm, so the sample
@@ -955,8 +957,9 @@ describe('a hidden dataset is closed to writes (A1 Task 7, Decision 15)', () => 
     // `requireOwnership('dataset', …)` reads UNFILTERED and is shared with
     // eight other resource types whose access-matrix tests pin that behaviour,
     // so the liveness check is explicit and local to this handler
-    // (`assertDatasetLive`). Without it the rename lands on a row no read path
-    // returns.
+    // (`assertDatasetLive`). Without it you can rename a corpus you have
+    // already deleted — and once Task 9 filters the list and detail reads, that
+    // rename lands on a row nothing returns.
     const user = await mkUser();
     mockSessionFor(user);
     const { dataset } = await t7Corpus(user.id);
@@ -977,27 +980,49 @@ describe('a hidden dataset is closed to writes (A1 Task 7, Decision 15)', () => 
     ).resolves.toMatchObject({ name: originalName });
   });
 
-  it('DELETE /api/datasets/[id] 404s on an ALREADY hidden dataset, and leaves the first delete\'s reason intact', async () => {
-    // A second delete must not overwrite the record of the first. The
-    // convergence property Task 6 pins is about delete -> RESTORE -> delete;
-    // a straight retry on a still-hidden dataset is a write onto a hidden row
-    // and answers 404 like every other write here.
+  it('DELETE /api/datasets/[id] 404s on an ALREADY hidden dataset, and the retry writes nothing at all', async () => {
+    // THE ASYMMETRY, STATED: a retried SAMPLE delete is 200-and-idempotent
+    // (pinned in the Task 3 block above) because it operates on rows inside a
+    // corpus that is still live and still writable. A retried DATASET delete
+    // is 404 because its target IS the hidden row. Both are deliberate.
+    //
+    // The first delete goes through the ROUTE, not the fixture, so every value
+    // asserted below is one a caller can actually produce. A fixture-written
+    // `reason` would pin a string no API path emits — the handler passes a
+    // hard-coded 'dataset deleted' — and the assertion would be unfalsifiable
+    // by anything a user could do.
     const user = await mkUser();
     mockSessionFor(user);
     const { dataset } = await t7Corpus(user.id);
-    await db.tombstone.create({
-      data: { datasetId: dataset.id, isTombstone: true, reason: 'the first delete' },
-    });
 
-    const res = await deleteDataset(
+    const first = await deleteDataset(
       new Request(`http://localhost/api/datasets/${dataset.id}`, { method: 'DELETE' }),
       { params: Promise.resolve({ id: dataset.id }) }
     );
+    expect(first.status).toBe(200);
+    const afterFirst = await db.tombstone.findUniqueOrThrow({
+      where: { datasetId: dataset.id },
+    });
+    expect(afterFirst.isTombstone).toBe(true);
+    expect(afterFirst.reason).toBe('dataset deleted');
 
-    expect(res.status).toBe(404);
-    const tomb = await db.tombstone.findUniqueOrThrow({ where: { datasetId: dataset.id } });
-    expect(tomb.isTombstone).toBe(true);
-    expect(tomb.reason).toBe('the first delete');
+    const second = await deleteDataset(
+      new Request(`http://localhost/api/datasets/${dataset.id}`, { method: 'DELETE' }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+    expect(second.status).toBe(404);
+
+    // The retry wrote NOTHING: the whole row is exactly what the first delete
+    // left, `updatedAt` included. That column is what makes this observable at
+    // all — `tombstoneDataset`'s upsert writes `isTombstone` and `reason` to
+    // the values they already hold, so on every OTHER column a second upsert
+    // is indistinguishable from no upsert. `Tombstone.updatedAt` is
+    // `@updatedAt`, so it moves on any update whether or not a value changed.
+    const afterSecond = await db.tombstone.findUniqueOrThrow({
+      where: { datasetId: dataset.id },
+    });
+    expect(afterSecond).toEqual(afterFirst);
+    await expect(db.tombstone.count({ where: { datasetId: dataset.id } })).resolves.toBe(1);
   });
 
   it('POST /api/golden-sets 404s over a hidden corpus — nothing is minted onto rows Restrict then pins forever', async () => {

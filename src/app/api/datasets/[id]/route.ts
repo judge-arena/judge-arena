@@ -22,16 +22,17 @@ import { liveDatasetsOnly, liveSamplesOnly, tombstoneDataset } from '@/lib/tombs
  * the write handlers run immediately after the ownership gate.
  *
  * Without it a hidden dataset stays PATCHable: you could rename a corpus you
- * had already deleted, and the rename would land on a row no read path
- * returns.
+ * had already deleted — and once Task 9 filters the list and detail reads,
+ * that rename lands on a row nothing returns.
  *
  * IT ANSWERS 404, NOT 409, unlike its golden-set counterpart, and the
- * difference is not cosmetic. A retired golden set is still listed to its
- * owner under `?includeRetired=true` and has an un-retire verb, so a bare 404
- * would confuse someone looking straight at it; a hidden dataset is absent
- * from every read path this branch has, with no escape flag and no un-delete
- * verb, so "not found" is what its owner has already been told everywhere
- * else. It is also the answer the other seven handlers give.
+ * difference is not cosmetic. A retired golden set stays visible to its owner
+ * under `?includeRetired=true` and has an un-retire verb, so a bare 404 would
+ * confuse someone looking straight at it. A hidden dataset has neither: no
+ * escape flag, and no un-delete verb anywhere in A1. 404 is also what this
+ * branch already answers everywhere else — all nine dataset guard reads Task 7
+ * converted return it, and Task 9 brings the list and detail reads into line.
+ * A 409 here would leave one handler in the set saying something different.
  *
  * Not exported: Next.js 15 validates a `route.ts`'s named exports against a
  * fixed allowlist. Module-local is the same accommodation `resolveJudgeVersionIds`
@@ -186,14 +187,27 @@ export async function DELETE(_request: Request, props: { params: Promise<{ id: s
   try {
     const ownershipError = await requireOwnership('dataset', params.id, session);
     if (ownershipError) return ownershipError;
-    // A STRAIGHT RETRY ON AN ALREADY-HIDDEN DATASET 404s, and that is not in
-    // tension with the convergence property the tombstone writers guarantee.
-    // `tombstoneDataset` converges on hidden for delete → RESTORE → delete,
-    // which is the sequence that would otherwise leave a deleted dataset
-    // visible; the restore in the middle makes this check pass. A retry with
-    // the row still hidden is a write onto a hidden row like any other, and
-    // letting it through would overwrite the first delete's `reason` with this
-    // one's — losing the only record of why the corpus went away.
+    // A STRAIGHT RETRY ON AN ALREADY-HIDDEN DATASET 404s, for the plain
+    // reason: a hidden dataset is closed to writes, and delete is a write.
+    //
+    // THE SAMPLE-LEVEL CONVERGENCE PROPERTY DOES NOT TRANSFER, and the
+    // resulting asymmetry is a stated choice rather than an oversight:
+    //
+    //   a retried SAMPLE delete is 200 and idempotent,
+    //   a retried DATASET delete is 404.
+    //
+    // `tombstoneSamples` never P2002s and always converges on hidden, and the
+    // DELETE samples verb keeps its membership lookup unfiltered precisely so
+    // a retry can reach an already-hidden row. But every one of those retries
+    // operates on rows inside a corpus that is itself still live and still
+    // writable. A retried dataset delete has no such standing — its target IS
+    // the hidden row. Same reason PATCH above refuses.
+    //
+    // `tombstoneDataset`'s own convergence is untouched and still required. It
+    // guarantees delete → RESTORE → delete, the sequence that would otherwise
+    // leave a deleted-then-restored-then-deleted dataset visible; the restore
+    // in the middle is what puts the row back within reach of this check.
+    // Both halves are pinned in tests/db/dataset-sample-tombstone.test.ts.
     const hiddenError = await assertDatasetLive(params.id);
     if (hiddenError) return hiddenError;
 

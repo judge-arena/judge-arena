@@ -41,10 +41,15 @@ const bulkReplaceSamplesSchema = z.object({
 
 // DECISION 15 — A HIDDEN DATASET IS CLOSED TO WRITES. All four verbs in this
 // file open with the same ownership guard read, and all four now spread
-// `liveDatasetsOnly()` into it, so a tombstoned dataset 404s on write exactly
-// as it already 404s on every list and detail read. `findFirst` rather than
-// `findUnique` so the id and the overlay predicate travel in one plain
-// `where`.
+// `liveDatasetsOnly()` into it, so a tombstoned dataset 404s on write.
+// `findFirst` rather than `findUnique` so the id and the overlay predicate
+// travel in one plain `where`.
+//
+// THE READ SIDE HAS NOT CAUGHT UP YET, and that is worth stating rather than
+// implying: `datasets/route.ts` (list) and `datasets/[id]/route.ts` (detail)
+// are still unfiltered at this commit. Filtering them is Task 9. Until it
+// lands, a hidden dataset is readable and unwritable — a deliberate ordering,
+// not an inconsistency to be reconciled here.
 //
 // TWO OF THE FOUR WERE ACTIVELY BROKEN WITHOUT IT, not merely permissive, and
 // for the same reason: `liveSamplesOnly()` carries a PARENT arm, so the sample
