@@ -49,11 +49,17 @@ Two holes after A0 motivate this. **Datasets still destroy data** — `DELETE` s
 
 ## Plan seam
 
-**Plan A — the mutation record.** The `Tombstone` and `SampleRevision` models and their migration, the two filter helpers and their shape tests, every read-site disposition, the ordinal rework, and converting the four destructive verbs plus `PATCH` to record instead of destroy. Independently shippable.
+Three plans, in order. A1 and A2 together are what this document calls **[A]**; B is **[B]**.
+
+**Plan A1 — the tombstone overlay.** The `Tombstone` model and its migration (including the hand-edited `CHECK`), both filter helpers and their shape tests, every read-site disposition, the ordinal and `sampleCount` rework, and converting the four *destructive* verbs to hide instead of delete. Independently shippable, and delivers the whole "datasets stop destroying data" guarantee on its own.
+
+**Plan A2 — the revision log.** The `SampleRevision` model and its migration, writing a revision on edit, delete and restore, and whatever surface exposes the history. Depends on A1 only for the delete/restore verbs it hooks into; `PATCH`'s in-place edit is untouched by A1, so A2 owns it end to end.
 
 **Plan B — the lifecycle.** `publishedAt` semantics, `POST /api/datasets/[id]/publish`, the freeze guards, fork-on-edit, the config-export backfill skip, retiring the pin-guard call sites, and `account-deletion.ts`'s tombstone-plus-reassign.
 
-Sections are tagged **[A]** or **[B]**.
+**The one cost of splitting A1 from A2**, stated so it is chosen rather than discovered: `DELETE` and `PUT` in `samples/route.ts` are edited twice — once by A1 to tombstone, once by A2 to append a revision. A1's implementer should leave those transactions shaped so a second write drops in cleanly, and A2's brief carries a pointer to what A1 did there.
+
+Sections below are tagged **[A]** where they apply to the overlay work; the revision log is confined to its own section.
 
 ---
 
