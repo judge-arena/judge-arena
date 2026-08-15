@@ -191,8 +191,8 @@ export function liveSampleOrNull<T extends MaybeHiddenSample>(
 /**
  * The pair, applied to one evaluation-shaped row. Every site that joins
  * `Evaluation.dataset` also joins `Evaluation.datasetSample` — the two are
- * always selected together, in all eight files — so one function keeps them
- * from being dispositioned differently by accident.
+ * always selected together, at all eight include sites across seven files — so
+ * one function keeps them from being dispositioned differently by accident.
  */
 export function withLiveCorpusRefs<
   E extends { dataset: MaybeHidden | null; datasetSample: MaybeHiddenSample | null },

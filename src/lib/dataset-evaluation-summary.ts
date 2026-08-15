@@ -115,17 +115,23 @@ function computeSummary(evaluations: EvaluationForSummary[]): DatasetEvaluationS
  * part of this race.)
  *
  * MUST NOT BE TOMBSTONE-FILTERED (A1) — and, uniquely in that class, CANNOT
- * BE. Every other member is a Prisma read that would compile perfectly well
- * with the filter spread in and break a write at runtime; this one is
- * unreachable by construction.
+ * BE, and it is the only member of the class with that property. The eight
+ * original members are Prisma reads that would compile perfectly well with the
+ * filter spread in and break a WRITE at runtime with P2002; the three added in
+ * wave 1 (`GoldenSet.dataset`, in golden-sets/shared.ts and
+ * config/export/route.ts) are to-one relation args that could be projected but
+ * must not be, because the pin guard makes a hidden bound corpus unreachable
+ * and nulling one would export a fabricated slug. This one cannot be filtered
+ * at all.
  *
- * TOMBSTONE OVERLAY (A1): the row lock below is `$queryRaw`, and both filter
- * helpers in src/lib/tombstones.ts compile to Prisma `where` fragments — they
- * CANNOT reach raw SQL. "Spread the helper into every dataset read site" (the
- * rule the rest of A1 follows, and which now covers ten reads) therefore does
- * not apply to this statement, and nobody should try to make it. It selects
- * one Dataset by primary key for an UPDATE it is about to make; hiding the
- * dataset does not change which row that is.
+ * TOMBSTONE OVERLAY (A1): the row lock below is `$queryRaw`, and BOTH shapes
+ * src/lib/tombstones.ts offers are unavailable to it. The two filter helpers
+ * compile to Prisma `where` fragments and cannot reach raw SQL; the
+ * projections (`liveOrNull`, `withLiveCorpusRefs`) act on a Prisma result
+ * object and this statement returns rows from `$queryRaw`. So neither half of
+ * A1's rule applies to this statement, and nobody should try to make it. It
+ * selects one Dataset by primary key for an UPDATE it is about to make; hiding
+ * the dataset does not change which row that is.
  */
 export async function refreshDatasetEvaluationSummary(datasetId: string): Promise<void> {
   const commit = await prisma.$transaction(async (tx) => {
