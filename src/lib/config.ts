@@ -224,7 +224,29 @@ const datasetSchema = z.object({
   huggingFaceId: z.string().optional(),
   tags: z.array(z.string()).optional(),
   projectSlug: z.string().optional(),
-  samples: z.array(datasetSampleSchema).optional(),
+  // DUPLICATE INDICES ARE REJECTED, the same refine `createGoldenSetSchema`'s
+  // `sampleIndices` has carried since A0.
+  //
+  // The importer's dataset-CREATE branch is the one hide-then-write pair in
+  // the tree that is not one transaction: `dataset.create` (writing
+  // `sampleCount: samples.length`) and `datasetSample.createMany` (writing
+  // `index: s.index` verbatim) are two round trips, so a duplicate index
+  // reaches P2002 in the second AFTER the first has committed — a 500 over a
+  // dataset row claiming 3 samples with zero sample rows behind it. The
+  // REPLACE branch has been immune since this branch re-packed it to
+  // `position + offset`; the create branch was left as its twin.
+  //
+  // A1 is what makes this worth closing now rather than never. Exports used to
+  // be dense, so hand-renumbering a config document was pointless; a filtered
+  // export is GAPPED, which makes renumbering a natural thing to do and a
+  // collision a natural mistake. Refusing at the schema costs one predicate
+  // and turns a half-applied import into a 400 that names the field.
+  samples: z
+    .array(datasetSampleSchema)
+    .refine((v) => new Set(v.map((s) => s.index)).size === v.length, {
+      message: 'samples must not contain duplicate index values',
+    })
+    .optional(),
 });
 
 const projectSchema = z.object({

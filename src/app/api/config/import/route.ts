@@ -613,8 +613,11 @@ export async function POST(request: Request) {
               // a reported skip and not a throw. The `{ maxWait, timeout }`
               // ceiling is the one the other bulk-write paths use
               // (golden-sets/route.ts's POST, golden-set-versions.ts's
-              // forkGoldenSet): a document may carry a 620-row corpus today
-              // and an order of magnitude more later, and 5s is thin for that.
+              // forkGoldenSet, and — since A1 wave 1 — the two golden-set
+              // replaces further down THIS file, which this enumeration
+              // originally omitted): a document may carry a 620-row corpus
+              // today and an order of magnitude more later, and 5s is thin for
+              // that.
               await prisma.$transaction(
                 async (tx) => {
                   // Filtered on lifecycle, exactly as
@@ -1072,7 +1075,15 @@ export async function POST(request: Request) {
                 },
               },
             });
-          });
+          },
+          // A1 wave 1: the ceiling this file's own sample-replace comment
+          // enumerates for "the other bulk-write paths" — and then omitted for
+          // the two in its own file. Measured on loopback Postgres: 6200 items
+          // + 12400 candidates takes 1741ms against Prisma's 5s default, 2.9x
+          // headroom and the thinnest margin in the tree; every other bulk
+          // path clears 20x. The ceilings were inverted relative to the work.
+          { maxWait: 10_000, timeout: 60_000 }
+        );
         }
         continue;
       }
@@ -1125,7 +1136,10 @@ export async function POST(request: Request) {
             },
           },
         });
-      });
+      },
+      // Same ceiling, same reasoning, as the unfrozen replace above.
+      { maxWait: 10_000, timeout: 60_000 }
+      );
       items.push({
         type: 'goldenSet',
         slug: fork.slug ?? slug,

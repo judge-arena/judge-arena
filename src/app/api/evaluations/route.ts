@@ -8,7 +8,7 @@ import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib
 import { logger } from '@/lib/logger';
 import { fetchNRows, fetchDatasetMetadata } from '@/lib/huggingface';
 import { generateSlug } from '@/lib/config';
-import { liveSamplesOnly, sampleTombstoneFlagSelect, tombstoneFlagSelect, withLiveCorpusRefs } from '@/lib/tombstones';
+import { liveDatasetsOnly, liveSamplesOnly, sampleTombstoneFlagSelect, tombstoneFlagSelect, withLiveCorpusRefs } from '@/lib/tombstones';
 
 // ── Dataset batch evaluation ──
 const createBatchSchema = z.object({
@@ -529,9 +529,24 @@ export async function POST(request: Request) {
     // ══════════════════════════════════════════════════════════════════════
     const batchData = createBatchSchema.parse(body);
 
-    // Load dataset + samples
-    const dataset = await prisma.dataset.findUnique({
-      where: { id: batchData.datasetId },
+    // Load dataset + samples.
+    //
+    // A1 / DECISION 15: `liveDatasetsOnly()` here is LOCAL rather than
+    // inherited. A batch create against a hidden corpus was already refused
+    // before this line existed — but only in the second order, because
+    // `liveSamplesOnly()` on the nested `samples` carries decision 16's parent
+    // arm, so the list came back empty and the route answered
+    // `400 'Dataset has no samples'` further down. That is a filter defined in
+    // another file, about another table, saying the wrong thing about why. Narrow
+    // decision 16's parent arm — which projects/[id]/export/route.ts calls "a
+    // plausible future change" in its own comment — and this becomes a WRITE
+    // path onto a deleted corpus with nothing failing anywhere near here.
+    //
+    // `findFirst`, not `findUnique`, for the reason datasets/[id]/route.ts
+    // spells out: a `DatasetWhereInput` cannot be spread into a
+    // `DatasetWhereUniqueInput`. `id` is still the primary key.
+    const dataset = await prisma.dataset.findFirst({
+      where: { id: batchData.datasetId, ...liveDatasetsOnly() },
       include: {
         // One evaluation per LIVE sample. Unfiltered, every batch run scores
         // rows the owner has already withdrawn, and the results look like

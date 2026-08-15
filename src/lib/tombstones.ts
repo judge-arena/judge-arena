@@ -375,8 +375,34 @@ export async function restoreSample(
  * 0-based position into the live sample array is wrong.
  *
  * MUST be called with the same `tx` as the inserts it feeds, for the same
- * reason `nextGoldenItemIndex` is (src/lib/golden-sets.ts): read-then-insert
- * across a commit boundary is a race against a concurrent append.
+ * reason `nextGoldenItemIndex` is (src/lib/golden-sets.ts) — but NOT for the
+ * reason this comment used to give, and the correction matters because the
+ * claim it made is the kind someone later relies on.
+ *
+ * WHAT SHARING THE `tx` DOES NOT BUY: serialisation. The aggregate below is a
+ * plain SELECT, it takes no lock of any kind, and Prisma's interactive
+ * transactions run at Postgres's default READ COMMITTED. Two concurrent
+ * appends can both read the same mark and both try to insert it; the loser
+ * gets P2002 on `@@unique([datasetId, index])`, which
+ * `POST /api/datasets/[id]/samples` has no retry for and reports as a bare
+ * 500. A1 NARROWED that window — the read it replaced
+ * (`dataset._count.samples`) happened outside the transaction entirely — but
+ * it did not close it. Pinned by 'two concurrent transactions both read the
+ * same high-water mark' in tests/db/dataset-sample-tombstone.test.ts, which
+ * asserts the collision rather than its absence.
+ *
+ * WHAT IT DOES BUY, and it is worth the argument: the read observes the
+ * caller's OWN uncommitted writes. A verb that inserted samples earlier in the
+ * same transaction and then called this on `prisma` would read a mark that
+ * predates its own rows and collide with them deterministically — not a race,
+ * a certainty. No caller does that today; all three call it before their first
+ * insert. And it makes the mark and the rows it numbers roll back together, so
+ * a failed append leaves nothing half-numbered.
+ *
+ * CLOSING THE RACE properly needs a retry on P2002 against `datasetId_index`,
+ * the shape `createDatasetVersion` and `createRubricVersion` already use for
+ * `version`. That is a real improvement and a deliberate follow-on: it changes
+ * the write path, and A1 is the read overlay.
  */
 export async function nextSampleIndex(
   tx: Prisma.TransactionClient,

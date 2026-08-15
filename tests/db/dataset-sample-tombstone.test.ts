@@ -36,6 +36,7 @@ import { POST as refreshDataset } from '@/app/api/datasets/[id]/refresh/route';
 import {
   liveDatasetsOnly,
   liveSamplesOnly,
+  nextSampleIndex,
   restoreSample,
   tombstoneDataset,
   tombstoneSample,
@@ -2408,5 +2409,130 @@ describe('the nested relation-arg sweep — a hidden row stops being served thro
     expect(rows).toHaveLength(1);
     expect(rows[0].dataset_name).toBe('');
     expect(rows[0].dataset_sample_index).toBe('');
+  });
+});
+
+describe('nextSampleIndex — what sharing the caller\'s transaction does and does not buy (A1 wave 1)', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('two concurrent transactions read the SAME high-water mark, and the loser gets P2002 — the read is not serialised', async () => {
+    // BOTH `tombstones.ts` and `samples/route.ts` used to claim that taking
+    // the caller's `tx` defeated a concurrent append. It does not: the
+    // aggregate is a plain SELECT taking no lock, and Prisma's interactive
+    // transactions run at Postgres's default READ COMMITTED. A1 narrowed the
+    // window — the read it replaced (`dataset._count.samples`) was outside the
+    // transaction — without closing it.
+    //
+    // THIS TEST PINS THE DEFECT, not its absence, and that is deliberate. The
+    // code is fine as far as A1's scope goes; the claim was wrong. Adding the
+    // retry loop `createDatasetVersion` uses is the real fix and a stated
+    // follow-on — when someone lands it, this test SHOULD fail, and its
+    // failure is how they will know to correct these two comments in the same
+    // commit rather than a wave later.
+    const user = await mkUser();
+    const dataset = await mkCorpus(user.id, [0, 1, 2]);
+
+    // The interleaving is forced rather than hoped for: neither transaction
+    // inserts until BOTH have read. Without the gate this races the scheduler
+    // and passes or fails at random.
+    let openGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    const marks: number[] = [];
+
+    const append = (input: string) =>
+      db.$transaction(
+        async (tx) => {
+          const mark = await nextSampleIndex(tx, dataset.id);
+          marks.push(mark);
+          if (marks.length === 2) openGate();
+          await gate;
+          return tx.datasetSample.create({
+            data: { datasetId: dataset.id, index: mark, input },
+          });
+        },
+        // Bounded so a change that DOES serialise the read cannot hold a
+        // connection open indefinitely. Verified: adding a
+        // `SELECT … FOR UPDATE` on the parent Dataset inside `nextSampleIndex`
+        // deadlocks the two against the gate and this test fails with
+        // "Test timed out in 5000ms" — vitest's own testTimeout gets there
+        // first, which is the fastest of the three bounds.
+        { maxWait: 5_000, timeout: 15_000 }
+      );
+
+    const results = await Promise.allSettled([append('first'), append('second')]);
+
+    // The whole finding, in one line: both transactions computed index 3.
+    expect(marks).toEqual([3, 3]);
+
+    const rejected = results.filter((r) => r.status === 'rejected');
+    expect(rejected).toHaveLength(1);
+    expect(String((rejected[0] as PromiseRejectedResult).reason)).toContain(
+      'Unique constraint failed'
+    );
+
+    // One append landed, one was lost. `POST /api/datasets/[id]/samples` has
+    // no retry, so its caller sees a generic 500.
+    await expect(db.datasetSample.count({ where: { datasetId: dataset.id } })).resolves.toBe(4);
+  });
+});
+
+describe('POST /api/evaluations batch — decision 15 stated locally, not inherited (A1 wave 1)', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('404s on a HIDDEN dataset, instead of 400 "Dataset has no samples" from a filter in another file', async () => {
+    // The refusal already happened before this fix, but only in the second
+    // order: `liveSamplesOnly()` on the nested `samples` carries decision 16's
+    // parent arm, so the sample list came back empty and the route answered
+    // `400 'Dataset has no samples'` — a true statement about the wrong thing.
+    // Every other mutation handler on the branch got an explicit guard; this
+    // one leaned on a filter defined in another file about another table.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const project = await db.project.create({ data: { name: 'w1-batch-project', userId: user.id } });
+    const dataset = await mkCorpus(user.id, [0, 1]);
+    await db.dataset.update({ where: { id: dataset.id }, data: { projectId: project.id } });
+    await tombstoneDataset(db, dataset.id, 'wave-1 fixture');
+
+    const res = await createEvaluations(
+      jsonRequest('http://localhost/api/evaluations', 'POST', {
+        projectId: project.id,
+        datasetId: dataset.id,
+        judgeModelVersionIds: [],
+      })
+    );
+
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toBe('Dataset not found');
+
+    // …and nothing was written onto the withdrawn corpus.
+    await expect(db.evaluation.count({ where: { datasetId: dataset.id } })).resolves.toBe(0);
+  });
+
+  it('a RESTORED dataset is open to a batch create again — the guard is `NOT`, not `tombstone: null`', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+    const project = await db.project.create({ data: { name: 'w1-batch-live', userId: user.id } });
+    const dataset = await mkCorpus(user.id, [0, 1]);
+    await db.dataset.update({ where: { id: dataset.id }, data: { projectId: project.id } });
+    await db.tombstone.create({ data: { datasetId: dataset.id, isTombstone: false } });
+
+    const res = await createEvaluations(
+      jsonRequest('http://localhost/api/evaluations', 'POST', {
+        projectId: project.id,
+        datasetId: dataset.id,
+        judgeModelVersionIds: [],
+      })
+    );
+
+    expect(res.status).toBe(201);
+    expect((await res.json()).evaluationsCreated).toBe(2);
   });
 });

@@ -111,10 +111,19 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
     // after it.
     //
     // `nextSampleIndex` is max(index) over ALL rows INCLUDING HIDDEN, + 1. It
-    // takes this callback's `tx` for the same reason `nextGoldenItemIndex`
-    // does (src/lib/golden-sets.ts): a read-then-insert across a commit
-    // boundary races a concurrent append, and the loser gets P2002 on
-    // @@unique([datasetId, index]).
+    // takes this callback's `tx` so the mark and the rows it numbers commit or
+    // roll back together, and so the read can see writes this transaction has
+    // already made.
+    //
+    // IT DOES NOT MAKE THE APPEND SAFE AGAINST A CONCURRENT ONE, and the
+    // earlier version of this comment said it did. The aggregate takes no
+    // lock and these transactions run at READ COMMITTED, so two callers can
+    // read the same mark and the loser still gets P2002 on
+    // @@unique([datasetId, index]) — which this handler's catch turns into a
+    // bare 500. Being inside a transaction narrows the window (the read this
+    // replaced was outside one) without closing it. The fix is a retry loop,
+    // the shape `createDatasetVersion` already uses; see `nextSampleIndex`'s
+    // own doc in src/lib/tombstones.ts.
     //
     // This replaces `startIndex = dataset._count.samples`. A count is only
     // right while ordinals are dense, and they stop being dense the first time
