@@ -7,10 +7,8 @@ import { toPublicDataset } from '@/lib/serializers';
 import { findGoldenSetsPinningDataset } from '@/lib/golden-sets';
 import {
   liveDatasetsOnly,
-  liveOrNull,
   liveSamplesOnly,
   tombstoneDataset,
-  tombstoneFlagSelect,
 } from '@/lib/tombstones';
 
 /**
@@ -124,15 +122,17 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
           select: { id: true, version: true, createdAt: true, sampleCount: true },
           orderBy: { version: 'desc' },
         },
-        // A hidden PARENT, same class one level up — and a to-ONE relation, so
-        // it takes no `where` and has to be projected out of the response
-        // instead (see the block above `liveOrNull` in src/lib/tombstones.ts).
+        // A hidden PARENT, same class one level up. `Dataset.parent` is an
+        // OPTIONAL to-one, so it carries a `where` like any other read (see the
+        // nested-to-ONE block in src/lib/tombstones.ts) and a hidden parent
+        // comes back `null` — the `parentId` scalar beside it stays populated.
         // Smaller than the `versions` leak because `toPublicDataset` already
         // emits `parentId`, so all this adds is the parent's `version`; nulled
         // for the same reason anyway, because a live child that still names
         // the version it forked from contradicts the 404 that id now answers.
         parent: {
-          select: { id: true, version: true, tombstone: tombstoneFlagSelect },
+          where: liveDatasetsOnly(),
+          select: { id: true, version: true },
         },
         // A1: the LIVE sample count, for both the owner branch (returned
         // verbatim) and the public branch (via toPublicDataset's
@@ -151,11 +151,12 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
     const decision = resolveResourceAccess(session, dataset.userId, dataset.visibility === 'public');
     if ('error' in decision) return decision.error;
 
-    // A hidden parent is projected out ONCE, before the branch, so the owner
-    // arm and the anonymous arm cannot disagree — the `versions` leak was
-    // exactly a sub-object that reached the public arm without passing through
-    // the serializer.
-    const body = { ...dataset, parent: liveOrNull(dataset.parent) };
+    // A hidden parent is already `null` here — the filter is on the read, so
+    // the owner arm and the anonymous arm cannot disagree about it. The
+    // `versions` leak was exactly a sub-object that reached the public arm
+    // without passing through the serializer; filtering at the query is what
+    // makes that class unreachable rather than merely handled.
+    const body = dataset;
 
     if (decision.access === 'owner') {
       return NextResponse.json(body);

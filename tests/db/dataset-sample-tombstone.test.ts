@@ -2410,6 +2410,75 @@ describe('the nested relation-arg sweep — a hidden row stops being served thro
     expect(rows[0].dataset_name).toBe('');
     expect(rows[0].dataset_sample_index).toBe('');
   });
+
+  // DECISION 16 THROUGH A NESTED ARG, IN THE STATE THE PRODUCT ACTUALLY
+  // PRODUCES: only the DATASET carries a tombstone, and the sample carries
+  // none. `DELETE /api/datasets/[id]` writes exactly one row and never one per
+  // sample, so this — not a per-sample tombstone — is what a deleted corpus
+  // looks like on disk.
+  //
+  // WHY THIS TEST EXISTS SEPARATELY. Of the eight endpoint tests above, seven
+  // tombstone the SAMPLE (four of those tombstone the dataset as well, which
+  // the sample's own marker already covers). Only the `GET /api/evaluations`
+  // one exercises the dataset-only state, so before this block the parent arm
+  // of `liveSamplesOnly()` was pinned at ONE endpoint out of eight. It is the
+  // arm that a hand-written parallel predicate lost once already, mid-wave-1;
+  // pinning it at one site is what let that happen quietly.
+  //
+  // The arm is now a clause of `liveSamplesOnly()` and rides in every
+  // `where: liveSamplesOnly()` on a nested `datasetSample:` arg, so all three
+  // endpoints below inherit it from one definition rather than restating it.
+  // Deleting `dataset: { NOT: … }` from that helper turns all three red.
+  it('decision 16 through the nested arg: a DATASET-only tombstone nulls the sample at three endpoints', async () => {
+    const { dataset, sample, evaluation, run } = await mkCorpusEvaluation();
+
+    // Baseline — everything live, everything served. Without it these
+    // assertions would pass against a route that returns nothing at all.
+    const before = await (
+      await getEvaluation(new Request(`http://localhost/api/evaluations/${evaluation.id}`), {
+        params: Promise.resolve({ id: evaluation.id }),
+      })
+    ).json();
+    expect(before.datasetSample.input).toBe('SECRET-HIDDEN-INPUT');
+
+    // The corpus alone. The sample keeps NO tombstone row of its own.
+    await tombstoneDataset(db, dataset.id, 'decision-16 parent arm');
+    expect(await db.tombstone.count({ where: { datasetSampleId: sample.id } })).toBe(0);
+
+    const detail = await getEvaluation(
+      new Request(`http://localhost/api/evaluations/${evaluation.id}`),
+      { params: Promise.resolve({ id: evaluation.id }) }
+    );
+    expect(detail.status).toBe(200);
+    const detailBody = await detail.json();
+    expect(detailBody.dataset).toBeNull();
+    expect(detailBody.datasetSample).toBeNull();
+    expect(JSON.stringify(detailBody)).not.toContain('SECRET-HIDDEN-INPUT');
+    expect(JSON.stringify(detailBody)).not.toContain('SECRET-HIDDEN-EXPECTED');
+
+    const runDetail = await getRun(
+      new Request(`http://localhost/api/evaluations/${evaluation.id}/runs/${run.id}`),
+      { params: Promise.resolve({ id: evaluation.id, runId: run.id }) }
+    );
+    expect(runDetail.status).toBe(200);
+    const runBody = await runDetail.json();
+    expect(runBody.evaluation.dataset).toBeNull();
+    expect(runBody.evaluation.datasetSample).toBeNull();
+    expect(JSON.stringify(runBody)).not.toContain('SECRET-HIDDEN-EXPECTED');
+
+    const list = await (
+      await listEvaluations(new Request('http://localhost/api/evaluations'))
+    ).json();
+    expect(list.data[0].dataset).toBeNull();
+    expect(list.data[0].datasetSample).toBeNull();
+    expect(JSON.stringify(list)).not.toContain('SECRET-HIDDEN-INPUT');
+
+    // The SCALARS survive at all three — `dataset-run-groups.ts` groups on
+    // `datasetId`, and a filtered relation arg nulls the sub-object without
+    // touching the FK beside it.
+    expect(list.data[0].datasetId).toBe(dataset.id);
+    expect(list.data[0].datasetSampleId).toBe(sample.id);
+  });
 });
 
 describe('nextSampleIndex — what sharing the caller\'s transaction does and does not buy (A1 wave 1)', () => {

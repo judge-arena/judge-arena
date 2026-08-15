@@ -9,7 +9,7 @@ import {
   jsonlResponse,
 } from '@/lib/export';
 import { logger, serializeError } from '@/lib/logger';
-import { sampleTombstoneFlagSelect, tombstoneFlagSelect, withLiveCorpusRefs } from '@/lib/tombstones';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 /**
  * Shared Prisma include for full evaluation + run + judgment data.
@@ -18,14 +18,14 @@ import { sampleTombstoneFlagSelect, tombstoneFlagSelect, withLiveCorpusRefs } fr
 const fullEvaluationInclude = {
   project: { select: { id: true, name: true } },
   rubric: { select: { id: true, name: true, version: true } },
-  // A1: to-ONE args take no `where`; the marker rides along and
-  // `withLiveCorpusRefs` nulls the sub-object before `flattenEvaluationForExport`
-  // sees it. That flattener already writes `dataset_name: '' ` and an empty
-  // `dataset_sample_index` for a null reference — the shape `onDelete: SetNull`
-  // produced before the overlay — so the exported CSV goes back to describing
-  // the corpus the instance still shows.
-  dataset: { select: { id: true, name: true, tombstone: tombstoneFlagSelect } },
-  datasetSample: { select: { id: true, index: true, ...sampleTombstoneFlagSelect } },
+  // A1: both are OPTIONAL to-ONE args and carry a `where`, so a hidden
+  // reference reaches `flattenEvaluationForExport` as `null`. That flattener
+  // already writes `dataset_name: ''` and an empty `dataset_sample_index` for a
+  // null reference — the shape `onDelete: SetNull` produced before the overlay
+  // — so the exported CSV goes back to describing the corpus the instance
+  // still shows.
+  dataset: { where: liveDatasetsOnly(), select: { id: true, name: true } },
+  datasetSample: { where: liveSamplesOnly(), select: { id: true, index: true } },
   runs: {
     include: {
       rubric: { select: { id: true, name: true, version: true } },
@@ -104,7 +104,7 @@ export async function GET(request: Request) {
     });
 
     const rows = evaluations.flatMap((evaluation) =>
-      flattenEvaluationForExport(withLiveCorpusRefs(evaluation))
+      flattenEvaluationForExport(evaluation)
     );
 
     const timestamp = new Date().toISOString().slice(0, 10);

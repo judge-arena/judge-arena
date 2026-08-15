@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
-import { launchSingleRun, runDetailInclude, toLiveRunDetail, toRunLaunchHttpError } from '@/lib/run-launch';
+import { launchSingleRun, runDetailInclude, toRunLaunchHttpError } from '@/lib/run-launch';
 import { judgeLimiter } from '@/lib/rate-limit-redis';
 import { rateLimitHeaders, JUDGE_LIMIT } from '@/lib/rate-limit';
 import { getClientIp } from '@/lib/client-ip';
@@ -37,11 +37,11 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
       orderBy: { createdAt: 'desc' },
     });
 
-    // A1: `runDetailInclude` joins `Evaluation.dataset`/`.datasetSample` as
-    // to-ONE args, which take no `where` — `toLiveRunDetail` is the projection
-    // that stands in for one. Imported from the same module as the include so
-    // the pair travels together.
-    return NextResponse.json(runs.map(toLiveRunDetail));
+    // A1: `runDetailInclude` carries the tombstone filter on its own nested
+    // `Evaluation.dataset`/`.datasetSample` args, so these rows arrive already
+    // filtered and this route has nothing to remember. That is the whole
+    // reason the filter lives in the shared include rather than here.
+    return NextResponse.json(runs);
   } catch (error) {
     logger.error('Failed to fetch runs', { error: serializeError(error) });
     return NextResponse.json({ error: 'Failed to fetch runs' }, { status: 500 });

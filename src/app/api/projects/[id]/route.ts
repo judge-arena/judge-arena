@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { requireAuth, requireScope, optionalAuth, resolveResourceAccess, requireOwnership, RateLimitedError } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicProject } from '@/lib/serializers';
-import { liveDatasetsOnly, sampleTombstoneFlagSelect, tombstoneFlagSelect, withLiveCorpusRefs } from '@/lib/tombstones';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 const updateProjectSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -98,13 +98,12 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
         user: { select: { id: true, name: true, email: true } },
         evaluations: {
           include: {
-            // A1, read 2 of 3 IN THIS FILE, and the odd one out: the other two
-            // are `dataset.findMany` calls that take `liveDatasetsOnly()`
-            // directly, this is a to-ONE relation arg and can take no `where`
-            // at all. So the marker rides along in the select and
-            // `withLiveCorpusRefs` nulls the sub-object at the response —
-            // restoring the `null` that `Evaluation.datasetId`'s
-            // `onDelete: SetNull` produced before the overlay.
+            // A1, read 2 of 3 IN THIS FILE. The other two are
+            // `dataset.findMany` calls that take `liveDatasetsOnly()` directly;
+            // these are nested to-ONE relation args, but OPTIONAL ones, so they
+            // take the same filters in the same place — restoring the `null`
+            // that `Evaluation.datasetId`'s `onDelete: SetNull` produced before
+            // the overlay.
             //
             // The project page groups these into dataset batches
             // (src/lib/dataset-run-groups.ts) keyed on the SCALAR `datasetId`,
@@ -113,17 +112,17 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
             // `datasets:` list below (already filtered) and then to
             // `Dataset ${datasetId}`.
             dataset: {
+              where: liveDatasetsOnly(),
               select: {
                 id: true,
                 name: true,
-                tombstone: tombstoneFlagSelect,
               },
             },
             datasetSample: {
+              where: liveSamplesOnly(),
               select: {
                 id: true,
                 index: true,
-                ...sampleTombstoneFlagSelect,
               },
             },
             rubric: {
@@ -204,10 +203,7 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
       return NextResponse.json({ error: 'Project not found' }, { status: 404 });
     }
 
-    return NextResponse.json({
-      ...project,
-      evaluations: project.evaluations.map(withLiveCorpusRefs),
-    });
+    return NextResponse.json(project);
   } catch (error) {
     if (error instanceof RateLimitedError) return error.response;
     logger.error('Failed to fetch project', { error: serializeError(error) });

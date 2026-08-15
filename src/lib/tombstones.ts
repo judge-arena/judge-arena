@@ -7,10 +7,9 @@
  * guaranteeing exactly one is non-null.
  *
  * THIS MODULE IS THE SINGLE DEFINITION OF "HIDDEN". Every read site spreads
- * one of the two filters below — or, where the read is a nested to-ONE
- * relation argument and so can carry no `where` at all, projects its result
- * through `liveOrNull` / `withLiveCorpusRefs` (see the block above those two).
- * Every destructive verb calls one of the writers.
+ * one of the two filters below — nested to-ONE relation arguments included,
+ * which take a `where` whenever the relation is OPTIONAL (see the block below
+ * the two filters). Every destructive verb calls one of the writers.
  * It lives in src/lib/ rather than inside the route handlers because
  * `src/app/api/**` is outside every vitest coverage `include`, and the shape
  * of these predicates is precisely the thing that is cheap to pin in a unit
@@ -91,16 +90,36 @@ export function liveDatasetsOnly(): Prisma.DatasetWhereInput {
   return { NOT: { tombstone: { is: { isTombstone: true } } } };
 }
 
-/* ─── The nested to-ONE case, which neither filter above can reach ──────────
+/* ─── The nested to-ONE case ────────────────────────────────────────────────
  *
- * `liveSamplesOnly()` and `liveDatasetsOnly()` are `where` fragments, and a
- * `where` is the one thing Prisma does NOT accept on a nested to-ONE relation
- * argument. `Evaluation.dataset`, `Evaluation.datasetSample`, `Dataset.parent`
- * and `GoldenSet.dataset` all take `select`/`include` and nothing else, so
- * "spread the helper into every read site" — the rule the rest of this module
- * states — has no spelling here at all. That is why the sweeps missed the
- * class rather than a site: every grep they ran was for a read that could
- * carry a filter.
+ * A nested to-ONE relation argument DOES take a `where` — but only when the
+ * relation is OPTIONAL. Prisma generates a per-relation args type for an
+ * optional to-one and each carries `where?`; a REQUIRED to-one generates the
+ * bare `DatasetDefaultArgs`, which does not. Verified against 6.19.2:
+ * `Evaluation.dataset` (`Evaluation$datasetArgs`), `Evaluation.datasetSample`
+ * and `Dataset.parent` (`Dataset$parentArgs`) all type-check with a `where`
+ * and filter correctly; `GoldenSet.dataset` — the one REQUIRED to-one in this
+ * overlay's reach — fails with `TS2353: … 'where' does not exist in type
+ * 'DatasetDefaultArgs'`.
+ *
+ * The distinction is not arbitrary. A filtered relation arg yields `null` when
+ * the row does not match, and `null` is only a legal value for the relation
+ * when the relation is optional to begin with.
+ *
+ * WHAT A FILTERED ARG DOES, precisely: it nulls the SUB-OBJECT, keeps the
+ * parent row (a `findMany` returns the same rows either way), and leaves the
+ * scalar FK beside it POPULATED. That last part is deliberate — it is strictly
+ * more than `onDelete: SetNull` left behind, and `dataset-run-groups.ts` groups
+ * on `datasetId` rather than on `dataset.id`, so grouping survives a delete
+ * that used to break it.
+ *
+ * DECISION 16 COMES FREE HERE, which is the reason this is a filter and not a
+ * hand-written projection. `liveSamplesOnly()` carries the parent clause, so a
+ * `datasetSample:` arg filtered by it returns `null` for a sample whose DATASET
+ * is hidden even when the sample itself has no tombstone row — the only state
+ * `DELETE /api/datasets/[id]` actually produces, since it writes ONE tombstone
+ * and never one per sample. A parallel predicate has to restate that arm and
+ * can drift out of step with this one; a `where` cannot.
  *
  * WHAT THE OVERLAY OWES THESE READS. `Evaluation.datasetId` and
  * `Evaluation.datasetSampleId` are both `onDelete: SetNull`
@@ -109,113 +128,15 @@ export function liveDatasetsOnly(): Prisma.DatasetWhereInput {
  * Every consumer in the tree is already written for that — `evaluation.dataset
  * && …`, `dataset?.name ?? ''`, `datasetSample?.index ?? 0`. A1 kept the row
  * alive and turned all of them back on, which is a regression the overlay
- * introduced and not an inherited gap.
+ * introduced and not an inherited gap; `where: liveDatasetsOnly()` /
+ * `where: liveSamplesOnly()` on the nested arg turns them back off.
  *
- * SO THE FILTER IS A PROJECTION, not a predicate: select the hidden flag
- * alongside the columns the caller wanted, and null the whole sub-object
- * afterwards. The FK column beside it is deliberately left populated — that is
- * strictly more than `SetNull` left behind, and `dataset-run-groups.ts` groups
- * on `datasetId` rather than on `dataset.id`, so grouping survives a delete
- * that used to break it.
- *
- * NOT AN INVITATION TO NULL EVERY SUCH ARG. Three `GoldenSet.dataset` sites
- * are deliberately left whole and marked MUST NOT BE TOMBSTONE-FILTERED (A1);
- * see the reasons at those sites.
+ * NOT AN INVITATION TO FILTER EVERY SUCH ARG. Three `GoldenSet.dataset` sites
+ * are deliberately left whole and marked MUST NOT BE TOMBSTONE-FILTERED (A1).
+ * They are the REQUIRED to-one above, so Prisma refuses the `where` outright —
+ * and they carry a second, independent reason on top of that; see the reasons
+ * at those sites.
  */
-
-/** The marker to select beside the caller's own columns on a to-one
- * `dataset:` / `datasetSample:` / `parent:` argument, so `liveOrNull` below
- * has something to test. Written as the whole nested arg
- * (`tombstone: tombstoneFlagSelect`) so no call site has to restate the shape. */
-export const tombstoneFlagSelect = { select: { isTombstone: true } } as const;
-
-/**
- * The sample's marker PAIR, spread into a to-one `datasetSample:` select.
- *
- * TWO markers, for the same reason `liveSamplesOnly()` has two clauses:
- * decision 16, a sample inherits its parent's hidden state. Selecting only the
- * sample's own tombstone makes hiding a whole CORPUS leave its rows visible
- * through every evaluation that cites one — the exact asymmetry
- * `DELETE /api/datasets/[id]` relies on not existing, since it deliberately
- * writes ONE tombstone and never a row per sample.
- *
- * The `dataset:` key it adds is stripped again by `liveSampleOrNull`, so the
- * shape that reaches a response is the one the call site asked for.
- */
-export const sampleTombstoneFlagSelect = {
-  tombstone: tombstoneFlagSelect,
-  dataset: { select: { tombstone: tombstoneFlagSelect } },
-} as const;
-
-interface MaybeHidden {
-  tombstone?: { isTombstone: boolean } | null;
-}
-
-interface MaybeHiddenSample extends MaybeHidden {
-  dataset?: { tombstone?: { isTombstone: boolean } | null } | null;
-}
-
-/**
- * A to-one relation's value if it is live, `null` if it is hidden — and with
- * the marker stripped either way, so `tombstone: { isTombstone: false }` never
- * reaches a response body.
- *
- * The test is `=== true` rather than truthiness for the same reason the `NOT`
- * formulation above is what it is: `undefined` (no marker selected) and `null`
- * (no tombstone row) and `false` (hidden then restored) all mean LIVE, and
- * only `true` means hidden.
- */
-export function liveOrNull<T extends MaybeHidden>(
-  related: T | null | undefined
-): Omit<T, 'tombstone'> | null {
-  if (!related) return null;
-  const { tombstone, ...rest } = related;
-  return tombstone?.isTombstone === true ? null : (rest as Omit<T, 'tombstone'>);
-}
-
-/**
- * `liveOrNull` for a to-one `datasetSample:`, carrying decision 16's parent
- * arm — see `sampleTombstoneFlagSelect` above. Strips BOTH markers, so the
- * `dataset:` key this needs never reaches a response body.
- */
-export function liveSampleOrNull<T extends MaybeHiddenSample>(
-  sample: T | null | undefined
-): Omit<T, 'tombstone' | 'dataset'> | null {
-  if (!sample) return null;
-  const { tombstone, dataset, ...rest } = sample;
-  if (tombstone?.isTombstone === true) return null;
-  if (dataset?.tombstone?.isTombstone === true) return null;
-  return rest as Omit<T, 'tombstone' | 'dataset'>;
-}
-
-/**
- * The pair, applied to one evaluation-shaped row. Every site that joins
- * `Evaluation.dataset` also joins `Evaluation.datasetSample` — the two are
- * always selected together, at all eight include sites across seven files — so
- * one function keeps them from being dispositioned differently by accident.
- */
-export function withLiveCorpusRefs<
-  E extends { dataset: MaybeHidden | null; datasetSample: MaybeHiddenSample | null },
->(
-  evaluation: E
-): Omit<E, 'dataset' | 'datasetSample'> & {
-  dataset: Omit<NonNullable<E['dataset']>, 'tombstone'> | null;
-  datasetSample: Omit<NonNullable<E['datasetSample']>, 'tombstone' | 'dataset'> | null;
-} {
-  // The two projections are written through INDEXED ACCESS on `E` rather than
-  // through their own type parameters. Separate parameters infer as the bare
-  // `MaybeHidden` constraint — the concrete columns are lost and every caller
-  // that hands the result to a typed consumer (the export flatteners) fails on
-  // a missing `id`/`name`.
-  return {
-    ...evaluation,
-    dataset: liveOrNull(evaluation.dataset),
-    datasetSample: liveSampleOrNull(evaluation.datasetSample),
-  } as Omit<E, 'dataset' | 'datasetSample'> & {
-    dataset: Omit<NonNullable<E['dataset']>, 'tombstone'> | null;
-    datasetSample: Omit<NonNullable<E['datasetSample']>, 'tombstone' | 'dataset'> | null;
-  };
-}
 
 /**
  * Hide one sample. Idempotent: never P2002, always converges on hidden.

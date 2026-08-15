@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
-import { sampleTombstoneFlagSelect, tombstoneFlagSelect, withLiveCorpusRefs } from '@/lib/tombstones';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 // Task 12: minimal JudgeModelVersion+JudgeModel select for display fallback
 // when modelConfig is null — see src/lib/model-display.ts.
@@ -44,14 +44,15 @@ const runDetailInclude = {
       responseText: true,
       userId: true,
       project: { select: { id: true, name: true } },
-      // A1: to-ONE args take no `where`; the marker rides along and
-      // `withLiveCorpusRefs` nulls the sub-object at the response. The run
-      // detail page renders `{dataset.name} #{datasetSample.index + 1}`, so
-      // unfiltered this named a withdrawn row by its ordinal — and this select
-      // carries `input`/`expected` as well.
-      dataset: { select: { id: true, name: true, sampleCount: true, tombstone: tombstoneFlagSelect } },
+      // A1: both are OPTIONAL to-ONE args and carry a `where`, so a hidden
+      // reference comes back `null`. The run detail page renders
+      // `{dataset.name} #{datasetSample.index + 1}`, so unfiltered this named a
+      // withdrawn row by its ordinal — and this select carries
+      // `input`/`expected` as well.
+      dataset: { where: liveDatasetsOnly(), select: { id: true, name: true, sampleCount: true } },
       datasetSample: {
-        select: { id: true, index: true, input: true, expected: true, ...sampleTombstoneFlagSelect },
+        where: liveSamplesOnly(),
+        select: { id: true, index: true, input: true, expected: true },
       },
     },
   },
@@ -86,7 +87,7 @@ export async function GET(
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    return NextResponse.json({ ...run, evaluation: withLiveCorpusRefs(run.evaluation) });
+    return NextResponse.json(run);
   } catch (error) {
     logger.error('Failed to fetch run', { error: serializeError(error) });
     return NextResponse.json({ error: 'Failed to fetch run' }, { status: 500 });

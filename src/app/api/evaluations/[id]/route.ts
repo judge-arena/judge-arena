@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
-import { sampleTombstoneFlagSelect, tombstoneFlagSelect, withLiveCorpusRefs } from '@/lib/tombstones';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 const updateEvaluationSchema = z.object({
   rubricId: z.string().nullable().optional(),
@@ -56,12 +56,13 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
         },
         project: { select: { id: true, name: true } },
         user: { select: { id: true, name: true, email: true } },
-        // A1: to-ONE args take no `where`; the marker rides along and
-        // `withLiveCorpusRefs` nulls the sub-object at the response. See the
-        // block above `liveOrNull` in src/lib/tombstones.ts.
-        dataset: { select: { id: true, name: true, sampleCount: true, tombstone: tombstoneFlagSelect } },
+        // A1: both are OPTIONAL to-ONE args, so both carry a `where` and a
+        // hidden reference comes back `null`. See the nested-to-ONE block in
+        // src/lib/tombstones.ts.
+        dataset: { where: liveDatasetsOnly(), select: { id: true, name: true, sampleCount: true } },
         datasetSample: {
-          select: { id: true, index: true, input: true, expected: true, ...sampleTombstoneFlagSelect },
+          where: liveSamplesOnly(),
+          select: { id: true, index: true, input: true, expected: true },
         },
         modelSelections: {
           include: {
@@ -86,7 +87,7 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    return NextResponse.json(withLiveCorpusRefs(evaluation));
+    return NextResponse.json(evaluation);
   } catch (error) {
     logger.error('Failed to fetch evaluation', { error: serializeError(error) });
     return NextResponse.json({ error: 'Failed to fetch evaluation' }, { status: 500 });
@@ -176,9 +177,10 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
           project: { select: { id: true, name: true } },
           // A1, same disposition as the GET above — the PATCH response
           // re-renders the same page.
-          dataset: { select: { id: true, name: true, sampleCount: true, tombstone: tombstoneFlagSelect } },
+          dataset: { where: liveDatasetsOnly(), select: { id: true, name: true, sampleCount: true } },
           datasetSample: {
-            select: { id: true, index: true, input: true, expected: true, ...sampleTombstoneFlagSelect },
+            where: liveSamplesOnly(),
+            select: { id: true, index: true, input: true, expected: true },
           },
           modelSelections: {
             include: {
@@ -197,7 +199,7 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
     if (!evaluation) {
       return NextResponse.json({ error: 'Evaluation not found' }, { status: 404 });
     }
-    return NextResponse.json(withLiveCorpusRefs(evaluation));
+    return NextResponse.json(evaluation);
   } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: 'Validation failed', details: error.errors }, { status: 400 });

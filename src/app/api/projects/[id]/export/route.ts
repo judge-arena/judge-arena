@@ -10,7 +10,7 @@ import {
   jsonlResponse,
 } from '@/lib/export';
 import { logger, serializeError } from '@/lib/logger';
-import { liveDatasetsOnly, liveSamplesOnly, sampleTombstoneFlagSelect, tombstoneFlagSelect, withLiveCorpusRefs } from '@/lib/tombstones';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 /**
  * Full include for evaluation export (same as evaluations/export)
@@ -19,12 +19,12 @@ const fullEvaluationInclude = {
   project: { select: { id: true, name: true } },
   rubric: { select: { id: true, name: true, version: true } },
   // A1, read 1 of 3 in this file, and the only one that is a to-ONE relation
-  // arg — so unlike the two `dataset.findMany` reads below it can carry no
-  // `where` at all, and `withLiveCorpusRefs` projects the result instead. The
-  // twin comment at the `scope=all` read below explains why the OTHER two
-  // filters change no output today; this one does change output.
-  dataset: { select: { id: true, name: true, tombstone: tombstoneFlagSelect } },
-  datasetSample: { select: { id: true, index: true, ...sampleTombstoneFlagSelect } },
+  // arg — an OPTIONAL one, so it carries a `where` exactly like the two
+  // `dataset.findMany` reads below. The twin comment at the `scope=all` read
+  // below explains why the OTHER two filters change no output today; this one
+  // does change output.
+  dataset: { where: liveDatasetsOnly(), select: { id: true, name: true } },
+  datasetSample: { where: liveSamplesOnly(), select: { id: true, index: true } },
   runs: {
     include: {
       rubric: { select: { id: true, name: true, version: true } },
@@ -98,7 +98,7 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
       });
 
       const evalRows = evaluations.flatMap((evaluation) =>
-        flattenEvaluationForExport(withLiveCorpusRefs(evaluation))
+        flattenEvaluationForExport(evaluation)
       );
 
       if (scope === 'evaluations') {

@@ -124,14 +124,14 @@ function computeSummary(evaluations: EvaluationForSummary[]): DatasetEvaluationS
  * and nulling one would export a fabricated slug. This one cannot be filtered
  * at all.
  *
- * TOMBSTONE OVERLAY (A1): the row lock below is `$queryRaw`, and BOTH shapes
- * src/lib/tombstones.ts offers are unavailable to it. The two filter helpers
- * compile to Prisma `where` fragments and cannot reach raw SQL; the
- * projections (`liveOrNull`, `withLiveCorpusRefs`) act on a Prisma result
- * object and this statement returns rows from `$queryRaw`. So neither half of
- * A1's rule applies to this statement, and nobody should try to make it. It
- * selects one Dataset by primary key for an UPDATE it is about to make; hiding
- * the dataset does not change which row that is.
+ * TOMBSTONE OVERLAY (A1): the row lock below is `$queryRaw`, and the only
+ * shape src/lib/tombstones.ts offers is unavailable to it. Both filter helpers
+ * compile to Prisma `where` fragments — spread into a top-level `where` or
+ * into a nested relation arg, it makes no difference — and a `where` fragment
+ * cannot reach raw SQL. So A1's rule does not apply to this statement, and
+ * nobody should try to make it. It selects one Dataset by primary key for an
+ * UPDATE it is about to make; hiding the dataset does not change which row
+ * that is.
  */
 export async function refreshDatasetEvaluationSummary(datasetId: string): Promise<void> {
   const commit = await prisma.$transaction(async (tx) => {
