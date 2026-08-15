@@ -25,10 +25,12 @@
  *
  *     grep -rn "MUST NOT BE TOMBSTONE-FILTERED (A1)" src/ scripts/
  *
- * Eleven sites carry that marker today (this comment is the twelfth hit, and
- * is a cross-reference rather than a member). They fall into three kinds:
+ * Eleven sites carry that marker today. The grep prints THIRTEEN hits: this
+ * comment names the marker twice more — in the grep line above, and again at
+ * `nextSampleIndex` below — and neither is a member. They fall into three
+ * kinds:
  *
- *   - EIGHT would compile perfectly well with a filter spread in and break a
+ *   - SEVEN would compile perfectly well with a filter spread in and break a
  *     WRITE at runtime. Five are slug DEDUP reads (`datasets/route.ts`,
  *     `evaluations/route.ts`, `config/import/route.ts`, `dataset-versions.ts`,
  *     `scripts/importer/artifacts.ts`) — a hidden row still occupies its slug,
@@ -37,8 +39,10 @@
  *     (`dataset-versions.ts`) and one the sample ORDINAL read
  *     (`scripts/importer/artifacts.ts`), both for the same reason
  *     `nextSampleIndex` below is unfiltered: a hidden row still holds its
- *     number. The eighth is `dataset-evaluation-summary.ts`'s
- *     `$queryRaw … FOR UPDATE` — see the next paragraph.
+ *     number.
+ *   - ONE is `dataset-evaluation-summary.ts`'s `$queryRaw … FOR UPDATE`. It is
+ *     marked for a different reason from the other ten: not "a filter would
+ *     break it" but "no filter can reach it" — see the paragraph below.
  *   - THREE are `GoldenSet.dataset` (`golden-sets/shared.ts` ×2,
  *     `config/export/route.ts`). These break no write. They are a REQUIRED
  *     to-one, so Prisma refuses a `where` there outright, and nulling them

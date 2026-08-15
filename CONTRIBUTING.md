@@ -485,9 +485,12 @@ introspection to half-notice. Every row here has an automated guard —
 `tests/db/idempotency-tighten.test.ts`, `tests/db/email-partial-unique.test.ts`
 and `tests/db/meta-eval.test.ts` cover the four index rows — and the
 `CHECK` row's, `tests/db/tombstone-check-constraint.test.ts`, is the only
-one that must attempt its violating rows through RAW SQL: `datasetId` and
-`datasetSampleId` are separate optional relation inputs, so no typed call
-can build a row with both set or neither. All of them run after
+one that must attempt its violating rows through RAW SQL. Not because the
+typed client refuses them — `tombstone.create({ data: {} })` and a `data`
+setting both FKs each compile clean, and both reach Postgres and die on
+`23514`. Raw SQL is used because a typed create needs real FK rows to
+satisfy the foreign keys first, so a typed probe that "fails" proves only
+that some constraint fired, not which one. All of them run after
 `npm run test:db` has replayed the whole chain. Guarding the constraint
 this way is the established convention here, not a novelty — copy it for
 the next inexpressible clause, because the drift gate will not do it for

@@ -19,10 +19,18 @@ import { db, truncateAll, mkUser } from './helpers';
 // that is dropped, or never re-added by a later table rebuild, fails here.
 //
 // ── WHY THE INSERTS ARE RAW ─────────────────────────────────────────────────
-// The invariant is unrepresentable in the typed client: `datasetSample` and
-// `dataset` are separate optional relation inputs, so no typed call can build
-// a row with both FKs set or neither. Raw SQL is the only way to attempt a
-// violating row at all. Same reasoning, and same tool, as
+// NOT because the typed client refuses a violating row. It does not:
+// `tombstone.create({ data: {} })` and a `data` setting both FKs each compile
+// clean under `tsc --noEmit`, reach Postgres, and die on `23514` — the very
+// constraint under test. (An earlier version of this comment claimed the
+// opposite. It was wrong, and the claim had already been copied into
+// CONTRIBUTING.md before anyone checked it.)
+//
+// Raw SQL is used because a typed create must satisfy the FOREIGN KEYS first,
+// so the both-FKs-set case needs real rows to point at — and a typed probe
+// that fails on a bogus FK proves only that SOME constraint fired, not that
+// this one did. Raw inserts let the test name the constraint it caught.
+// Same tool, and the same reason, as
 // tests/db/idempotency-tighten.test.ts, which reruns its own migration's
 // statement raw rather than through the client.
 
