@@ -10,7 +10,7 @@ import {
   jsonlResponse,
 } from '@/lib/export';
 import { logger, serializeError } from '@/lib/logger';
-import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
+import { liveDatasetsOnly, liveSamplesOnly, sampleTombstoneFlagSelect, tombstoneFlagSelect, withLiveCorpusRefs } from '@/lib/tombstones';
 
 /**
  * Full include for evaluation export (same as evaluations/export)
@@ -18,8 +18,13 @@ import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 const fullEvaluationInclude = {
   project: { select: { id: true, name: true } },
   rubric: { select: { id: true, name: true, version: true } },
-  dataset: { select: { id: true, name: true } },
-  datasetSample: { select: { id: true, index: true } },
+  // A1, read 1 of 3 in this file, and the only one that is a to-ONE relation
+  // arg — so unlike the two `dataset.findMany` reads below it can carry no
+  // `where` at all, and `withLiveCorpusRefs` projects the result instead. The
+  // twin comment at the `scope=all` read below explains why the OTHER two
+  // filters change no output today; this one does change output.
+  dataset: { select: { id: true, name: true, tombstone: tombstoneFlagSelect } },
+  datasetSample: { select: { id: true, index: true, ...sampleTombstoneFlagSelect } },
   runs: {
     include: {
       rubric: { select: { id: true, name: true, version: true } },
@@ -92,8 +97,8 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
         orderBy: { createdAt: 'asc' },
       });
 
-      const evalRows = evaluations.flatMap((evaluation: any) =>
-        flattenEvaluationForExport(evaluation)
+      const evalRows = evaluations.flatMap((evaluation) =>
+        flattenEvaluationForExport(withLiveCorpusRefs(evaluation))
       );
 
       if (scope === 'evaluations') {
@@ -108,7 +113,7 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
       if (format === 'jsonl') {
         // In JSONL mode, append dataset samples with a _type discriminator
         const datasets = await prisma.dataset.findMany({
-          // A1, read 1 of 2 in this file.
+          // A1, read 2 of 3 in this file.
           //
           // THIS FILTER CHANGES NO OUTPUT TODAY, and saying so is the point.
           // The consumer below is `flatMap(ds => ds.samples.map(…))` — one row
@@ -174,10 +179,10 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
       // tests/db/dataset-sample-tombstone.test.ts drives each branch
       // separately). The DATASET filter added beside it has no test on either
       // branch, and cannot easily have one, for the reason spelled out above
-      // the first read: it changes no output while `liveSamplesOnly()` keeps
-      // its parent arm. It is defence in depth, not a behaviour.
+      // the first of those two: it changes no output while `liveSamplesOnly()`
+      // keeps its parent arm. It is defence in depth, not a behaviour.
       const datasets = await prisma.dataset.findMany({
-        // A1, read 2 of 2 in this file: same rule on the datasets scope, and
+        // A1, read 3 of 3 in this file: same rule on the datasets scope, and
         // the same "no output change today" disposition.
         where: { projectId: params.id, ...liveDatasetsOnly() },
         include: { samples: { where: liveSamplesOnly(), orderBy: { index: 'asc' } } },

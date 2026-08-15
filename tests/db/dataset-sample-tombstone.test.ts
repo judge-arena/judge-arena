@@ -16,6 +16,11 @@ import {
   GET as listDatasets,
   POST as createDataset,
 } from '@/app/api/datasets/route';
+import { GET as listEvaluations } from '@/app/api/evaluations/route';
+import { GET as getEvaluation } from '@/app/api/evaluations/[id]/route';
+import { GET as listRuns } from '@/app/api/evaluations/[id]/runs/route';
+import { GET as getRun } from '@/app/api/evaluations/[id]/runs/[runId]/route';
+import { GET as exportEvaluations } from '@/app/api/evaluations/export/route';
 import { GET as exportConfig } from '@/app/api/config/export/route';
 import { POST as importConfig } from '@/app/api/config/import/route';
 import { POST as createEvaluations } from '@/app/api/evaluations/route';
@@ -31,6 +36,7 @@ import { POST as refreshDataset } from '@/app/api/datasets/[id]/refresh/route';
 import {
   liveDatasetsOnly,
   liveSamplesOnly,
+  restoreSample,
   tombstoneDataset,
   tombstoneSample,
 } from '@/lib/tombstones';
@@ -2055,5 +2061,352 @@ describe('the _count.samples sweep — a hidden sample stops being counted (A1 T
       select: { sampleCount: true },
     });
     expect(stored.sampleCount).toBe(2);
+  });
+});
+
+// ─── The NESTED RELATION-ARG sweep (A1 whole-branch review, wave 1) ──────────
+//
+// Eleven reads reach `Dataset` or `DatasetSample` as a nested relation
+// ARGUMENT rather than as a `dataset.findX` call, and none of the three sweeps
+// above found them: every grep those sweeps ran was for a read that could
+// carry a filter, and most of these cannot. `Evaluation.dataset`,
+// `Evaluation.datasetSample` and `Dataset.parent` are to-ONE relations, which
+// Prisma gives `select`/`include` and no `where` at all — so the fix is a
+// PROJECTION (`withLiveCorpusRefs`/`liveOrNull`, src/lib/tombstones.ts) rather
+// than a predicate. `Dataset.versions` is to-MANY and does take one.
+//
+// THESE ARE REGRESSIONS THE OVERLAY INTRODUCED, not inherited gaps.
+// `Evaluation.datasetId` and `.datasetSampleId` are both `onDelete: SetNull`
+// (schema.prisma), so before A1 deleting a corpus or a row NULLED the
+// reference and every one of these args returned null by construction. Hiding
+// the row instead turned all of them back on.
+let argCounter = 0;
+
+function argSessionFor(user: { id: string; email: string }) {
+  (getServerSession as unknown as Mock).mockResolvedValue({
+    user: { id: user.id, email: user.email },
+  });
+}
+
+/**
+ * One corpus, one sample, one evaluation pointing at both, one run on that
+ * evaluation. The sample's text is a sentinel and the evaluation's own
+ * `inputText` deliberately is NOT: an evaluation carries its own copy of the
+ * text it judged and is entitled to keep serving it, so a test that just
+ * searched the body for the sentinel would have to distinguish the two, and
+ * this fixture makes the sentinel mean "the withdrawn ROW leaked" and nothing
+ * else.
+ */
+async function mkCorpusEvaluation() {
+  argCounter += 1;
+  const user = await mkUser();
+  const project = await db.project.create({
+    data: { name: `arg-project-${argCounter}`, userId: user.id },
+  });
+  const dataset = await db.dataset.create({
+    data: {
+      name: `arg-corpus-${argCounter}`,
+      slug: `arg-corpus-${argCounter}`,
+      userId: user.id,
+      projectId: project.id,
+      source: 'local',
+      visibility: 'private',
+      sampleCount: 1,
+      samples: {
+        create: [{ index: 0, input: 'SECRET-HIDDEN-INPUT', expected: 'SECRET-HIDDEN-EXPECTED' }],
+      },
+    },
+    include: { samples: true },
+  });
+  const evaluation = await db.evaluation.create({
+    data: {
+      projectId: project.id,
+      userId: user.id,
+      title: `arg-evaluation-${argCounter}`,
+      inputText: 'evaluation-carries-its-own-copy',
+      datasetId: dataset.id,
+      datasetSampleId: dataset.samples[0].id,
+    },
+  });
+  const run = await db.evaluationRun.create({ data: { evaluationId: evaluation.id } });
+  argSessionFor(user);
+  return { user, project, dataset, sample: dataset.samples[0], evaluation, run };
+}
+
+describe('the nested relation-arg sweep — a hidden row stops being served through a JOIN (A1 wave 1)', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('GET /api/datasets/[id] drops a hidden CHILD VERSION from `versions:` — on the ANONYMOUS branch, which is the one that leaked', async () => {
+    // The anonymous branch is the whole finding. This route is `optionalAuth`,
+    // the root only has to be `visibility: 'public'`, and the public response
+    // passes `versions` through OUTSIDE `toPublicDataset` — so the
+    // serializer's allow-list, which is what stops every other leak on this
+    // route, never sees it. An owner-only test would pass against a fix that
+    // filtered nothing, because the owner is allowed to see the row anyway.
+    const user = await mkUser();
+    argCounter += 1;
+    const root = await db.dataset.create({
+      data: {
+        name: `arg-root-${argCounter}`,
+        slug: `arg-root-${argCounter}`,
+        userId: user.id,
+        source: 'local',
+        visibility: 'public',
+      },
+    });
+    const mkChild = async (version: number) =>
+      db.dataset.create({
+        data: {
+          name: `arg-root-${argCounter}`,
+          slug: `arg-root-${argCounter}-v${version}`,
+          userId: user.id,
+          source: 'local',
+          visibility: 'public',
+          parentId: root.id,
+          version,
+        },
+      });
+    const keptChild = await mkChild(2);
+    const hiddenChild = await mkChild(3);
+    // The third fixture separates the required
+    // `NOT: { tombstone: { is: { isTombstone: true } } }` from the simpler
+    // `{ tombstone: { is: null } }`, which would drop a RESTORED version too
+    // and satisfy every other line here.
+    const restoredChild = await mkChild(4);
+    await tombstoneDataset(db, hiddenChild.id, 'nested-arg fixture');
+    await db.tombstone.create({ data: { datasetId: restoredChild.id, isTombstone: false } });
+
+    (getServerSession as unknown as Mock).mockResolvedValue(null);
+    const anon = await getDataset(new Request(`http://localhost/api/datasets/${root.id}`), {
+      params: Promise.resolve({ id: root.id }),
+    });
+    expect(anon.status).toBe(200);
+    const anonBody = await anon.json();
+    expect(anonBody.versions.map((v: { id: string }) => v.id).sort()).toEqual(
+      [keptChild.id, restoredChild.id].sort()
+    );
+
+    // The owner's branch reads the SAME include and returns the row verbatim,
+    // so both are driven against one fixture rather than trusting that they
+    // cannot diverge.
+    argSessionFor(user);
+    const owned = await getDataset(new Request(`http://localhost/api/datasets/${root.id}`), {
+      params: Promise.resolve({ id: root.id }),
+    });
+    const ownedBody = await owned.json();
+    expect(ownedBody.versions.map((v: { id: string }) => v.id).sort()).toEqual(
+      [keptChild.id, restoredChild.id].sort()
+    );
+
+    // …and the sibling endpoint that has filtered since Task 9 now AGREES.
+    // Two routes describing the same family and disagreeing about which
+    // versions exist is the shape of the finding, not an incidental detail.
+    const versionsRes = await listVersions(
+      new Request(`http://localhost/api/datasets/${root.id}/versions`),
+      { params: Promise.resolve({ id: root.id }) }
+    );
+    const versionsBody = await versionsRes.json();
+    expect(versionsBody.map((v: { id: string }) => v.id).sort()).toEqual(
+      [root.id, keptChild.id, restoredChild.id].sort()
+    );
+  });
+
+  it('GET /api/datasets/[id] nulls a hidden PARENT — a to-ONE arg, so no `where` could have done it', async () => {
+    const user = await mkUser();
+    argCounter += 1;
+    const parent = await db.dataset.create({
+      data: {
+        name: `arg-parent-${argCounter}`,
+        slug: `arg-parent-${argCounter}`,
+        userId: user.id,
+        source: 'local',
+        visibility: 'public',
+      },
+    });
+    const child = await db.dataset.create({
+      data: {
+        name: `arg-parent-${argCounter}`,
+        slug: `arg-parent-${argCounter}-v2`,
+        userId: user.id,
+        source: 'local',
+        visibility: 'public',
+        parentId: parent.id,
+        version: 2,
+      },
+    });
+    await tombstoneDataset(db, parent.id, 'nested-arg fixture');
+
+    (getServerSession as unknown as Mock).mockResolvedValue(null);
+    const anon = await getDataset(new Request(`http://localhost/api/datasets/${child.id}`), {
+      params: Promise.resolve({ id: child.id }),
+    });
+    expect(anon.status).toBe(200);
+    const anonBody = await anon.json();
+    expect(anonBody.parent).toBeNull();
+
+    argSessionFor(user);
+    const owned = await getDataset(new Request(`http://localhost/api/datasets/${child.id}`), {
+      params: Promise.resolve({ id: child.id }),
+    });
+    const ownedBody = await owned.json();
+    expect(ownedBody.parent).toBeNull();
+    // The SCALAR is deliberately left populated — that is strictly more than
+    // `SetNull` left behind, and version lineage still resolves.
+    expect(ownedBody.parentId).toBe(parent.id);
+  });
+
+  it('GET /api/evaluations stops serving a hidden sample\'s input/expected, and a hidden corpus\'s name', async () => {
+    const { dataset, sample, evaluation } = await mkCorpusEvaluation();
+
+    // Baseline: everything live, everything served. Without this the
+    // assertions below pass against a route that returns nothing at all.
+    const before = await (await listEvaluations(new Request('http://localhost/api/evaluations'))).json();
+    expect(before.data[0].datasetSample.input).toBe('SECRET-HIDDEN-INPUT');
+    expect(before.data[0].dataset.name).toBe(dataset.name);
+
+    await tombstoneSample(db, sample.id, 'nested-arg fixture');
+    const afterSample = await (
+      await listEvaluations(new Request('http://localhost/api/evaluations'))
+    ).json();
+    expect(afterSample.data[0].datasetSample).toBeNull();
+    // The corpus itself is still live, so its own reference stays.
+    expect(afterSample.data[0].dataset.name).toBe(dataset.name);
+    // …and the withdrawn text is nowhere in the body. The evaluation's own
+    // `inputText` copy is untouched, which is why the fixture gives the two
+    // different strings.
+    const sampleBodyText = JSON.stringify(afterSample);
+    expect(sampleBodyText).not.toContain('SECRET-HIDDEN-INPUT');
+    expect(sampleBodyText).not.toContain('SECRET-HIDDEN-EXPECTED');
+    expect(sampleBodyText).toContain('evaluation-carries-its-own-copy');
+    // The FK column survives — `dataset-run-groups.ts` groups on it.
+    expect(afterSample.data[0].datasetSampleId).toBe(sample.id);
+    expect(evaluation.datasetSampleId).toBe(sample.id);
+
+    // A RESTORED sample comes back. `isTombstone: false` means live, and a
+    // truthiness test on the flag would get this wrong.
+    await restoreSample(db, sample.id);
+    const restored = await (
+      await listEvaluations(new Request('http://localhost/api/evaluations'))
+    ).json();
+    expect(restored.data[0].datasetSample.input).toBe('SECRET-HIDDEN-INPUT');
+
+    await tombstoneDataset(db, dataset.id, 'nested-arg fixture');
+    const afterDataset = await (
+      await listEvaluations(new Request('http://localhost/api/evaluations'))
+    ).json();
+    expect(afterDataset.data[0].dataset).toBeNull();
+    // Decision 16: the sample inherits its parent's hidden state, so hiding
+    // the corpus hides the row through it without a second tombstone.
+    expect(afterDataset.data[0].datasetSample).toBeNull();
+  });
+
+  it('GET /api/evaluations/[id] — the detail route carries the same two args, and its own copy of the include', async () => {
+    const { sample, evaluation } = await mkCorpusEvaluation();
+    await tombstoneSample(db, sample.id, 'nested-arg fixture');
+
+    const res = await getEvaluation(
+      new Request(`http://localhost/api/evaluations/${evaluation.id}`),
+      { params: Promise.resolve({ id: evaluation.id }) }
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.datasetSample).toBeNull();
+    expect(JSON.stringify(body)).not.toContain('SECRET-HIDDEN-INPUT');
+  });
+
+  it('GET /api/evaluations/[id]/runs reads through src/lib/run-launch.ts — the include no route-level sweep could see', async () => {
+    // `runDetailInclude` lives in a lib module, so both this route and
+    // `launchSingleRun`'s own re-read reach a corpus without naming a dataset
+    // anywhere in their own file. That is why this one survived three sweeps.
+    const { dataset, sample } = await mkCorpusEvaluation();
+    await tombstoneSample(db, sample.id, 'nested-arg fixture');
+    await tombstoneDataset(db, dataset.id, 'nested-arg fixture');
+
+    const res = await listRuns(
+      new Request(`http://localhost/api/evaluations/${sample.datasetId}/runs`),
+      { params: Promise.resolve({ id: (await db.evaluation.findFirstOrThrow()).id }) }
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toHaveLength(1);
+    expect(body[0].evaluation.dataset).toBeNull();
+    expect(body[0].evaluation.datasetSample).toBeNull();
+  });
+
+  it('GET /api/evaluations/[id]/runs/[runId] — the run detail page renders `{dataset.name} #{index + 1}` off these two', async () => {
+    const { sample, evaluation, run } = await mkCorpusEvaluation();
+    await tombstoneSample(db, sample.id, 'nested-arg fixture');
+
+    const res = await getRun(
+      new Request(`http://localhost/api/evaluations/${evaluation.id}/runs/${run.id}`),
+      { params: Promise.resolve({ id: evaluation.id, runId: run.id }) }
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.evaluation.datasetSample).toBeNull();
+    expect(JSON.stringify(body)).not.toContain('SECRET-HIDDEN-EXPECTED');
+  });
+
+  it('GET /api/evaluations/export writes an EMPTY dataset column for a hidden corpus, exactly as SetNull used to', async () => {
+    const { dataset, sample } = await mkCorpusEvaluation();
+    await tombstoneSample(db, sample.id, 'nested-arg fixture');
+    await tombstoneDataset(db, dataset.id, 'nested-arg fixture');
+
+    const res = await exportEvaluations(
+      new Request('http://localhost/api/evaluations/export?format=jsonl')
+    );
+    expect(res.status).toBe(200);
+    const rows = (await res.text())
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(rows).toHaveLength(1);
+    // `flattenEvaluationForExport` already writes '' for a null reference —
+    // the shape it was given when the FK went NULL — so nothing downstream
+    // needed changing.
+    expect(rows[0].dataset_name).toBe('');
+    expect(rows[0].dataset_sample_index).toBe('');
+  });
+
+  it('GET /api/projects/[id] — the owner\'s heavy include joins both args per evaluation', async () => {
+    const { project, dataset, sample } = await mkCorpusEvaluation();
+    await tombstoneSample(db, sample.id, 'nested-arg fixture');
+    await tombstoneDataset(db, dataset.id, 'nested-arg fixture');
+
+    const res = await getProject(new Request(`http://localhost/api/projects/${project.id}`), {
+      params: Promise.resolve({ id: project.id }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.evaluations).toHaveLength(1);
+    expect(body.evaluations[0].dataset).toBeNull();
+    expect(body.evaluations[0].datasetSample).toBeNull();
+    // Grouping is keyed on the scalar, which survives, so the project page
+    // still batches these together under a fallback name.
+    expect(body.evaluations[0].datasetId).toBe(dataset.id);
+  });
+
+  it('GET /api/projects/[id]/export?scope=evaluations — the third dataset read in that file, and the only to-ONE one', async () => {
+    const { project, dataset, sample } = await mkCorpusEvaluation();
+    await tombstoneSample(db, sample.id, 'nested-arg fixture');
+    await tombstoneDataset(db, dataset.id, 'nested-arg fixture');
+
+    const res = await exportProject(
+      new Request(
+        `http://localhost/api/projects/${project.id}/export?format=jsonl&scope=evaluations`
+      ),
+      { params: Promise.resolve({ id: project.id }) }
+    );
+    expect(res.status).toBe(200);
+    const rows = (await res.text())
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].dataset_name).toBe('');
+    expect(rows[0].dataset_sample_index).toBe('');
   });
 });

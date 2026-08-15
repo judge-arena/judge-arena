@@ -77,6 +77,7 @@ import { prisma } from '@/lib/db';
 import { deriveRunMode } from '@/lib/run-mode';
 import { logger } from '@/lib/logger';
 import { publishJudgmentExecute, publishRunCreate, type JudgmentExecuteMsg, type RunCreateMsg } from '@/lib/queue/publish';
+import { sampleTombstoneFlagSelect, tombstoneFlagSelect, withLiveCorpusRefs } from '@/lib/tombstones';
 
 const EVALUATION_MODEL_TIMEOUT_MS = Number(process.env.EVALUATION_MODEL_TIMEOUT_MS ?? '120000');
 /** Same slack literal as src/worker/run-create-consumer.ts's
@@ -154,13 +155,32 @@ export const runDetailInclude = {
       promptText: true,
       responseText: true,
       project: { select: { id: true, name: true } },
-      dataset: { select: { id: true, name: true } },
-      datasetSample: { select: { id: true, index: true } },
+      // A1: to-ONE args take no `where`, so the hidden flag rides along and
+      // `toLiveRunDetail` below nulls the sub-object before the run leaves
+      // this module. THIS IS THE SITE NO ROUTE-LEVEL SWEEP COULD FIND — the
+      // read is here, in a shared include, and both `GET
+      // /api/evaluations/[id]/runs` and `launchSingleRun`'s own re-read reach
+      // a corpus through it without naming a dataset anywhere in their file.
+      dataset: { select: { id: true, name: true, tombstone: tombstoneFlagSelect } },
+      datasetSample: { select: { id: true, index: true, ...sampleTombstoneFlagSelect } },
     },
   },
 };
 
 export type RunDetail = Prisma.EvaluationRunGetPayload<{ include: typeof runDetailInclude }>;
+
+/**
+ * A `runDetailInclude` row with its corpus references projected — the only
+ * shape callers of this module should serialise. Exported beside the include
+ * so a route that imports one imports the other: `GET
+ * /api/evaluations/[id]/runs` does its own `findMany` with `runDetailInclude`
+ * and would otherwise be filtered by nothing.
+ */
+export function toLiveRunDetail(run: RunDetail) {
+  return { ...run, evaluation: withLiveCorpusRefs(run.evaluation) };
+}
+
+export type LiveRunDetail = ReturnType<typeof toLiveRunDetail>;
 
 async function resolveCurrentPromptTemplate(protocol: RunProtocol) {
   // "Current" = highest version FOR THIS PROTOCOL — same query as
@@ -249,7 +269,7 @@ export interface LaunchSingleRunDeps {
 }
 
 export interface LaunchSingleRunResult {
-  run: RunDetail;
+  run: LiveRunDetail;
   publishFailed: boolean;
   publishError?: string;
 }
@@ -485,7 +505,7 @@ export async function launchSingleRun(
     include: runDetailInclude,
   });
 
-  return { run, publishFailed, publishError };
+  return { run: toLiveRunDetail(run), publishFailed, publishError };
 }
 
 // ─── launchBulkRunCreates ───────────────────────────────────────────────────

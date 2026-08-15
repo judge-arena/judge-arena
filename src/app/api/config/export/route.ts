@@ -268,6 +268,25 @@ export async function GET(request: Request) {
       const goldenSets = await prisma.goldenSet.findMany({
         where: { ...ownerScope, ...goldenSetLifecycleWhere(includeRetired) },
         include: {
+          // MUST NOT BE TOMBSTONE-FILTERED (A1). Not the P2002 reason the
+          // other members of this class carry — this one would not raise
+          // anything, it would emit a WRONG BINDING.
+          //
+          // A `GoldenSet.dataset` cannot be hidden in the first place:
+          // `findGoldenSetsPinningDataset` (src/lib/golden-sets.ts) has a
+          // `datasetId` arm that is deliberately not lifecycle-filtered, so
+          // every destructive dataset verb 409s while ANY golden set — live,
+          // retired or tombstoned — names the corpus. There is no product path
+          // that leaves this relation pointing at a tombstoned row.
+          //
+          // And if there were, nulling it here would be worse than serving it.
+          // `dbGoldenSetToConfig` (src/lib/config.ts) falls back to
+          // `generateSlug(goldenSet.dataset?.name ?? 'unnamed')`, so a nulled
+          // relation exports `datasetSlug: "unnamed"` — a slug the importer
+          // resolves like any other, binding the set to whatever real dataset
+          // happens to hold it. Serving the true slug of a hidden corpus makes
+          // the importer fail to resolve it and skip, which is the honest
+          // outcome.
           dataset: { select: { slug: true, name: true } },
           items: {
             // Same reasoning one level down, and the same helper every other

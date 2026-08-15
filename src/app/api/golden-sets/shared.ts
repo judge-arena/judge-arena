@@ -56,6 +56,16 @@ export const goldenSetInclude = {
   // `from {set.dataset.name}` line (src/app/golden-sets/page.tsx) is a
   // permanently dead branch — guarded by `set.dataset &&`, so it renders
   // nothing rather than crashing, which is exactly why it went unnoticed.
+  //
+  // MUST NOT BE TOMBSTONE-FILTERED (A1), and unreachably so rather than
+  // riskily so: `findGoldenSetsPinningDataset`'s `datasetId` arm
+  // (src/lib/golden-sets.ts) is not lifecycle-filtered, so every destructive
+  // dataset verb answers 409 while ANY golden set names the corpus — live,
+  // retired or tombstoned. A bound dataset therefore cannot be hidden, and
+  // projecting this to null (the treatment `Evaluation.dataset` gets, since it
+  // has no such guard) would add a branch nothing can enter. The same marker
+  // and the same reasoning sit on `goldenSetDetailInclude` below and on
+  // config/export/route.ts's golden-set read, which has a second reason.
   dataset: { select: { id: true, name: true } },
   _count: { select: { items: { where: goldenItemLifecycleWhere(false) } } },
 } satisfies Prisma.GoldenSetInclude;
@@ -69,6 +79,8 @@ export const goldenSetDetailInclude = {
   // columns only: Dataset joins no user data, and this include feeds the
   // public branch of GET /api/golden-sets/[id] as well, where
   // `toPublicGoldenSet`'s allow-list drops it.
+  //
+  // MUST NOT BE TOMBSTONE-FILTERED (A1) — see `goldenSetInclude` above.
   dataset: { select: { id: true, name: true } },
   _count: { select: { items: { where: goldenItemLifecycleWhere(false) } } },
   items: {

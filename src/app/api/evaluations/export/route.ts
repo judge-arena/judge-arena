@@ -9,6 +9,7 @@ import {
   jsonlResponse,
 } from '@/lib/export';
 import { logger, serializeError } from '@/lib/logger';
+import { sampleTombstoneFlagSelect, tombstoneFlagSelect, withLiveCorpusRefs } from '@/lib/tombstones';
 
 /**
  * Shared Prisma include for full evaluation + run + judgment data.
@@ -17,8 +18,14 @@ import { logger, serializeError } from '@/lib/logger';
 const fullEvaluationInclude = {
   project: { select: { id: true, name: true } },
   rubric: { select: { id: true, name: true, version: true } },
-  dataset: { select: { id: true, name: true } },
-  datasetSample: { select: { id: true, index: true } },
+  // A1: to-ONE args take no `where`; the marker rides along and
+  // `withLiveCorpusRefs` nulls the sub-object before `flattenEvaluationForExport`
+  // sees it. That flattener already writes `dataset_name: '' ` and an empty
+  // `dataset_sample_index` for a null reference — the shape `onDelete: SetNull`
+  // produced before the overlay — so the exported CSV goes back to describing
+  // the corpus the instance still shows.
+  dataset: { select: { id: true, name: true, tombstone: tombstoneFlagSelect } },
+  datasetSample: { select: { id: true, index: true, ...sampleTombstoneFlagSelect } },
   runs: {
     include: {
       rubric: { select: { id: true, name: true, version: true } },
@@ -96,8 +103,8 @@ export async function GET(request: Request) {
       orderBy: { createdAt: 'asc' },
     });
 
-    const rows = evaluations.flatMap((evaluation: any) =>
-      flattenEvaluationForExport(evaluation)
+    const rows = evaluations.flatMap((evaluation) =>
+      flattenEvaluationForExport(withLiveCorpusRefs(evaluation))
     );
 
     const timestamp = new Date().toISOString().slice(0, 10);

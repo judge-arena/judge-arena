@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
+import { sampleTombstoneFlagSelect, tombstoneFlagSelect, withLiveCorpusRefs } from '@/lib/tombstones';
 
 // Task 12: minimal JudgeModelVersion+JudgeModel select for display fallback
 // when modelConfig is null — see src/lib/model-display.ts.
@@ -43,8 +44,15 @@ const runDetailInclude = {
       responseText: true,
       userId: true,
       project: { select: { id: true, name: true } },
-      dataset: { select: { id: true, name: true, sampleCount: true } },
-      datasetSample: { select: { id: true, index: true, input: true, expected: true } },
+      // A1: to-ONE args take no `where`; the marker rides along and
+      // `withLiveCorpusRefs` nulls the sub-object at the response. The run
+      // detail page renders `{dataset.name} #{datasetSample.index + 1}`, so
+      // unfiltered this named a withdrawn row by its ordinal — and this select
+      // carries `input`/`expected` as well.
+      dataset: { select: { id: true, name: true, sampleCount: true, tombstone: tombstoneFlagSelect } },
+      datasetSample: {
+        select: { id: true, index: true, input: true, expected: true, ...sampleTombstoneFlagSelect },
+      },
     },
   },
 };
@@ -78,7 +86,7 @@ export async function GET(
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    return NextResponse.json(run);
+    return NextResponse.json({ ...run, evaluation: withLiveCorpusRefs(run.evaluation) });
   } catch (error) {
     logger.error('Failed to fetch run', { error: serializeError(error) });
     return NextResponse.json({ error: 'Failed to fetch run' }, { status: 500 });

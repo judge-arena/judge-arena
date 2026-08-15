@@ -8,7 +8,7 @@ import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib
 import { logger } from '@/lib/logger';
 import { fetchNRows, fetchDatasetMetadata } from '@/lib/huggingface';
 import { generateSlug } from '@/lib/config';
-import { liveSamplesOnly } from '@/lib/tombstones';
+import { liveSamplesOnly, sampleTombstoneFlagSelect, tombstoneFlagSelect, withLiveCorpusRefs } from '@/lib/tombstones';
 
 // ── Dataset batch evaluation ──
 const createBatchSchema = z.object({
@@ -96,8 +96,15 @@ const evaluationInclude = {
   rubric: { select: { id: true, name: true, version: true, parentId: true } },
   project: { select: { id: true, name: true } },
   user: { select: { id: true, name: true, email: true } },
-  dataset: { select: { id: true, name: true, sampleCount: true } },
-  datasetSample: { select: { id: true, index: true, input: true, expected: true } },
+  // A1: both are to-ONE relation args, so neither can carry a `where` — the
+  // hidden flag comes back with the columns and `withLiveCorpusRefs` nulls the
+  // sub-object at the response, restoring the `null` that `onDelete: SetNull`
+  // used to produce. `datasetSample` here carries `input`/`expected`, so
+  // unfiltered this served a withdrawn row's full text verbatim.
+  dataset: { select: { id: true, name: true, sampleCount: true, tombstone: tombstoneFlagSelect } },
+  datasetSample: {
+    select: { id: true, index: true, input: true, expected: true, ...sampleTombstoneFlagSelect },
+  },
   modelSelections: {
     include: {
       modelConfig: {
@@ -144,7 +151,7 @@ export async function GET(request: Request) {
       prisma.evaluation.count({ where }),
     ]);
 
-    return paginatedJson(evaluations, limit, total);
+    return paginatedJson(evaluations.map(withLiveCorpusRefs), limit, total);
   } catch (error) {
     logger.error('Failed to fetch evaluations', { error });
     return NextResponse.json({ error: 'Failed to fetch evaluations' }, { status: 500 });
@@ -267,7 +274,13 @@ export async function POST(request: Request) {
           ? persistedResponse || persistedPrompt || ''
           : persistedPrompt || '';
 
-      const evaluation = await prisma.evaluation.create({
+      // Projected like every other consumer of `evaluationInclude`, though
+      // this one cannot yet produce a hidden reference: a single-text
+      // evaluation sets neither `datasetId` nor `datasetSampleId`, so both
+      // sub-objects are already `null`. Uniform rather than reasoned-about,
+      // because the reasoning stops holding the moment this create grows a
+      // dataset column and nothing would fail.
+      const evaluation = withLiveCorpusRefs(await prisma.evaluation.create({
         data: {
           projectId: data.projectId,
           title: data.title,
@@ -281,7 +294,7 @@ export async function POST(request: Request) {
           },
         } satisfies Prisma.EvaluationUncheckedCreateInput,
         include: evaluationInclude,
-      });
+      }));
 
       if (shouldRunImmediately) {
         const launch = await launchSingleRun({

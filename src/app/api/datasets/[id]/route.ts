@@ -5,7 +5,13 @@ import { requireAuth, requireScope, optionalAuth, resolveResourceAccess, require
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicDataset } from '@/lib/serializers';
 import { findGoldenSetsPinningDataset } from '@/lib/golden-sets';
-import { liveDatasetsOnly, liveSamplesOnly, tombstoneDataset } from '@/lib/tombstones';
+import {
+  liveDatasetsOnly,
+  liveOrNull,
+  liveSamplesOnly,
+  tombstoneDataset,
+  tombstoneFlagSelect,
+} from '@/lib/tombstones';
 
 /**
  * DECISION 15 — A HIDDEN DATASET IS CLOSED TO WRITES, at the two sites the
@@ -96,16 +102,37 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
           take: 100,
         },
         versions: {
-          // The stored `sampleCount` only — there is no `_count` here to
-          // filter. The version-history panel does not read this: it fetches
-          // GET /api/datasets/[id]/versions, whose `_count` IS filtered.
-          // Keeping this rung truthful is the write side's job, not this
-          // read's.
+          // MEMBERSHIP FIRST. `Dataset.versions` is
+          // `Dataset[] @relation("DatasetVersions")` (schema.prisma) — a list
+          // of Dataset ROWS, and the one such list on this branch that was
+          // left unfiltered. Unfiltered it served a hidden child version to
+          // ANONYMOUS callers: this route is `optionalAuth`, the root only has
+          // to be `visibility: 'public'`, and the public branch below passes
+          // `versions` through OUTSIDE `toPublicDataset`, so the serializer's
+          // allow-list never saw it. `GET /api/datasets/[id]/versions` has
+          // filtered its family read since Task 9, so the two endpoints
+          // contradicted each other about which versions exist. A
+          // `dataset.findMany` grep does not surface this line — it is a
+          // nested relation arg, the same blind spot as the `datasets:` select
+          // in projects/[id]/route.ts.
+          //
+          // The COUNT rung is a separate question and its answer has not
+          // changed: what is selected here is the STORED `sampleCount`, there
+          // is no `_count` to filter, and keeping that number truthful is the
+          // write side's job rather than this read's.
+          where: liveDatasetsOnly(),
           select: { id: true, version: true, createdAt: true, sampleCount: true },
           orderBy: { version: 'desc' },
         },
+        // A hidden PARENT, same class one level up — and a to-ONE relation, so
+        // it takes no `where` and has to be projected out of the response
+        // instead (see the block above `liveOrNull` in src/lib/tombstones.ts).
+        // Smaller than the `versions` leak because `toPublicDataset` already
+        // emits `parentId`, so all this adds is the parent's `version`; nulled
+        // for the same reason anyway, because a live child that still names
+        // the version it forked from contradicts the 404 that id now answers.
         parent: {
-          select: { id: true, version: true },
+          select: { id: true, version: true, tombstone: tombstoneFlagSelect },
         },
         // A1: the LIVE sample count, for both the owner branch (returned
         // verbatim) and the public branch (via toPublicDataset's
@@ -124,18 +151,24 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
     const decision = resolveResourceAccess(session, dataset.userId, dataset.visibility === 'public');
     if ('error' in decision) return decision.error;
 
+    // A hidden parent is projected out ONCE, before the branch, so the owner
+    // arm and the anonymous arm cannot disagree — the `versions` leak was
+    // exactly a sub-object that reached the public arm without passing through
+    // the serializer.
+    const body = { ...dataset, parent: liveOrNull(dataset.parent) };
+
     if (decision.access === 'owner') {
-      return NextResponse.json(dataset);
+      return NextResponse.json(body);
     }
 
     // Public view: PII-stripped dataset core + the same samples/versions/
     // parent sub-objects (none of which join user data, so they're already
     // safe to pass through verbatim — see the GET include above).
     return NextResponse.json({
-      ...toPublicDataset(dataset),
-      samples: dataset.samples,
-      versions: dataset.versions,
-      parent: dataset.parent,
+      ...toPublicDataset(body),
+      samples: body.samples,
+      versions: body.versions,
+      parent: body.parent,
     });
   } catch (error) {
     if (error instanceof RateLimitedError) return error.response;
