@@ -45,8 +45,10 @@ describe('liveSamplesOnly', () => {
     //   { OR: [{ tombstone: { is: null } }, { tombstone: { isTombstone: false } }] }
     // and it is wrong for a structural reason nothing else would catch: an
     // object literal cannot carry two `OR` keys, and FOUR dataset read sites
-    // already build their own (datasets/route.ts:67, stats/route.ts:47,
-    // datasets/[id]/versions/route.ts:155, dataset-versions.ts:157). Spreading
+    // already build their own (datasets/route.ts, stats/route.ts,
+    // datasets/[id]/versions/route.ts, dataset-versions.ts — grep `OR:` in
+    // each; the line numbers this comment used to carry all went stale on this
+    // branch). Spreading
     // an OR into those clobbers one clause or the other with no type error and
     // no test failure — which is exactly why it needs a test here.
     const where = liveSamplesOnly();
@@ -56,7 +58,7 @@ describe('liveSamplesOnly', () => {
 
   it('returns a fresh object per call, so a caller cannot poison the next one', () => {
     // Every read site spreads this into a `where` it then mutates
-    // (datasets/route.ts:62 builds `const where: any = {}` and assigns into
+    // (datasets/route.ts:63 builds `const where: any = {}` and assigns into
     // it). A shared frozen constant would be a cross-request bug with no
     // reproduction; a module-level `const` returned by reference is the exact
     // shape that fails here.

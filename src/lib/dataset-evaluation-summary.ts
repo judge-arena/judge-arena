@@ -119,10 +119,11 @@ function computeSummary(evaluations: EvaluationForSummary[]): DatasetEvaluationS
  * original members are Prisma reads that would compile perfectly well with the
  * filter spread in and break a WRITE at runtime with P2002; the three added in
  * wave 1 (`GoldenSet.dataset`, in golden-sets/shared.ts and
- * config/export/route.ts) are to-one relation args that could be projected but
- * must not be, because the pin guard makes a hidden bound corpus unreachable
- * and nulling one would export a fabricated slug. This one cannot be filtered
- * at all.
+ * config/export/route.ts) are REQUIRED to-one relation args, which Prisma
+ * refuses a `where` on anyway — and must not be nulled by any other means
+ * either, because the pin guard makes a hidden bound corpus unreachable and
+ * nulling one would export a fabricated slug. This one cannot be filtered at
+ * all: it is raw SQL, so there is no arg to refuse and no result to null.
  *
  * TOMBSTONE OVERLAY (A1): the row lock below is `$queryRaw`, and the only
  * shape src/lib/tombstones.ts offers is unavailable to it. Both filter helpers

@@ -9,21 +9,53 @@
  * THIS MODULE IS THE SINGLE DEFINITION OF "HIDDEN". Every read site spreads
  * one of the two filters below — nested to-ONE relation arguments included,
  * which take a `where` whenever the relation is OPTIONAL (see the block below
- * the two filters). Every destructive verb calls one of the writers.
+ * the two filters) — EXCEPT for a deliberate, enumerated class that must not
+ * be filtered at all. Every destructive verb calls one of the writers.
  * It lives in src/lib/ rather than inside the route handlers because
  * `src/app/api/**` is outside every vitest coverage `include`, and the shape
  * of these predicates is precisely the thing that is cheap to pin in a unit
  * test and expensive to discover in a 620-row corpus.
+ *
+ * ─── THE READS THAT MUST NOT BE FILTERED — READ THIS BEFORE SWEEPING ────────
+ *
+ * "Spread the filter into every read" is WRONG as an absolute, and acting on
+ * it literally breaks seven write paths with P2002. The exceptions are not a
+ * list to maintain here — they are greppable, each one sitting directly above
+ * the read it governs with its own reason:
+ *
+ *     grep -rn "MUST NOT BE TOMBSTONE-FILTERED (A1)" src/ scripts/
+ *
+ * Eleven sites carry that marker today (this comment is the twelfth hit, and
+ * is a cross-reference rather than a member). They fall into three kinds:
+ *
+ *   - EIGHT would compile perfectly well with a filter spread in and break a
+ *     WRITE at runtime. Five are slug DEDUP reads (`datasets/route.ts`,
+ *     `evaluations/route.ts`, `config/import/route.ts`, `dataset-versions.ts`,
+ *     `scripts/importer/artifacts.ts`) — a hidden row still occupies its slug,
+ *     so a filtered dedup read reports "free" and the insert takes P2002 on
+ *     `(userId, slug)`. One is the version HIGH-WATER read
+ *     (`dataset-versions.ts`) and one the sample ORDINAL read
+ *     (`scripts/importer/artifacts.ts`), both for the same reason
+ *     `nextSampleIndex` below is unfiltered: a hidden row still holds its
+ *     number. The eighth is `dataset-evaluation-summary.ts`'s
+ *     `$queryRaw … FOR UPDATE` — see the next paragraph.
+ *   - THREE are `GoldenSet.dataset` (`golden-sets/shared.ts` ×2,
+ *     `config/export/route.ts`). These break no write. They are a REQUIRED
+ *     to-one, so Prisma refuses a `where` there outright, and nulling them
+ *     would make `dbGoldenSetToConfig` emit `datasetSlug: "unnamed"` from its
+ *     fallback and bind the set to whatever real dataset holds that slug.
+ *
+ * WHAT THIS MODULE CANNOT REACH, as opposed to must not: exactly one of the
+ * eleven. `refreshDatasetEvaluationSummary`'s row lock is a
+ * `$queryRaw … FOR UPDATE`, and both helpers below compile to Prisma `where`
+ * fragments, which cannot reach raw SQL. The other ten COULD be filtered and
+ * must not be.
  *
  * NOT A0's `tombstonedAt` COLUMN FORM, AND THE TWO MUST NOT BE HARMONISED.
  * `goldenSetLifecycleWhere` (src/lib/golden-sets.ts) pins `tombstonedAt: null`
  * in BOTH arms precisely so a tombstoned golden set has no way back. This
  * overlay is reversible by design — see `restoreSample`. Two mechanisms with
  * different capabilities, coexisting on purpose.
- *
- * WHAT THIS MODULE CANNOT REACH: `dataset-evaluation-summary.ts:119` is a
- * `$queryRaw ... FOR UPDATE`. "Spread the helper" does not apply to raw SQL,
- * and that read is deliberately left alone.
  */
 
 import type { Prisma } from '@prisma/client';
@@ -37,11 +69,13 @@ import type { Prisma } from '@prisma/client';
  *     { OR: [{ tombstone: { is: null } }, { tombstone: { isTombstone: false } }] }
  *
  * and it cannot be used, because an object literal cannot carry two `OR` keys
- * and FOUR dataset read sites already build their own — `datasets/route.ts:67`,
- * `stats/route.ts:47`, `datasets/[id]/versions/route.ts:155`,
- * `dataset-versions.ts:157`. Spreading an `OR` into any of those would
- * silently clobber one clause or the other, with no type error and no test
- * failure.
+ * and FOUR dataset read sites already build their own — `datasets/route.ts`
+ * (`where.OR = [`), `stats/route.ts`, `datasets/[id]/versions/route.ts` and
+ * `dataset-versions.ts` (each an `OR: [` inside a dataset `where`). Spreading
+ * an `OR` into any of those would silently clobber one clause or the other,
+ * with no type error and no test failure. Grep `OR:` in those four files
+ * rather than trusting a line number — this branch has already invalidated
+ * these four once.
  *
  * `NOT` collides with `NOT` identically, so this is a rule rather than an
  * escape: the only `NOT:` in src/ today is `auth.ts:49`, on a different model.
@@ -185,7 +219,9 @@ export async function tombstoneSample(
  * The two sets are disjoint — `updateMany` matches exactly the ids that have a
  * row, `createMany` inserts exactly the ids that do not — so the returned sum
  * is the number of DISTINCT ids now hidden, which is what the DELETE handler
- * reports as `deleted`. Input duplicates are removed first so that count means
+ * reports as `tombstoned` (`samples/route.ts` returns `{ tombstoned, remaining }`
+ * — `deleted` was renamed because nothing is deleted here any more).
+ * Input duplicates are removed first so that count means
  * what it says.
  *
  * An id that is not a real `DatasetSample` raises P2003 rather than being
@@ -281,7 +317,8 @@ export async function restoreSample(
  * WHY NOT `max` over LIVE rows: hide the TAIL (samples 0..4, hide 4) and
  * live-max + 1 is 4, which is occupied by the hidden row. This is why
  * `liveSamplesOnly()` must NOT be spread into the read below, and why
- * `samples/route.ts:46` stays unfiltered.
+ * `samples/route.ts`'s POST guard read stays unfiltered (its
+ * `select: { userId: true, _count: { select: { samples: true } } }`).
  *
  * THE CASE THAT ACTUALLY BITES is not a freshly-appended corpus — Prisma's
  * `_count` is unfiltered by default and the POST high-water read stays
@@ -308,9 +345,10 @@ export async function restoreSample(
  * `POST /api/datasets/[id]/samples` has no retry for and reports as a bare
  * 500. A1 NARROWED that window — the read it replaced
  * (`dataset._count.samples`) happened outside the transaction entirely — but
- * it did not close it. Pinned by 'two concurrent transactions both read the
- * same high-water mark' in tests/db/dataset-sample-tombstone.test.ts, which
- * asserts the collision rather than its absence.
+ * it did not close it. Pinned by 'two concurrent transactions read the SAME
+ * high-water mark, and the loser gets P2002 — the read is not serialised' in
+ * tests/db/dataset-sample-tombstone.test.ts, which asserts the collision
+ * rather than its absence.
  *
  * WHAT IT DOES BUY, and it is worth the argument: the read observes the
  * caller's OWN uncommitted writes. A verb that inserted samples earlier in the
