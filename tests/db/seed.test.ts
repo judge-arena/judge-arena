@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from 'vitest';
 
 import { seedAll, PLATFORM_USER_EMAIL } from '../../prisma/seed-core';
-import { JUDGEBENCH_DATASET_ID } from '../../prisma/seed-judgebench';
+import { JUDGEBENCH_DATASET_ID, seedJudgeBench } from '../../prisma/seed-judgebench';
 
 import { db, truncateAll } from './helpers';
 
@@ -132,5 +132,146 @@ describe('prisma seed', () => {
     await expect(db.dataset.count()).resolves.toBe(before.datasets);
     await expect(db.datasetSample.count()).resolves.toBe(before.samples);
     await expect(db.promptTemplate.count()).resolves.toBe(before.templates);
+  });
+});
+
+/**
+ * A1 — the seeder against the tombstone overlay.
+ *
+ * `seedJudgeBench` is the eighth `Dataset.sampleCount` writer and was the one
+ * that still meant "every row in the vendored file" while the other seven mean
+ * LIVE rows; it was also the one write path Decision 15 ("a hidden dataset is
+ * closed to writes") never reached. Both were silent — a re-seed printed a
+ * success line and exited 0 in each case.
+ *
+ * These call `seedJudgeBench` directly rather than `seedAll`: the whole seeder
+ * would work too, but it is the JudgeBench arm that is under test and running
+ * the rest of it twice per case buys nothing.
+ */
+describe('prisma seed — JudgeBench against the tombstone overlay (A1)', () => {
+  beforeAll(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterAll(() => {
+    vi.restoreAllMocks();
+  });
+
+  beforeEach(async () => {
+    await truncateAll();
+  });
+
+  async function seedOwner() {
+    const user = await db.user.create({
+      data: { email: 'judgebench-seed-owner@test.local', passwordHash: 'fixture-hash' },
+    });
+    const project = await db.project.create({ data: { name: 'Seed Fixture', userId: user.id } });
+    return { ownerId: user.id, projectId: project.id };
+  }
+
+  it('re-seeding over a HIDDEN sample writes the LIVE sampleCount, and does not restore the row', async () => {
+    const opts = await seedOwner();
+    await seedJudgeBench(db, opts);
+
+    // Hide one row the way DELETE /api/datasets/[id]/samples does — the row
+    // stays on disk holding index 0, which is the whole reason `createMany`'s
+    // `skipDuplicates` cannot repair it any more.
+    const victim = await db.datasetSample.findFirstOrThrow({
+      where: { datasetId: JUDGEBENCH_DATASET_ID, index: 0 },
+    });
+    await db.tombstone.create({
+      data: { datasetSampleId: victim.id, isTombstone: true, reason: 'deleted by hand' },
+    });
+
+    // The stored count is deliberately left at the stale 620 the first seed
+    // wrote, so this asserts the re-seed CORRECTS it rather than merely
+    // declining to make it worse.
+    await expect(
+      db.dataset.findUnique({ where: { id: JUDGEBENCH_DATASET_ID }, select: { sampleCount: true } })
+    ).resolves.toEqual({ sampleCount: 620 });
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await seedJudgeBench(db, opts);
+
+    // 619, not 620. The stored rung shadows the live one in every consumer
+    // (`sampleCount ?? sampleTotal ?? _count.samples`), so 620 here is what
+    // makes the golden-set import picker advertise a row the import cannot
+    // return.
+    const after = await db.dataset.findUnique({
+      where: { id: JUDGEBENCH_DATASET_ID },
+      select: { sampleCount: true },
+    });
+    expect(after?.sampleCount).toBe(619);
+
+    // Nothing was restored and nothing was duplicated: 620 rows on disk, 619
+    // live, and the hidden one keeps the reason it went away with rather than
+    // having the seeder's written over it.
+    await expect(
+      db.datasetSample.count({ where: { datasetId: JUDGEBENCH_DATASET_ID } })
+    ).resolves.toBe(620);
+    const tomb = await db.tombstone.findUnique({ where: { datasetSampleId: victim.id } });
+    expect(tomb?.isTombstone).toBe(true);
+    expect(tomb?.reason).toBe('deleted by hand');
+
+    // …and the skip is REPORTED. Silence is the defect this closes.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain('were NOT restored');
+    warn.mockRestore();
+  });
+
+  it('REFUSES a hidden judgebench-v1 and rewrites nothing on it — decision 15 reaches the seeder', async () => {
+    const opts = await seedOwner();
+    await seedJudgeBench(db, opts);
+
+    // Hand-set to values the seeder would overwrite if it ran, so "nothing was
+    // written" is observable rather than inferred.
+    await db.dataset.update({
+      where: { id: JUDGEBENCH_DATASET_ID },
+      data: { visibility: 'private', sampleCount: 7 },
+    });
+    await db.tombstone.create({
+      data: { datasetId: JUDGEBENCH_DATASET_ID, isTombstone: true, reason: 'dataset deleted' },
+    });
+
+    await expect(seedJudgeBench(db, opts)).rejects.toThrow(/closed to writes/);
+
+    const after = await db.dataset.findUnique({
+      where: { id: JUDGEBENCH_DATASET_ID },
+      select: { visibility: true, sampleCount: true },
+    });
+    expect(after?.visibility).toBe('private');
+    expect(after?.sampleCount).toBe(7);
+
+    // Still deleted. A re-seed is not an un-delete: there is no restore verb
+    // in the product, and inventing one here would resurrect a corpus an admin
+    // withdrew.
+    const tomb = await db.tombstone.findUnique({ where: { datasetId: JUDGEBENCH_DATASET_ID } });
+    expect(tomb?.isTombstone).toBe(true);
+  });
+
+  it('an isTombstone: false row is NOT hidden — the seeder refuses on the flag, not on the row existing', async () => {
+    // The `NOT` formulation's third case, and the one a `tombstone: { is:
+    // null }` spelling would get wrong: a dataset that was deleted and then
+    // restored carries a Tombstone row with the flag DOWN, and must be
+    // seedable exactly like one that was never deleted.
+    const opts = await seedOwner();
+    await seedJudgeBench(db, opts);
+
+    await db.dataset.update({
+      where: { id: JUDGEBENCH_DATASET_ID },
+      data: { visibility: 'private' },
+    });
+    await db.tombstone.create({
+      data: { datasetId: JUDGEBENCH_DATASET_ID, isTombstone: false, reason: null },
+    });
+
+    await expect(seedJudgeBench(db, opts)).resolves.toBeTruthy();
+
+    const after = await db.dataset.findUnique({
+      where: { id: JUDGEBENCH_DATASET_ID },
+      select: { visibility: true, sampleCount: true },
+    });
+    expect(after?.visibility).toBe('public');
+    expect(after?.sampleCount).toBe(620);
   });
 });
