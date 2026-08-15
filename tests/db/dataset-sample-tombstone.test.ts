@@ -1011,7 +1011,8 @@ describe('a hidden dataset is closed to writes (A1 Task 7, Decision 15)', () => 
 
   it('PATCH /api/datasets/[id] 404s on a hidden dataset — you cannot rename a corpus you have deleted', async () => {
     // `requireOwnership('dataset', …)` reads UNFILTERED and is shared with
-    // eight other resource types whose access-matrix tests pin that behaviour,
+    // six other resource types whose access-matrix tests pin that behaviour
+    // (`OWNERSHIP_MODELS` has seven entries; `dataset` is one of them),
     // so the liveness check is explicit and local to this handler
     // (`assertDatasetLive`). Without it you can rename a corpus you have
     // already deleted — and now that the list and detail reads ARE filtered
@@ -1127,8 +1128,10 @@ describe('a hidden dataset is closed to writes (A1 Task 7, Decision 15)', () => 
   });
 
   it('GET /api/datasets/[id]/versions 404s on a hidden dataset', async () => {
-    // The one guard in the nine that gates a READ rather than a write, and it
-    // is in the list for a reason: without it the version ladder of a hidden
+    // One of the TWO guards in the nine that gate a READ rather than a write —
+    // the other is `GET /api/datasets/[id]/export`, pinned later in this same
+    // describe block. (The remaining seven are mutation handlers.) It is in
+    // the list for a reason: without it the version ladder of a hidden
     // corpus stays enumerable — id, version, sampleCount and timestamps for
     // every sibling — to anyone, since this route is `optionalAuth` and the
     // fixture is public. The list is served by the same handler whose POST
@@ -1256,13 +1259,25 @@ describe('a hidden dataset is closed to writes (A1 Task 7, Decision 15)', () => 
 //   is `onDelete: Restrict`, permanently.
 //
 // TWO SAMPLE READS STAY UNFILTERED and are not this block's to change; both
-// already say why in place (samples/route.ts). The POST high-water `_count`
-// must see hidden rows or a new append reuses an ordinal a hidden row still
-// holds and violates @@unique([datasetId, index]); the DELETE membership
-// lookup must accept an already-hidden id so a retried delete converges on
-// hidden instead of 400ing that the id is foreign. Both are pinned by the
-// Task 3 and Task 4 blocks above, which is what keeps the sweep honest: a
-// later hand that "completes" it by filtering them turns those tests red.
+// already say why in place (samples/route.ts). The ORDINAL source must see
+// hidden rows or a new append reuses an ordinal a hidden row still holds and
+// violates @@unique([datasetId, index]); the DELETE membership lookup must
+// accept an already-hidden id so a retried delete converges on hidden instead
+// of 400ing that the id is foreign.
+//
+// WHAT ACTUALLY ENFORCES THAT, named precisely, because an earlier version of
+// this header promised a tripwire that does not exist. The ordinal source is
+// `nextSampleIndex`'s aggregate, and filtering it turns 'appends above
+// max(index) over ALL rows on a GAPPED corpus with a hidden tail' (Task 4
+// block) red. The membership lookup is pinned by 'converges on hidden when
+// repeated — never P2002, never a silent no-op' (Task 3 block).
+//
+// The POST guard's `_count.samples` is NOT the ordinal source and has not been
+// one since A1 — samples/route.ts says so at that read. It is INERT: nothing
+// consumes it, so filtering it changes no response and turns NO test red, and
+// no behavioural test can be written that would. That gap is real and is
+// stated again at the Task 10 block below; it is not covered here, and this
+// header no longer claims it is.
 describe('the sample read sweep: a hidden sample is invisible to every filtered read (A1 Task 8)', () => {
   beforeEach(async () => {
     await truncateAll();
@@ -1606,7 +1621,7 @@ describe('the sample read sweep: a hidden sample is invisible to every filtered 
 // ALSO the golden-set dataset picker — golden-sets/page.tsx fetches
 // /api/datasets, it is not a distinct server read) and the single-dataset GET.
 //
-// The third test in this block is the opposite claim, and it is the reason the
+// The LAST test in this block is the opposite claim, and it is the reason the
 // filter and the must-not-filter class landed in ONE task: the slug-dedup read
 // in the SAME file as the list must stay UNFILTERED, or creating a dataset
 // whose name collides with a hidden one raises P2002 and 500s.
@@ -1886,7 +1901,7 @@ describe('the dataset read sweep — a hidden dataset leaves every list (A1 Task
 //
 // THE ELEVEN LADDER EXPRESSIONS THEMSELVES NEED NO CHANGE and this task does
 // not touch one: datasets/page.tsx; datasets/[id]/page.tsx ×4;
-// golden-sets/page.tsx; projects/[id]/page.tsx ×4. Nor `hfMeta.sampleCount` (a
+// golden-sets/page.tsx; projects/[id]/page.tsx ×5. Nor `hfMeta.sampleCount` (a
 // HuggingFace remote count) or `summary.sampleCount` (which is
 // `evaluations.length`). The ladder is right once its producers are.
 //
@@ -2069,12 +2084,13 @@ describe('the _count.samples sweep — a hidden sample stops being counted (A1 T
 //
 // Eleven reads reach `Dataset` or `DatasetSample` as a nested relation
 // ARGUMENT rather than as a `dataset.findX` call, and none of the three sweeps
-// above found them: every grep those sweeps ran was for a read that could
-// carry a filter, and most of these cannot. `Evaluation.dataset`,
-// `Evaluation.datasetSample` and `Dataset.parent` are to-ONE relations, which
-// Prisma gives `select`/`include` and no `where` at all — so the fix is a
-// PROJECTION (`withLiveCorpusRefs`/`liveOrNull`, src/lib/tombstones.ts) rather
-// than a predicate. `Dataset.versions` is to-MANY and does take one.
+// above found them: every grep those sweeps ran was for a `dataset.findX`
+// call, and these are relation args. They DO carry a filter, though —
+// `Evaluation.dataset`, `Evaluation.datasetSample` and `Dataset.parent` are
+// OPTIONAL to-ONE relations, and Prisma gives an optional to-one a `where`
+// like any other read (only a REQUIRED to-one refuses it). So the fix is the
+// same predicate as everywhere else on the branch, spread on the nested arg.
+// `Dataset.versions` is to-MANY and takes one too.
 //
 // THESE ARE REGRESSIONS THE OVERLAY INTRODUCED, not inherited gaps.
 // `Evaluation.datasetId` and `.datasetSampleId` are both `onDelete: SetNull`
@@ -2215,7 +2231,7 @@ describe('the nested relation-arg sweep — a hidden row stops being served thro
     );
   });
 
-  it('GET /api/datasets/[id] nulls a hidden PARENT — a to-ONE arg, so no `where` could have done it', async () => {
+  it('GET /api/datasets/[id] nulls a hidden PARENT — `Dataset.parent` is OPTIONAL, so a `where` on the arg does it', async () => {
     const user = await mkUser();
     argCounter += 1;
     const parent = await db.dataset.create({

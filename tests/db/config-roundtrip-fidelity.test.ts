@@ -516,15 +516,15 @@ const COVERAGE: Record<string, Coverage> = {
   // re-import hide rows on another instance that its owner there never
   // deleted.
   //
-  // STATE OF PLAY, so this comment is not read as a description of today's
-  // exporter: the filtering it depends on does NOT exist yet. As of this
-  // task, src/app/api/config/export/route.ts's dataset loop takes only an
-  // ownership `where`, and its nested `samples` include is
-  // `{ orderBy: { index: 'asc' } }` with no `where` at all. A1 Tasks 8 and 9
-  // add the tombstone filter to both. Until they land, a hidden row would
-  // still be exported — which is precisely why `exported: []` here is a
-  // statement about what this model SHOULD contribute to the document
-  // (nothing), not a claim that the current exporter already achieves it.
+  // THE FILTERING THIS DEPENDS ON NOW EXISTS, and this comment used to say it
+  // did not. A1 Tasks 8 and 9 landed it (`23deeb2`):
+  // src/app/api/config/export/route.ts's dataset loop takes
+  // `liveDatasetsOnly()` on BOTH the admin and the owner arm, and its nested
+  // `samples` include is `{ where: liveSamplesOnly(), orderBy: { index: 'asc' } }`.
+  // So `exported: []` is now both what this model SHOULD contribute to the
+  // document (nothing) and what the exporter actually does — and the
+  // config/export coverage that `23deeb2` added alongside the filters is what
+  // holds it there.
   //
   // This is deliberately NOT a knownGap. `knownGaps` means "should round-trip
   // and does not yet"; nothing on this model should round-trip. Recording one
@@ -538,7 +538,7 @@ const COVERAGE: Record<string, Coverage> = {
       datasetSampleId:
         'a DatasetSample id is instance-local and meaningless across instances, the same argument as GoldenItem.sourceDatasetSampleId — that alone excludes it today. It is additionally pointless once A1 Task 9 filters the nested `samples` include, because the hidden sample will then be absent from the document entirely, leaving nothing on the other side for this FK to point at.',
       datasetId:
-        'same as datasetSampleId one column up, in both halves: the id is instance-local regardless, and once A1 Task 8 filters the dataset export loop the document will carry no hidden dataset for this FK to name',
+        'same as datasetSampleId one column up, in both halves: the id is instance-local regardless, and now that A1 Task 8 filters the dataset export loop the document carries no hidden dataset for this FK to name',
       isTombstone:
         'the hide/un-hide flag itself. Instance-local curation state in the same register as GoldenItem.tombstonedAt: a row hidden HERE must not arrive hidden on another instance, and a re-import must neither resurrect nor re-bury anything. Absence from the document IS the representation.',
       reason:

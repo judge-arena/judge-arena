@@ -258,7 +258,7 @@ export async function POST(request: Request) {
       include: {
         user: { select: { id: true, name: true, email: true } },
         project: { select: { id: true, name: true } },
-        // A1: NEEDS NOTHING, unlike the list `_count` above and the five other
+        // A1: NEEDS NOTHING, unlike the list `_count` above and the six other
         // producers this sweep filtered. A dataset created microseconds ago
         // cannot carry a tombstone, and neither can the samples created with
         // it in this very `create` — there is no window in which a row here is

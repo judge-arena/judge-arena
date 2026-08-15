@@ -481,11 +481,17 @@ hand-add the missing clause again — `NULLS NOT DISTINCT`, the partial
 it's forgotten, for the same reason nothing warns about drift today:
 Prisma can't see any of them either way. The `CHECK` row is the sharpest
 case, because it is not an index at all and so leaves nothing behind for
-introspection to half-notice; it is also the only row here with an
-automated guard, `tests/db/tombstone-check-constraint.test.ts`, which
-attempts violating rows through raw SQL after `npm run test:db` has
-replayed the whole chain. That guard is a model worth copying for the
-next inexpressible constraint — the drift gate will not do it for you.
+introspection to half-notice. Every row here has an automated guard —
+`tests/db/idempotency-tighten.test.ts`, `tests/db/email-partial-unique.test.ts`
+and `tests/db/meta-eval.test.ts` cover the four index rows — and the
+`CHECK` row's, `tests/db/tombstone-check-constraint.test.ts`, is the only
+one that must attempt its violating rows through RAW SQL: `datasetId` and
+`datasetSampleId` are separate optional relation inputs, so no typed call
+can build a row with both set or neither. All of them run after
+`npm run test:db` has replayed the whole chain. Guarding the constraint
+this way is the established convention here, not a novelty — copy it for
+the next inexpressible clause, because the drift gate will not do it for
+you.
 Anyone adding a NEW schema change that also needs a Prisma-inexpressible
 SQL clause should add a row to this table and re-verify (`db pull`/`migrate
 diff`/`db push` against a database that has the migration applied) rather

@@ -1071,8 +1071,14 @@ describe('Config import — the guards the later sweeps never reached (M1-M3)', 
   });
 
   it('a golden set naming a HIDDEN corpus is skipped, never bound to it — an empty items array is not a way past the guard', async () => {
-    // UNOWNED DEFECT (not part of any A1 task): both arms of the golden-set
-    // dataset resolution read `Dataset` by slug with no lifecycle filter.
+    // THE DEFECT THIS TEST WAS WRITTEN AGAINST IS FIXED, in the same commit
+    // that added the test (`a82f189`): both arms of the golden-set dataset
+    // resolution now spread `liveDatasetsOnly()`
+    // (config/import/route.ts's `findFirst` by `{ userId, slug }` and its
+    // platform-user fallback). It read `Dataset` by slug with no lifecycle
+    // filter, and this test is what holds the fix in place. The reasoning
+    // below describes the shape that USED to reach the bug — keep it: it is
+    // why the fixture is built the way it is.
     //
     // NON-VACUITY — why the `items` array is EMPTY, and why that is the only
     // shape that reaches the bug. With items present, the item re-resolution

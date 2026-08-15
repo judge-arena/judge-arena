@@ -18,8 +18,10 @@ import {
  * The other seven mutation handlers on this branch spread `liveDatasetsOnly()`
  * straight into their own guard read. PATCH and DELETE here do not have one:
  * they gate on `requireOwnership('dataset', …)` (src/lib/auth-guard.ts), whose
- * read is UNFILTERED and which is shared with eight other resource types whose
- * access-matrix rows pin exactly that behaviour. Pushing the overlay into the
+ * read is UNFILTERED and which is shared with six other resource types whose
+ * access-matrix rows pin exactly that behaviour (`OWNERSHIP_MODELS` in
+ * src/lib/auth-guard.ts has seven entries and `dataset` is one of them).
+ * Pushing the overlay into the
  * helper would silently change what `rubric`, `project`, `evaluation` … mean,
  * so the liveness check is EXPLICIT AND LOCAL instead — the same shape as A0's
  * `assertGoldenSetInCirculation` (src/lib/golden-sets.ts): a named assertion

@@ -48,8 +48,9 @@ const bulkReplaceSamplesSchema = z.object({
 // THE READ SIDE HAS SINCE CAUGHT UP: `datasets/route.ts` (list, and its
 // pagination count) and `datasets/[id]/route.ts` (detail) both spread
 // `liveDatasetsOnly()` now, so a hidden dataset is neither readable nor
-// writable. The two halves landed in that order, one commit apart; nothing
-// here had to change when the read half arrived.
+// writable. The two halves landed in that order, three commits apart
+// (`431ed3a` and `f530556` fell between them); nothing here had to change
+// when the read half arrived.
 //
 // TWO OF THE FOUR WERE ACTIVELY BROKEN WITHOUT IT, not merely permissive, and
 // for the same reason: `liveSamplesOnly()` carries a PARENT arm, so the sample
@@ -182,7 +183,7 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
       // inherited.
       //
       // Same ceiling and same reasoning as the other bulk-write path in this
-      // tree, `POST /api/golden-sets` (src/app/api/golden-sets/route.ts:257),
+      // tree, `POST /api/golden-sets` (src/app/api/golden-sets/route.ts:274),
       // whose comment states the rule outright: "an interactive transaction's
       // default 5s timeout will not survive 620 round trips". That route earns
       // its margin with `createMany`; this one CANNOT — the response body
@@ -492,8 +493,9 @@ export async function PUT(request: Request, props: { params: Promise<{ id: strin
     // annotated must not drift under the annotation, and the replace below
     // hides every live row of it. Retiring this guard belongs to the
     // lifecycle work (Plan B), not to the overlay — do not remove it here.
-    // tests/db/dataset-sample-freeze.test.ts pins the 409 three times over,
-    // including for a set whose items are themselves tombstoned.
+    // The PUT block of tests/db/dataset-sample-freeze.test.ts pins this 409
+    // twice, including for a set whose items are themselves tombstoned; its
+    // third test asserts the 200 for a set over a DIFFERENT dataset.
     //
     // The predicate — including why it is NOT lifecycle-filtered — lives in
     // `findGoldenSetsPinningDataset` (src/lib/golden-sets.ts), shared with the
@@ -508,7 +510,7 @@ export async function PUT(request: Request, props: { params: Promise<{ id: strin
           error:
             'Cannot replace this dataset\'s samples: it is annotated by golden set(s) ' +
             `${pinningGoldenSets.map((g) => g.name).join(', ')}. ` +
-            'Replacing samples would delete the rows those golden items were imported from. ' +
+            'Replacing samples would hide the rows those golden items were imported from. ' +
             'Create a new dataset version instead — retiring or deleting the golden set does not ' +
             'release the binding, so it will not lift this refusal.',
           goldenSets: pinningGoldenSets,
@@ -578,7 +580,7 @@ export async function PUT(request: Request, props: { params: Promise<{ id: strin
         });
       },
       // Same ceiling, same reasoning, as the POST above and as
-      // `POST /api/golden-sets` (src/app/api/golden-sets/route.ts:257). This is
+      // `POST /api/golden-sets` (src/app/api/golden-sets/route.ts:274). This is
       // an INTERACTIVE transaction doing a round trip PER INCOMING ROW, and
       // `bulkReplaceSamplesSchema` puts no upper bound on N — so Prisma's
       // defaults (maxWait 2s, timeout 5s) would cap the endpoint at whatever
