@@ -268,11 +268,33 @@ export async function DELETE(_request: Request, props: { params: Promise<{ id: s
     const hiddenError = await assertDatasetLive(params.id);
     if (hiddenError) return hiddenError;
 
-    // A0: `GoldenSet.datasetId` and `GoldenItem.sourceDatasetSampleId` are both
-    // `onDelete: Restrict` (schema.prisma:671, :717), so this delete aborts on
-    // any annotated corpus — via the set FK directly, or via the item FK when
-    // the samples cascade. Unguarded that was a raw P2003 in a generic 500.
-    // Same predicate, same 409 shape, as PUT /api/datasets/[id]/samples.
+    // A0 put this guard here because `GoldenSet.datasetId` and
+    // `GoldenItem.sourceDatasetSampleId` are both `onDelete: Restrict`
+    // (schema.prisma), so `dataset.delete` aborted on any annotated corpus —
+    // via the set FK directly, or via the item FK when the samples cascaded —
+    // and unguarded that was a raw P2003 in a generic 500.
+    //
+    // THAT REASON NO LONGER APPLIES HERE. The delete below is
+    // `tombstoneDataset`: it writes one `Tombstone` row and touches no foreign
+    // key, so there is no P2003 left for this guard to pre-empt on this path.
+    //
+    // THE GUARD STAYS ANYWAY, deliberately — the same re-justification both
+    // sample verbs got when the same thing happened to them
+    // (samples/route.ts's DELETE and PUT). Hiding a corpus removes it from
+    // every filtered read exactly as deleting it did, so an annotated corpus
+    // would still change shape under its annotation. Whether that is allowed
+    // is the lifecycle plan's call (Plan B), not the overlay's. It is now a
+    // PURE-POLICY 409 on an operation that is physically safe, and that is the
+    // honest description of it.
+    //
+    // WHICH IS WHY THE MESSAGE NAMES NO REMEDY. `DELETE /api/golden-sets/[id]`
+    // only stamps `tombstonedAt`, and `findGoldenSetsPinningDataset` is
+    // deliberately NOT lifecycle-filtered (correctly — see its doc), so a
+    // deleted or retired set still pins. "Delete the golden set first", which
+    // this message used to say, sent the user to do something that provably
+    // changes nothing and then names a set they can no longer see. There is no
+    // in-product escape at all until a purge path exists, so the message says
+    // that instead of inventing one.
     const pinningGoldenSets = await findGoldenSetsPinningDataset(prisma, params.id);
 
     if (pinningGoldenSets.length > 0) {
@@ -282,7 +304,9 @@ export async function DELETE(_request: Request, props: { params: Promise<{ id: s
             'Cannot delete this dataset: it is annotated by golden set(s) ' +
             `${pinningGoldenSets.map((g) => g.name).join(', ')}. ` +
             'A golden set is the annotation layer over exactly one dataset, and its items were ' +
-            'imported from these samples. Delete the golden set first.',
+            'imported from these samples. Deleting or retiring that golden set does not release ' +
+            'the dataset — the binding survives both — so this corpus cannot be deleted for as ' +
+            'long as the set exists.',
           goldenSets: pinningGoldenSets,
         },
         { status: 409 }

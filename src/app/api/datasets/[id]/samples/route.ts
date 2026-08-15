@@ -351,7 +351,8 @@ export async function DELETE(request: Request, props: { params: Promise<{ id: st
             'Cannot delete samples from this dataset: it is annotated by golden set(s) ' +
             `${pinningGoldenSets.map((g) => g.name).join(', ')}. ` +
             'Golden items were imported from these rows. ' +
-            'Retire the golden set, or create a new dataset version instead.',
+            'Create a new dataset version instead — retiring or deleting the golden set does not ' +
+            'release the binding, so it will not lift this refusal.',
           goldenSets: pinningGoldenSets,
         },
         { status: 409 }
@@ -499,7 +500,8 @@ export async function PUT(request: Request, props: { params: Promise<{ id: strin
             'Cannot replace this dataset\'s samples: it is annotated by golden set(s) ' +
             `${pinningGoldenSets.map((g) => g.name).join(', ')}. ` +
             'Replacing samples would delete the rows those golden items were imported from. ' +
-            'Retire the golden set, or create a new dataset version instead.',
+            'Create a new dataset version instead — retiring or deleting the golden set does not ' +
+            'release the binding, so it will not lift this refusal.',
           goldenSets: pinningGoldenSets,
         },
         { status: 409 }

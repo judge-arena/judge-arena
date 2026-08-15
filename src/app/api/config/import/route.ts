@@ -575,8 +575,9 @@ export async function POST(request: Request) {
             changes.push(
               `samples: NOT replaced — this dataset is annotated by golden set(s) ` +
                 `${pinningGoldenSets.map((g) => g.name).join(', ')}, whose items were imported from ` +
-                'these rows. Every other field on the dataset was applied. Retire the golden set, or ' +
-                'import this corpus under a different slug.'
+                'these rows. Every other field on the dataset was applied. Import this corpus under a ' +
+                'different slug — retiring or deleting the golden set does not release the binding, so ' +
+                'it will not lift this skip.'
             );
           }
           const replaceSamples = wantsSampleReplace && pinningGoldenSets.length === 0;

@@ -3,6 +3,7 @@ import { getServerSession } from 'next-auth';
 import { db, truncateAll, mkUser } from './helpers';
 import { PUT, DELETE as deleteSamples } from '@/app/api/datasets/[id]/samples/route';
 import { DELETE as deleteDataset } from '@/app/api/datasets/[id]/route';
+import { DELETE as deleteGoldenSet } from '@/app/api/golden-sets/[id]/route';
 import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 // A0 Task 1. GoldenItem.sourceDatasetSampleId is `onDelete: Restrict`, so the
@@ -399,5 +400,65 @@ describe('the other destructive paths onto a golden-set-pinned corpus (M1)', () 
     expect(res.status).toBe(409);
     expect((await res.json()).goldenSets).toEqual([{ id: empty.id, name: 'Empty golden set' }]);
     await expect(db.dataset.count({ where: { id: dataset.id } })).resolves.toBe(1);
+  });
+
+  it('deleting the golden set does NOT release the dataset, and the 409 no longer says it does', async () => {
+    // The message used to say "Delete the golden set first." It sent the user
+    // to do something that provably changes nothing:
+    // `DELETE /api/golden-sets/[id]` only stamps `tombstonedAt`, and
+    // `findGoldenSetsPinningDataset` is deliberately NOT lifecycle-filtered
+    // (filtering it would turn this clean 409 into the bare P2003 the guard
+    // exists to pre-empt on the sample paths), so the tombstoned set still
+    // pins — and the second 409 then names a set the user can no longer see
+    // anywhere in the product.
+    //
+    // Scope note: this fixes the MESSAGE, not the mechanism. There is no
+    // in-product escape from the pin until a purge path exists, and that is
+    // the owner's call, not the overlay's. What must not persist is a 409 that
+    // prescribes an action which cannot help.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const { dataset, sample } = await mkDatasetWithSample(user.id);
+    const set = await mkGoldenSetOver(user.id, dataset.id, sample.id, 'Pinning golden set');
+
+    const first = await deleteDataset(
+      new Request(`http://localhost/api/datasets/${dataset.id}`, { method: 'DELETE' }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+    expect(first.status).toBe(409);
+
+    // The remedy the old message prescribed, performed exactly as a user would
+    // — through the real handler, not by touching the row.
+    const setDeleted = await deleteGoldenSet(
+      new Request(`http://localhost/api/golden-sets/${set.id}`, { method: 'DELETE' }),
+      { params: Promise.resolve({ id: set.id }) }
+    );
+    expect(setDeleted.status).toBe(200);
+    await expect(
+      db.goldenSet.findUniqueOrThrow({ where: { id: set.id }, select: { tombstonedAt: true } })
+    ).resolves.not.toEqual({ tombstonedAt: null });
+
+    const second = await deleteDataset(
+      new Request(`http://localhost/api/datasets/${dataset.id}`, { method: 'DELETE' }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+    expect(second.status).toBe(409);
+    const body = await second.json();
+
+    // Still names the set — that part is correct and load-bearing, it is how
+    // the user learns what is holding the corpus.
+    expect(body.error).toContain('Pinning golden set');
+
+    // But it no longer prescribes the inert remedy, and it says outright that
+    // the binding survives.
+    expect(body.error).not.toMatch(/Delete the golden set first/i);
+    expect(body.error).not.toMatch(/Retire the golden set/i);
+    expect(body.error).toContain('does not release');
+
+    // And the corpus is still there, still live — the delete really did not
+    // happen, so the 409 is not merely cosmetic.
+    await expect(
+      db.dataset.count({ where: { id: dataset.id, ...liveDatasetsOnly() } })
+    ).resolves.toBe(1);
   });
 });
