@@ -1,9 +1,20 @@
 # Dataset lifecycle and the mutation record
 
-**Date:** 2026-08-14 · **Status:** approved design, fact-checked, ready to plan
+**Date:** 2026-08-14 · **Status (2026-08-16):** approved and **partly implemented** — plan A1 (the
+tombstone overlay) is complete and merged into `feat/a0-golden-set-substrate` locally; plan A2 (the
+revision log) is planned in six tasks and **not started**; Plan B (the lifecycle: publish, freeze,
+version-on-edit) is not planned.
 **Supersedes:** Ruling 9 of `docs/superpowers/plans/2026-08-13-a0-status-and-handoff.md` ("staged datasets").
-**Depends on:** A0 (`feat/a0-golden-set-substrate`, PR #12) being merged first.
+**Depends on:** A0 (`feat/a0-golden-set-substrate`, PR #12) being merged first. *In practice A1 was
+built on top of A0's branch before that merge happened, so both are stacked ahead of `main`.*
 **Ships as two plans.** Plan A is the mutation record; Plan B is the lifecycle. B depends on A.
+Plan A was itself split during planning: **A1 = the tombstone overlay, A2 = the revision log.**
+These labels collide with the `A0…A5` phases of
+`2026-08-10-judge-training-engine-roadmap.md`, which mean something different — see
+`../plans/2026-08-16-a1-complete-a2-handoff.md` §0.
+
+**Current state, residual findings, and the A2 pickup:
+[`../plans/2026-08-16-a1-complete-a2-handoff.md`](../plans/2026-08-16-a1-complete-a2-handoff.md).**
 
 Every `file:line` in this document was opened and verified against the working tree at `af58c96`. Where a claim was found wrong during fact-checking, the corrected version is what appears here.
 

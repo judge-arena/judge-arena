@@ -95,20 +95,28 @@ building Roadmap A end to end? Everything below is verified, not inferred.
 > re-checked against the live cluster and the current tree on that date, not carried forward from
 > the 08-10 pass; where a number is quoted it was measured again.
 
-### Status at a glance (2026-08-12)
+### Status at a glance (2026-08-12, phase status updated 2026-08-16)
+
+> **Naming collision, read before using the labels below.** This roadmap's phases are `A0…A5`. The
+> dataset-lifecycle work uses `A1`/`A2` for something else entirely —
+> `specs/2026-08-14-dataset-lifecycle-and-tombstone-overlay-design.md` splits into plan A1 (the
+> tombstone overlay, **complete**) and plan A2 (the revision log, **not started**). This roadmap's
+> A1 is *human verification* and its A2 is *the calibration engine*; neither has begun. When someone
+> says "A2", establish which namespace they mean. See
+> `plans/2026-08-16-a1-complete-a2-handoff.md` §0.
 
 | | Item | State |
 |---|---|---|
-| 1 | CI builds the image | **done** — Gitea CI runs lint/typecheck/367 tests/build, kaniko pushes to Harbor |
+| 1 | CI builds the image | **done** — Gitea CI runs lint/typecheck/tests/build, kaniko pushes to Harbor. (The "367 tests" this row used to quote was the 2026-08-12 unit figure; at `1ee28df` it is 493 unit / 522 db / 80 integration. Re-measure rather than quoting a number here.) |
 | 2 | Seeder | **done** — bundled to `/app/seed.js`, BYOK-safe, idempotent |
 | 3 | `llamacpp` descriptor | **done** — merged, verified against the live server |
 | 8 | WAL archiving + rehearsed restore (T2) | **done** — 6/6 exit gate verified, RTO measured |
 | 9 | `lanEgress` declares the dev endpoint | **done** |
-| — | **Deploy + seed the built image** | **OPEN — this is the only thing between here and A0** |
+| — | **Deploy + seed the built image** | **OPEN** — was "the only thing between here and A0"; A0 was built and completed ahead of it, so this now gates *deployment*, not A0 |
 | — | CI cannot run the DB or integration suites | **done 2026-08-12** — ephemeral Job with service sidecars; 286 DB + 74 integration tests green in CI, `build-push` gates on it |
-| 7 | RabbitMQ scrape/alerts/cap (T5) | **OPEN — gates A2** |
+| 7 | RabbitMQ scrape/alerts/cap (T5) | **OPEN — gates A2 (this roadmap's A2, the calibration engine — not the lifecycle plan A2)** |
 | 4,5,6 | `startedAt`, format-compliance, token rollup | OPEN — needed during A |
-| 11 | Golden sets absent from round-trip coverage | OPEN — A0's own exit gate |
+| 11 | Golden sets absent from round-trip coverage | **done 2026-08-13** — A0's exit gate; classified in the `COVERAGE` map at `tests/db/config-roundtrip-fidelity.test.ts` |
 
 ### The dev endpoint: live, reachable, and missing a descriptor
 
@@ -383,6 +391,22 @@ measure agreement before labels exist, cannot calibrate before agreement is meas
 cannot claim a distilled judge is better before calibration works.
 
 ### A0 — Make the golden-set substrate reachable · ~3 days
+
+> **DONE (2026-08-13), plus unplanned lifecycle work on top.** All 24 tasks landed (22 planned + 2
+> corrective) on `feat/a0-golden-set-substrate`, pushed to gitea at `8d65198` as **PR #12**, not yet
+> merged to `main`. The exit gate below is met: golden sets round-trip through export/import and are
+> covered in `tests/db/config-roundtrip-fidelity.test.ts`.
+>
+> Two things this phase description did not anticipate. **Delete became non-destructive** — an owner
+> ruling mid-flight replaced every destructive path with a tombstone, first as `tombstonedAt` columns
+> on `GoldenItem`/`GoldenLabel` (A0), then as a general `Tombstone` overlay table for datasets and
+> samples (plan A1, complete, merged locally, **unpushed**). The consequence worth carrying forward:
+> **ordinals are never reused and `index` is not dense.** And **pairwise is not HTTP-reachable** — it
+> ships as a library-and-integration capability; no route passes `protocol` or `candidates` to
+> `launchSingleRun`. Wiring it is follow-on work that A1 (this roadmap's) will need.
+>
+> Current state, decisions outstanding, and the next pickup:
+> `plans/2026-08-16-a1-complete-a2-handoff.md`.
 
 Nothing exists above the schema. This phase is the API and the UI, with no new modelling.
 
