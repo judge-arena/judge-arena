@@ -1,5 +1,16 @@
 # A1 — Human Verification and the Agreement Floor: Implementation Plan
 
+> **COMPLETE — executed 2026-08-17**, all seven tasks, on `feat/a0-golden-set-substrate`
+> (`4ff04f4`…`eef73fb`). Suites moved **508 → 533** unit, **555 → 633** db, **80 → 80** integration;
+> `tsc --noEmit` and `npm run lint` exit 0 with no warnings. Every task's discrimination proofs were
+> run and observed — 31 injections in total — and every file restored byte-identical by
+> `sha256sum -c`.
+>
+> **Read "Defects found during execution" below before trusting a snippet in this file.** Three
+> snippets here are wrong, and one of them could not have passed under any implementation. The task
+> bodies are left AS WRITTEN so the corrections stay legible as corrections; what shipped is what the
+> table says.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give `GoldenLabel` its first writer — a labelling surface with designed annotator overlap, blind re-reading for test-retest, per-item provenance that survives edits, and an agreement number reported with the method that produced it.
@@ -130,7 +141,7 @@ export function retestEligibility(args: {
 - Consumes: nothing.
 - Produces: models `GoldenItemRevision`, `GoldenAssignment`; `GoldenLabel.{overallScore?, preference?, round, goldenItemRevisionId?}`; `GoldenSet.retestIntervalItems`; the `tx.goldenItemRevision` and `tx.goldenAssignment` delegates.
 
-- [ ] **Step 1: Write the failing coverage entries**
+- [x] **Step 1: Write the failing coverage entries**
 
 The fidelity suite iterates `Object.entries(COVERAGE)` and never the datamodel, so a model absent from the map is unchecked. Add both entries **after** the `SampleRevision` entry L2 added:
 
@@ -185,7 +196,7 @@ The fidelity suite iterates `Object.entries(COVERAGE)` and never the datamodel, 
       retestIntervalItems: 'the measurement protocol in force on THIS instance, not part of the set as an artifact',
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 ```bash
 sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/config-roundtrip-fidelity.test.ts'
@@ -193,7 +204,7 @@ sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.t
 
 Expected: FAIL with `GoldenItemRevision is not in the Prisma datamodel: expected undefined to be defined`, and `GoldenLabel classifies column(s) that no longer exist` for the not-yet-added columns.
 
-- [ ] **Step 3: Edit the schema**
+- [x] **Step 3: Edit the schema**
 
 Add to `GoldenItem`'s relations block: `revisions GoldenItemRevision[]` and `assignments GoldenAssignment[]`.
 Add to `GoldenSet`: `assignments GoldenAssignment[]` and `retestIntervalItems Int @default(20)`.
@@ -211,7 +222,7 @@ Change `GoldenLabel`:
 
 Append both new models exactly as the spec's "Data model" section defines them, including the doc comments.
 
-- [ ] **Step 4: Generate the migration**
+- [x] **Step 4: Generate the migration**
 
 ```bash
 sh -c 'set -a; . ./.env.local; set +a; npx prisma migrate diff \
@@ -222,7 +233,7 @@ cat /tmp/v2h.sql
 
 Read it. Expect two `CREATE TABLE`s, the `GoldenLabel`/`GoldenSet` `ALTER`s, indexes and FKs. **`prisma migrate diff` will also emit `DROP INDEX "GoldenLabel_goldenItemId_annotatorId_live_key"` — or nothing at all for it.** It cannot see the partial index (that is why it is in the pseudo-drift table), so **you must hand-write both the drop and the recreate.** If the generated SQL contains anything you cannot explain, stop.
 
-- [ ] **Step 5: Write the migration with its header and three hand edits**
+- [x] **Step 5: Write the migration with its header and three hand edits**
 
 ```sql
 -- v2h — human verification (Roadmap A, phase A1)
@@ -263,7 +274,7 @@ CREATE UNIQUE INDEX "GoldenAssignment_item_annotator_round_active_key"
 
 **The CHECK is added AFTER the column changes and there are no rows yet** — `GoldenLabel` is empty on every instance, because nothing has ever written one. Verify that before relying on it: `SELECT count(*) FROM "GoldenLabel";` must be 0, or the CHECK will refuse to apply against existing rows and you need a backfill first.
 
-- [ ] **Step 6: Apply locally and regenerate**
+- [x] **Step 6: Apply locally and regenerate**
 
 ```bash
 sh -c 'set -a; . ./.env.local; set +a; \
@@ -273,7 +284,7 @@ sh -c 'set -a; . ./.env.local; set +a; \
 npx prisma generate
 ```
 
-- [ ] **Step 7: Verify no drift**
+- [x] **Step 7: Verify no drift**
 
 ```bash
 sh -c 'set -a; . ./.env.local; set +a; npx prisma migrate diff \
@@ -283,7 +294,7 @@ sh -c 'set -a; . ./.env.local; set +a; npx prisma migrate diff \
 
 Expected: `-- This is an empty migration.` The three hand-edited objects are invisible to this command **by construction** — that is what makes them pseudo-drift, and why Step 8 exists.
 
-- [ ] **Step 8: Write the constraint tests — raw SQL, because the typed client cannot violate them**
+- [x] **Step 8: Write the constraint tests — raw SQL, because the typed client cannot violate them**
 
 Create `tests/db/golden-label-constraints.test.ts`. The typed client cannot construct a violating row (`overallScore` and `preference` are separate optional inputs; the partial indexes are invisible to it), so every assertion goes through `$executeRawUnsafe` — the same reason `tests/db/tombstone-check-constraint.test.ts` exists.
 
@@ -376,7 +387,7 @@ describe('v2h hand-edited constraints', () => {
 });
 ```
 
-- [ ] **Step 9: Run them, then prove they discriminate**
+- [x] **Step 9: Run them, then prove they discriminate**
 
 ```bash
 sh -c 'set -a; . ./.env.test; set +a; npx prisma migrate deploy && npx vitest run --config vitest.db.config.ts tests/db/golden-label-constraints.test.ts'
@@ -392,11 +403,11 @@ SQL
 
 Expected without it: the first two tests fail with `expected promise to reject`. Re-apply by re-running `prisma migrate reset --force --skip-seed`. Do the same for each partial index. **Put all three observed failures in your report** — a constraint whose test has never been seen to fail is a constraint nobody has verified exists.
 
-- [ ] **Step 10: Update CONTRIBUTING's pseudo-drift table**
+- [x] **Step 10: Update CONTRIBUTING's pseudo-drift table**
 
 Change the count sentence from five to **eight**, add one row per hand edit above (Migration / What's really there / Why `schema.prisma` can't say it), and append to v2e's existing row: *"**Superseded by v2h**, which drops this index and recreates it with `round` as a third column; the row is kept because v2e is applied and immutable."*
 
-- [ ] **Step 11: Full suites, then commit**
+- [x] **Step 11: Full suites, then commit**
 
 ```bash
 npx tsc --noEmit && npm run lint && npm test && npm run test:db && npm run test:integration
@@ -428,7 +439,7 @@ a violating row."
 
 **The fixtures are published worked examples with known answers.** A snapshot of our own output proves the implementation is stable, not that it is right, and a wrong kappa is the archetypal confidently-plausible number nobody catches.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 import { describe, expect, it } from 'vitest';
@@ -529,7 +540,7 @@ describe('agreement — Fleiss', () => {
 });
 ```
 
-- [ ] **Step 2: Run and watch it fail**
+- [x] **Step 2: Run and watch it fail**
 
 ```bash
 npx vitest run --config vitest.config.ts tests/lib/agreement.test.ts
@@ -537,7 +548,7 @@ npx vitest run --config vitest.config.ts tests/lib/agreement.test.ts
 
 Expected: FAIL at collection — `Cannot find module '@/lib/agreement'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Write `src/lib/agreement.ts` implementing the contract. Required behaviour, all pinned above:
 
@@ -550,7 +561,7 @@ Write `src/lib/agreement.ts` implementing the contract. Required behaviour, all 
 
 Carry the spec's three limitations as a module doc comment: Fleiss has no standard weighted form, `overallScore` has no declared scale so the category set is derived, and preferences default to unweighted.
 
-- [ ] **Step 4: Run and watch it pass**
+- [x] **Step 4: Run and watch it pass**
 
 ```bash
 npx vitest run --config vitest.config.ts tests/lib/agreement.test.ts
@@ -558,7 +569,7 @@ npx vitest run --config vitest.config.ts tests/lib/agreement.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 5: Prove the tests discriminate**
+- [x] **Step 5: Prove the tests discriminate**
 
 ```bash
 sha256sum src/lib/agreement.ts > /tmp/agr.sha
@@ -570,7 +581,7 @@ sha256sum src/lib/agreement.ts > /tmp/agr.sha
 
 Restore after each, then `sha256sum -c /tmp/agr.sha` → `OK`. Put all three observed messages in your report.
 
-- [ ] **Step 6: Full suites and commit**
+- [x] **Step 6: Full suites and commit**
 
 ```bash
 npx tsc --noEmit && npm run lint && npm test && npm run test:db
@@ -598,7 +609,7 @@ measurable, and is the normal case while one account exists."
 
 **This is the task that makes "the prompt as the annotator saw it" recoverable.** Today the handler reads the before-image **only to detect a change** and then discards it.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `tests/db/labelling.test.ts` with the three-mock preamble (`next-auth`, `next/headers`, `@/lib/rate-limit-redis` — see Global Constraints), helpers to build a golden set with one item, and:
 
@@ -659,11 +670,11 @@ it('a SECOND edit does not re-stamp labels an earlier edit already stamped', asy
 });
 ```
 
-- [ ] **Step 2: Run and watch it fail**
+- [x] **Step 2: Run and watch it fail**
 
 Expected: FAIL with `expected [] to have a length of 1` — nothing writes a revision yet.
 
-- [ ] **Step 3: Implement inside the existing `if (contentChanged)` block**
+- [x] **Step 3: Implement inside the existing `if (contentChanged)` block**
 
 ```ts
         if (contentChanged) {
@@ -701,9 +712,9 @@ Expected: FAIL with `expected [] to have a length of 1` — nothing writes a rev
 
 `session` is already in scope in this handler; if the symbol differs, use whatever the handler already uses for the acting user rather than re-deriving it.
 
-- [ ] **Step 4: Run and watch it pass** — expected: PASS, 3 tests.
+- [x] **Step 4: Run and watch it pass** — expected: PASS, 3 tests.
 
-- [ ] **Step 5: Prove it discriminates**
+- [x] **Step 5: Prove it discriminates**
 
 ```bash
 sha256sum "src/app/api/golden-sets/[id]/items/route.ts" > /tmp/items.sha
@@ -713,7 +724,7 @@ Remove `goldenItemRevisionId: revision.id` from the `updateMany`. Re-run.
 Expected: FAIL with `expected null to be 'clx…'` on the first test — the revision exists but nothing connects the label to it, which is the silent half of this defect.
 Restore, `sha256sum -c /tmp/items.sha` → `OK`.
 
-- [ ] **Step 6: Full suites and commit**
+- [x] **Step 6: Full suites and commit**
 
 ```bash
 git add "src/app/api/golden-sets/[id]/items/route.ts" tests/db/labelling.test.ts
@@ -745,7 +756,7 @@ back-fills goldenItemRevisionId onto exactly the labels it tombstones."
   export type QueueCandidate = { itemId: string; round: number; eligible: boolean; labelsUntilEligible?: number };
   ```
 
-- [ ] **Step 1: Write the failing eligibility tests**
+- [x] **Step 1: Write the failing eligibility tests**
 
 ```ts
 import { describe, expect, it } from 'vitest';
@@ -770,11 +781,11 @@ describe('retestEligibility', () => {
 });
 ```
 
-- [ ] **Step 2: Run and watch it fail** — `Cannot find module '@/lib/retest'`.
+- [x] **Step 2: Run and watch it fail** — `Cannot find module '@/lib/retest'`.
 
-- [ ] **Step 3: Implement `retest.ts`**, returning `labelsUntilEligible: Math.max(0, intervalItems - labelledSinceRound1)` when not eligible, and `{eligible:false, labelsUntilEligible: 0}` for the two structural cases (no round 1, or round 2 already present) — a shortfall of 0 that is still not eligible is deliberate: the blocker is not a count.
+- [x] **Step 3: Implement `retest.ts`**, returning `labelsUntilEligible: Math.max(0, intervalItems - labelledSinceRound1)` when not eligible, and `{eligible:false, labelsUntilEligible: 0}` for the two structural cases (no round 1, or round 2 already present) — a shortfall of 0 that is still not eligible is deliberate: the blocker is not a count.
 
-- [ ] **Step 4: Write the failing queue tests**
+- [x] **Step 4: Write the failing queue tests**
 
 ```ts
 import { describe, expect, it } from 'vitest';
@@ -813,15 +824,15 @@ describe('selectNext', () => {
 });
 ```
 
-- [ ] **Step 5: Run, watch fail, implement `labelling-queue.ts`.**
+- [x] **Step 5: Run, watch fail, implement `labelling-queue.ts`.**
 
 `selectNext` filters to eligible candidates, orders them by a deterministic hash of `seed + itemId` (a small FNV-1a is enough — **do not use `Math.random()`**, which makes the queue untestable and the order irreproducible), and returns the first. With no eligible candidates it returns the smallest `labelsUntilEligible` among ineligible ones as `retest-not-yet-eligible`, or `set-complete` when there are none at all.
 
 **The round is part of the result and is decided here, from data — never from a request.**
 
-- [ ] **Step 6: Run and watch pass. Then prove determinism discriminates:** replace the hash with `Math.random()` and re-run — expected FAIL on the determinism test with two different item ids. Restore and verify by sha256.
+- [x] **Step 6: Run and watch pass. Then prove determinism discriminates:** replace the hash with `Math.random()` and re-run — expected FAIL on the determinism test with two different item ids. Restore and verify by sha256.
 
-- [ ] **Step 7: Full suites and commit**
+- [x] **Step 7: Full suites and commit**
 
 ```bash
 git add src/lib/retest.ts src/lib/labelling-queue.ts tests/lib/retest.test.ts
@@ -845,17 +856,17 @@ round is decided from data here rather than accepted from a request."
 - Consumes: `tx.goldenAssignment` from Task 1.
 - Produces: `GET → 200 {assignments: […]}`, `POST → 201 {assignment}`, `DELETE → 200 {revoked: true}`.
 
-- [ ] **Step 1: Write the failing tests** — owner assigns a whole set (`goldenItemId: null`), assigns a single item, revocation sets `revokedAt` rather than deleting the row, and a re-assignment after revocation succeeds (the partial index permits it).
+- [x] **Step 1: Write the failing tests** — owner assigns a whole set (`goldenItemId: null`), assigns a single item, revocation sets `revokedAt` rather than deleting the row, and a re-assignment after revocation succeeds (the partial index permits it).
 
-- [ ] **Step 2: Run and watch fail** (`Cannot find module`).
+- [x] **Step 2: Run and watch fail** (`Cannot find module`).
 
-- [ ] **Step 3: Implement the route.** `requireAuth` + `requireScope(session, 'golden-sets:write')`, owner-or-admin on the set (`findFirst` + `goldenSetLifecycleWhere`, matching the sibling handlers in this directory — **do not** invent a new ownership read). `DELETE` **revokes**, never deletes: an assignment is a record of what was asked.
+- [x] **Step 3: Implement the route.** `requireAuth` + `requireScope(session, 'golden-sets:write')`, owner-or-admin on the set (`findFirst` + `goldenSetLifecycleWhere`, matching the sibling handlers in this directory — **do not** invent a new ownership read). `DELETE` **revokes**, never deletes: an assignment is a record of what was asked.
 
-- [ ] **Step 4: Run and watch pass.**
+- [x] **Step 4: Run and watch pass.**
 
-- [ ] **Step 5: Register in the access matrix.** Follow the **golden-set sub-routes block** (`describe('Access matrix — golden-set sub-routes (/fork, /retire) and list')`) — a `for (const actor of ['anonymous','stranger','owner','admin'])` loop with a per-actor expected status. **Do not attempt a `registry` entry**: `ResourceHandlers` is `{createTarget, get, patch, del}` over a single `id` and the registry is typed to six fixed resource keys, so a two-parameter sub-resource does not fit.
+- [x] **Step 5: Register in the access matrix.** Follow the **golden-set sub-routes block** (`describe('Access matrix — golden-set sub-routes (/fork, /retire) and list')`) — a `for (const actor of ['anonymous','stranger','owner','admin'])` loop with a per-actor expected status. **Do not attempt a `registry` entry**: `ResourceHandlers` is `{createTarget, get, patch, del}` over a single `id` and the registry is typed to six fixed resource keys, so a two-parameter sub-resource does not fit.
 
-- [ ] **Step 6: Full suites and commit.**
+- [x] **Step 6: Full suites and commit.**
 
 ---
 
@@ -871,7 +882,7 @@ round is decided from data here rather than accepted from a request."
 
 **Two security properties, not conveniences. Both are tested below.**
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 it('the queue never reveals that an item is a RE-READ', async () => {
@@ -923,20 +934,20 @@ it('refuses a score on a PAIRWISE item and a preference on a POINTWISE one', asy
 });
 ```
 
-- [ ] **Step 2: Run and watch them fail.**
+- [x] **Step 2: Run and watch them fail.**
 
-- [ ] **Step 3: Implement both routes.**
+- [x] **Step 3: Implement both routes.**
 
 The queue resolves the annotator's active assignments, builds `QueueCandidate[]` (round 1 for unread items; round 2 for items whose `retestEligibility` passes, using `GoldenSet.retestIntervalItems` and a count of that annotator's labels created since their round-1 reading), calls `selectNext(candidates, `${session.user.id}:${params.id}`)`, and returns the item's **content only** — never the round, never a prior label.
 
 The submit route: zod-validates `{overallScore?, preference?, criteriaScores?, reasoning?}` and rejects the wrong one for the item's protocol with a 400; **re-derives** the round exactly as the queue did, ignoring anything in the body; verifies an active assignment covering `(item, annotator, round)`; writes the label in one transaction; marks the assignment `completedAt` when its last item is read.
 
-- [ ] **Step 4: Run and watch pass.**
+- [x] **Step 4: Run and watch pass.**
 
-- [ ] **Step 5: Prove blinding discriminates.** Add the round to the queue's response body. Re-run.
+- [x] **Step 5: Prove blinding discriminates.** Add the round to the queue's response body. Re-run.
 Expected: FAIL on `expect(JSON.stringify(body)).not.toContain('round')`. Restore, verify by sha256.
 
-- [ ] **Step 6: Access matrix rows, full suites, commit.**
+- [x] **Step 6: Access matrix rows, full suites, commit.**
 
 ---
 
@@ -950,7 +961,7 @@ Expected: FAIL on `expect(JSON.stringify(body)).not.toContain('round')`. Restore
 - Consumes: `agreement()` from Task 2.
 - Produces: `GET agreement → 200 AgreementResult`; `GET disagreements → 200 {items: [{itemId, spread, readings}]}`; `GET history → 200 {readings: [{round, annotator:{id,name}|null, value, sawRevisionId, sawText}]}`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 it('reports the method and the OVERLAP, not the set size', async () => {
@@ -992,20 +1003,83 @@ it('anonymous gets agreement for a PUBLISHED public set, and 401 for an unpublis
 });
 ```
 
-- [ ] **Step 2: Run, watch fail, implement.**
+- [x] **Step 2: Run, watch fail, implement.**
 
 All three use `optionalAuth()` — which **throws**, so it goes inside the `try` with `if (error instanceof RateLimitedError) return error.response;` first in the `catch`. Anonymous is served only when `publishedAt !== null` **and** `visibility === 'public'`; otherwise owner/admin. `history` joins `goldenItemRevision` and falls back to the item's current content when `goldenItemRevisionId` is null — which means *they saw the current content*, per the spec's invariant.
 
 `disagreements` ranks items by spread: for scores, `max - min` across live readings; for preferences, the count of distinct values. Ranked descending, because this list is also A3's highest-information input to the next labelling round.
 
-- [ ] **Step 3: Run and watch pass.**
+- [x] **Step 3: Run and watch pass.**
 
-- [ ] **Step 4: Prove the history join discriminates.** Return the item's current content unconditionally, ignoring `goldenItemRevisionId`. Re-run.
+- [x] **Step 4: Prove the history join discriminates.** Return the item's current content unconditionally, ignoring `goldenItemRevisionId`. Re-run.
 Expected: FAIL with `expected 'edited later' to be 'as first seen'`. Restore, verify by sha256.
 
-- [ ] **Step 5: Access matrix rows for all three, full suites, commit.**
+- [x] **Step 5: Access matrix rows for all three, full suites, commit.**
 
 ---
+
+## Defects found during execution
+
+Recorded here rather than only in commit messages, because each is the kind that returns.
+
+### Three defects in this plan's own snippets
+
+| # | Task | What the plan said | What is true |
+|---|---|---|---|
+| 1 | 2 | The value-vs-rank fixture compares a `{1,5}` call against a separate `{4,5}` call and asserts `near > far`. | **It cannot pass under ANY implementation.** `range` is derived per call from that call's OWN observed categories, so the single disagreement spans the full range in both — `w = 0` either way — and both kappas are exactly `0`. `0 > 0` is false. Replaced with one SHARED, unevenly spaced set `{1,2,5}` — the only shape where value and rank distance differ at all — pinned to hand-worked **0.60** and **0.50** (rank distance gives 0.7143 and 0.5294). Caught by working the arithmetic before writing the module. |
+| 2 | 2 | The Fleiss fixture (3 items × 3 raters, all `'4'`) asserts `value === 1`. | That is the **degenerate case**: one observed category makes `Pe = 1`, so the textbook quotient is `0/0` → `NaN`. Complete agreement now reports `1`, which matters because `NaN` serialises to `null` through JSON and would reach the UI as "not measurable" when the truth is "everyone agreed". A second, NON-degenerate Fleiss oracle (κ = 1/3 over 4 items × 3 raters) was added so the statistic is pinned somewhere other than its boundary. |
+| 3 | 2 | The contract defines `itemCount` as "items with >= 2 readings". | Must be **items with ≥ 2 DISTINCT ANNOTATORS**. A blind re-read gives one item two readings from one person; counting it as overlap inflates the reported denominator *and* leaves Cohen's matrix builder dereferencing a rater who never saw the item. Reverting it crashes with `Cannot read properties of undefined (reading 'category')`. |
+
+### Two defects in the code the plan did not predict
+
+| # | Task | Defect |
+|---|---|---|
+| 4 | 6 | **The queue had no visibility gate.** A stranger holding no assignment would have received `200 {reason: 'no-assignment'}` on a **private** set — an existence oracle over any id, from the endpoint whose job is handing out work. Now assigned-annotator / owner / admin, which is what the design's route table already said. The access-matrix rows target a PUBLIC set so that "public" is shown not to be what grants access. |
+| 5 | 6 | **A concurrent double-submit was a bare 500.** Two submits derive the same round from the same stored labels and the second loses to the partial unique. Now a 409. Pinned in `tests/db/label-round-collision.test.ts` with the collision INJECTED via a stale `deriveReadingStates` — the same choice, and the same reason, as `tests/db/sample-index-retry.test.ts`: a real race would pass without ever exercising the path. |
+
+### One injection that was not evidence
+
+The plan's Task 6 round injection (trust the client's round) fails with **`expected 500 to be 201`** — a failure for the *wrong reason*. Trusting the client collides with the partial unique and dies as an unhandled P2002 rather than writing round 1, so it demonstrates nothing about the assertion under test. It is what surfaced defect 5. A second, cleaner form — report round 1 in the response while writing the derived round — gives **`expected 1 to be 2`**, which is the defect meant. **This is the plan's own "a malformed break is not evidence" rule catching the plan.**
+
+### Additions beyond the plan, and why each is not scope creep
+
+| Where | Addition | Why |
+|---|---|---|
+| Task 5 | `src/lib/assignment-policy.ts` — `mayHoldAssignment` | Design decision 8 (who may HOLD) is a different question from who may CALL the route, and with one account the two collapse — which is exactly why conflating them is easy and expensive. In `src/lib/**` because `src/app/api/**` is outside every coverage `include`. |
+| Task 5 | POST refuses an item from another set (400) | Otherwise the id in the URL is decoration, and every downstream queue query — all scoped by `goldenSetId` — silently never sees the row. |
+| Task 6 | `nextRoundFor` / `deriveReadingStates` shared by both routes | "The submit route re-derives the round exactly as the queue did" is a claim a comment cannot keep true. One implementation, two callers, so they cannot drift. |
+| Task 7 | `excludedAnonymisedReadings` on the agreement response | Account deletion nulls `annotatorId`; those readings cannot be attributed, and treating them as one rater would merge two deleted people into one. Dropping them is right — dropping them **silently** changes a statistic with no way for the caller to tell, which is the exact failure mode this phase exists to prevent. |
+| Task 7 | Public branch does not name annotators | Every other public read path strips user data to the owner's `{id, name}` (`src/lib/serializers.ts`). A published set's artifact is the labels and the number, not who scored what. |
+
+### Coverage: floors held, actuals rose, and NO floor was touched
+
+`npm run test:coverage` and `npm run test:db:coverage` both exit 0. Measured on the db run at
+`eef73fb`:
+
+| | actual | floor | margin | policy |
+|---|---|---|---|---|
+| all-files statements / lines | **54.52** | 47 | 7.52pp | 2pp |
+| all-files branches | **79.29** | 77 | 2.29pp | 2pp |
+| all-files functions | **62.12** | 60 | 2.12pp | 2pp |
+| `auth-guard.ts` lines | **87.37** | 84 | 3.37pp | 3pp |
+| `auth-guard.ts` branches | **85.29** | 82 | 3.29pp | 3pp |
+| `scripts/importer/**` | unchanged | — | — | — |
+
+Statements and lines rose materially (49.55 → 54.52), which `vitest.db.config.ts` says is the
+trigger for re-baselining UPWARD. **Deliberately not done here.** That file's own threshold policy
+freezes floors for the length of a branch precisely so no single task can ratchet them and trip a
+successor, and it requires at least three measurements taking the LOWEST — this is one. The right
+place is a single end-of-branch re-baseline, as A0's was. Recorded rather than acted on.
+
+Every rule this phase adds that could be wrong lives in `src/lib/**` — `agreement.ts`, `retest.ts`,
+`labelling-queue.ts`, `label-readings.ts`, `assignment-policy.ts` — for the reason the plan gives:
+`src/app/api/**` is outside every coverage `include`, so a rule in a handler is a rule no coverage
+number describes. `agreement.ts` and `retest.ts` are at 100% statements on the unit run.
+
+### Two things deliberately NOT done
+
+- **The submit route is not freeze-guarded.** `isGoldenSetFrozen`'s own contract is that item CONTENT freezes — items, candidates, `protocol`, `expected` — because those are what a calibration run measured. Labels are not content, and decision 4 has agreement COMPUTED ON READ and merely *recorded* at freeze, which presumes labels keep arriving. The lifecycle guard (retired / tombstoned) is a different rule and **is** applied.
+- **`GoldenItem.expected` never reaches the queue.** Not a blinding subtlety — it is the answer. `GoldenCandidate.label` *is* served, because it is the candidate's identifier (`'A'`/`'B'`), not the verdict.
 
 ## Self-review notes
 

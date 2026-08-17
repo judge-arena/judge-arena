@@ -117,7 +117,8 @@ building Roadmap A end to end? Everything below is verified, not inferred.
 | — | CI cannot run the DB or integration suites | **done 2026-08-12** — ephemeral Job with service sidecars; 286 DB + 74 integration tests green in CI, `build-push` gates on it |
 | 7 | RabbitMQ scrape/alerts/cap (T5) | **OPEN — gates A2 (this roadmap's A2, the calibration engine — not the lifecycle plan, which is now L2)** |
 | 4,5,6 | `startedAt`, format-compliance, token rollup | OPEN — needed during A |
-| — | **A1 + A1.5** | **specced and planned 2026-08-17, not implemented.** A1 = labelling, assignment, agreement. A1.5 = the studio shell A2/A3 also consume. Independent; buildable in parallel |
+| — | **A1** | **done 2026-08-17** — `4ff04f4`…`eef73fb` on `feat/a0-golden-set-substrate`. `GoldenLabel` has its first writer; `v2h` adds the item revision log, assignment rows, `round` and `preference`. Exit gate met on all four clauses. Suites 533 unit / 633 db / 80 integration |
+| — | **A1.5** | **specced and planned 2026-08-17, not implemented.** The studio shell A2/A3 also consume. Independent of A1, which has now landed without it |
 | — | **A2** | **decisions recorded** (`2026-08-17-a2-calibration-and-reporting-decisions.md`), deliberately not specced — its design takes A1's real label data as an input |
 | — | Capturing `reasoning_content` | **OPEN, backlogged.** Chain-of-thought is discarded on every model call, so the studio's reasoning panel is structurally thin until it lands |
 | 11 | Golden sets absent from round-trip coverage | **done 2026-08-13** — A0's exit gate; classified in the `COVERAGE` map at `tests/db/config-roundtrip-fidelity.test.ts` |
@@ -434,11 +435,25 @@ survives an export/import round trip (which means adding it to the coverage list
 
 ### A1 — Human verification and a measured agreement floor · ~4 days
 
-> **SPECCED AND PLANNED 2026-08-17.** Design:
-> `2026-08-17-a1-human-verification-design.md`. Plan (7 tasks):
-> `../plans/2026-08-17-a1-human-verification.md`. **Split:** the annotation studio — the panel shell
-> A2 and A3 also consume — is now **A1.5**, specced and planned separately and buildable in
-> parallel. Nothing is implemented yet.
+> **IMPLEMENTED 2026-08-17**, all seven tasks (`4ff04f4`…`eef73fb`). Design:
+> `2026-08-17-a1-human-verification-design.md`. Plan:
+> `../plans/2026-08-17-a1-human-verification.md` — which carries a **"Defects found during
+> execution"** table: three of its own snippets were wrong (one could not have passed under any
+> implementation) and two defects in the code were not predicted. Read that before reusing anything
+> from it. **Split:** the annotation studio — the panel shell A2 and A3 also consume — is **A1.5**,
+> still specced-and-planned only; A1 landed without it, since A1 owns the data and endpoints and
+> A1.5 owns the surface.
+>
+> **Exit gate, all four clauses met.** A set reports a number with a stated method — statistic,
+> weighting, annotator count and the OVERLAP it was computed over. A deliberately inconsistent
+> re-label moves `testRetest` down. An item edited after labelling still resolves each label to the
+> text that annotator saw. A POST from an unassigned annotator is refused, and re-checked on submit
+> rather than trusted from the queue.
+>
+> **What to expect on day one, and it is not a bug.** With one account the inter-annotator number is
+> `insufficient-annotators` — null with a reason, never `0`, which would read as total disagreement.
+> `testRetest` is the only signal that yields a value until a second account exists. See the
+> annotator distinction below.
 
 The point of this phase is that **a golden set with no agreement measurement is not ground truth,
 it is one person's opinion**, and calibrating a judge against it would produce a confidently wrong
