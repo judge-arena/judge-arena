@@ -2512,11 +2512,22 @@ describe('nextSampleIndex — what sharing the caller\'s transaction does and do
     // transaction — without closing it.
     //
     // THIS TEST PINS THE DEFECT, not its absence, and that is deliberate. The
-    // code is fine as far as A1's scope goes; the claim was wrong. Adding the
-    // retry loop `createDatasetVersion` uses is the real fix and a stated
-    // follow-on — when someone lands it, this test SHOULD fail, and its
-    // failure is how they will know to correct these two comments in the same
-    // commit rather than a wave later.
+    // code is fine as far as A1's scope goes; the claim was wrong.
+    //
+    // R1 HAS SINCE LANDED, AND THIS TEST STILL PASSES — correcting a promise
+    // an earlier version of this comment made. It said the retry loop would
+    // make this test fail, and that whoever landed the retry would learn of
+    // the two stale comments that way. It does not fail, because it never
+    // exercised the route: it calls `nextSampleIndex` DIRECTLY, and that
+    // function is still not serialised. What R1 changed is one level up — the
+    // losing CALLER retries (`appendWithRetry`), so `POST` recovers instead of
+    // reporting a bare 500.
+    //
+    // So this test remains true and stays as it is. The route-level behaviour
+    // is pinned separately in tests/db/sample-index-retry.test.ts, which
+    // INJECTS the collision rather than racing for it — two concurrent POSTs
+    // may not interleave, and a retry test that does not force the collision
+    // passes without ever exercising the retry.
     const user = await mkUser();
     const dataset = await mkCorpus(user.id, [0, 1, 2]);
 

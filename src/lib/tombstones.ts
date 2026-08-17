@@ -62,7 +62,79 @@
  * different capabilities, coexisting on purpose.
  */
 
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
+
+/**
+ * How many times an ordinal-appending verb re-reads the high-water mark and
+ * tries again before giving up. Same bound, and the same reasoning, as
+ * `MAX_ATTEMPTS` in src/lib/dataset-versions.ts: enough to clear a real
+ * collision, small enough that a persistent one fails loudly instead of
+ * hammering the database.
+ */
+export const MAX_APPEND_ATTEMPTS = 3;
+
+/**
+ * True iff `error` is a P2002 that re-reading the high-water mark can actually
+ * fix — a violation of `@@unique([datasetId, index])` specifically (R1).
+ *
+ * This is the race `nextSampleIndex`'s own doc describes: the aggregate takes
+ * no lock and Prisma's interactive transactions run at READ COMMITTED, so two
+ * concurrent appends can read the same mark and the loser collides. Recomputing
+ * inside a FRESH transaction is the fix, because the winner's row is visible by
+ * then and the mark moves.
+ *
+ * A P2002 on any OTHER constraint is not retryable here and surfaces as-is —
+ * `@@unique([userId, slug])` above all, which a retry could only turn into the
+ * same failure three times more slowly.
+ *
+ * Both shapes of `meta.target` are accepted deliberately. Prisma reports either
+ * the field list (`['datasetId', 'index']`) or the constraint name
+ * (`'DatasetSample_datasetId_index_key'`) depending on the error path, and a
+ * predicate that handles only the one it was written against fails OPEN: the
+ * retry silently never fires and the defect looks fixed.
+ */
+export function isRetryableAppendConflict(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+    return false;
+  }
+  const target = (error.meta as { target?: unknown } | undefined)?.target;
+  if (Array.isArray(target)) {
+    return target.includes('datasetId') && target.includes('index');
+  }
+  return typeof target === 'string' && target.includes('datasetId_index');
+}
+
+/**
+ * Run an appending transaction, retrying on an ordinal collision (R1).
+ *
+ * `run` MUST open its own transaction and re-read the high-water mark inside
+ * it. That is the whole mechanism: a retry that reused a mark computed outside
+ * the loop would recompute the same doomed value every attempt and turn one
+ * 500 into the same 500, three times slower.
+ *
+ * Deliberately generic over what the transaction returns, and deliberately NOT
+ * aware of what it writes — POST, PUT and the config importer's replace all
+ * append above the mark and all share this exposure. Only POST is wired to it
+ * today (R1's stated scope); the other two are a one-line change each and are
+ * called out in `nextSampleIndex`'s doc below.
+ */
+export async function appendWithRetry<T>(run: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= MAX_APPEND_ATTEMPTS; attempt++) {
+    try {
+      return await run();
+    } catch (error) {
+      lastError = error;
+      if (isRetryableAppendConflict(error) && attempt < MAX_APPEND_ATTEMPTS) continue;
+      throw error;
+    }
+  }
+
+  // Unreachable — the loop always returns or throws — but keeps the control
+  // flow explicit for TypeScript, the same way `createDatasetVersion` does.
+  throw lastError;
+}
 
 /**
  * Live samples: not hidden themselves, and not owned by a hidden dataset
@@ -345,14 +417,25 @@ export async function restoreSample(
  * plain SELECT, it takes no lock of any kind, and Prisma's interactive
  * transactions run at Postgres's default READ COMMITTED. Two concurrent
  * appends can both read the same mark and both try to insert it; the loser
- * gets P2002 on `@@unique([datasetId, index])`, which
- * `POST /api/datasets/[id]/samples` has no retry for and reports as a bare
- * 500. A1 NARROWED that window — the read it replaced
- * (`dataset._count.samples`) happened outside the transaction entirely — but
- * it did not close it. Pinned by 'two concurrent transactions read the SAME
- * high-water mark, and the loser gets P2002 — the read is not serialised' in
- * tests/db/dataset-sample-tombstone.test.ts, which asserts the collision
- * rather than its absence.
+ * gets P2002 on `@@unique([datasetId, index])`. A1 NARROWED that window — the
+ * read it replaced (`dataset._count.samples`) happened outside the transaction
+ * entirely — but it did not close it, and NOTHING HERE CLOSES IT. This
+ * function is still not serialised, and that is pinned by 'two concurrent
+ * transactions read the SAME high-water mark, and the loser gets P2002 — the
+ * read is not serialised' in tests/db/dataset-sample-tombstone.test.ts, which
+ * asserts the collision rather than its absence and STILL PASSES after R1.
+ *
+ * WHAT CHANGED IN R1 is one level up: the losing CALLER retries. See
+ * `appendWithRetry` above. `POST /api/datasets/[id]/samples` is wrapped in it,
+ * so the collision below no longer reaches a user as a bare 500 — the second
+ * attempt re-reads this mark in a FRESH transaction, by which point the
+ * winner's row is visible and the mark has moved.
+ *
+ * **`PUT` and the config importer's replace are NOT yet wrapped**, and they
+ * append above this same mark. Their exposure is identical in kind and smaller
+ * in practice — both tombstone the whole live set first, so two concurrent
+ * ones collide on far more than an ordinal — but "smaller" is not "absent".
+ * Wrapping them is a one-line change each and deliberately out of R1's scope.
  *
  * WHAT IT DOES BUY, and it is worth the argument: the read observes the
  * caller's OWN uncommitted writes. A verb that inserted samples earlier in the
@@ -362,10 +445,16 @@ export async function restoreSample(
  * insert. And it makes the mark and the rows it numbers roll back together, so
  * a failed append leaves nothing half-numbered.
  *
- * CLOSING THE RACE properly needs a retry on P2002 against `datasetId_index`,
+ * CLOSING THE RACE FOR A CALLER is a retry on P2002 against `datasetId_index`,
  * the shape `createDatasetVersion` and `createRubricVersion` already use for
- * `version`. That is a real improvement and a deliberate follow-on: it changes
- * the write path, and A1 is the read overlay.
+ * `version`. That landed as R1 — `appendWithRetry` above.
+ *
+ * A LOCK WAS CONSIDERED AND REJECTED. `SELECT … FOR UPDATE` on the parent
+ * `Dataset` inside this function would serialise the read properly, and it
+ * serialises every append against every other append on the same corpus to do
+ * it. It was measured: it deadlocks the concurrency test against its own gate
+ * and the test fails on vitest's 5s timeout. Retry-on-conflict costs nothing
+ * in the uncontended case, which is nearly every case.
  */
 export async function nextSampleIndex(
   tx: Prisma.TransactionClient,

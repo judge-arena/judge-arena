@@ -6,6 +6,7 @@ import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
 import { findGoldenSetsPinningDataset } from '@/lib/golden-sets';
 import {
+  appendWithRetry,
   liveDatasetsOnly,
   liveSamplesOnly,
   nextSampleIndex,
@@ -117,15 +118,21 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
     // roll back together, and so the read can see writes this transaction has
     // already made.
     //
-    // IT DOES NOT MAKE THE APPEND SAFE AGAINST A CONCURRENT ONE, and the
-    // earlier version of this comment said it did. The aggregate takes no
-    // lock and these transactions run at READ COMMITTED, so two callers can
-    // read the same mark and the loser still gets P2002 on
-    // @@unique([datasetId, index]) — which this handler's catch turns into a
-    // bare 500. Being inside a transaction narrows the window (the read this
-    // replaced was outside one) without closing it. The fix is a retry loop,
-    // the shape `createDatasetVersion` already uses; see `nextSampleIndex`'s
-    // own doc in src/lib/tombstones.ts.
+    // SHARING THE TRANSACTION DOES NOT MAKE THE APPEND SAFE AGAINST A
+    // CONCURRENT ONE — an earlier version of this comment said it did, and A1
+    // corrected that to "narrows the window without closing it". THE RETRY
+    // LOOP BELOW IS WHAT CLOSES IT (R1). The aggregate takes no lock and these
+    // transactions run at READ COMMITTED, so two callers can still read the
+    // same mark; what changed is that the loser now re-reads inside a FRESH
+    // transaction — by which point the winner's row is visible, so the mark
+    // moves — instead of surfacing P2002 as a bare 500.
+    //
+    // Same shape as `createDatasetVersion` (src/lib/dataset-versions.ts), and
+    // deliberately NOT a lock: `SELECT … FOR UPDATE` on the parent Dataset
+    // serialises every append against every other one, and was measured to
+    // deadlock the concurrency test in tests/db/dataset-sample-tombstone.test.ts
+    // against its own gate. Retry-on-conflict costs nothing in the
+    // uncontended case, which is nearly all of them.
     //
     // This replaces `startIndex = dataset._count.samples`. A count is only
     // right while ordinals are dense, and they stop being dense the first time
@@ -135,7 +142,7 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
     // FROM A FILTERED EXPORT: src/lib/config.ts:389 emits `index: s.index`
     // verbatim and the importer writes it back, so the rows arrive with GAPS,
     // count < max + 1, and the first append lands on an occupied ordinal.
-    const created = await prisma.$transaction(
+    const created = await appendWithRetry(() => prisma.$transaction(
       async (tx) => {
         const startIndex = await nextSampleIndex(tx, params.id);
 
@@ -191,7 +198,7 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
       // returns the created rows and `createMany` returns only a count — so it
       // pays a round trip per row and needs the raised ceiling MORE, not less.
       { maxWait: 10_000, timeout: 60_000 }
-    );
+    ));
 
     return NextResponse.json({ added: created.length, samples: created }, { status: 201 });
   } catch (error) {
