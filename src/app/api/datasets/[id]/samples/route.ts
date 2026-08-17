@@ -11,6 +11,7 @@ import {
   nextSampleIndex,
   tombstoneSamples,
 } from '@/lib/tombstones';
+import { recordSampleRevision } from '@/lib/sample-revisions';
 
 const addSamplesSchema = z.object({
   samples: z.array(z.object({
@@ -237,9 +238,19 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
     // path hides it — an edit nobody can see and nobody can review.
     // `findFirst`, because the live predicate is a relation filter layered on
     // top of the id.
+    //
+    // L2 widened the `select` to carry the BEFORE-IMAGE the revision records.
+    // Selected here rather than re-read inside the transaction because this
+    // lookup already runs, and a second read would be a second round trip for
+    // the same row. The `where` is L1's and is not L2's to touch.
     const sample = await prisma.datasetSample.findFirst({
       where: { id: data.sampleId, ...liveSamplesOnly() },
-      select: { datasetId: true },
+      select: {
+        datasetId: true,
+        input: true,
+        expected: true,
+        metadata: true,
+      },
     });
 
     if (!sample || sample.datasetId !== params.id) {
@@ -253,9 +264,30 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
       updateData.metadata = data.metadata ? JSON.stringify(data.metadata) : null;
     }
 
-    const updated = await prisma.datasetSample.update({
-      where: { id: data.sampleId },
-      data: updateData,
+    // L2: ONE transaction, so a rolled-back update leaves no revision claiming
+    // it happened. Before this, PATCH overwrote sample text with no history at
+    // all — it is the one verb L1 left untouched, because hiding a row and
+    // editing one are different losses and only the second destroys content.
+    //
+    // The revision carries the FULL before-image, not just the fields the
+    // request named: the log answers "what did this row look like before",
+    // which a partial image cannot reconstruct.
+    const updated = await prisma.$transaction(async (tx) => {
+      await recordSampleRevision(tx, {
+        datasetSampleId: data.sampleId,
+        changeType: 'edit',
+        actorId: session.user.id,
+        before: {
+          input: sample.input,
+          expected: sample.expected,
+          metadata: sample.metadata,
+        },
+      });
+
+      return tx.datasetSample.update({
+        where: { id: data.sampleId },
+        data: updateData,
+      });
     });
 
     return NextResponse.json(updated);
