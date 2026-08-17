@@ -70,9 +70,8 @@ this note at the top.
 
 | Ref | SHA | Note |
 |---|---|---|
-| `feat/a2-revision-log` | `c4de3b3` | **Where L2's work landed** (owner decision, 2026-08-16). Branched from `1dcd73c`, the commit below; 8 commits ahead of it. HEAD of worktree `/root/judge-arena-worktrees/a0`. **Not pushed.** |
-| `feat/a1-tombstone-overlay` | `1dcd73c` | **Pushed.** `gitea/feat/a1-tombstone-overlay` is at the same SHA, so local and remote agree and there is nothing outstanding on it. |
-| `feat/a0-golden-set-substrate` | `1dcd73c` | Byte-identical to the above (L1 was a true fast-forward merge). Tracks gitea, and is **36 ahead** of it. |
+| `feat/a0-golden-set-substrate` | `1161e57` | **A0 + L1 + L2.** L2 was built on `feat/a2-revision-log` and fast-forward merged here on 2026-08-16, after which that branch was deleted. Tracks gitea and is **46 ahead** of it — **not pushed**. Checked out in worktree `/root/judge-arena-worktrees/a0`. |
+| `feat/a1-tombstone-overlay` | `1dcd73c` | **Pushed**, and now behind the above by L2's 9 commits. `gitea/feat/a1-tombstone-overlay` is at the same SHA, so nothing is outstanding on it. |
 | `gitea/feat/a0-golden-set-substrate` | `8d65198` | **35 commits behind local.** Head of open **PR #12**. |
 | `gitea/main` | `7306c2f` | The de-facto trunk. Local branches are 87 ahead of it. |
 | `main` (local) | `a192300` | Badly stale — 94 behind `gitea/main`. Do not use as a base. |
