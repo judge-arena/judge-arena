@@ -2,8 +2,17 @@
 
 **Date:** 2026-08-17 · **Status:** **DECISIONS ONLY — not a full spec, and deliberately not one yet.**
 **Phase:** Roadmap A's **A2**, the calibration engine.
-**Depends on:** **A1** (`2026-08-17-a1-human-verification-design.md`) for labels, and on rebaseline
-**T5** for broker safety. Neither is done.
+**Depends on:** **A1** for labels, and on rebaseline **T5** for broker safety. Neither is done.
+
+| What | Spec | Plan |
+|---|---|---|
+| **A1** — human verification, the agreement floor | `2026-08-17-a1-human-verification-design.md` | `../plans/2026-08-17-a1-human-verification.md` — 7 tasks |
+| **A1.5** — the annotation studio | `2026-08-17-a1_5-annotation-studio-design.md` | `../plans/2026-08-17-a1_5-annotation-studio.md` — 5 tasks |
+| **A2** — this document | *(decisions only)* | *(none — see below)* |
+
+A1 and A1.5 are **independent and may be built in parallel**: A1 owns the data and endpoints, A1.5
+owns the surface, and they meet only in A1.5's last task, which degrades to a static fixture if A1
+has not merged.
 
 > **Why this document exists rather than a spec.** These decisions were made while designing A1 and
 > would otherwise survive only in a conversation. A2 cannot be specced properly until A1 has produced
@@ -62,7 +71,10 @@ human-vs-model kappa — which is most of what "view that run's performance" mea
 schema work is that per-item row.** It carries, at minimum:
 
 - the `CalibrationRun` it belongs to, and the `GoldenItem` it is about
-- the model's label, in `GoldenLabel`'s score-or-preference shape
+- the model's label, in `GoldenLabel`'s score-or-preference shape — **which A1 defines**: nullable
+  `overallScore` XOR `preference`, under the `GoldenLabel_score_xor_preference` CHECK. Reuse that
+  shape rather than inventing a second one, or human and model verdicts stop comparing directly,
+  which is the entire point of the row
 - a link to the `ModelJudgment` that produced it (reasoning, `rawResponse`, latency, tokens)
 - the position/order the item was presented in, since `positionBias` is measured by re-presenting the
   same pair in both orders
@@ -107,7 +119,12 @@ recorded, which closes the rebaseline item as a side effect.
    header when it is frozen for the leaderboard.
 4. **What "against the state of the art" compares to** — the reference judges, and where their runs
    come from. Roadmap B's territory, but A2's header is what would carry the comparison.
-5. **Drain rate and seconds** — `CalibrationRun` has `startedAt`/`finishedAt` but no throughput
+5. **Whether `agreement()` is reused for human-vs-model.** A1 ships
+   `src/lib/agreement.ts` taking `Reading[] = {itemId, raterId, category}[]`. A model is just another
+   `raterId`, so human-vs-model kappa should need no new statistics — only a projection of the
+   per-item verdicts into `Reading[]`. Confirm this when A2 is specced rather than assuming it, since
+   it decides whether A2 writes any statistics code at all.
+6. **Drain rate and seconds** — `CalibrationRun` has `startedAt`/`finishedAt` but no throughput
    measure, and `EvaluationRun` still lacks the run-grain `startedAt` the roadmap flags (item 4),
    without which elapsed time conflates queue wait with execution.
 

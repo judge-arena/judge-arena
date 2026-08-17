@@ -1,6 +1,7 @@
 # A1 — Human verification and a measured agreement floor
 
-**Date:** 2026-08-17 · **Status:** approved in brainstorming, not yet planned
+**Date:** 2026-08-17 · **Status:** approved, and **planned** — implementation plan at
+`../plans/2026-08-17-a1-human-verification.md`
 **Phase:** Roadmap A's **A1** — `2026-08-10-judge-training-engine-roadmap.md`.
 **Sibling:** **A1.5**, the annotation studio (`2026-08-17-a1_5-annotation-studio-design.md`), split
 out of this phase deliberately and buildable in parallel.

@@ -1,6 +1,7 @@
 # A1.5 — The annotation studio
 
-**Date:** 2026-08-17 · **Status:** approved in brainstorming, not yet planned
+**Date:** 2026-08-17 · **Status:** approved, and **planned** — implementation plan at
+`../plans/2026-08-17-a1_5-annotation-studio.md`
 **Phase:** Roadmap A, between **A1** and **A2**. Split out of A1 deliberately.
 **Sibling:** **A1** (`2026-08-17-a1-human-verification-design.md`) — the labelling routes, the
 agreement maths and the assignment model. **The two are buildable in parallel**: A1 owns the data and
