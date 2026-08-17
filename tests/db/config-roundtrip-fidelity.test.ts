@@ -447,6 +447,8 @@ const COVERAGE: Record<string, Coverage> = {
         'retire state is a product verb meaning "out of circulation on THIS instance"; carrying it would let a re-import silently resurrect a retired set, and a retired set is not part of a portable working set',
       tombstonedAt:
         'account-lifecycle state, pending purge — never user intent, and a tombstoned set must not come back through a config file',
+      retestIntervalItems:
+        'the measurement protocol in force on THIS instance, not part of the set as an artifact',
     },
     knownGaps: {
       parentId:
@@ -496,6 +498,10 @@ const COVERAGE: Record<string, Coverage> = {
       goldenItemId: 'implied by document nesting — except nothing is nested; see annotatorId',
       annotatorId: ANNOTATION,
       overallScore: ANNOTATION,
+      preference:
+        'the human verdict for a pairwise item, same register as overallScore beside it',
+      round: 'which blind reading this is — instance-local measurement protocol, not content',
+      goldenItemRevisionId: 'instance-local FK to an instance-local revision row',
       criteriaScores: ANNOTATION,
       reasoning: ANNOTATION,
       createdAt: TIMESTAMP,
@@ -574,6 +580,46 @@ const COVERAGE: Record<string, Coverage> = {
       actorId:
         'a real User FK with no portable representation, exactly as GoldenLabel.annotatorId: carrying it across instances would forge an attribution',
       at: TIMESTAMP,
+    },
+    knownGaps: {},
+  },
+
+  // Instance-local mutation history, exactly as SampleRevision above: a
+  // revision records WHAT HAPPENED HERE. The config document describes a
+  // golden set's current content, not its edit history.
+  GoldenItemRevision: {
+    exported: [],
+    excludedByDesign: {
+      id: SURROGATE,
+      goldenItemId: 'instance-local FK, the same argument as SampleRevision.datasetSampleId',
+      inputText:
+        'the PRE-EDIT text of an item on THIS instance; the document carries current content',
+      promptText: 'same as inputText one column up — a before-image, not current content',
+      responseText: 'same as inputText two columns up — a before-image, not current content',
+      expected:
+        "the ground truth AS IT STOOD before an edit here, not the document's current value",
+      actorId: 'a real User FK with no portable representation, exactly as GoldenLabel.annotatorId',
+      at: TIMESTAMP,
+    },
+    knownGaps: {},
+  },
+
+  // Workflow state, not content. WHO WAS ASKED to annotate on this instance
+  // says nothing about the set as an artifact, and carrying it would assign
+  // work to strangers on import.
+  GoldenAssignment: {
+    exported: [],
+    excludedByDesign: {
+      id: SURROGATE,
+      goldenSetId: 'instance-local FK',
+      annotatorId: 'a real User FK with no portable representation',
+      goldenItemId: 'instance-local FK; NULL means the whole set',
+      round: 'which reading this assignment is for — instance-local workflow state',
+      assignedById: 'a real User FK with no portable representation',
+      assignedAt: TIMESTAMP,
+      completedAt: TIMESTAMP,
+      revokedAt: TIMESTAMP,
+      revokedReason: 'free-text audit of why an assignment was withdrawn HERE',
     },
     knownGaps: {},
   },
