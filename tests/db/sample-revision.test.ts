@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { getServerSession } from 'next-auth';
 import { db, truncateAll, mkUser } from './helpers';
 import { DELETE, PATCH, PUT } from '@/app/api/datasets/[id]/samples/route';
+import { POST as POST_RESTORE } from '@/app/api/datasets/[id]/samples/[sampleId]/restore/route';
 
 // L2, the revision log. Every mutation to a DatasetSample appends one
 // SampleRevision carrying the values as they stood BEFORE the change, so the
@@ -276,5 +277,179 @@ describe('the bulk verbs record a revision per hidden row', () => {
     // `if (outgoing.length > 0)` guard buys, and why the revision write goes
     // INSIDE it rather than beside it.
     expect(await db.sampleRevision.count()).toBe(0);
+  });
+});
+
+describe('POST /api/datasets/[id]/samples/[sampleId]/restore', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    vi.clearAllMocks();
+  });
+
+  async function mkHiddenSample(userId: string, opts: { hideSample?: boolean; hideDataset?: boolean } = {}) {
+    fixtureCounter += 1;
+    const dataset = await db.dataset.create({
+      data: {
+        name: 'Restore Fixture',
+        slug: `restore-${fixtureCounter}`,
+        userId,
+        visibility: 'private',
+        inputType: 'query-response',
+        sampleCount: 1,
+      },
+    });
+    const sample = await db.datasetSample.create({
+      data: { datasetId: dataset.id, index: 0, input: 'hidden then back', expected: null, metadata: null },
+    });
+    if (opts.hideSample) {
+      await db.tombstone.create({ data: { datasetSampleId: sample.id, isTombstone: true } });
+    }
+    if (opts.hideDataset) {
+      await db.tombstone.create({ data: { datasetId: dataset.id, isTombstone: true } });
+    }
+    return { dataset, sample };
+  }
+
+  const restoreRequest = () => new Request('http://localhost/x', { method: 'POST' });
+
+  it('un-hides a hidden sample and records a `restore` revision', async () => {
+    const owner = await mkUser();
+    const { dataset, sample } = await mkHiddenSample(owner.id, { hideSample: true });
+    sessionFor(owner);
+
+    const res = await POST_RESTORE(restoreRequest(), {
+      params: Promise.resolve({ id: dataset.id, sampleId: sample.id }),
+    });
+    expect(res.status).toBe(200);
+
+    // The tombstone row SURVIVES with the flag flipped — it is not deleted.
+    // That is what preserves "this was hidden once", and it is why the read
+    // filter is written as a NOT rather than an is-null check.
+    const tomb = await db.tombstone.findUnique({ where: { datasetSampleId: sample.id } });
+    expect(tomb).not.toBeNull();
+    expect(tomb?.isTombstone).toBe(false);
+
+    const revisions = await db.sampleRevision.findMany({ where: { datasetSampleId: sample.id } });
+    expect(revisions).toHaveLength(1);
+    expect(revisions[0].changeType).toBe('restore');
+    expect(revisions[0].input).toBeNull();
+    expect(revisions[0].actorId).toBe(owner.id);
+  });
+
+  it('the restored sample keeps its original ordinal — nothing ever reused it', async () => {
+    const owner = await mkUser();
+    const { dataset, sample } = await mkHiddenSample(owner.id, { hideSample: true });
+    sessionFor(owner);
+
+    await POST_RESTORE(restoreRequest(), {
+      params: Promise.resolve({ id: dataset.id, sampleId: sample.id }),
+    });
+
+    // The high-water-mark rule exists precisely so this holds: a restored
+    // sample lands back in its original position rather than at the end.
+    const after = await db.datasetSample.findUniqueOrThrow({ where: { id: sample.id } });
+    expect(after.index).toBe(0);
+  });
+
+  it('409s a sample that is not hidden, and records nothing', async () => {
+    const owner = await mkUser();
+    const { dataset, sample } = await mkHiddenSample(owner.id);
+    sessionFor(owner);
+
+    const res = await POST_RESTORE(restoreRequest(), {
+      params: Promise.resolve({ id: dataset.id, sampleId: sample.id }),
+    });
+    expect(res.status).toBe(409);
+    expect(await db.sampleRevision.count()).toBe(0);
+  });
+
+  it('404s when the PARENT dataset is hidden — a hidden dataset is closed to writes', async () => {
+    const owner = await mkUser();
+    const { dataset, sample } = await mkHiddenSample(owner.id, { hideSample: true, hideDataset: true });
+    sessionFor(owner);
+
+    // Owner decision, 2026-08-16: both new routes filter the parent with
+    // liveDatasetsOnly(), following design decisions 15 and 16. Un-hiding one
+    // sample beneath a hidden dataset would surface nothing anyway — every
+    // sample of a hidden dataset is hidden by inheritance, and there is no
+    // restoreDataset to lift the parent.
+    const res = await POST_RESTORE(restoreRequest(), {
+      params: Promise.resolve({ id: dataset.id, sampleId: sample.id }),
+    });
+    expect(res.status).toBe(404);
+    expect(await db.sampleRevision.count()).toBe(0);
+
+    // And the sample is still hidden — a 404 that wrote anyway is the worse bug.
+    const tomb = await db.tombstone.findUnique({ where: { datasetSampleId: sample.id } });
+    expect(tomb?.isTombstone).toBe(true);
+  });
+
+  it('404s a sample that belongs to a different dataset', async () => {
+    const owner = await mkUser();
+    const mine = await mkHiddenSample(owner.id, { hideSample: true });
+    const theirs = await mkHiddenSample(owner.id, { hideSample: true });
+    sessionFor(owner);
+
+    const res = await POST_RESTORE(restoreRequest(), {
+      params: Promise.resolve({ id: mine.dataset.id, sampleId: theirs.sample.id }),
+    });
+    expect(res.status).toBe(404);
+    expect(await db.sampleRevision.count()).toBe(0);
+  });
+});
+
+describe('restore and the stored sampleCount', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    vi.clearAllMocks();
+  });
+
+  it('a restore puts the sample back INTO the stored live count', async () => {
+    // L1 made `sampleCount` a LIVE row count and had DELETE rewrite it. A
+    // restore moves that count in the other direction, so it has to rewrite it
+    // too — otherwise the stored value under-reports by one for every restored
+    // row, permanently. The UI ladder reads the stored value FIRST, so a stale
+    // one shadows the live count beneath it: the same failure L1 documented as
+    // "the import picker advertises 620 and the import yields 610", pointing
+    // the other way.
+    const owner = await mkUser();
+    fixtureCounter += 1;
+    const dataset = await db.dataset.create({
+      data: {
+        name: 'Count Fixture',
+        slug: `count-${fixtureCounter}`,
+        userId: owner.id,
+        visibility: 'private',
+        inputType: 'query-response',
+        sampleCount: 2,
+      },
+    });
+    const a = await db.datasetSample.create({
+      data: { datasetId: dataset.id, index: 0, input: 'a', expected: null, metadata: null },
+    });
+    await db.datasetSample.create({
+      data: { datasetId: dataset.id, index: 1, input: 'b', expected: null, metadata: null },
+    });
+    sessionFor(owner);
+
+    // Hide one through the real verb, so the stored count is whatever DELETE
+    // leaves rather than something this test asserts into place.
+    await DELETE(
+      new Request('http://localhost/api/datasets/x/samples', {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sampleIds: [a.id] }),
+      }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+    expect((await db.dataset.findUniqueOrThrow({ where: { id: dataset.id } })).sampleCount).toBe(1);
+
+    const res = await POST_RESTORE(new Request('http://localhost/x', { method: 'POST' }), {
+      params: Promise.resolve({ id: dataset.id, sampleId: a.id }),
+    });
+    expect(res.status).toBe(200);
+
+    const after = await db.dataset.findUniqueOrThrow({ where: { id: dataset.id } });
+    expect(after.sampleCount).toBe(2);
   });
 });

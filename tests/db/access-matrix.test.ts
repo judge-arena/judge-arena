@@ -26,6 +26,7 @@ import { GET as getGoldenSet, PATCH as patchGoldenSet, DELETE as deleteGoldenSet
 import { GET as listGoldenSets, POST as createGoldenSetRoute } from '@/app/api/golden-sets/route';
 import { POST as forkGoldenSetRoute } from '@/app/api/golden-sets/[id]/fork/route';
 import { POST as retireGoldenSetRoute } from '@/app/api/golden-sets/[id]/retire/route';
+import { POST as restoreSampleRoute } from '@/app/api/datasets/[id]/samples/[sampleId]/restore/route';
 
 import {
   GET as listApiKeys,
@@ -1198,4 +1199,59 @@ describe('Access matrix — golden-set sub-routes (/fork, /retire) and list', ()
     );
     expect(res.status).toBe(201);
   });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// L2 sample sub-routes: POST …/restore and GET …/revisions.
+//
+// These get their own block rather than a `registry` entry, and the reason
+// is structural rather than stylistic: `ResourceHandlers` is
+// {createTarget, get, patch, del} over a SINGLE `id`, and `registry` is
+// typed to six fixed resource keys — neither a POST-only sub-resource nor
+// a two-parameter route fits it. This is the same shape the golden-set
+// /fork and /retire block above uses.
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('Access matrix — L2 sample sub-routes (/restore, /revisions)', () => {
+  let ctx: Ctx;
+
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+    (headers as unknown as Mock).mockReset();
+    (headers as unknown as Mock).mockImplementation(async () => new Headers());
+    const owner = await mkUser();
+    const stranger = await mkUser();
+    const admin = await mkUser({ role: 'admin' });
+    ctx = { ownerId: owner.id, strangerId: stranger.id, adminId: admin.id };
+  });
+
+  async function mkHiddenSample(visibility: Visibility = 'private') {
+    const dataset = await db.dataset.create({
+      data: { name: uniq('fixture-dataset'), userId: ctx.ownerId, visibility, inputType: 'query-response' },
+    });
+    const sample = await db.datasetSample.create({
+      data: { datasetId: dataset.id, index: 0, input: 'hidden row', expected: null, metadata: null },
+    });
+    await db.tombstone.create({ data: { datasetSampleId: sample.id, isTombstone: true } });
+    return { dataset, sample };
+  }
+
+  for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+    const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 200;
+    it(`POST /api/datasets/[id]/samples/[sampleId]/restore as ${actor} -> ${expected}`, async () => {
+      const { dataset, sample } = await mkHiddenSample();
+      setSessionFor(actor, ctx);
+      const res = await restoreSampleRoute(
+        jsonRequest(
+          `http://localhost/api/datasets/${dataset.id}/samples/${sample.id}/restore`,
+          'POST',
+          {}
+        ),
+        { params: Promise.resolve({ id: dataset.id, sampleId: sample.id }) }
+      );
+      expect(res.status).toBe(expected);
+    });
+  }
+
 });
