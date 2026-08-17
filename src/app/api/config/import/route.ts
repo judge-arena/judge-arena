@@ -685,33 +685,67 @@ export async function POST(request: Request) {
       } else {
         items.push({ type: 'dataset', slug, name: configDataset.name, action: 'create' });
         if (!dryRun) {
-          const created = await prisma.dataset.create({
-            data: {
-              name: configDataset.name,
-              slug,
-              description: configDataset.description ?? null,
-              source: configDataset.source,
-              visibility: configDataset.visibility,
-              sourceUrl: configDataset.sourceUrl ?? null,
-              huggingFaceId: configDataset.huggingFaceId ?? null,
-              tags: configDataset.tags ? JSON.stringify(configDataset.tags) : null,
-              projectId,
-              userId,
-              sampleCount: configDataset.samples?.length ?? null,
-            },
-          });
+          // R3 — ONE TRANSACTION. This was the last hide-then-write pair in the
+          // tree that was not one, and the replace branch above has been atomic
+          // since A1. Unwrapped, `dataset.create` (which writes
+          // `sampleCount: samples.length`) and `datasetSample.createMany` were
+          // two round trips, so any failure in the second left a dataset row
+          // ADVERTISING N samples with zero sample rows behind it — and a 500
+          // that said nothing about which half landed.
+          //
+          // The duplicate-`index` case that motivated the note on
+          // `datasetSchema` is refused at the schema now, so it never reaches
+          // here. That closed the likeliest trigger and not the gap: `index` is
+          // `z.number().int().min(0)` with no upper bound while the column is
+          // int4, so a document can still fail inside the createMany after the
+          // dataset row would have committed. Pinned by "R3: a failed CREATE
+          // leaves NO dataset row behind" in tests/db/config-golden-sets.test.ts,
+          // which drives exactly that overflow.
+          //
+          // Same `{ maxWait, timeout }` ceiling as every other bulk-write path
+          // here (the replace branch below, golden-sets/route.ts's POST,
+          // forkGoldenSet): a document may carry a 620-row corpus today and an
+          // order of magnitude more later, and Prisma's default 5s is thin for
+          // that.
+          //
+          // NOTE the scope, which is deliberately per-dataset and not
+          // per-document: everything earlier in the document (projects,
+          // rubrics, models) stays committed independently, which is the same
+          // reason the pinned and hidden cases above report a skip rather than
+          // throwing. This makes ONE dataset all-or-nothing; it does not make
+          // the import one atomic unit, and nothing here claims it does.
+          await prisma.$transaction(
+            async (tx) => {
+              const created = await tx.dataset.create({
+                data: {
+                  name: configDataset.name,
+                  slug,
+                  description: configDataset.description ?? null,
+                  source: configDataset.source,
+                  visibility: configDataset.visibility,
+                  sourceUrl: configDataset.sourceUrl ?? null,
+                  huggingFaceId: configDataset.huggingFaceId ?? null,
+                  tags: configDataset.tags ? JSON.stringify(configDataset.tags) : null,
+                  projectId,
+                  userId,
+                  sampleCount: configDataset.samples?.length ?? null,
+                },
+              });
 
-          if (configDataset.samples && configDataset.samples.length > 0) {
-            await prisma.datasetSample.createMany({
-              data: configDataset.samples.map((s) => ({
-                datasetId: created.id,
-                index: s.index,
-                input: s.input,
-                expected: s.expected ?? null,
-                metadata: s.metadata ? JSON.stringify(s.metadata) : null,
-              })),
-            });
-          }
+              if (configDataset.samples && configDataset.samples.length > 0) {
+                await tx.datasetSample.createMany({
+                  data: configDataset.samples.map((s) => ({
+                    datasetId: created.id,
+                    index: s.index,
+                    input: s.input,
+                    expected: s.expected ?? null,
+                    metadata: s.metadata ? JSON.stringify(s.metadata) : null,
+                  })),
+                });
+              }
+            },
+            { maxWait: 10_000, timeout: 60_000 }
+          );
         }
       }
     }

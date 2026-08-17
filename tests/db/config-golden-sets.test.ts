@@ -898,6 +898,52 @@ describe('Config import — the guards the later sweeps never reached (M1-M3)', 
     expect(await db.datasetSample.count({ where: { datasetId: dataset.id } })).toBe(4);
   });
 
+  it('R3: a failed CREATE leaves NO dataset row behind — the branch is one transaction', async () => {
+    // The importer's dataset-CREATE branch was the one hide-then-write pair in
+    // the tree that was not a transaction: `dataset.create` (writing
+    // `sampleCount: samples.length`) and `datasetSample.createMany` were two
+    // round trips, so a failure in the second left a dataset row claiming N
+    // samples with zero sample rows behind it, and a 500 that said nothing.
+    //
+    // The duplicate-index case is already refused at the schema (a 400 naming
+    // the field), so this reaches the gap a different way: `index` is
+    // `z.number().int().min(0)` with NO upper bound, and Postgres `index` is
+    // int4. An index past 2^31-1 passes validation and fails inside the
+    // createMany — after the dataset row would have committed.
+    const user = await mkUser();
+    mockSessionFor(user);
+
+    const doc = {
+      version: '1.0',
+      exportedAt: new Date().toISOString(),
+      projects: [],
+      rubrics: [],
+      models: [],
+      datasets: [
+        {
+          slug: 'ds-atomic-create',
+          name: 'Atomic Create',
+          source: 'local',
+          visibility: 'private',
+          samples: [
+            { index: 0, input: 'fits in int4' },
+            { index: 3_000_000_000, input: 'does not fit in int4' },
+          ],
+        },
+      ],
+      goldenSets: [],
+    };
+
+    const res = await importConfig(importRequest(JSON.stringify(doc)));
+    expect(res.status).not.toBe(200);
+
+    // NON-VACUITY: both halves matter. Unatomic, the dataset row is there with
+    // sampleCount 2 and no samples — which is exactly what a reader of the
+    // corpus would then see advertised and never find.
+    expect(await db.dataset.count({ where: { slug: 'ds-atomic-create' } })).toBe(0);
+    expect(await db.datasetSample.count({ where: { input: 'fits in int4' } })).toBe(0);
+  });
+
   it('L2: a config-import sample replace records a delete revision per hidden row', async () => {
     // The importer is the THIRD place that hides samples in bulk, after
     // DELETE and PUT. Without this, a corpus refreshed from a config document

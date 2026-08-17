@@ -227,14 +227,22 @@ const datasetSchema = z.object({
   // DUPLICATE INDICES ARE REJECTED, the same refine `createGoldenSetSchema`'s
   // `sampleIndices` has carried since A0.
   //
-  // The importer's dataset-CREATE branch is the one hide-then-write pair in
-  // the tree that is not one transaction: `dataset.create` (writing
-  // `sampleCount: samples.length`) and `datasetSample.createMany` (writing
-  // `index: s.index` verbatim) are two round trips, so a duplicate index
-  // reaches P2002 in the second AFTER the first has committed — a 500 over a
-  // dataset row claiming 3 samples with zero sample rows behind it. The
-  // REPLACE branch has been immune since this branch re-packed it to
-  // `position + offset`; the create branch was left as its twin.
+  // This refine is the FIRST of two defences, and it was the only one when it
+  // landed. `dataset.create` (writing `sampleCount: samples.length`) and
+  // `datasetSample.createMany` (writing `index: s.index` verbatim) were two
+  // round trips outside any transaction, so a duplicate index reached P2002 in
+  // the second AFTER the first had committed — a 500 over a dataset row
+  // claiming 3 samples with zero sample rows behind it. The REPLACE branch has
+  // been immune since this branch re-packed it to `position + offset`; the
+  // create branch was left as its twin.
+  //
+  // THE SECOND DEFENCE NOW EXISTS: that create branch is one `$transaction`
+  // (R3, config/import/route.ts). So this refine is no longer load-bearing for
+  // atomicity — it is load-bearing for the ERROR, and that is why it stays. A
+  // duplicate index is a fault in the DOCUMENT, and refusing it at the schema
+  // costs one predicate and answers 400 naming the field, where the
+  // transaction alone would answer an opaque 500 and roll back. Keep both:
+  // they fail differently on purpose.
   //
   // A1 is what makes this worth closing now rather than never. Exports used to
   // be dense, so hand-renumbering a config document was pointless; a filtered
