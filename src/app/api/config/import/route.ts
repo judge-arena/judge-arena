@@ -29,6 +29,7 @@ import {
   nextSampleIndex,
   tombstoneSamples,
 } from '@/lib/tombstones';
+import { recordSampleRevisions } from '@/lib/sample-revisions';
 
 /** Old config exports (pre Task 12 review fix) only ever wrote one of the
  * three legacy `ModelConfig.provider` values — translate those the same
@@ -634,6 +635,17 @@ export async function POST(request: Request) {
                       outgoing.map((s) => s.id),
                       'config-import-replace'
                     );
+
+                    // L2. `outgoing` is already the filtered live set, so every
+                    // row in it transitions — no "which of these transitioned"
+                    // read, unlike DELETE. Inside the guard and inside L1's
+                    // transaction, so a refreshed corpus keeps its history and
+                    // a failure leaves neither the hide nor the log behind.
+                    await recordSampleRevisions(tx, {
+                      datasetSampleIds: outgoing.map((s) => s.id),
+                      changeType: 'delete',
+                      actorId: userId,
+                    });
                   }
 
                   // Retained rows KEEP their ordinals — `@@unique([datasetId,

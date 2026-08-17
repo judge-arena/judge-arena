@@ -898,6 +898,43 @@ describe('Config import — the guards the later sweeps never reached (M1-M3)', 
     expect(await db.datasetSample.count({ where: { datasetId: dataset.id } })).toBe(4);
   });
 
+  it('L2: a config-import sample replace records a delete revision per hidden row', async () => {
+    // The importer is the THIRD place that hides samples in bulk, after
+    // DELETE and PUT. Without this, a corpus refreshed from a config document
+    // would lose its history at exactly the moment the history becomes most
+    // useful — the rows are hidden, so nothing else records what they said.
+    const user = await mkUser();
+    mockSessionFor(user);
+    const dataset = await mkAnnotatedDataset(user.id, { slug: 'ds-rev-import' });
+
+    const before = await db.datasetSample.count({ where: { datasetId: dataset.id } });
+    expect(before).toBe(2);
+
+    // The replace is gated on `changes.length > 0`, and that diff compares
+    // dataset FIELDS plus the sample COUNT — never sample text. Editing only
+    // `samples[0].input` is a skip, so this renames the dataset the way the
+    // unpinned-replace test above does, which is what actually reaches the
+    // replace.
+    const doc = await exportDoc();
+    doc.datasets[0].name = 'Renamed Corpus';
+    doc.datasets[0].samples[0].input = 'a wholly different question';
+    expect((await importConfig(importRequest(JSON.stringify(doc)))).status).toBe(200);
+
+    // One revision per OUTGOING row, attributed to the importing session. The
+    // incoming rows are creates and get none — a row's first state is the row.
+    const revisions = await db.sampleRevision.findMany({
+      where: { datasetSampleId: { in: dataset.samples.map((s) => s.id) } },
+    });
+    expect(revisions).toHaveLength(before);
+    expect(revisions.every((r) => r.changeType === 'delete')).toBe(true);
+    expect(revisions.every((r) => r.actorId === user.id)).toBe(true);
+    // A delete changes no content, so the before-image columns stay null.
+    expect(revisions.every((r) => r.input === null)).toBe(true);
+
+    // NON-VACUITY: the log must not have grown beyond the outgoing set.
+    expect(await db.sampleRevision.count()).toBe(before);
+  });
+
   it('M1: re-importing the SAME document is a skip, not a second replace — hidden rows must not inflate the diff', async () => {
     // NON-VACUITY: this shape only bites AFTER something is hidden. On a clean
     // corpus the diff reads count == document length both times and skips, so

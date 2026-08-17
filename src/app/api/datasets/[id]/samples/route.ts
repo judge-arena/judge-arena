@@ -11,7 +11,7 @@ import {
   nextSampleIndex,
   tombstoneSamples,
 } from '@/lib/tombstones';
-import { recordSampleRevision } from '@/lib/sample-revisions';
+import { recordSampleRevision, recordSampleRevisions } from '@/lib/sample-revisions';
 
 const addSamplesSchema = z.object({
   samples: z.array(z.object({
@@ -416,6 +416,24 @@ export async function DELETE(request: Request, props: { params: Promise<{ id: st
     // callback, which Next.js 15 forces to be module-local classes because it
     // validates route.ts exports against a known allowlist.
     const result = await prisma.$transaction(async (tx) => {
+      // L2: which of the resolved ids are still LIVE — precisely the set about
+      // to transition, and precisely what the log must record. Read BEFORE the
+      // tombstone write below, or every id looks already-hidden.
+      //
+      // FILTERED ON PURPOSE, and it is not the membership lookup above. That
+      // one is deliberately unfiltered so a retried delete converges on hidden
+      // instead of 400ing; this one asks the narrower question "which of these
+      // are still live", whose answer is the log's.
+      //
+      // It cannot be `tombstoneSamples`' return value: that counts DISTINCT
+      // IDS NOW HIDDEN, which counts an already-hidden row again. Right for
+      // the response body, wrong for a log — a second `delete` revision would
+      // record a deletion that did not happen.
+      const newlyHidden = await tx.datasetSample.findMany({
+        where: { id: { in: samples.map((s) => s.id) }, ...liveSamplesOnly() },
+        select: { id: true },
+      });
+
       // `samples` rather than `data.sampleIds`: the lookup above already
       // resolved exactly the ids that belong here, and passing the resolved
       // set is what keeps the P2003 in `tombstoneSamples` unreachable.
@@ -424,6 +442,12 @@ export async function DELETE(request: Request, props: { params: Promise<{ id: st
         samples.map((s) => s.id),
         'sample deleted'
       );
+
+      await recordSampleRevisions(tx, {
+        datasetSampleIds: newlyHidden.map((s) => s.id),
+        changeType: 'delete',
+        actorId: session.user.id,
+      });
 
       // ── THE RE-INDEX LOOP IS DELETED, NOT ADAPTED ──────────────────────
       // What stood here read every surviving row and renumbered it 0..n-1.
@@ -571,6 +595,16 @@ export async function PUT(request: Request, props: { params: Promise<{ id: strin
 
         if (outgoing.length > 0) {
           await tombstoneSamples(tx, outgoing.map((s) => s.id), 'bulk replace');
+
+          // L2. No "which of these transitioned" read is needed here, unlike
+          // DELETE: `outgoing` IS the filtered live set, so every row in it
+          // transitions by construction. Inside the guard, so a replace over an
+          // empty corpus logs nothing rather than a no-op.
+          await recordSampleRevisions(tx, {
+            datasetSampleIds: outgoing.map((s) => s.id),
+            changeType: 'delete',
+            actorId: session.user.id,
+          });
         }
 
         // Ordinals are no longer dense. The outgoing rows still hold 0..n-1, so

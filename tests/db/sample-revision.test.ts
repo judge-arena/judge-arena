@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { getServerSession } from 'next-auth';
 import { db, truncateAll, mkUser } from './helpers';
-import { PATCH } from '@/app/api/datasets/[id]/samples/route';
+import { DELETE, PATCH, PUT } from '@/app/api/datasets/[id]/samples/route';
 
 // L2, the revision log. Every mutation to a DatasetSample appends one
 // SampleRevision carrying the values as they stood BEFORE the change, so the
@@ -162,6 +162,119 @@ describe('PATCH /api/datasets/[id]/samples — the revision log', () => {
       params: Promise.resolve({ id: dataset.id }),
     });
     expect(res.status).toBe(404);
+    expect(await db.sampleRevision.count()).toBe(0);
+  });
+});
+
+describe('the bulk verbs record a revision per hidden row', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    vi.clearAllMocks();
+  });
+
+  async function mkCorpus(userId: string, inputs: string[]) {
+    fixtureCounter += 1;
+    const dataset = await db.dataset.create({
+      data: {
+        name: 'Bulk Fixture',
+        slug: `bulk-${fixtureCounter}`,
+        userId,
+        visibility: 'private',
+        inputType: 'query-response',
+        sampleCount: inputs.length,
+      },
+    });
+    const samples = [];
+    for (const [i, input] of inputs.entries()) {
+      samples.push(
+        await db.datasetSample.create({
+          data: { datasetId: dataset.id, index: i, input, expected: null, metadata: null },
+        })
+      );
+    }
+    return { dataset, samples };
+  }
+
+  function bulkRequest(method: 'DELETE' | 'PUT', body: unknown) {
+    return new Request('http://localhost/api/datasets/x/samples', {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('DELETE records one `delete` revision per sample it hides', async () => {
+    const owner = await mkUser();
+    const { dataset, samples } = await mkCorpus(owner.id, ['first', 'second']);
+    sessionFor(owner);
+
+    const res = await DELETE(bulkRequest('DELETE', { sampleIds: samples.map((s) => s.id) }), {
+      params: Promise.resolve({ id: dataset.id }),
+    });
+    expect(res.status).toBe(200);
+
+    const revisions = await db.sampleRevision.findMany({ orderBy: { at: 'asc' } });
+    expect(revisions).toHaveLength(2);
+    expect(revisions.every((r) => r.changeType === 'delete')).toBe(true);
+    expect(revisions.every((r) => r.actorId === owner.id)).toBe(true);
+    // A delete changes no content, so the before-image columns stay NULL.
+    expect(revisions.every((r) => r.input === null)).toBe(true);
+  });
+
+  it('a retried DELETE of an already-hidden id records NO second revision', async () => {
+    const owner = await mkUser();
+    const { dataset, samples } = await mkCorpus(owner.id, ['only']);
+    sessionFor(owner);
+
+    const body = { sampleIds: [samples[0].id] };
+    await DELETE(bulkRequest('DELETE', body), { params: Promise.resolve({ id: dataset.id }) });
+    const second = await DELETE(bulkRequest('DELETE', body), {
+      params: Promise.resolve({ id: dataset.id }),
+    });
+    expect(second.status).toBe(200);
+
+    // L1 made the retry converge on hidden rather than error, and it reports
+    // `tombstoned: 1` both times because that count means "distinct ids now
+    // hidden". The log must NOT agree with that number: the row was deleted
+    // ONCE. A second revision would claim a deletion that did not happen,
+    // which is exactly the kind of false history that makes a log worse than
+    // none.
+    expect(await db.sampleRevision.count()).toBe(1);
+  });
+
+  it('PUT bulk-replace records one `delete` revision per outgoing live row', async () => {
+    const owner = await mkUser();
+    const { dataset } = await mkCorpus(owner.id, ['out-a', 'out-b', 'out-c']);
+    sessionFor(owner);
+
+    const res = await PUT(
+      bulkRequest('PUT', { samples: [{ input: 'incoming', expected: null }] }),
+      { params: Promise.resolve({ id: dataset.id }) }
+    );
+    expect(res.status).toBe(200);
+
+    // Three outgoing rows hidden, one incoming row appended above the
+    // high-water mark. The incoming row is a CREATE and gets no revision —
+    // a row's first state is the row itself.
+    const revisions = await db.sampleRevision.findMany();
+    expect(revisions).toHaveLength(3);
+    expect(revisions.every((r) => r.changeType === 'delete')).toBe(true);
+    expect(revisions.every((r) => r.actorId === owner.id)).toBe(true);
+  });
+
+  it('a PUT over an already-empty corpus records nothing', async () => {
+    const owner = await mkUser();
+    const { dataset } = await mkCorpus(owner.id, []);
+    sessionFor(owner);
+
+    const res = await PUT(bulkRequest('PUT', { samples: [{ input: 'first ever', expected: null }] }), {
+      params: Promise.resolve({ id: dataset.id }),
+    });
+    expect(res.status).toBe(200);
+
+    // Nothing transitioned, so nothing is logged. This is what L1's
+    // `if (outgoing.length > 0)` guard buys, and why the revision write goes
+    // INSIDE it rather than beside it.
     expect(await db.sampleRevision.count()).toBe(0);
   });
 });
