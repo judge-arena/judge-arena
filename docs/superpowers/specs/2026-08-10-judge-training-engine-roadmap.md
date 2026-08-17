@@ -1,9 +1,15 @@
 # Roadmap A: the judge training engine
 
-**Date:** 2026-08-10 · **Last verified against the live cluster:** 2026-08-12
-**Status:** preflight cleared, DB-backed CI live. A0 unblocked pending one deploy + seed. Four owner
-decisions remain open; **#3 and #6, the two that gate A0, were settled 2026-08-12** — weighted kappa
-with the threshold stored as data, and golden sets immutable once a `CalibrationRun` references them.
+**Date:** 2026-08-10 · **Last verified against the live cluster:** **2026-08-17**
+**Status:** **A0, A1 and A1.5 are DONE in code and NONE of it is deployed.** Preflight cleared,
+DB-backed CI live. Production runs a pre-A0 image, sits 5 migrations behind and holds 0 golden sets;
+A1/A1.5 are not merged. **That gap — not T5 alone — is what stands between here and A2**, because
+A2's design needs real label data and none exists. The path is
+`2026-08-17-integration-release-and-a2-roadmap.md`.
+Owner decisions **#3 and #6 were settled 2026-08-12** (weighted kappa with the threshold stored as
+data; golden sets immutable once a `CalibrationRun` references them); **#4 and #7 remain open** and
+are settled when A2 is specced. **#5** (cross-user annotation) now has its mechanism built by A1 and
+waits only on a second account.
 **Scope:** labelling, entry, human verification, and distillation — everything whose purpose is
 **producing a stronger judge.**
 **Sibling:** `2026-08-10-benchmark-sharing-roadmap.md` (Roadmap B) measures and publishes the
@@ -113,12 +119,13 @@ building Roadmap A end to end? Everything below is verified, not inferred.
 | 3 | `llamacpp` descriptor | **done** — merged, verified against the live server |
 | 8 | WAL archiving + rehearsed restore (T2) | **done** — 6/6 exit gate verified, RTO measured |
 | 9 | `lanEgress` declares the dev endpoint | **done** |
-| — | **Deploy + seed the built image** | **OPEN** — was "the only thing between here and A0"; A0 was built and completed ahead of it, so this now gates *deployment*, not A0 |
 | — | CI cannot run the DB or integration suites | **done 2026-08-12** — ephemeral Job with service sidecars; 286 DB + 74 integration tests green in CI, `build-push` gates on it |
 | 7 | RabbitMQ scrape/alerts/cap (T5) | **OPEN — gates A2 (this roadmap's A2, the calibration engine — not the lifecycle plan, which is now L2)** |
 | 4,5,6 | `startedAt`, format-compliance, token rollup | OPEN — needed during A |
-| — | **A1 + A1.5** | **specced and planned 2026-08-17, not implemented.** A1 = labelling, assignment, agreement. A1.5 = the studio shell A2/A3 also consume. Independent; buildable in parallel |
-| — | **A2** | **decisions recorded** (`2026-08-17-a2-calibration-and-reporting-decisions.md`), deliberately not specced — its design takes A1's real label data as an input |
+| — | **A1** | **done 2026-08-17** — `4ff04f4`…`eef73fb` on `feat/a0-golden-set-substrate`. `GoldenLabel` has its first writer; `v2h` adds the item revision log, assignment rows, `round` and `preference`. Exit gate met on all four clauses. Suites 533 unit / 633 db / 80 integration |
+| — | **A1.5** | **done 2026-08-17** — `133cc12`…`05bf29b`. The composable panel shell A2 and A3 also consume, plus A1's labelling view as its first composition. Every rule that can be silently wrong lives in `src/lib/studio/**` (100% statements) because this repo has no jsdom; `src/components/studio/**` is verified by `docs/runbooks/studio-manual-verification.md`, whose 12 rows were walked in a browser |
+| — | **A2** | **decisions recorded** (`2026-08-17-a2-calibration-and-reporting-decisions.md`), deliberately not specced — its design takes A1's real label data as an input, and **no real labels exist yet**. Path to it: `2026-08-17-integration-release-and-a2-roadmap.md` |
+| — | **Merge, promote, migrate, seed, end-to-end** | **OPEN, and now the critical path.** Absorbs the old "deploy + seed the built image" row, which was written when this gated A0 and now gates *everything after A1*. Verified 2026-08-17: prod runs `sha-70fce84bee11` (a pre-A0 build), is **5 migrations behind** and has **0 golden sets**; A1/A1.5 are not merged and their PR is not open. See `2026-08-17-integration-release-and-a2-roadmap.md` |
 | — | Capturing `reasoning_content` | **OPEN, backlogged.** Chain-of-thought is discarded on every model call, so the studio's reasoning panel is structurally thin until it lands |
 | 11 | Golden sets absent from round-trip coverage | **done 2026-08-13** — A0's exit gate; classified in the `COVERAGE` map at `tests/db/config-roundtrip-fidelity.test.ts` |
 
@@ -434,11 +441,31 @@ survives an export/import round trip (which means adding it to the coverage list
 
 ### A1 — Human verification and a measured agreement floor · ~4 days
 
-> **SPECCED AND PLANNED 2026-08-17.** Design:
-> `2026-08-17-a1-human-verification-design.md`. Plan (7 tasks):
-> `../plans/2026-08-17-a1-human-verification.md`. **Split:** the annotation studio — the panel shell
-> A2 and A3 also consume — is now **A1.5**, specced and planned separately and buildable in
-> parallel. Nothing is implemented yet.
+> **IMPLEMENTED 2026-08-17**, all seven tasks (`4ff04f4`…`eef73fb`). Design:
+> `2026-08-17-a1-human-verification-design.md`. Plan:
+> `../plans/2026-08-17-a1-human-verification.md` — which carries a **"Defects found during
+> execution"** table: three of its own snippets were wrong (one could not have passed under any
+> implementation) and two defects in the code were not predicted. Read that before reusing anything
+> from it. **Split:** the annotation studio — the panel shell A2 and A3 also consume — is **A1.5**,
+> and it landed straight afterwards (`133cc12`…`05bf29b`). A1 owns the data and the endpoints,
+> A1.5 owns the surface; they were built in that order but neither depended on the other until
+> A1.5's last task, which composes A1's queue and submit routes into the labelling view.
+>
+> **A1.5's exit gate is met too**, and its five clauses are recorded against a walked browser
+> checklist rather than against tests — `src/components/**` cannot be unit-tested in this repo
+> (no jsdom), which is why every rule that can be silently wrong lives in `src/lib/studio/**`
+> instead. See `docs/runbooks/studio-manual-verification.md`.
+>
+> **Exit gate, all four clauses met.** A set reports a number with a stated method — statistic,
+> weighting, annotator count and the OVERLAP it was computed over. A deliberately inconsistent
+> re-label moves `testRetest` down. An item edited after labelling still resolves each label to the
+> text that annotator saw. A POST from an unassigned annotator is refused, and re-checked on submit
+> rather than trusted from the queue.
+>
+> **What to expect on day one, and it is not a bug.** With one account the inter-annotator number is
+> `insufficient-annotators` — null with a reason, never `0`, which would read as total disagreement.
+> `testRetest` is the only signal that yields a value until a second account exists. See the
+> annotator distinction below.
 
 The point of this phase is that **a golden set with no agreement measurement is not ground truth,
 it is one person's opinion**, and calibrating a judge against it would produce a confidently wrong
@@ -494,6 +521,17 @@ who may see whose readings. The mechanism does not need redesigning for either a
 it was built as assignment rows rather than a free-for-all.
 
 ### A2 — The calibration engine · ~5 days
+
+> **NOT STARTABLE YET, and the reason is longer than "T5 is open".** A1 and A1.5 are done, but A1
+> shipped the ABILITY to produce labels and has not produced any: production has zero golden sets
+> and is five migrations behind. A2's decisions document requires *real* label data as an input to
+> its design, so the merge → promote → migrate → seed → annotate chain is a genuine gate rather
+> than housekeeping. It is written out, with the verified state of prod, in
+> **`2026-08-17-integration-release-and-a2-roadmap.md`** — read that before planning A2.
+>
+> T5 below was re-measured 2026-08-17 rather than quoted: **0.1407 GB against a 0.2577 GB
+> watermark, 54.6% at idle, still zero VMServiceScrapes and zero VMRules.** Unchanged, so the gate
+> is stable rather than a spike.
 
 This is the phase that gives `trustState` its first writer.
 

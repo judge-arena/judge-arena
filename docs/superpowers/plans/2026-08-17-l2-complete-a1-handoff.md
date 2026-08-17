@@ -1,10 +1,46 @@
 # L2 complete, residuals closed, A1 planned — handoff
 
+> **SUPERSEDED 2026-08-17 by `2026-08-17-a1-a15-complete-handoff.md`.** A1 and A1.5 both landed
+> after this was written, so §1 (branch table), §2 (suite counts) and §4 (what to do next) are
+> stale — the update banner below patches them, but the newer handoff is the one to read.
+>
+> **§8's method notes are NOT superseded** and are the most transferable thing here; the new
+> handoff's §6 adds to them rather than replacing them.
+
 **Written 2026-08-17.** Supersedes `2026-08-16-l1-complete-l2-handoff.md`, whose §1 branch table and
 §5 residual list are both now stale. That document is still worth reading for §3 (what L1 shipped)
 and §8 (method notes), which remain accurate.
 
 **Everything below was verified against the tree and the cluster on 2026-08-17, not carried forward.**
+
+> **UPDATE, later the same day: §4 item 1 is DONE.** A1 was executed in full — all seven tasks,
+> `4ff04f4`…`eef73fb`. What that changes in this document:
+>
+> - **§1 "Where the code is"** — the branch is no longer at `e62501e`/`7afa2ac`; `HEAD` is
+>   `eef73fb`, and the latest migration is `20260818120000_v2h_human_verification`, **18 in the
+>   chain**, not 17.
+> - **§2 "Suites"** — now **578 unit / 633 db / 80 integration** (from 508 / 555 / 80): 533 unit
+>   after A1, 578 after A1.5, whose work is all unit-tested library code. §9's "write those numbers
+>   down" baseline was observed before starting and matched the table exactly.
+> - **§4 "What to do next"** — items 1 AND 2 are closed. A1.5 landed straight after A1
+>   (`133cc12`…`05bf29b`). **Item 3, spec A2, is NOT simply next**, and an earlier version of this
+>   line said T5 was the only thing in front of it. That was wrong: A1 shipped the ability to
+>   produce labels and has produced none, prod is 5 migrations behind with 0 golden sets, and A2's
+>   design needs REAL label data. See `specs/2026-08-17-integration-release-and-a2-roadmap.md`.
+> - **§7 "Open decisions and hard gates"** — A2's *A1 gate* is closed: `GoldenLabel` has a writer.
+>   The **T5 RabbitMQ gate is untouched** and remains the reason A2 cannot start.
+> - **§5's annotator distinction was the right call and is now load-bearing in code**, not just in
+>   prose: `agreement()` returns `insufficient-annotators` rather than `0`, and the overlap model,
+>   assignment rows and Fleiss path are all built and tested against multi-`User` fixtures exactly as
+>   §5 said they should be.
+>
+> **R4 and R5 are now CLOSED too** — R4 by deleting the inert read, R5 as accepted-and-documented.
+> **Still open:** the merge/promote/migrate/seed chain (prod runs a pre-A0 image), roadmap
+> decisions #4 and #7, and `reasoning_content` capture (preflight Stage 5).
+>
+> §8's method notes are unchanged and were repeatedly vindicated — see the plan's own **"Defects
+> found during execution"** table, in which its "a malformed break is not evidence" rule caught the
+> plan.
 
 ---
 
@@ -30,15 +66,17 @@ Fourteen documents govern this work. Here is what each is for, so you do not rea
 | `plans/2026-08-14-l2-revision-log.md` | **L2** — every mutation recorded. Complete; carries its own "Corrections applied" table. |
 | `plans/2026-08-16-l1-complete-l2-handoff.md` | The previous handoff. Superseded by this one. |
 
-### What comes next — specced, planned, not implemented
+### The Roadmap A work — A1 and A1.5 now IMPLEMENTED
 
 | Document | What it is |
 |---|---|
 | `specs/2026-08-17-a1-human-verification-design.md` | **A1** design — labelling, assignment, agreement, provenance. |
-| `plans/2026-08-17-a1-human-verification.md` | **A1 plan — 7 tasks. This is what to execute next.** |
+| `plans/2026-08-17-a1-human-verification.md` | **A1 plan — 7 tasks. DONE 2026-08-17**; carries its own "Defects found during execution" table. |
 | `specs/2026-08-17-a1_5-annotation-studio-design.md` | **A1.5** design — the panel shell A2 and A3 also consume. |
-| `plans/2026-08-17-a1_5-annotation-studio.md` | **A1.5 plan — 5 tasks.** Independent of A1; either may land first. |
-| `specs/2026-08-17-a2-calibration-and-reporting-decisions.md` | **A2 decisions only**, deliberately not a spec — its design takes A1's real label data as an input. |
+| `plans/2026-08-17-a1_5-annotation-studio.md` | **A1.5 plan — 5 tasks. DONE 2026-08-17**, straight after A1; also carries a defects table. |
+| `specs/2026-08-17-a2-calibration-and-reporting-decisions.md` | **A2 decisions only**, still deliberately not a spec — no real label data exists yet. |
+| `specs/2026-08-17-integration-release-and-a2-roadmap.md` | **NEW — the path from here to A2**: merge, promote, migrate, seed, end-to-end, T5. |
+| `plans/2026-08-17-a1-a15-complete-handoff.md` | **NEW — the current handoff. Read it instead of this one.** |
 
 **On labels.** `L1`/`L2` are the dataset-lifecycle plans. `A0…A5` are Roadmap A phases. They were
 renamed apart on 2026-08-16 because both used `A1`/`A2` for different work. **`(A1)` markers in
@@ -179,9 +217,17 @@ All are recorded in the specs with their reasoning; this is the index.
 
 **Still-open residuals from L1** (`2026-08-16` handoff §5 — R1 and R3 are now closed):
 
-- **R4** — POST's guard read selects an inert `_count.samples` that nothing consumes. The fix is to
-  **delete the select**, not to add a comment-only guard: nothing can test a value no one reads.
-- **R5** — the pin-guard 409 is terminal, with no purge path. Dispositioned as accept-and-document.
+- ~~**R4**~~ — **CLOSED 2026-08-17.** The inert `_count.samples` is deleted from POST's guard
+  select, so there is nothing left to guard. Not a comment-only fix, for the reason this line always
+  gave: nothing can test a value no one reads, so the warning could have gone stale with the suite
+  green. The one load-bearing fact it carried — a LIVE count is the wrong basis for an ordinal —
+  moved to the `nextSampleIndex` call site, which is the only code that depends on it.
+- ~~**R5**~~ — **CLOSED 2026-08-17 as ACCEPTED.** Terminality stands and is documented at
+  `findGoldenSetsPinningDataset`, the one predicate its four callers share: it follows from two
+  rulings that are each correct on their own (a golden set is never destroyed, so it never releases
+  its FKs; and this predicate is deliberately not lifecycle-filtered, because filtering it converts
+  a clean 409 into the raw P2003 it exists to prevent). Only a purge wave, authorised separately,
+  could lift it. The doc warns against the tempting wrong fix.
 
 **Also open:** the deploy + seed of the built image (prod still runs an old tag with an empty
 catalog), and roadmap decisions #4 (perturbation set) and #7 (PPI config), both of which gate A2/A3.

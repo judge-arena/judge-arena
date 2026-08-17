@@ -402,18 +402,37 @@ export default function GoldenSetDetailPage() {
         description={goldenSet.description || undefined}
         breadcrumbs={[{ label: 'Golden Sets', href: '/golden-sets' }, { label: goldenSet.name }]}
         actions={
-          isOwner ? (
+          viewerId ? (
             <div className="flex items-center gap-2">
-              <Button variant="secondary" size="sm" onClick={handleFork} loading={forking}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <circle cx="6" cy="6" r="3" />
-                  <circle cx="18" cy="6" r="3" />
-                  <circle cx="12" cy="18" r="3" />
-                  <path d="M6 9v3a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V9" />
-                </svg>
-                Fork
-              </Button>
+              {/* A1.5: NOT gated on ownership. An assigned annotator need not
+                  own the set, and hiding the entry point from them would make
+                  assignment unusable for the multi-annotator case it exists
+                  to serve. The queue route does the real gating, and answers
+                  an unassigned caller with an explicit "nothing is assigned to
+                  you" rather than an error. Retired sets are excluded because
+                  they are out of circulation for new work — the queue would
+                  404 on one. */}
               {!goldenSet.retiredAt && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => router.push(`/golden-sets/${goldenSet.id}/label`)}
+                >
+                  Label
+                </Button>
+              )}
+              {isOwner && (
+                <Button variant="secondary" size="sm" onClick={handleFork} loading={forking}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <circle cx="6" cy="6" r="3" />
+                    <circle cx="18" cy="6" r="3" />
+                    <circle cx="12" cy="18" r="3" />
+                    <path d="M6 9v3a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V9" />
+                  </svg>
+                  Fork
+                </Button>
+              )}
+              {isOwner && !goldenSet.retiredAt && (
                 <Button variant="outline" size="sm" onClick={handleRetire} loading={retiring}>
                   Retire
                 </Button>

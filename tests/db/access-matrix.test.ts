@@ -26,6 +26,16 @@ import { GET as getGoldenSet, PATCH as patchGoldenSet, DELETE as deleteGoldenSet
 import { GET as listGoldenSets, POST as createGoldenSetRoute } from '@/app/api/golden-sets/route';
 import { POST as forkGoldenSetRoute } from '@/app/api/golden-sets/[id]/fork/route';
 import { POST as retireGoldenSetRoute } from '@/app/api/golden-sets/[id]/retire/route';
+import {
+  GET as listAssignmentsRoute,
+  POST as createAssignmentRoute,
+  DELETE as revokeAssignmentRoute,
+} from '@/app/api/golden-sets/[id]/assignments/route';
+import { GET as queueRoute } from '@/app/api/golden-sets/[id]/queue/route';
+import { GET as agreementRoute } from '@/app/api/golden-sets/[id]/agreement/route';
+import { GET as disagreementsRoute } from '@/app/api/golden-sets/[id]/disagreements/route';
+import { GET as itemHistoryRoute } from '@/app/api/golden-sets/[id]/items/[itemId]/history/route';
+import { POST as submitLabelRoute } from '@/app/api/golden-sets/[id]/items/[itemId]/labels/route';
 import { POST as restoreSampleRoute } from '@/app/api/datasets/[id]/samples/[sampleId]/restore/route';
 import { GET as sampleRevisionsRoute } from '@/app/api/datasets/[id]/samples/[sampleId]/revisions/route';
 
@@ -1070,6 +1080,171 @@ describe('Access matrix — golden-set sub-routes (/fork, /retire) and list', ()
         { params: Promise.resolve({ id: target.id }) }
       );
       expect(res.status).toBe(expected);
+    });
+  }
+
+  // ── A1: the assignments sub-resource ────────────────────────────────────
+  // Registered as a loop rather than as a `registry` entry on purpose:
+  // ResourceHandlers is {createTarget, get, patch, del} over a single `id`,
+  // and the registry is typed to six fixed resource keys, so a two-parameter
+  // sub-resource does not fit it. Same shape as /fork and /retire above.
+  //
+  // Every verb is coordinator-only — there is no public read of who was asked
+  // to annotate what, on a public set or otherwise. That is deliberate: the
+  // published artifacts are the labels and the agreement number (Task 7), not
+  // the workflow that produced them.
+  for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+    const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 200;
+    it(`GET /api/golden-sets/[id]/assignments as ${actor} -> ${expected}`, async () => {
+      const target = await mkGoldenSet(ctx.ownerId, 'public');
+      setSessionFor(actor, ctx);
+      const res = await listAssignmentsRoute(
+        new Request(`http://localhost/api/golden-sets/${target.id}/assignments`),
+        { params: Promise.resolve({ id: target.id }) }
+      );
+      expect(res.status).toBe(expected);
+    });
+  }
+
+  for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+    const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 201;
+    it(`POST /api/golden-sets/[id]/assignments as ${actor} -> ${expected}`, async () => {
+      const target = await mkGoldenSet(ctx.ownerId, 'public');
+      setSessionFor(actor, ctx);
+      const res = await createAssignmentRoute(
+        jsonRequest(`http://localhost/api/golden-sets/${target.id}/assignments`, 'POST', {
+          // The SET OWNER is the holder in every row, so `mayHoldAssignment`
+          // passes for both the owner and the admin actor and the only thing
+          // that can move the status is the access check under test.
+          annotatorId: ctx.ownerId,
+        }),
+        { params: Promise.resolve({ id: target.id }) }
+      );
+      expect(res.status).toBe(expected);
+    });
+  }
+
+  for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+    const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 200;
+    it(`DELETE /api/golden-sets/[id]/assignments as ${actor} -> ${expected}`, async () => {
+      const target = await mkGoldenSet(ctx.ownerId, 'public');
+      const assignment = await db.goldenAssignment.create({
+        data: { goldenSetId: target.id, annotatorId: ctx.ownerId, round: 1 },
+      });
+      setSessionFor(actor, ctx);
+      const res = await revokeAssignmentRoute(
+        jsonRequest(`http://localhost/api/golden-sets/${target.id}/assignments`, 'DELETE', {
+          assignmentId: assignment.id,
+        }),
+        { params: Promise.resolve({ id: target.id }) }
+      );
+      expect(res.status).toBe(expected);
+    });
+  }
+
+  // ── A1: the queue and the submit route ──────────────────────────────────
+  // Neither has a public branch, even on a PUBLISHED PUBLIC set. A queue is
+  // personal work rather than a published artifact, and a reading is a write.
+  // The target below is public precisely so that "public" is shown not to be
+  // the thing granting access.
+  for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+    const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 200;
+    it(`GET /api/golden-sets/[id]/queue as ${actor} -> ${expected}`, async () => {
+      const target = await mkGoldenSet(ctx.ownerId, 'public');
+      setSessionFor(actor, ctx);
+      const res = await queueRoute(
+        new Request(`http://localhost/api/golden-sets/${target.id}/queue`),
+        { params: Promise.resolve({ id: target.id }) }
+      );
+      expect(res.status).toBe(expected);
+    });
+  }
+
+  for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+    const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 201;
+    it(`POST /api/golden-sets/[id]/items/[itemId]/labels as ${actor} -> ${expected}`, async () => {
+      const target = await mkGoldenSet(ctx.ownerId, 'public');
+      const item = await db.goldenItem.findFirstOrThrow({ where: { goldenSetId: target.id } });
+      // Owner and admin each hold a whole-set assignment, so the ONLY thing
+      // that can move the status is the check under test. The stranger's 403
+      // is the submit-side re-check refusing an unassigned annotator.
+      for (const annotatorId of [ctx.ownerId, ctx.adminId]) {
+        await db.goldenAssignment.create({
+          data: { goldenSetId: target.id, annotatorId, round: 1 },
+        });
+      }
+      setSessionFor(actor, ctx);
+      const res = await submitLabelRoute(
+        jsonRequest(
+          `http://localhost/api/golden-sets/${target.id}/items/${item.id}/labels`,
+          'POST',
+          // mkGoldenSet builds PAIRWISE items, so a preference is the correct
+          // field; a score here would be a 400 on protocol before access is
+          // ever reached, and every row would read 400.
+          { preference: 'A>B' }
+        ),
+        { params: Promise.resolve({ id: target.id, itemId: item.id }) }
+      );
+      expect(res.status).toBe(expected);
+    });
+  }
+
+  // ── A1: the three reporting routes — "public IFF published" ─────────────
+  // Two conditions, not one. The rows below use a set that is `visibility:
+  // 'public'` but NOT published, so a handler checking only visibility would
+  // turn every anonymous 401 here into a 200 — which is what makes these rows
+  // a test of the conjunction rather than of the word "public".
+  // Typed so the two set-level routes may declare only the parameter they use
+  // — a shorter signature is assignable, and naming an unused `_itemId` just
+  // to match arity trips no-unused-vars.
+  const reportingRoutes: Array<{
+    name: string;
+    call: (setId: string, itemId: string) => Promise<Response>;
+  }> = [
+    {
+      name: 'agreement',
+      call: (setId: string) =>
+        agreementRoute(new Request(`http://localhost/api/golden-sets/${setId}/agreement`), {
+          params: Promise.resolve({ id: setId }),
+        }),
+    },
+    {
+      name: 'disagreements',
+      call: (setId: string) =>
+        disagreementsRoute(
+          new Request(`http://localhost/api/golden-sets/${setId}/disagreements`),
+          { params: Promise.resolve({ id: setId }) }
+        ),
+    },
+    {
+      name: 'items/[itemId]/history',
+      call: (setId: string, itemId: string) =>
+        itemHistoryRoute(
+          new Request(`http://localhost/api/golden-sets/${setId}/items/${itemId}/history`),
+          { params: Promise.resolve({ id: setId, itemId }) }
+        ),
+    },
+  ];
+
+  for (const route of reportingRoutes) {
+    for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+      const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 200;
+      it(`GET /api/golden-sets/[id]/${route.name} on an UNPUBLISHED public set as ${actor} -> ${expected}`, async () => {
+        const target = await mkGoldenSet(ctx.ownerId, 'public');
+        const item = await db.goldenItem.findFirstOrThrow({ where: { goldenSetId: target.id } });
+        setSessionFor(actor, ctx);
+        const res = await route.call(target.id, item.id);
+        expect(res.status).toBe(expected);
+      });
+    }
+
+    it(`GET /api/golden-sets/[id]/${route.name} on a PUBLISHED public set is open to anonymous`, async () => {
+      const target = await mkGoldenSet(ctx.ownerId, 'public');
+      await db.goldenSet.update({ where: { id: target.id }, data: { publishedAt: new Date() } });
+      const item = await db.goldenItem.findFirstOrThrow({ where: { goldenSetId: target.id } });
+      setSessionFor('anonymous', ctx);
+      const res = await route.call(target.id, item.id);
+      expect(res.status).toBe(200);
     });
   }
 

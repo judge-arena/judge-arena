@@ -128,12 +128,21 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
 // scored WHAT, and `tombstonedAt` — stamped once per request, shared by every
 // label the request invalidates — pins it to a specific edit event.
 //
-// KNOWN GAP, NOT PAPERED OVER: this does not preserve the TEXT the annotator
-// saw. The update below overwrites the item's content in place and there is
-// no item-content history, so "which version of the text" is recoverable only
-// as "whatever it was immediately before the edit at tombstonedAt". Closing
-// that means versioning item content, which belongs with the staged/published
-// dataset identity work, not here.
+// THAT GAP IS NOW CLOSED (A1). This used to record, as a known limitation,
+// that the handler did NOT preserve the text the annotator saw: it read the
+// prior content only to detect a change and then overwrote it in place, so
+// "which version of the text" was recoverable only as "whatever it was
+// immediately before the edit at tombstonedAt" — which is not recoverable at
+// all. The same transaction now writes a `GoldenItemRevision` holding the
+// before-image and stamps `goldenItemRevisionId` onto exactly the labels it
+// tombstones, so "what did this annotator see?" is a JOIN rather than a
+// timestamp inference. SampleRevision's pattern (L2) one level up.
+//
+// THE INVARIANT, stated so nobody re-derives it wrongly: a live label with
+// `goldenItemRevisionId IS NULL` saw the item's CURRENT content. Non-null
+// means it saw that revision's before-image. A twice-edited item is correct
+// for free, because the second edit's `updateMany` filters on
+// `tombstonedAt: null` and so never touches labels an earlier edit stamped.
 //
 // ALSO LIFECYCLE-GUARDED, closing the gap recorded when this handler landed:
 // GET filtered `retiredAt`/`tombstonedAt` from the start and these verbs did
@@ -194,6 +203,21 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
         });
 
         if (contentChanged) {
+          // A1: the before-image, written BEFORE the labels that saw it are
+          // tombstoned, so the update below has a revision id to stamp them
+          // with. Same transaction as the edit, so a rolled-back edit leaves
+          // no revision claiming it happened.
+          const revision = await tx.goldenItemRevision.create({
+            data: {
+              goldenItemId: item.id,
+              inputText: before.inputText,
+              promptText: before.promptText,
+              responseText: before.responseText,
+              expected: before.expected,
+              actorId: session.user.id,
+            },
+          });
+
           // One instant for the whole request, so every label invalidated by
           // this edit carries the same timestamp and reads as one event.
           await tx.goldenLabel.updateMany({
@@ -201,6 +225,11 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
             data: {
               tombstonedAt: editedAt,
               tombstonedReason: GOLDEN_LABEL_TOMBSTONE_REASON_CONTENT_EDIT,
+              // THE BACK-FILL. These are exactly the labels that saw the
+              // before-image, which is why the stamp happens here rather than
+              // at label-write time: with before-image semantics the revision
+              // does not exist until the edit that supersedes it.
+              goldenItemRevisionId: revision.id,
             },
           });
         }

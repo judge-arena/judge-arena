@@ -330,6 +330,32 @@ export class GoldenSetFrozenError extends Error {
  * unpinned while `dataset.delete` still raised P2003. On the sample paths that
  * arm can only ever over-report, and "this corpus is annotated by set X" is
  * true of an empty set too — it declared itself the annotation layer over it.
+ *
+ * ── R5: THIS REFUSAL IS TERMINAL. ACCEPTED, NOT OVERLOOKED. ────────────────
+ *
+ * Once a golden set has been created over a dataset, NO in-product verb ever
+ * lifts this 409 for that dataset again. That is not an oversight and it is
+ * not a bug report waiting to be filed; it is a consequence of two rulings
+ * that are each correct on their own:
+ *
+ *   - A golden set is never destroyed. `DELETE` retires it, and account
+ *     lifecycle tombstones it — neither removes the row, so neither releases
+ *     `datasetId` or `sourceDatasetSampleId`.
+ *   - This predicate is deliberately NOT lifecycle-filtered (see above),
+ *     because filtering it would convert a clean 409 into the raw P2003 it
+ *     exists to prevent.
+ *
+ * So a retired set still pins, a tombstoned set still pins, and there is no
+ * purge. THE WAY FORWARD IS A NEW DATASET VERSION, which is what the callers'
+ * messages say — and they say it INSTEAD of naming a remedy, because an
+ * earlier version of that text told users to delete or retire the golden set,
+ * which provably does nothing.
+ *
+ * WHAT WOULD CHANGE THIS: a purge wave — actual row removal, authorised
+ * separately — is the only thing that can release a pin. It is out of scope
+ * for every plan to date by the same owner ruling that made deletion
+ * non-destructive in the first place. Do not "fix" the terminality by
+ * lifecycle-filtering this predicate; that trades a clear refusal for a 500.
  */
 export async function findGoldenSetsPinningDataset(
   client: Prisma.TransactionClient,

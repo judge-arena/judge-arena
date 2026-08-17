@@ -133,6 +133,12 @@ model User {
   goldenSets        GoldenSet[]
   goldenLabels      GoldenLabel[]
   sampleRevisions   SampleRevision[]
+  // A1: three separate back-relations because a User meets the annotation
+  // workflow in three distinct roles — who edited an item, who was ASKED to
+  // annotate, and who did the asking. All three are SetNull on delete.
+  goldenItemRevisions    GoldenItemRevision[]
+  assignedAnnotations    GoldenAssignment[]   @relation("AssignedAnnotator")
+  coordinatedAssignments GoldenAssignment[]   @relation("AssigningCoordinator")
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
@@ -686,6 +692,18 @@ model GoldenSet {
   owner           User?            @relation(fields: [ownerId], references: [id], onDelete: SetNull)
   items           GoldenItem[]
   calibrationRuns CalibrationRun[]
+  assignments     GoldenAssignment[]
+
+  // ── A1: K, the intervening-items gate for a blind re-read. Lives on the
+  // SET so the interval IN FORCE travels with it — a reliability number is
+  // uninterpretable without the protocol that produced it, the same reason
+  // A0 stores a threshold as data rather than as a constant.
+  //
+  // ACCEPTED LIMITATION: a set with fewer than K items can never produce a
+  // retest, so the queue says so explicitly (`retest-not-yet-eligible` with
+  // a shortfall) rather than appearing empty.
+  retestIntervalItems Int          @default(20)
+
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
 
@@ -721,6 +739,8 @@ model GoldenItem {
   sourceSample          DatasetSample     @relation(fields: [sourceDatasetSampleId], references: [id], onDelete: Restrict)
   labels                GoldenLabel[]
   candidates            GoldenCandidate[]
+  revisions             GoldenItemRevision[]
+  assignments           GoldenAssignment[]
   // A0 follow-up (owner ruling 2026-08-13): DELETE on an item is a
   // same-transaction tombstone tag, never a row removal. NULL = live. The
   // row KEEPS its `index` — @@unique([goldenSetId, index]) below is
@@ -761,7 +781,46 @@ model GoldenLabel {
   goldenItem       GoldenItem @relation(fields: [goldenItemId], references: [id], onDelete: Cascade)
   annotatorId      String?
   annotator        User?      @relation(fields: [annotatorId], references: [id], onDelete: SetNull)
-  overallScore     Float
+
+  // ── A1: a pointwise label is a SCORE, a pairwise label is a PREFERENCE.
+  // `overallScore` became nullable here and `preference` was added beside
+  // it, under the hand-written CHECK
+  // `GoldenLabel_score_xor_preference` (num_nonnulls(...) = 1) in
+  // 20260818120000_v2h_human_verification — Prisma's DSL has no CHECK
+  // syntax of any kind, so this file can only say that both are optional,
+  // and "exactly one" is invisible here. See CONTRIBUTING.md's "Known
+  // migrate-diff pseudo-drift" table. Encoding a preference as a float was
+  // rejected: the stored number would be uninterpretable without an
+  // out-of-band convention. `preference` uses GoldenItem.expected's
+  // vocabulary ('A>B' | 'B>A' | 'tie') so a label and its ground truth
+  // compare directly.
+  overallScore     Float?
+  preference       String?
+
+  // ── A1 test-retest: WHICH BLIND READING this is. Two readings by one
+  // annotator on one item are PEERS, not a tombstone and a survivor —
+  // tombstoning the first would overload "retracted" with "an earlier valid
+  // reading", and every live-label query (the agreement maths included)
+  // would silently drop it. The partial unique index therefore widened to
+  // (goldenItemId, annotatorId, round) in v2h; see the comment below.
+  //
+  // THE SERVER DECIDES THIS, never the client — a client-named round makes
+  // blinding client-trusted, and a stale tab defeats the reliability signal
+  // the column exists to produce.
+  round            Int        @default(1)
+
+  // ── A1 provenance: the item content THIS annotator saw.
+  //
+  // NULL means they saw the item's CURRENT content. Non-null means they saw
+  // that revision's BEFORE-IMAGE. It is written by the EDIT, not by the
+  // label: with before-image semantics the revision capturing what an
+  // annotator saw does not exist until the edit that supersedes it, so the
+  // same `updateMany` in PATCH /api/golden-sets/[id]/items that tombstones
+  // these labels also stamps them with the revision it just wrote — those
+  // are exactly the labels that saw it.
+  goldenItemRevisionId String?
+  goldenItemRevision   GoldenItemRevision? @relation(fields: [goldenItemRevisionId], references: [id], onDelete: SetNull)
+
   criteriaScores   Json?
   reasoning        String?
   // A human label is the expensive, irreplaceable artifact this roadmap
@@ -779,7 +838,13 @@ model GoldenLabel {
   // `@@unique([goldenItemId, annotatorId])` IS GONE ON PURPOSE. It is
   // replaced by a PARTIAL unique index restricted to WHERE "tombstonedAt"
   // IS NULL, hand-written in
-  // 20260813120000_v2e_golden_item_label_tombstones — Prisma's DSL has no
+  // 20260813120000_v2e_golden_item_label_tombstones — and WIDENED by
+  // 20260818120000_v2h_human_verification, which drops that index and
+  // recreates it as
+  // GoldenLabel_goldenItemId_annotatorId_round_live_key over
+  // (goldenItemId, annotatorId, round). Test-retest needs TWO live readings
+  // by one annotator on one item; the two-column version permitted one.
+  // Everything below still applies, one column wider. Prisma's DSL has no
   // syntax for a WHERE predicate, so this file cannot declare it and the
   // migration's raw SQL is the only record. Whole-table uniqueness would let
   // a tombstoned label occupy its annotator's slot forever, making
@@ -907,4 +972,77 @@ model SampleRevision {
 
   // Serves the only query: one sample's history, newest first.
   @@index([datasetSampleId, at])
+}
+
+// ─── A1: human verification ─────────────────────────────────────────────────
+
+// SampleRevision's shape one level up, at the level labelling actually
+// happens. Append-only, one row per content edit, carrying the values as they
+// stood BEFORE the change.
+//
+// Written by PATCH /api/golden-sets/[id]/items INSIDE the transaction that
+// already tombstones the item's labels — not beside it, so a rolled-back edit
+// leaves no revision claiming it happened.
+model GoldenItemRevision {
+  id           String     @id @default(cuid())
+  goldenItemId String
+  goldenItem   GoldenItem @relation(fields: [goldenItemId], references: [id], onDelete: Cascade)
+
+  // The before-image. Exactly the four fields the items PATCH already reads to
+  // detect a change and, before A1, threw away.
+  inputText    String
+  promptText   String?
+  responseText String?
+  expected     String?
+
+  // SetNull, matching GoldenLabel.annotatorId and SampleRevision.actorId:
+  // account deletion anonymises rather than destroying.
+  actorId String?
+  actor   User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  at      DateTime @default(now())
+
+  labels GoldenLabel[]
+
+  // Serves the only query: one item's history, newest first.
+  @@index([goldenItemId, at])
+}
+
+// WHO WAS ASKED to annotate WHAT. Explicit rows rather than self-selection,
+// because inter-annotator agreement requires OVERLAP — the same items read by
+// more than one annotator. Without assignment the overlap is whatever
+// coincides, easy items get their second reading first, and the resulting
+// kappa is optimistic in a way nothing in the system can detect.
+model GoldenAssignment {
+  id          String    @id @default(cuid())
+  goldenSetId String
+  goldenSet   GoldenSet @relation(fields: [goldenSetId], references: [id], onDelete: Cascade)
+
+  // SetNull to match GoldenLabel.annotatorId: an assignment to a deleted
+  // account is a record of what was ASKED, not something to be actioned.
+  annotatorId String?
+  annotator   User?   @relation("AssignedAnnotator", fields: [annotatorId], references: [id], onDelete: SetNull)
+
+  // NULL = the whole set. Set = one item, for adjudication or a targeted
+  // re-read. Both granularities, because assigning 620 rows individually is
+  // the exception and not the normal case.
+  goldenItemId String?
+  goldenItem   GoldenItem? @relation(fields: [goldenItemId], references: [id], onDelete: Cascade)
+
+  round Int @default(1)
+
+  assignedById String?
+  assignedBy   User?    @relation("AssigningCoordinator", fields: [assignedById], references: [id], onDelete: SetNull)
+  assignedAt   DateTime @default(now())
+  completedAt  DateTime?
+
+  // DELETE on this resource REVOKES rather than removing the row. A partial
+  // unique index (hand-written in v2h, WHERE "revokedAt" IS NULL) keeps one
+  // ACTIVE assignment per (item, annotator, round) while letting a revoked
+  // one be superseded — Prisma's DSL cannot express the predicate, so it is
+  // invisible in this file. See CONTRIBUTING.md's pseudo-drift table.
+  revokedAt     DateTime?
+  revokedReason String?
+
+  @@index([goldenSetId, annotatorId])
+  @@index([annotatorId, revokedAt])
 }
