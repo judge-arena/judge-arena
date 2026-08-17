@@ -64,9 +64,13 @@ then view **that run's** performance, confusion, agreements and disagreements.
 header row with aggregate metrics and **no per-item rows**. `ModelJudgment` hangs off `EvaluationRun`
 and reaches a `DatasetSample` only through `Evaluation`; nothing pairs a `GoldenItem` with a model's
 verdict. Without that join row there is no confusion matrix, no per-run disagreement list, and no
-human-vs-model kappa — which is most of what "view that run's performance" means. **A2 needs a
-per-item verdict row** (golden item × calibration run × the model's label, in the same score-or-
-preference shape `GoldenLabel` uses, so the two compare directly).
+human-vs-model kappa — which is most of what "view that run's performance" means.
+
+A2 therefore produces **two artifacts, not one**: `CalibrationRun` as the leaderboard-facing header,
+and an **`EvaluationReport`** giving the item-by-item breakdown, computed as a projection over stored
+per-item answers. Those decisions and their open questions live in
+`2026-08-17-a2-calibration-and-reporting-decisions.md` — recorded rather than specced, because A2's
+design takes A1's real label data as an input.
 
 A1 builds none of that. Its entire output is a corpus of human labels and an honest number describing
 how much the humans agree.
