@@ -1,4 +1,14 @@
-# Plan A1 — The Tombstone Overlay Implementation Plan
+# Plan L1 — The Tombstone Overlay Implementation Plan
+
+> **Renamed 2026-08-16 from "Plan A1", after execution.** The lifecycle plans are now `L1`/`L2`,
+> leaving `A0…A5` to `specs/2026-08-10-judge-training-engine-roadmap.md`. **This body was not
+> swept**, deliberately: most of its "A1" mentions are inside prescribed source text that the
+> implementation really does carry — the `MUST NOT BE TOMBSTONE-FILTERED (A1)` markers, the `(A1)`
+> comments in `src/`, the `feat(a1):` commit prefixes, and the header of the **applied**
+> `20260814120000_v2f_tombstone_overlay` migration, which Prisma checksums and which therefore can
+> never be edited. Rewriting the prose here would desynchronise the plan from the code it produced.
+> Read "A1" in this document as L1. One string is not a label at all and must stay verbatim: the
+> consent id `approved-plan-2026-08-14-a1-tombstone-overlay` at Task 1.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -10,7 +20,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-14-dataset-lifecycle-and-tombstone-overlay-design.md` — read it before Task 1. Every `file:line` in this plan was verified against the tree at `af58c96`.
 
-**Follows:** A0 (`feat/a0-golden-set-substrate`). **Precedes:** Plan A2 (the revision log) and Plan B (the lifecycle).
+**Follows:** A0 (`feat/a0-golden-set-substrate`). **Precedes:** Plan L2 (the revision log, `2026-08-14-l2-revision-log.md`) and Plan B (the lifecycle).
 
 ## Global Constraints
 

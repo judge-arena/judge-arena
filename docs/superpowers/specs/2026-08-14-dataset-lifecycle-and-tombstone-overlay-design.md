@@ -1,20 +1,21 @@
 # Dataset lifecycle and the mutation record
 
-**Date:** 2026-08-14 · **Status (2026-08-16):** approved and **partly implemented** — plan A1 (the
-tombstone overlay) is complete and merged into `feat/a0-golden-set-substrate` locally; plan A2 (the
+**Date:** 2026-08-14 · **Status (2026-08-16):** approved and **partly implemented** — plan L1 (the
+tombstone overlay) is complete and merged into `feat/a0-golden-set-substrate` locally; plan L2 (the
 revision log) is planned in six tasks and **not started**; Plan B (the lifecycle: publish, freeze,
 version-on-edit) is not planned.
 **Supersedes:** Ruling 9 of `docs/superpowers/plans/2026-08-13-a0-status-and-handoff.md` ("staged datasets").
-**Depends on:** A0 (`feat/a0-golden-set-substrate`, PR #12) being merged first. *In practice A1 was
+**Depends on:** A0 (`feat/a0-golden-set-substrate`, PR #12) being merged first. *In practice L1 was
 built on top of A0's branch before that merge happened, so both are stacked ahead of `main`.*
 **Ships as two plans.** Plan A is the mutation record; Plan B is the lifecycle. B depends on A.
-Plan A was itself split during planning: **A1 = the tombstone overlay, A2 = the revision log.**
-These labels collide with the `A0…A5` phases of
-`2026-08-10-judge-training-engine-roadmap.md`, which mean something different — see
-`../plans/2026-08-16-a1-complete-a2-handoff.md` §0.
+Plan A was itself split during planning: **L1 = the tombstone overlay, L2 = the revision log.**
+*Those two were labelled `A1`/`A2` until 2026-08-16, when they were renamed `L1`/`L2` to stop
+colliding with the `A0…A5` phases of `2026-08-10-judge-training-engine-roadmap.md`, which mean
+something different.* Commit prefixes, `(A1)` comments in `src/`, and the applied `v2f` migration
+header keep the old letters permanently — see `../plans/2026-08-16-l1-complete-l2-handoff.md` §0.
 
-**Current state, residual findings, and the A2 pickup:
-[`../plans/2026-08-16-a1-complete-a2-handoff.md`](../plans/2026-08-16-a1-complete-a2-handoff.md).**
+**Current state, residual findings, and the L2 pickup:
+[`../plans/2026-08-16-l1-complete-l2-handoff.md`](../plans/2026-08-16-l1-complete-l2-handoff.md).**
 
 Every `file:line` in this document was opened and verified against the working tree at `af58c96`. Where a claim was found wrong during fact-checking, the corrected version is what appears here.
 
@@ -60,15 +61,15 @@ Two holes after A0 motivate this. **Datasets still destroy data** — `DELETE` s
 
 ## Plan seam
 
-Three plans, in order. A1 and A2 together are what this document calls **[A]**; B is **[B]**.
+Three plans, in order. L1 and L2 together are what this document calls **[A]**; B is **[B]**.
 
-**Plan A1 — the tombstone overlay.** The `Tombstone` model and its migration (including the hand-edited `CHECK`), both filter helpers and their shape tests, every read-site disposition, the ordinal and `sampleCount` rework, and converting the four *destructive* verbs to hide instead of delete. Independently shippable, and delivers the whole "datasets stop destroying data" guarantee on its own.
+**Plan L1 — the tombstone overlay.** The `Tombstone` model and its migration (including the hand-edited `CHECK`), both filter helpers and their shape tests, every read-site disposition, the ordinal and `sampleCount` rework, and converting the four *destructive* verbs to hide instead of delete. Independently shippable, and delivers the whole "datasets stop destroying data" guarantee on its own.
 
-**Plan A2 — the revision log.** The `SampleRevision` model and its migration, writing a revision on edit, delete and restore, and whatever surface exposes the history. Depends on A1 only for the delete/restore verbs it hooks into; `PATCH`'s in-place edit is untouched by A1, so A2 owns it end to end.
+**Plan L2 — the revision log.** The `SampleRevision` model and its migration, writing a revision on edit, delete and restore, and whatever surface exposes the history. Depends on L1 only for the delete/restore verbs it hooks into; `PATCH`'s in-place edit is untouched by L1, so L2 owns it end to end.
 
 **Plan B — the lifecycle.** `publishedAt` semantics, `POST /api/datasets/[id]/publish`, the freeze guards, fork-on-edit, the config-export backfill skip, retiring the pin-guard call sites, and `account-deletion.ts`'s tombstone-plus-reassign.
 
-**The one cost of splitting A1 from A2**, stated so it is chosen rather than discovered: `DELETE` and `PUT` in `samples/route.ts` are edited twice — once by A1 to tombstone, once by A2 to append a revision. A1's implementer should leave those transactions shaped so a second write drops in cleanly, and A2's brief carries a pointer to what A1 did there.
+**The one cost of splitting L1 from L2**, stated so it is chosen rather than discovered: `DELETE` and `PUT` in `samples/route.ts` are edited twice — once by L1 to tombstone, once by L2 to append a revision. L1's implementer should leave those transactions shaped so a second write drops in cleanly, and L2's brief carries a pointer to what L1 did there.
 
 Sections below are tagged **[A]** where they apply to the overlay work; the revision log is confined to its own section.
 

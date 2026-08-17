@@ -1,12 +1,13 @@
 # A0 status and handoff
 
 > **SUPERSEDED 2026-08-16 — do not act on the numbers below.** This was a mid-flight snapshot taken
-> when 11 of 22 A0 tasks were done. All 24 A0 tasks have since landed, all 12 tasks of Plan A1
-> landed on top, and A1 was fast-forward merged into `feat/a0-golden-set-substrate` locally. Every
+> when 11 of 22 A0 tasks were done. All 24 A0 tasks have since landed, all 12 tasks of Plan L1 (then called A1)
+> landed on top, and L1 was fast-forward merged into `feat/a0-golden-set-substrate` locally. Every
 > count in this document — commits, files, test totals, coverage floors — is stale, and the
-> "nothing merged, nothing pushed" line is false in one half (A0 *is* pushed).
+> "nothing merged, nothing pushed" line is false: both `feat/a0-golden-set-substrate` and
+> `feat/a1-tombstone-overlay` are pushed to gitea.
 >
-> **Current status and the A2 pickup: [`2026-08-16-a1-complete-a2-handoff.md`](2026-08-16-a1-complete-a2-handoff.md).**
+> **Current status and the L2 pickup: [`2026-08-16-l1-complete-l2-handoff.md`](2026-08-16-l1-complete-l2-handoff.md).**
 >
 > Kept unedited as the record of what was known on 2026-08-13, and because several of its rulings
 > are cited by later commit messages.

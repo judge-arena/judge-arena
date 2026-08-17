@@ -1,39 +1,65 @@
-# A1 complete — handoff for picking up A2
+# L1 complete — handoff for picking up L2
 
 **Written 2026-08-16.** Supersedes `docs/superpowers/plans/2026-08-13-a0-status-and-handoff.md`,
 every quantitative claim in which is now stale.
+**Revised 2026-08-16 (second pass)** — the rename in §0 is now done, §1's push status was wrong
+within hours of being written, §4 gains a seventh defect, and §6's decisions are answered.
 
 ---
 
-## 0. First: "A2" is ambiguous in this repo. Read this before anything else.
+## 0. The naming collision, and how it was resolved
 
-Two different documents number their phases `A0…A5`, and they do not mean the same thing.
+It used to be that two documents numbered their phases `A0…A5` and did not mean the same thing:
+Roadmap A's A1/A2 are *human verification* and *the calibration engine*, while the lifecycle split
+used A1/A2 for *the tombstone overlay* and *the revision log*.
 
-| Label | Roadmap A — `specs/2026-08-10-judge-training-engine-roadmap.md` | Plan split — `specs/2026-08-14-dataset-lifecycle-and-tombstone-overlay-design.md` |
-|---|---|---|
-| A0 | Make the golden-set substrate reachable | *(not used)* |
-| A1 | Human verification and a measured agreement floor | The tombstone overlay |
-| A2 | The calibration engine | The revision log |
+**Resolved 2026-08-16: the lifecycle plans are renamed `L1`/`L2`, and `A0…A5` belongs to Roadmap A
+alone.**
 
-**The A2 this handoff is about is the revision log** — `docs/superpowers/plans/2026-08-14-a2-revision-log.md`,
-six tasks, not started. Roadmap A's A2 (the calibration engine) is a different, later piece of work
-and is not in scope.
+| Was | Is now |
+|---|---|
+| Plan A1 — `plans/2026-08-14-a1-tombstone-overlay.md` | **Plan L1** — `plans/2026-08-14-l1-tombstone-overlay.md` |
+| Plan A2 — `plans/2026-08-14-a2-revision-log.md` | **Plan L2** — `plans/2026-08-14-l2-revision-log.md` |
+| this file — `plans/2026-08-16-a1-complete-a2-handoff.md` | `plans/2026-08-16-l1-complete-l2-handoff.md` |
 
-The collision is real and it will mislead someone. Our completed A0 *does* correspond to Roadmap A's
-A0, which makes it natural — and wrong — to read the next plan as Roadmap A's A1. **Recommendation:
-rename the lifecycle plans to `L1`/`L2` (lifecycle) and leave `A0…A5` to Roadmap A.** That rename is
-not done; it is a decision waiting for you in §6.
+**The work in scope here is L2, the revision log** — six tasks, not started. Roadmap A's A2, the
+calibration engine, is a different and later piece of work; it is additionally hard-gated on the
+rebaseline's T5 (RabbitMQ scrape, alerts and the per-run concurrency cap), which is not done.
+
+**Three classes of artifact keep the old letters permanently, and that is not drift.**
+
+1. **Commit messages.** Everything L1 shipped is prefixed `feat(a1):` / `fix(a1):` in history.
+2. **Source comments.** The `MUST NOT BE TOMBSTONE-FILTERED (A1)` markers and the other `(A1)`
+   annotations in `src/`. They were left alone deliberately — see below.
+3. **`prisma/migrations/20260814120000_v2f_tombstone_overlay/migration.sql`**, whose header says
+   "Plan A1". This one is not a choice: the migration is **applied**, Prisma records a checksum of
+   the file in `_prisma_migrations`, and editing it makes every subsequent `migrate deploy` /
+   `migrate status` fail with a modified-migration error. It can never be renamed.
+
+Because (3) is immovable, renaming (2) would have produced a *three-way* split — docs saying L1,
+comments saying L1, and the one unchangeable file saying A1 — which is worse than a clean two-way
+one. So the rule is simply: **`(A1)` in code and in history means L1.** The plan bodies were not
+swept for the same reason; they quote source text that genuinely carries those letters.
+
+The bodies of `2026-08-14-l1-tombstone-overlay.md` and `2026-08-14-l2-revision-log.md` each carry
+this note at the top.
 
 ---
 
 ## 1. Where the code is
 
-Nothing from A1 is pushed anywhere. Verified by `git ls-remote gitea`.
+> **CORRECTED 2026-08-16.** The first version of this section said "Nothing from A1 is pushed
+> anywhere… this branch name has never left the machine." That was true when written and false
+> within hours: `feat/a1-tombstone-overlay` was pushed to gitea at `1dcd73c` — the commit that
+> *added this document*. Re-verified by `git ls-remote gitea`. The lesson is the one §8 already
+> makes: a fact about a remote decays faster than a fact about the tree, so re-run the command
+> rather than trusting the row.
 
 | Ref | SHA | Note |
 |---|---|---|
-| `feat/a1-tombstone-overlay` | `1ee28df` | HEAD of worktree `/root/judge-arena-worktrees/a0`, clean. **No upstream, no remote ref — this branch name has never left the machine.** |
-| `feat/a0-golden-set-substrate` | `1ee28df` | Byte-identical to the above (A1 was a true fast-forward merge). Tracks gitea. |
+| `feat/a2-revision-log` | `1dcd73c` | **Where L2's work lands** (owner decision, 2026-08-16). Branched from the commit below; HEAD of worktree `/root/judge-arena-worktrees/a0`. |
+| `feat/a1-tombstone-overlay` | `1dcd73c` | **Pushed.** `gitea/feat/a1-tombstone-overlay` is at the same SHA, so local and remote agree and there is nothing outstanding on it. |
+| `feat/a0-golden-set-substrate` | `1dcd73c` | Byte-identical to the above (L1 was a true fast-forward merge). Tracks gitea, and is **36 ahead** of it. |
 | `gitea/feat/a0-golden-set-substrate` | `8d65198` | **35 commits behind local.** Head of open **PR #12**. |
 | `gitea/main` | `7306c2f` | The de-facto trunk. Local branches are 87 ahead of it. |
 | `main` (local) | `a192300` | Badly stale — 94 behind `gitea/main`. Do not use as a base. |
@@ -63,20 +89,26 @@ produce spurious failures.
 
 `npx tsc --noEmit` and `npm run lint` both exit 0. Total 82 files / 1095 tests.
 
+> **Re-run 2026-08-16 at `1dcd73c`** — the docs commit sitting on top of `1ee28df` — and every
+> number above reproduced exactly: 35/493 unit, 37/522 db, 10/80 integration, tsc and lint clean.
+> `npx prisma migrate status` reports 16 migrations and "Database schema is up to date!". These are
+> L2's baseline; the plan forbids asserting absolute counts, so each task's contract is zero
+> failures and no fewer tests than the previous task left.
+
 **Caveat worth knowing.** The 522 came from `sh -c 'set -a; . ./.env.test; set +a; npx vitest run
 --config vitest.db.config.ts'`, not from `npm run test:db` — the packaged script begins with a
 `prisma migrate reset --force`. The counts are the same either way (every `tests/db` file truncates
 in `beforeEach`), but the packaged command has not been exercised at this HEAD, and neither has
-coverage: no suite was run with `--coverage`, so the threshold blocks are unverified against A1's
+coverage: no suite was run with `--coverage`, so the threshold blocks are unverified against L1's
 actuals. The prose inside `vitest.db.config.ts` still records A0's end-of-branch figure of
 "444 tests, 35 files" and is stale.
 
-## 3. What A1 shipped
+## 3. What L1 shipped
 
 Deletion became non-destructive. A `Tombstone` table with per-entity nullable `@unique` FK columns
 hides rows instead of removing them, under a hand-edited
 `CHECK (num_nonnulls("datasetSampleId","datasetId") = 1)` that Prisma's tooling cannot see — hence
-its row in `CONTRIBUTING.md`'s pseudo-drift table (five rows; A2's `v2g` needs no hand edit, so it
+its row in `CONTRIBUTING.md`'s pseudo-drift table (five rows; L2's `v2g` needs no hand edit, so it
 must stay at five).
 
 `src/lib/tombstones.ts` is the single definition of "hidden" and exports:
@@ -98,7 +130,7 @@ Three things a newcomer gets wrong:
 2. **The `NOT` formulation is load-bearing.** Prisma compiles it to
    `NOT (isTombstone = $1 AND id IS NOT NULL)`, and the injected `IS NOT NULL` is what makes the
    no-tombstone case work. `tombstone: null` loses every *restored* row; `{ isTombstone: false }`
-   loses the entire clean corpus. Both were measured during the A1 review, by capturing emitted SQL
+   loses the entire clean corpus. Both were measured during the L1 review, by capturing emitted SQL
    across 24 query shapes; the record of that lives in `src/lib/tombstones.ts`'s module doc rather
    than in a test, so it is documentation, not an enforced invariant. Do not "simplify" it.
 3. **Ordinals are never reused.** `@@unique([datasetId, index])` is deliberately not partial, so a
@@ -110,9 +142,9 @@ Eleven reads deliberately stay unfiltered, each marked `MUST NOT BE TOMBSTONE-FI
 `grep -rn "MUST NOT BE TOMBSTONE-FILTERED (A1)" src/ scripts/` (prints 13 hits — two are
 cross-references in `tombstones.ts` itself, not members).
 
-## 4. The A2 plan is NOT safe to execute verbatim
+## 4. The L2 plan is NOT safe to execute verbatim
 
-The plan was written before A1 was implemented, and A1 changed shape substantially during execution.
+The plan was written before L1 was implemented, and L1 changed shape substantially during execution.
 
 **The plan's line references into `src/app/api/datasets/[id]/samples/route.ts` are stale** — Task 3
 locates `PATCH` at `:97` with its lookup at `:120-127` and update at `:133-146`; at HEAD they are
@@ -128,23 +160,39 @@ Defects found by reading the plan against the real code. Fix these as you reach 
 - Test helpers are `tests/db/helpers.ts` exporting `db`, `truncateAll`, `mkUser`. The plan imports
   `./helpers/db` and `./helpers/factories`, which do not exist.
 
-**Snippets that regress A1 if applied literally.**
+**Snippets that regress L1 if applied literally.**
 - Task 4's DELETE snippet writes `tombstoneSamples(tx, sampleIds)` — dropping the `'sample deleted'`
-  reason A1 passes, renaming the binding the response body reads (`{ tombstoned, remaining }`), and
+  reason L1 passes, renaming the binding the response body reads (`{ tombstoned, remaining }`), and
   referencing a variable that does not exist (the real one is the *resolved* `samples.map(s => s.id)`,
   deliberately, not `data.sampleIds`).
-- Task 4's PUT snippet re-derives `outgoingIds`, dropping A1's `if (outgoing.length > 0)` guard and
-  its `'bulk replace'` reason. A1 already computes that list as `outgoing`; reuse it.
+- Task 4's PUT snippet re-derives `outgoingIds`, dropping L1's `if (outgoing.length > 0)` guard and
+  its `'bulk replace'` reason. L1 already computes that list as `outgoing`; reuse it.
 - Task 3's import line omits `liveDatasetsOnly`, which the real four-name import block includes and
   which PATCH, DELETE and PUT all use. Replacing the block verbatim breaks the file.
 
 **Claims in the plan that are false.**
-- "PATCH … is untouched by A1" — A1 filtered both its dataset read and its sample read. The
+- "PATCH … is untouched by L1" — L1 filtered both its dataset read and its sample read. The
   substantive point (PATCH still overwrites content with no history) does hold.
-- Task 3 Step 3 tells you to replace a `findUnique` that is not there; A1 already made it a filtered
+- Task 3 Step 3 tells you to replace a `findUnique` that is not there; L1 already made it a filtered
   `findFirst`. The only real edit is widening the `select`.
 - Task 2's interface-contract block and its Task 2 Step 3 signature disagree. **Use the union**; the
   contract block is the stale one.
+
+**A defect the first pass of this document missed — every `DATABASE_URL` command in Task 1 fails.**
+Steps 4, 6 and 7 all build the URL as
+`DATABASE_URL="$(grep -m1 '^DATABASE_URL=' .env.local | cut -d= -f2-)"`. The value in `.env.local` is
+**double-quoted**, and `cut` keeps the quotes, so Prisma receives `"postgresql://…"` with literal
+quote characters and dies:
+
+```
+Error code: P1012
+error: Error validating datasource `db`: the URL must start with the protocol `postgresql://` or `postgres://`.
+```
+
+Reproduced 2026-08-16. Use the same sourcing idiom the DB-suite commands already use —
+`sh -c 'set -a; . ./.env.local; set +a; npx prisma …'` — which strips the quotes correctly. Worth
+noting *why* it was not caught by review: the line is quoted verbatim from L1's plan, where it
+worked, because L1 was written before `.env.local` was rewritten with quoted values.
 
 **Two things that will bite later.**
 - Task 6's ordering test is likely flaky: it seeds two revisions in one `createMany`, and
@@ -159,19 +207,19 @@ Defects found by reading the plan against the real code. Fix these as you reach 
 **One good thing:** `tests/db/helpers.ts` derives its TRUNCATE list from `pg_tables` at runtime, so
 `SampleRevision` is picked up automatically. No helper edit needed.
 
-## 5. A1's residual findings, re-verified at `1ee28df`
+## 5. L1's residual findings, re-verified at `1ee28df`
 
 Two were fixed by later waves without the record being updated. That is exactly the drift this
 re-verification existed to catch — treat the list below as authoritative over anything older.
 
 | Id | Finding | State at HEAD | Disposition |
 |---|---|---|---|
-| **R1** | `nextSampleIndex` concurrent-append race; POST has no retry loop | **still true** | Separate branch — A2 never opens POST |
+| **R1** | `nextSampleIndex` concurrent-append race; POST has no retry loop | **still true** | Separate branch — L2 never opens POST |
 | **R2** | Golden-set replace had no transaction ceiling | **fixed** (`8b7972c`) | Closed |
-| **R3** | Importer CREATE branch unatomic; no duplicate-`index` refine | **half fixed** — refine landed (`8b7972c`), atomicity did not | Cheap to fold into A2 Task 4 |
+| **R3** | Importer CREATE branch unatomic; no duplicate-`index` refine | **half fixed** — refine landed (`8b7972c`), atomicity did not | Cheap to fold into L2 Task 4 |
 | **R4** | An inert `_count` has no automated guard | **still true** | Delete the `_count` rather than guard it |
 | **R5** | Pin-guard 409 is terminal — no purge path | **half fixed** — message honest (`531dc6d`), terminality stands | Accept and document |
-| **R6** | `tombstoneSample`/`restoreSample` have no production caller | **still true** | A2 Task 5 gives `restoreSample` its first caller |
+| **R6** | `tombstoneSample`/`restoreSample` have no production caller | **still true** | L2 Task 5 gives `restoreSample` its first caller |
 
 Detail worth carrying:
 
@@ -188,24 +236,38 @@ Detail worth carrying:
 
 ## 6. Decisions waiting for the owner
 
-None of these are blockers for starting A2, but each will be hit early.
+None of these are blockers for starting L2, but each will be hit early. **Four were answered by the
+owner on 2026-08-16 and are marked RESOLVED below; the rest are still open.**
 
-1. **Which branch does A2 build on** — `feat/a0-golden-set-substrate` (tracks gitea, carries PR #12)
-   or a new `feat/a2-revision-log`? They are the same commit today; picking wrong diverges them.
-2. **Push before or after A2?** PR #12 currently shows 52 commits of A0. Pushing makes it an 87-commit
-   A0+A1 PR **with an A0-only description** — that body needs rewriting either way.
-3. **The `A0…A5` naming collision** (§0). Rename the lifecycle plans, or document the collision and
-   live with it.
+1. ~~**Which branch does L2 build on**~~ — **RESOLVED: a new `feat/a2-revision-log`**, branched from
+   `1dcd73c`. (The branch name keeps the `a2` spelling: it was created before the §0 rename, and
+   renaming a branch that L2's commits already sit on buys nothing. The plan it implements is L2.)
+   Rationale: it keeps L2 reviewable on its own and leaves the already-pushed A0/A1 branches
+   untouched.
+2. ~~**Push before or after L2?**~~ — **PARTLY OVERTAKEN BY EVENTS.** `feat/a1-tombstone-overlay` is
+   already pushed (§1), so the "nothing has left the machine" framing no longer applies. What
+   remains true and undecided: `gitea/feat/a0-golden-set-substrate` is still 36 behind, and **PR
+   #12's body still describes A0 only**. Whoever advances that PR rewrites the body.
+3. ~~**The `A0…A5` naming collision**~~ — **RESOLVED: renamed to `L1`/`L2`.** Done 2026-08-16; see
+   §0, including the three classes of artifact that keep the old letters permanently.
 4. **Account deletion destroys revisions.** `src/lib/account-deletion.ts` hard-deletes a user's
    private datasets, which cascades `DatasetSample` → `SampleRevision`. The spec's "anonymise rather
-   than destroy" therefore holds only for revisions on *other people's* samples. A2 has no task
+   than destroy" therefore holds only for revisions on *other people's* samples. L2 has no task
    touching this. Needs a ruling.
-5. **`GET …/revisions` exposure**: owner-only or `datasets:read`? Strangers can read public datasets'
-   *prior* text if the latter. Is actor identity projected? Is it paginated? Undecided.
-6. **Restore/history on a hidden dataset.** Both new routes use a bare `prisma.dataset.findUnique`
-   for ownership while every sibling uses `findFirst` + `liveDatasetsOnly()`. As written, a sample
-   of a *hidden* dataset can be restored and its history read. Defensible for restore; unstated for
-   the GET. Decide deliberately.
+5. ~~**`GET …/revisions` exposure**~~ — **RESOLVED: owner-only** (plus admin, matching every sibling
+   route), as the plan already drafted it. The log names who made each change and carries pre-edit
+   text, which is not public data even on a public dataset. Actor identity **is** projected, to
+   `{ id, name }` only. Pagination stays undecided — item 11 below.
+6. ~~**Restore/history on a hidden dataset**~~ — **RESOLVED: filter both** with `liveDatasetsOnly()`,
+   so a hidden dataset 404s on the restore route and on the history route alike. This follows the
+   spec's Decision 15 (a hidden dataset is closed to writes) and Decision 16 (samples inherit their
+   parent's hidden state), and it matches the sibling idiom — a bare `findUnique` for ownership was
+   the one thing in these two routes that diverged from every other handler.
+   **Note the asymmetry this leaves standing, deliberately:** the sample's *own* tombstone is still
+   not filtered by either route. That is the point of them — restoring a hidden sample and reading
+   its history are exactly the operations that need to see a hidden row. It is only the *parent*
+   dataset that must be live. With no `restoreDataset` (decision 9), un-hiding one sample beneath a
+   hidden dataset would not have made it visible anyway.
 7. **`changeType` has no database constraint** — a bare `String`, guarded only by Zod/TS. `v2g` is
    planned to need no hand edit (keeping `CONTRIBUTING.md` at five rows). Confirm that is intended.
 8. **A second coverage re-baseline?** `src/lib/sample-revisions.ts` lands inside the `src/lib/**`
@@ -216,22 +278,34 @@ None of these are blockers for starting A2, but each will be hit early.
    The plan flags this and asks that it be raised rather than discovered. Deferred to Plan B.
 10. **Consent id.** `package.json`'s `test:db` bakes in
     `PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION=approved-plan-2026-07-24-1a-testdb-only`, while the
-    A2 plan uses `approved-plan-2026-08-15-a2-revision-log` for its `migrate dev`. These are
-    different ids for different commands; confirm the new one is granted before Task 1 Step 6.
+    L2 plan uses `approved-plan-2026-08-15-a2-revision-log` for its `migrate deploy`. These are
+    different ids for different commands; confirm the new one is granted before Task 1 Step 6. Left
+    spelled `a2` to match the branch name, for the same reason — it is an identifier, not a label.
+11. **Is `GET …/revisions` paginated?** It is not, as drafted: the route returns a sample's entire
+    history in one array. Unbounded in principle, though bounded in practice by how many times a
+    human edits one row. Left as-is for L2 and recorded here so it is a choice rather than an
+    oversight.
 
-## 7. Starting A2: the first hour
+## 7. Starting L2: the first hour
+
+> **Two corrections, both reproduced 2026-08-16.** `npx prisma migrate status` **does not work bare**
+> in this repo: Prisma auto-loads `.env`, this tree has only `.env.local` / `.env.test` / `.env.example`,
+> and with no `DATABASE_URL` in the environment it fails `P1012` — which reads like schema drift and
+> is not. Source the file. The same applies to every `prisma` invocation in Task 1; see §4. And the
+> starting SHA is `1dcd73c`, not `1ee28df` — the latter is one commit behind, before this document
+> was added.
 
 ```bash
-cd /root/judge-arena-worktrees/a0          # or a fresh worktree, per decision 1
-git status                                  # expect clean at 1ee28df
-npx prisma migrate status                   # expect "Database schema is up to date!", 16 migrations
+cd /root/judge-arena-worktrees/a0          # already on feat/a2-revision-log, per decision 1
+git status                                  # expect clean at 1dcd73c
+sh -c 'set -a; . ./.env.local; set +a; npx prisma migrate status'   # 16 migrations, "up to date!"
 npx tsc --noEmit && npm run lint
 npm test                                    # 493
 sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts'   # 522
 npm run test:integration                    # 80 — needs Redis :6379 and RabbitMQ :5672
 ```
 
-Write those starting numbers down. The A2 plan forbids asserting absolute suite counts — each task's
+Write those starting numbers down. The L2 plan forbids asserting absolute suite counts — each task's
 contract is *zero failures and no fewer tests than the previous task left* — so the baseline has to
 be observed, not assumed.
 
@@ -262,7 +336,7 @@ and must never be touched.** The names differ by one character. Never `prisma db
   missing entries were where the real defect lived.
 - **Fact-check the handoff too.** This document was checked against the repo before it was committed:
   ~96 discrete claims, of which **two were false** and five were not checkable. One of the false ones
-  was an over-generalisation — "every line reference in the A2 plan is stale", inherited from a
+  was an over-generalisation — "every line reference in the L2 plan is stale", inherited from a
   survey's phrasing and true only of one task's — which is the exact failure this section warns
   about, committed while writing the warning. The five unverifiable ones are now labelled as such in
   place rather than quietly asserted.

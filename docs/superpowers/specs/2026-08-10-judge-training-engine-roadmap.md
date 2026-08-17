@@ -97,13 +97,14 @@ building Roadmap A end to end? Everything below is verified, not inferred.
 
 ### Status at a glance (2026-08-12, phase status updated 2026-08-16)
 
-> **Naming collision, read before using the labels below.** This roadmap's phases are `A0…A5`. The
-> dataset-lifecycle work uses `A1`/`A2` for something else entirely —
-> `specs/2026-08-14-dataset-lifecycle-and-tombstone-overlay-design.md` splits into plan A1 (the
-> tombstone overlay, **complete**) and plan A2 (the revision log, **not started**). This roadmap's
-> A1 is *human verification* and its A2 is *the calibration engine*; neither has begun. When someone
-> says "A2", establish which namespace they mean. See
-> `plans/2026-08-16-a1-complete-a2-handoff.md` §0.
+> **Naming collision — RESOLVED 2026-08-16, and `A0…A5` now belongs to this roadmap alone.** The
+> dataset-lifecycle plans used to be labelled `A1`/`A2` for something else entirely; they are now
+> **`L1`** (the tombstone overlay, complete) and **`L2`** (the revision log, not started), in
+> `specs/2026-08-14-dataset-lifecycle-and-tombstone-overlay-design.md`. This roadmap's A1 is *human
+> verification* and its A2 is *the calibration engine*; neither has begun. Note that lifecycle
+> commit prefixes (`feat(a1):`), `(A1)` comments in `src/`, and the applied `v2f` migration header
+> keep the old letters and cannot be changed — so **`(A1)` in code means L1, never this roadmap's
+> A1.** See `plans/2026-08-16-l1-complete-l2-handoff.md` §0.
 
 | | Item | State |
 |---|---|---|
@@ -114,7 +115,7 @@ building Roadmap A end to end? Everything below is verified, not inferred.
 | 9 | `lanEgress` declares the dev endpoint | **done** |
 | — | **Deploy + seed the built image** | **OPEN** — was "the only thing between here and A0"; A0 was built and completed ahead of it, so this now gates *deployment*, not A0 |
 | — | CI cannot run the DB or integration suites | **done 2026-08-12** — ephemeral Job with service sidecars; 286 DB + 74 integration tests green in CI, `build-push` gates on it |
-| 7 | RabbitMQ scrape/alerts/cap (T5) | **OPEN — gates A2 (this roadmap's A2, the calibration engine — not the lifecycle plan A2)** |
+| 7 | RabbitMQ scrape/alerts/cap (T5) | **OPEN — gates A2 (this roadmap's A2, the calibration engine — not the lifecycle plan, which is now L2)** |
 | 4,5,6 | `startedAt`, format-compliance, token rollup | OPEN — needed during A |
 | 11 | Golden sets absent from round-trip coverage | **done 2026-08-13** — A0's exit gate; classified in the `COVERAGE` map at `tests/db/config-roundtrip-fidelity.test.ts` |
 
@@ -400,13 +401,15 @@ cannot claim a distilled judge is better before calibration works.
 > Two things this phase description did not anticipate. **Delete became non-destructive** — an owner
 > ruling mid-flight replaced every destructive path with a tombstone, first as `tombstonedAt` columns
 > on `GoldenItem`/`GoldenLabel` (A0), then as a general `Tombstone` overlay table for datasets and
-> samples (plan A1, complete, merged locally, **unpushed**). The consequence worth carrying forward:
+> samples (plan **L1**, complete, merged locally, and **pushed** to `gitea/feat/a1-tombstone-overlay`
+> at `1dcd73c` — an earlier revision of this line said unpushed, which was true for a few hours).
+> The consequence worth carrying forward:
 > **ordinals are never reused and `index` is not dense.** And **pairwise is not HTTP-reachable** — it
 > ships as a library-and-integration capability; no route passes `protocol` or `candidates` to
 > `launchSingleRun`. Wiring it is follow-on work that A1 (this roadmap's) will need.
 >
 > Current state, decisions outstanding, and the next pickup:
-> `plans/2026-08-16-a1-complete-a2-handoff.md`.
+> `plans/2026-08-16-l1-complete-l2-handoff.md`.
 
 Nothing exists above the schema. This phase is the API and the UI, with no new modelling.
 

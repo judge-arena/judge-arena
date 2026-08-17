@@ -1,4 +1,14 @@
-# Plan A2 — The Revision Log Implementation Plan
+# Plan L2 — The Revision Log Implementation Plan
+
+> **Renamed 2026-08-16 from "Plan A2".** The lifecycle plans are now `L1`/`L2`, leaving `A0…A5`
+> to `specs/2026-08-10-judge-training-engine-roadmap.md`, whose A2 is *the calibration engine* and
+> is unrelated work. **Three classes of artifact keep the old label and cannot be changed:** the
+> `feat(a1):` commit prefixes already in history; the `MUST NOT BE TOMBSTONE-FILTERED (A1)` markers
+> and other `(A1)` comments in `src/`; and the header of
+> `prisma/migrations/20260814120000_v2f_tombstone_overlay/migration.sql`, which is **applied** —
+> Prisma checksums migration files and errors if one changes after application. Read `(A1)` in code
+> as L1. This plan's own body still says "A1"/"A2" in places where it quotes source text that really
+> does carry those letters; those quotes are correct as written.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -10,7 +20,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-14-dataset-lifecycle-and-tombstone-overlay-design.md` — read the "The overlay and the log" section before Task 1.
 
-**Follows:** Plan A1 (`docs/superpowers/plans/2026-08-14-a1-tombstone-overlay.md`) — **which must be merged first.** **Precedes:** Plan B (the lifecycle).
+**Follows:** Plan L1 (`docs/superpowers/plans/2026-08-14-l1-tombstone-overlay.md`) — **which must be merged first.** **Precedes:** Plan B (the lifecycle).
 
 ## What A1 left for this plan
 
