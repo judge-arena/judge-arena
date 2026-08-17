@@ -35,8 +35,8 @@ alone.**
 | Plan A2 — `plans/2026-08-14-a2-revision-log.md` | **Plan L2** — `plans/2026-08-14-l2-revision-log.md` |
 | this file — `plans/2026-08-16-a1-complete-a2-handoff.md` | `plans/2026-08-16-l1-complete-l2-handoff.md` |
 
-**The work in scope here is L2, the revision log** — six tasks, not started. Roadmap A's A2, the
-calibration engine, is a different and later piece of work; it is additionally hard-gated on the
+**The work in scope here was L2, the revision log** — six tasks, now complete (see the banner
+above). Roadmap A's A2, the calibration engine, is a different and later piece of work; it is additionally hard-gated on the
 rebaseline's T5 (RabbitMQ scrape, alerts and the per-run concurrency cap), which is not done.
 
 **Three classes of artifact keep the old letters permanently, and that is not drift.**
@@ -70,7 +70,7 @@ this note at the top.
 
 | Ref | SHA | Note |
 |---|---|---|
-| `feat/a2-revision-log` | `1dcd73c` | **Where L2's work lands** (owner decision, 2026-08-16). Branched from the commit below; HEAD of worktree `/root/judge-arena-worktrees/a0`. |
+| `feat/a2-revision-log` | `c4de3b3` | **Where L2's work landed** (owner decision, 2026-08-16). Branched from `1dcd73c`, the commit below; 8 commits ahead of it. HEAD of worktree `/root/judge-arena-worktrees/a0`. **Not pushed.** |
 | `feat/a1-tombstone-overlay` | `1dcd73c` | **Pushed.** `gitea/feat/a1-tombstone-overlay` is at the same SHA, so local and remote agree and there is nothing outstanding on it. |
 | `feat/a0-golden-set-substrate` | `1dcd73c` | Byte-identical to the above (L1 was a true fast-forward merge). Tracks gitea, and is **36 ahead** of it. |
 | `gitea/feat/a0-golden-set-substrate` | `8d65198` | **35 commits behind local.** Head of open **PR #12**. |
@@ -87,7 +87,8 @@ There is no PR template anywhere in the repo.
 file — `docs/superpowers/specs/2026-08-07-public-users-roadmap.md`. It is not ours. Do not touch it,
 and do not edit that file from here**; a concurrent edit would collide with work in progress there.
 
-Latest migration: `prisma/migrations/20260814120000_v2f_tombstone_overlay` (16 in the chain).
+Latest migration: `prisma/migrations/20260815120000_v2g_sample_revisions` (17 in the chain, added by
+L2 Task 1). L1's `v2f_tombstone_overlay` is the one before it.
 
 ## 2. Suites at `1ee28df`
 
