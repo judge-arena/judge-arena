@@ -548,6 +548,35 @@ const COVERAGE: Record<string, Coverage> = {
     },
     knownGaps: {},
   },
+
+  // Empty `exported`, for the same reason as Tombstone directly above: a
+  // revision records WHAT HAPPENED ON THIS INSTANCE. The config document
+  // describes a dataset's CURRENT content, not its history, and carrying
+  // revisions would attribute edits made here to an import made elsewhere —
+  // the same forged-attribution argument that keeps GoldenLabel out of the
+  // document.
+  //
+  // Not a knownGap: nothing here should round-trip. Recording one would also
+  // fail the gap ledger below, whose expected object is locked to exactly
+  // {Rubric, Dataset, GoldenSet}.
+  SampleRevision: {
+    exported: [],
+    excludedByDesign: {
+      id: SURROGATE,
+      datasetSampleId:
+        'instance-local FK to a row whose id is itself instance-local, the same argument as GoldenItem.sourceDatasetSampleId',
+      changeType:
+        'describes a mutation that happened on THIS instance; an import performs its own mutations and records its own rows',
+      input:
+        "the PRE-EDIT text of a sample on this instance. The document carries the sample's CURRENT text; carrying its history would let an import resurrect text the target instance never had",
+      expected: 'same as input one column up — a before-image, not current content',
+      metadata: 'same as input two columns up — a before-image, not current content',
+      actorId:
+        'a real User FK with no portable representation, exactly as GoldenLabel.annotatorId: carrying it across instances would forge an attribution',
+      at: TIMESTAMP,
+    },
+    knownGaps: {},
+  },
 };
 
 describe('Config export/import — schema coverage', () => {

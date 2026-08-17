@@ -132,6 +132,7 @@ model User {
   modelEndpoints    ModelEndpoint[]
   goldenSets        GoldenSet[]
   goldenLabels      GoldenLabel[]
+  sampleRevisions   SampleRevision[]
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
@@ -614,7 +615,8 @@ model DatasetSample {
   evaluations Evaluation[]
   goldenItems GoldenItem[]
   tombstone   Tombstone?
-  createdAt   DateTime     @default(now())
+  revisions   SampleRevision[]
+  createdAt   DateTime         @default(now())
 
   @@unique([datasetId, index])
   @@index([datasetId])
@@ -864,4 +866,45 @@ model Tombstone {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// ─── The revision log (L2) ──────────────────────────────────────────────────
+// Append-only. One row per mutation to a DatasetSample, carrying the values as
+// they stood BEFORE the change.
+//
+// Deliberately separate from Tombstone, and the two are not merge-able:
+// Tombstone is the CURRENT-STATE projection the read filters consult and needs
+// @unique per entity to be a to-one relation and to make upsert correct; a log
+// needs MANY rows per entity and therefore cannot carry that uniqueness.
+//
+// Nothing filters this table by the overlay. The history of a HIDDEN sample is
+// exactly what you read when deciding whether to restore it.
+
+model SampleRevision {
+  id String @id @default(cuid())
+
+  datasetSampleId String
+  datasetSample   DatasetSample @relation(fields: [datasetSampleId], references: [id], onDelete: Cascade)
+
+  // 'edit' | 'delete' | 'restore'. A String rather than an enum, matching
+  // GoldenLabel.tombstonedReason and Dataset.source — this schema uses enums
+  // only where Prisma already had one (Visibility, RunProtocol).
+  changeType String
+
+  // The values BEFORE the change. Null on 'delete' and 'restore', which change
+  // no content, so a before-image would be a copy of the live row.
+  input    String?
+  expected String?
+  metadata String?
+
+  // SetNull, matching GoldenLabel.annotatorId: account deletion anonymises
+  // rather than destroying. There is deliberately NO unique constraint on this
+  // table, so two deleted actors coexist freely on one sample's history.
+  actorId String?
+  actor   User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  at DateTime @default(now())
+
+  // Serves the only query: one sample's history, newest first.
+  @@index([datasetSampleId, at])
 }
