@@ -1,18 +1,34 @@
 # A2 — Calibration and reporting: decisions recorded
 
-**Date:** 2026-08-17 · **Status:** **DECISIONS ONLY — not a full spec, and deliberately not one yet.**
+**Date:** 2026-08-17 · **Status:** **DECISIONS ONLY — not a full spec, and deliberately still not one.**
 **Phase:** Roadmap A's **A2**, the calibration engine.
-**Depends on:** **A1** for labels, and on rebaseline **T5** for broker safety. Neither is done.
+**Depends on:** **A1** for labels, and on rebaseline **T5** for broker safety.
+
+> **UPDATE 2026-08-17: A1 and A1.5 are DONE** (`4ff04f4`…`05bf29b`), and that changes less than it
+> looks like it does. **A1 shipped the ability to produce labels; it has not produced any.**
+> Production has zero golden sets and is five migrations behind, so the input this document says
+> A2's design requires — *real* label data — still does not exist.
+>
+> **Both gates below therefore still stand**, and the sequencing between them is now written out in
+> **`2026-08-17-integration-release-and-a2-roadmap.md`**, which is the document to read next. T5 was
+> re-measured for it rather than quoted: **54.6% at idle, still zero scrapes and zero rules.**
+>
+> One open question moved, though. **#5 — whether `agreement()` is reused for human-vs-model — is
+> now cheaply answerable**, because A1 shipped it: it takes `Reading[] = {itemId, raterId,
+> category}[]`, and a model is just another `raterId`. Settle that FIRST when speccing, because it
+> decides whether A2 writes any statistics code at all.
 
 | What | Spec | Plan |
 |---|---|---|
-| **A1** — human verification, the agreement floor | `2026-08-17-a1-human-verification-design.md` | `../plans/2026-08-17-a1-human-verification.md` — 7 tasks |
-| **A1.5** — the annotation studio | `2026-08-17-a1_5-annotation-studio-design.md` | `../plans/2026-08-17-a1_5-annotation-studio.md` — 5 tasks |
+| **A1** — human verification, the agreement floor | `2026-08-17-a1-human-verification-design.md` | `../plans/2026-08-17-a1-human-verification.md` — 7 tasks · **DONE** |
+| **A1.5** — the annotation studio | `2026-08-17-a1_5-annotation-studio-design.md` | `../plans/2026-08-17-a1_5-annotation-studio.md` — 5 tasks · **DONE** |
+| **Getting from here to A2** | `2026-08-17-integration-release-and-a2-roadmap.md` — merge, promote, migrate, seed, end-to-end, T5 | *(each item becomes its own plan)* |
 | **A2** — this document | *(decisions only)* | *(none — see below)* |
 
-A1 and A1.5 are **independent and may be built in parallel**: A1 owns the data and endpoints, A1.5
-owns the surface, and they meet only in A1.5's last task, which degrades to a static fixture if A1
-has not merged.
+A1 and A1.5 were **independent and buildable in parallel**: A1 owns the data and endpoints, A1.5
+owns the surface, and they met only in A1.5's last task. In the event A1 landed first, so that task
+composed the real queue and submit routes rather than the static fixture it was designed to fall
+back to.
 
 > **Why this document exists rather than a spec.** These decisions were made while designing A1 and
 > would otherwise survive only in a conversation. A2 cannot be specced properly until A1 has produced
