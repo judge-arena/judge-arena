@@ -27,6 +27,7 @@ import { GET as listGoldenSets, POST as createGoldenSetRoute } from '@/app/api/g
 import { POST as forkGoldenSetRoute } from '@/app/api/golden-sets/[id]/fork/route';
 import { POST as retireGoldenSetRoute } from '@/app/api/golden-sets/[id]/retire/route';
 import { POST as restoreSampleRoute } from '@/app/api/datasets/[id]/samples/[sampleId]/restore/route';
+import { GET as sampleRevisionsRoute } from '@/app/api/datasets/[id]/samples/[sampleId]/revisions/route';
 
 import {
   GET as listApiKeys,
@@ -1254,4 +1255,24 @@ describe('Access matrix — L2 sample sub-routes (/restore, /revisions)', () => 
     });
   }
 
+  for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+    const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 200;
+    it(`GET /api/datasets/[id]/samples/[sampleId]/revisions as ${actor} -> ${expected}`, async () => {
+      // PUBLIC on purpose: the history is owner-only REGARDLESS of the
+      // dataset's visibility, unlike every sibling read. A sample's edit
+      // history names who made each change and carries pre-edit text, which is
+      // not public data even on a public dataset. A stranger getting 200 here
+      // would be the finding.
+      const { dataset, sample } = await mkHiddenSample('public');
+      setSessionFor(actor, ctx);
+      const res = await sampleRevisionsRoute(
+        new Request(
+          `http://localhost/api/datasets/${dataset.id}/samples/${sample.id}/revisions`
+        ),
+        { params: Promise.resolve({ id: dataset.id, sampleId: sample.id }) }
+      );
+      expect(res.status).toBe(expected);
+    
+    });
+  }
 });

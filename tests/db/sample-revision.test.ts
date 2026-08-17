@@ -3,6 +3,7 @@ import { getServerSession } from 'next-auth';
 import { db, truncateAll, mkUser } from './helpers';
 import { DELETE, PATCH, PUT } from '@/app/api/datasets/[id]/samples/route';
 import { POST as POST_RESTORE } from '@/app/api/datasets/[id]/samples/[sampleId]/restore/route';
+import { GET as GET_REVISIONS } from '@/app/api/datasets/[id]/samples/[sampleId]/revisions/route';
 
 // L2, the revision log. Every mutation to a DatasetSample appends one
 // SampleRevision carrying the values as they stood BEFORE the change, so the
@@ -451,5 +452,151 @@ describe('restore and the stored sampleCount', () => {
 
     const after = await db.dataset.findUniqueOrThrow({ where: { id: dataset.id } });
     expect(after.sampleCount).toBe(2);
+  });
+});
+
+describe('GET /api/datasets/[id]/samples/[sampleId]/revisions', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    vi.clearAllMocks();
+  });
+
+  async function mkHistory(userId: string, opts: { hideSample?: boolean; hideDataset?: boolean } = {}) {
+    fixtureCounter += 1;
+    const dataset = await db.dataset.create({
+      data: {
+        name: 'History Fixture',
+        slug: `hist-${fixtureCounter}`,
+        userId,
+        visibility: 'private',
+        inputType: 'query-response',
+        sampleCount: 1,
+      },
+    });
+    const sample = await db.datasetSample.create({
+      data: { datasetId: dataset.id, index: 0, input: 'v3', expected: null, metadata: null },
+    });
+    // `at` is set EXPLICITLY and distinctly. @default(now()) is Postgres's
+    // now(), which is the TRANSACTION timestamp — both rows of a single
+    // createMany would get the identical value and `orderBy: { at: 'desc' }`
+    // would have no defined order between them, so the assertion below would
+    // pass or fail on insertion-order luck.
+    await db.sampleRevision.createMany({
+      data: [
+        {
+          datasetSampleId: sample.id,
+          changeType: 'edit',
+          input: 'v1',
+          actorId: userId,
+          at: new Date('2026-08-15T10:00:00.000Z'),
+        },
+        {
+          datasetSampleId: sample.id,
+          changeType: 'edit',
+          input: 'v2',
+          actorId: userId,
+          at: new Date('2026-08-15T11:00:00.000Z'),
+        },
+      ],
+    });
+    if (opts.hideSample) {
+      await db.tombstone.create({ data: { datasetSampleId: sample.id, isTombstone: true } });
+    }
+    if (opts.hideDataset) {
+      await db.tombstone.create({ data: { datasetId: dataset.id, isTombstone: true } });
+    }
+    return { dataset, sample };
+  }
+
+  const historyRequest = () => new Request('http://localhost/x');
+
+  it('returns the history newest first, including for a HIDDEN sample', async () => {
+    const owner = await mkUser();
+    // Hidden. The history of a hidden sample is exactly what you read when
+    // deciding whether to restore it, so this route does NOT filter on the
+    // sample's own tombstone.
+    const { dataset, sample } = await mkHistory(owner.id, { hideSample: true });
+    sessionFor(owner);
+
+    const res = await GET_REVISIONS(historyRequest(), {
+      params: Promise.resolve({ id: dataset.id, sampleId: sample.id }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.revisions.map((r: { input: string }) => r.input)).toEqual(['v2', 'v1']);
+    expect(body.revisions[0].actor.id).toBe(owner.id);
+  });
+
+  it('projects the actor as id and name only — never an email', async () => {
+    const owner = await mkUser();
+    const { dataset, sample } = await mkHistory(owner.id);
+    sessionFor(owner);
+
+    const res = await GET_REVISIONS(historyRequest(), {
+      params: Promise.resolve({ id: dataset.id, sampleId: sample.id }),
+    });
+    const body = await res.json();
+    expect(Object.keys(body.revisions[0].actor).sort()).toEqual(['id', 'name']);
+    expect(JSON.stringify(body)).not.toContain(owner.email);
+  });
+
+  it('403s a stranger', async () => {
+    const owner = await mkUser();
+    const stranger = await mkUser();
+    const { dataset, sample } = await mkHistory(owner.id);
+    sessionFor(stranger);
+
+    const res = await GET_REVISIONS(historyRequest(), {
+      params: Promise.resolve({ id: dataset.id, sampleId: sample.id }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('404s when the PARENT dataset is hidden', async () => {
+    const owner = await mkUser();
+    const { dataset, sample } = await mkHistory(owner.id, { hideDataset: true });
+    sessionFor(owner);
+
+    const res = await GET_REVISIONS(historyRequest(), {
+      params: Promise.resolve({ id: dataset.id, sampleId: sample.id }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('404s a sample that belongs to a different dataset', async () => {
+    const owner = await mkUser();
+    const mine = await mkHistory(owner.id);
+    const theirs = await mkHistory(owner.id);
+    sessionFor(owner);
+
+    const res = await GET_REVISIONS(historyRequest(), {
+      params: Promise.resolve({ id: mine.dataset.id, sampleId: theirs.sample.id }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('a sample with no history is an empty array, not a 404', async () => {
+    const owner = await mkUser();
+    fixtureCounter += 1;
+    const dataset = await db.dataset.create({
+      data: {
+        name: 'No History',
+        slug: `nohist-${fixtureCounter}`,
+        userId: owner.id,
+        visibility: 'private',
+        inputType: 'query-response',
+        sampleCount: 1,
+      },
+    });
+    const sample = await db.datasetSample.create({
+      data: { datasetId: dataset.id, index: 0, input: 'never edited', expected: null, metadata: null },
+    });
+    sessionFor(owner);
+
+    const res = await GET_REVISIONS(historyRequest(), {
+      params: Promise.resolve({ id: dataset.id, sampleId: sample.id }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).revisions).toEqual([]);
   });
 });
