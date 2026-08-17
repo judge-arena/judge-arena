@@ -1,5 +1,18 @@
 # A1.5 — The Annotation Studio: Implementation Plan
 
+> **COMPLETE — executed 2026-08-17**, all five tasks, on `feat/a0-golden-set-substrate`
+> (`133cc12`…`05bf29b`), directly after A1. Unit suite **533 → 578**; db and integration unchanged
+> at **633** and **80**, as expected — nothing here touches a route or the schema. `tsc --noEmit`
+> and `npm run lint` exit 0 with no warnings, and `npm run build` compiles the new route.
+>
+> **Task 5's manual checklist was WALKED, not deferred.** All 12 rows were run against
+> `npm run dev` and local Postgres in a real browser. Row 7 found a defect, which was fixed and
+> re-walked before commit. See `docs/runbooks/studio-manual-verification.md` for the recorded run.
+>
+> **Read "Defects found during execution" below before trusting a snippet here.** One of this
+> plan's own test snippets could not pass as written, and five of the discrimination injections it
+> prescribes proved nothing until the fixtures behind them were fixed.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A composable panel shell — prompt, options, reasoning, output, verdict — each minimizable and re-orderable, with delta highlighting and a progression rail, so comparison and entry are a first-class product surface rather than a form.
@@ -103,7 +116,7 @@ export function reconcile(persisted: unknown, defaults: Panel[]): Panel[];
 
 **Nothing produces spans yet.** This task exists now anyway, because the offsets contract is the one thing that cannot be retrofitted: every producer written against un-normalized text would need revisiting, and the symptom of getting it wrong is a highlight covering the wrong words with no error anywhere.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 import { describe, expect, it } from 'vitest';
@@ -176,7 +189,7 @@ describe('segment', () => {
 });
 ```
 
-- [ ] **Step 2: Run and watch it fail**
+- [x] **Step 2: Run and watch it fail**
 
 ```bash
 npx vitest run --config vitest.config.ts tests/lib/studio/content.test.ts
@@ -184,15 +197,15 @@ npx vitest run --config vitest.config.ts tests/lib/studio/content.test.ts
 
 Expected: FAIL at collection — `Cannot find module '@/lib/studio/content'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `toSpanText` replaces `\r\n` and lone `\r` with `\n`, then `.normalize('NFC')`, and returns `{text, spans}` with spans defaulting to `[]`. **Normalization happens before offsets mean anything**, so a caller supplying spans must have computed them against normalized text — say so in the module doc.
 
 `segment` collects every boundary (0, each span's clamped start/end, `text.length`), sorts and de-duplicates them, and emits one run per adjacent pair, attaching every span that covers it. Spans are clamped to `[0, text.length]` and dropped when `start >= end` after clamping.
 
-- [ ] **Step 4: Run and watch it pass.**
+- [x] **Step 4: Run and watch it pass.**
 
-- [ ] **Step 5: Prove the tests discriminate**
+- [x] **Step 5: Prove the tests discriminate**
 
 ```bash
 sha256sum src/lib/studio/content.ts > /tmp/content.sha
@@ -204,7 +217,7 @@ sha256sum src/lib/studio/content.ts > /tmp/content.sha
 
 Restore after each, then `sha256sum -c /tmp/content.sha` → `OK`.
 
-- [ ] **Step 6: Full suites and commit**
+- [x] **Step 6: Full suites and commit**
 
 ```bash
 npx tsc --noEmit && npm run lint && npm test
@@ -229,7 +242,7 @@ smart quote or a CRLF appears and no error is ever raised."
 - Consumes: `SpanText`, `toSpanText` from Task 1.
 - Produces: `DeltaRun`, `delta(before, after)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 import { describe, expect, it } from 'vitest';
@@ -280,16 +293,16 @@ describe('delta', () => {
 });
 ```
 
-- [ ] **Step 2: Run and watch it fail.**
+- [x] **Step 2: Run and watch it fail.**
 
-- [ ] **Step 3: Implement** a standard LCS over word tokens (split on whitespace, **keeping the whitespace attached** so reconstruction is exact), emitting `unchanged`/`removed`/`added` runs and merging adjacent runs of the same change.
+- [x] **Step 3: Implement** a standard LCS over word tokens (split on whitespace, **keeping the whitespace attached** so reconstruction is exact), emitting `unchanged`/`removed`/`added` runs and merging adjacent runs of the same change.
 
-- [ ] **Step 4: Run and watch it pass.**
+- [x] **Step 4: Run and watch it pass.**
 
-- [ ] **Step 5: Prove it discriminates.** Split on whitespace and discard it (`.split(/\s+/)`). Re-run.
+- [x] **Step 5: Prove it discriminates.** Split on whitespace and discard it (`.split(/\s+/)`). Re-run.
 Expected: FAIL on the reconstruction test — the rebuilt string loses its spaces. Restore and verify by sha256. **This is the bug that makes a diff look fine and be wrong**, which is why the invariant is tested rather than the appearance.
 
-- [ ] **Step 6: Full suites and commit.**
+- [x] **Step 6: Full suites and commit.**
 
 ---
 
@@ -303,7 +316,7 @@ Expected: FAIL on the reconstruction test — the rebuilt string loses its space
 - Consumes: nothing.
 - Produces: `PanelKind`, `Panel`, `StudioView`, `defaultLayout`, `applyReorder`, `applyCollapse`, `reconcile`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 import { describe, expect, it } from 'vitest';
@@ -377,9 +390,9 @@ describe('reconcile — persisted layout is UNTRUSTED INPUT', () => {
 });
 ```
 
-- [ ] **Step 2: Run and watch it fail.**
+- [x] **Step 2: Run and watch it fail.**
 
-- [ ] **Step 3: Implement.** **`defaultLayout` assigns `id === kind`** for the panels it creates — the
+- [x] **Step 3: Implement.** **`defaultLayout` assigns `id === kind`** for the panels it creates — the
 tests above call `applyReorder(defaults, 'verdict', 0)` and `applyCollapse(defaults, 'reasoning', true)`
 passing a kind where an id is expected, and that only works because the default layout makes them
 equal. Keep the two fields distinct in the type anyway: a view will eventually want two panels of the
@@ -387,12 +400,12 @@ same kind, and collapsing them now would make that a breaking change.
 
 `reconcile` must: return `defaults` for anything that is not an array of objects; keep only entries whose `kind` is a known `PanelKind`; de-duplicate by kind; append any default whose kind is missing; and renumber `order` contiguously from 0 in the resulting sequence. **It never throws.**
 
-- [ ] **Step 4: Run and watch it pass.**
+- [x] **Step 4: Run and watch it pass.**
 
-- [ ] **Step 5: Prove it discriminates.** Make `reconcile` return `persisted as Panel[]` unchanged when it is an array. Re-run.
+- [x] **Step 5: Prove it discriminates.** Make `reconcile` return `persisted as Panel[]` unchanged when it is an array. Re-run.
 Expected: FAIL on the unknown-kind test with `expected [… 'telepathy'] to deeply equal […]`, and on the garbage test for `[1,2,3]`. Restore and verify by sha256.
 
-- [ ] **Step 6: Full suites and commit.**
+- [x] **Step 6: Full suites and commit.**
 
 ---
 
@@ -407,17 +420,17 @@ Expected: FAIL on the unknown-kind test with `expected [… 'telepathy'] to deep
 
 **None of this is unit-testable in this repo** — there is no jsdom. Verification is Task 5's manual checklist. That is exactly why Tasks 1–3 came first and hold every rule that can be wrong.
 
-- [ ] **Step 1: `SpanTextView`** — maps `segment(value)` to spans, applying a class per `span.kind`. With no spans it renders one plain run, which is the only path exercised until span targeting exists.
+- [x] **Step 1: `SpanTextView`** — maps `segment(value)` to spans, applying a class per `span.kind`. With no spans it renders one plain run, which is the only path exercised until span targeting exists.
 
-- [ ] **Step 2: `DeltaTextView`** — maps `DeltaRun[]` to `<ins>`/`<del>`/plain. Use real `<ins>`/`<del>` elements rather than styled `<span>`s: they carry the meaning to a screen reader, and "what changed" is the panel's entire purpose.
+- [x] **Step 2: `DeltaTextView`** — maps `DeltaRun[]` to `<ins>`/`<del>`/plain. Use real `<ins>`/`<del>` elements rather than styled `<span>`s: they carry the meaning to a screen reader, and "what changed" is the panel's entire purpose.
 
-- [ ] **Step 3: `Panel`** — title, collapse toggle, drag handle, children, and an **explicit empty state** taking a reason string. A panel with no content renders *why* ("no reasoning captured for this model") rather than a blank box.
+- [x] **Step 3: `Panel`** — title, collapse toggle, drag handle, children, and an **explicit empty state** taking a reason string. A panel with no content renders *why* ("no reasoning captured for this model") rather than a blank box.
 
-- [ ] **Step 4: `ProgressionRail`** — takes `stages: {key, label, state: 'done'|'empty'|'pending'}[]` and renders every stage including empty ones. **An empty stage is rendered, never omitted** — omitting it makes the studio look complete when half the pipeline has not run.
+- [x] **Step 4: `ProgressionRail`** — takes `stages: {key, label, state: 'done'|'empty'|'pending'}[]` and renders every stage including empty ones. **An empty stage is rendered, never omitted** — omitting it makes the studio look complete when half the pipeline has not run.
 
-- [ ] **Step 5: `StudioShell`** — holds `Panel[]` state, loads via `reconcile(JSON.parse(localStorage.getItem(key) ?? 'null'), defaultLayout(view))`, persists on change, and renders panels in `order` through a `renderers: Record<PanelKind, ReactNode>` prop. **The `JSON.parse` goes in a `try`** — a truncated blob throws before `reconcile` ever sees it, and `reconcile`'s guarantees do not cover a parse error.
+- [x] **Step 5: `StudioShell`** — holds `Panel[]` state, loads via `reconcile(JSON.parse(localStorage.getItem(key) ?? 'null'), defaultLayout(view))`, persists on change, and renders panels in `order` through a `renderers: Record<PanelKind, ReactNode>` prop. **The `JSON.parse` goes in a `try`** — a truncated blob throws before `reconcile` ever sees it, and `reconcile`'s guarantees do not cover a parse error.
 
-- [ ] **Step 6: Typecheck, lint, commit**
+- [x] **Step 6: Typecheck, lint, commit**
 
 ```bash
 npx tsc --noEmit && npm run lint
@@ -444,13 +457,13 @@ studio cannot look complete when half the pipeline has not run."
 - Consumes: all five components; A1's `GET …/queue` and `POST …/items/[itemId]/labels` when they exist.
 - Produces: the first composition of the shell.
 
-- [ ] **Step 1: Build the view against A1's queue endpoint.** Protocol-aware content: pointwise renders a score input in the `verdict` panel; pairwise renders the candidates in `options` and a preference control in `verdict`. `reasoning` and `output` render their empty states until judgments exist.
+- [x] **Step 1: Build the view against A1's queue endpoint.** Protocol-aware content: pointwise renders a score input in the `verdict` panel; pairwise renders the candidates in `options` and a preference control in `verdict`. `reasoning` and `output` render their empty states until judgments exist.
 
 **If A1 has not merged**, drive the view from a static fixture module and leave a single clearly-marked `TODO(a1)` at the fetch call site — the composition is the deliverable here, not the data.
 
-- [ ] **Step 2: Handle the queue's non-item states.** `retest-not-yet-eligible` renders *"label N more items before this one comes back"* using `labelsUntilRetest`; `set-complete` and `no-assignment` each render their own message. **A blank screen for any of these is the failure this step exists to prevent** — with intervening-items-only eligibility, a small set legitimately has nothing to serve.
+- [x] **Step 2: Handle the queue's non-item states.** `retest-not-yet-eligible` renders *"label N more items before this one comes back"* using `labelsUntilRetest`; `set-complete` and `no-assignment` each render their own message. **A blank screen for any of these is the failure this step exists to prevent** — with intervening-items-only eligibility, a small set legitimately has nothing to serve.
 
-- [ ] **Step 3: Write the manual verification checklist** to `docs/runbooks/studio-manual-verification.md` — the substitute for the tests this layer cannot have, and the thing a future change is re-run against:
+- [x] **Step 3: Write the manual verification checklist** to `docs/runbooks/studio-manual-verification.md` — the substitute for the tests this layer cannot have, and the thing a future change is re-run against:
 
 ```markdown
 1. All five panels render for a pointwise item; all five for a pairwise item.
@@ -463,11 +476,72 @@ studio cannot look complete when half the pipeline has not run."
 8. Submitting a reading advances to the next item without revealing whether it was a re-read.
 ```
 
-- [ ] **Step 4: Walk the checklist and record the result** in the task report — including anything that failed and what you changed.
+- [x] **Step 4: Walk the checklist and record the result** in the task report — including anything that failed and what you changed.
 
-- [ ] **Step 5: Typecheck, lint, full suites, commit.**
+- [x] **Step 5: Typecheck, lint, full suites, commit.**
 
 ---
+
+## Defects found during execution
+
+### One snippet that could not pass as written
+
+| Task | What the plan said | What is true |
+|---|---|---|
+| 1 | The NFC test writes the decomposed form as a plain literal `'éclair'` and asserts `toHaveLength(7)`. | A literal typed into a source file is whatever that file's ENCODING holds, and here it arrived composed — so the assertion failed at 6. The trap is the obvious fix: changing the 7 to a 6 turns it green while deleting the only thing under test, because both sides of the assertion are then the composed form and `normalize('NFC')` could be removed without failing anything. Both literals are now explicit `\u` escapes, which no editor, formatter or copy-paste can quietly normalize. |
+
+### Five injections that proved nothing, and what each exposed
+
+**This is the real yield of the phase.** Every one was a case where the code looked fine, the test
+looked fine, and breaking the code on purpose changed nothing.
+
+| Task | Injection that did not discriminate | What it exposed |
+|---|---|---|
+| 2 | Removing the empty-run guard in `delta`'s accumulator | The guard was **unreachable**: `tokenize` cannot yield an empty token. Deleted rather than commented — the same call R4 made about an inert read. |
+| 2 | Collapsing `keyOf`'s whitespace special-case | It was **dead**. The byte-equality check in `delta` already covers a paragraph break not matching a space. Simplified to `token.trim()`. |
+| 2 | Forcing the byte-equality check to `true` | **No fixture had two tokens with the same word and different whitespace.** Two cases added — an internal whitespace-only change, and leading whitespace, the only place `keyOf`'s empty key is reachable at all. |
+| 3 | Removing the reorder clamp | The test used `-5`, which `Array.prototype.splice` clamps to 0 by itself. **The discriminating value is `-1`**, where splice's offset-from-the-end semantics insert the panel second-to-LAST — the opposite of dragging to the top. |
+| 3 | Removing the duplicate-kind skip | The test asserted only the resulting LENGTH, which a `Map` keyed by kind gives for free. The skip decides **which copy survives**; now pinned as first-wins. |
+
+### One defect the manual walk found
+
+Task 5, checklist row 7. On a set in the `retest-not-yet-eligible` state the progression rail read
+*"Item — not started / Human label — not started"* directly above the message *"Label 20 more items
+before this one comes back"*. The queue returns that reason precisely BECAUSE a reading exists and
+is too fresh to repeat, so the rail contradicted the paragraph under it. **This is exactly what the
+untestable layer's checklist is for** — no unit test could have caught it, because the rule was
+right and the composition was wrong.
+
+### Additions beyond the plan
+
+| Where | Addition | Why |
+|---|---|---|
+| Task 1 | A lone-`\r` case, a wholly-out-of-range/inverted span, empty text segmenting to no runs, and an astral character never split | Each is a SILENT-corruption path rather than an error path. A boundary inside a surrogate pair renders as a replacement glyph — visible corruption from an invisible cause. |
+| Task 4 | `<ins>`/`<del>` rather than styled spans; stage state spelled out for assistive tech; a keyboard-operable drag handle | All three are correctness rather than polish: a colour communicates a diff only to users who can see colour, and a pointer-only arrangement feature is unavailable to anyone not using a mouse — which is the interaction this phase is named for. |
+| Task 4 | Layout loads in an effect, not a `useState` initialiser | `localStorage` does not exist during the server render; reading it there makes the two renders disagree and costs the whole tree to a hydration error. A first write is held back until the load completes, or the defaults would be persisted over the saved layout before it was read. |
+| Task 5 | The Label entry point is not gated on ownership | An assigned annotator need not own the set. Gating it would make assignment unusable for the multi-annotator case it exists to serve; the queue does the real gating. |
+
+### Coverage
+
+Both configs exit 0 and **no floor was touched.**
+
+| | actual | floor | margin |
+|---|---|---|---|
+| unit, `src/lib/studio/**` | **100** stmts / 96.42 branches / **100** funcs / **100** lines | — | — |
+| unit, all-files | 41.39 / 87.20 / 70.64 / 41.39 | passes | — |
+| db, all-files statements & lines | **53.55** | 47 | 6.55pp |
+| db, all-files branches | **79.24** | 77 | 2.24pp |
+| db, all-files functions | **62.43** | 60 | 2.43pp |
+
+**The db aggregate DIPPED, from 54.52 after A1 to 53.55, and that is expected rather than a
+regression.** `vitest.db.config.ts` includes `src/lib/**`, so the three new studio modules are in
+its denominator — but the db suite drives API routes and never imports them, so they contribute
+nothing to its numerator. They are fully covered by the UNIT run instead, at 100%. The margin is
+still 6.55pp against a 2pp policy, so nothing needed doing; recorded here so the next reader does
+not read the dip as a loss of coverage.
+
+`src/lib/studio/**` is measured by both configs; `src/components/studio/**` by neither, which is
+the split the whole plan is shaped around.
 
 ## Self-review notes
 

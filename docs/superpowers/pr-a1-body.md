@@ -1,7 +1,9 @@
-## A1 — Human verification and a measured agreement floor
+## A1 + A1.5 — human verification, and the annotation studio
 
-Roadmap A's **A1**, all seven tasks of `docs/superpowers/plans/2026-08-17-a1-human-verification.md`.
-Design: `docs/superpowers/specs/2026-08-17-a1-human-verification-design.md`.
+Roadmap A's **A1** (all seven tasks of `plans/2026-08-17-a1-human-verification.md`) and **A1.5**
+(all five of `plans/2026-08-17-a1_5-annotation-studio.md`), plus the last two L1 residuals.
+Designs: `specs/2026-08-17-a1-human-verification-design.md` and
+`specs/2026-08-17-a1_5-annotation-studio-design.md`.
 
 **Follows PR #12** (A0 + L1 + L2 + R1 + R3), which is merged. This branch continues on top of it.
 
@@ -33,6 +35,7 @@ the rows mean something.
 | `eef73fb` | **Agreement, disagreements, history** — public iff published. |
 | `c440058` | Docs: A1 marked complete, with what the plan got wrong. |
 | `6528b32` | **R4 + R5** — the last two L1 residuals, closed. |
+| `133cc12`…`05bf29b` | **A1.5** — the annotation studio, all five tasks. |
 
 ### The migration: three hand edits, and why each is invisible to tooling
 
@@ -88,14 +91,17 @@ routed work.
 
 | Suite | Before | After |
 |---|---|---|
-| unit | 508 / 37 files | **533 / 39** |
+| unit | 508 / 37 files | **578 / 42** |
 | db | 555 / 39 files | **633 / 42** |
 | integration | 80 / 10 files | **80 / 10** |
 
-`npx tsc --noEmit` and `npm run lint` exit 0 with no warnings. `prisma migrate status`: **18
-migrations**, up to date. Both coverage configs exit 0; **no floor was touched** — statements/lines
-rose 49.55 → 54.52, which is the documented trigger to re-baseline upward, deliberately deferred to
-a single end-of-branch pass per `vitest.db.config.ts`'s own policy.
+`npx tsc --noEmit` and `npm run lint` exit 0 with no warnings, and `npm run build` compiles.
+`prisma migrate status`: **18 migrations**, up to date. Both coverage configs exit 0 and **no floor
+was touched**: db statements/lines rose 49.55 → 54.52 across A1, then settled at **53.55** once
+A1.5 added three `src/lib/studio/**` modules that the db suite does not import (they are at 100% on
+the UNIT run instead). Still 6.55pp clear of a 47 floor against a 2pp policy. The upward
+re-baseline that rise would justify is deliberately deferred to a single end-of-branch pass, per
+`vitest.db.config.ts`'s own frozen-floors policy.
 
 ### Read this before reusing the plan
 
@@ -122,9 +128,33 @@ by `sha256sum -c`.
   own, and what would change it. Verified rather than assumed: there is no `goldenSet.delete` or
   `deleteMany` anywhere in `src/`, `scripts/` or `prisma/`.
 
-### Not in this PR
+### And A1.5, the annotation studio (`133cc12`…`05bf29b`)
 
-- **A1.5**, the annotation studio — specced and planned, independent, still to build.
+Landed straight after A1 on the same branch. A composable panel shell — prompt, options, reasoning,
+output, verdict — each collapsible and re-orderable, with layout persisted to localStorage, plus
+A1's labelling view as its first composition.
+
+**The shape of it is the point.** This repo has no jsdom, so nothing in `src/components/` can be
+unit-tested at all. Every rule that can be silently wrong therefore lives in `src/lib/studio/**`,
+which both coverage configs measure and which sits at **100% statements**: span segmentation and
+its normalization contract, the word diff, and layout reconciliation against untrusted persisted
+state. `reconcile` never throws for any input — a studio that white-screens on a year-old
+localStorage entry is a bug the user cannot diagnose and can only fix by clearing site data.
+
+`docs/runbooks/studio-manual-verification.md` is the substitute for the tests the component layer
+cannot have. **All 12 rows were walked in a real browser** against `npm run dev` and local
+Postgres, and row 7 caught a defect that no unit test could have: the progression rail reported
+"not started" on a set whose only item had just been labelled, directly above the message saying
+so. Fixed and re-walked.
+
+Row 12 is the one that matters, and was checked at the network level: six readings driven through a
+3-item set with `retestIntervalItems: 0` so every item was served twice, first and second servings
+compared — identical key sets, no `round`, no prior score, no `expected`.
+
+Five of the plan's prescribed injections proved nothing until the fixtures behind them were fixed;
+each is recorded in that plan's own "Defects found during execution" table.
+
+### Not in this PR
 - **A2**, still hard-gated on rebaseline **T5**: RabbitMQ sits at 54.5% of its publisher-blocking
   watermark at idle with zero VMServiceScrapes and zero VMRules covering it.
 - The deploy + seed of the built image; `reasoning_content` capture (preflight Stage 5); roadmap

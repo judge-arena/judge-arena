@@ -12,10 +12,12 @@ and §8 (method notes), which remain accurate.
 > - **§1 "Where the code is"** — the branch is no longer at `e62501e`/`7afa2ac`; `HEAD` is
 >   `eef73fb`, and the latest migration is `20260818120000_v2h_human_verification`, **18 in the
 >   chain**, not 17.
-> - **§2 "Suites"** — now **533 unit / 633 db / 80 integration** (from 508 / 555 / 80). §9's
->   "write those numbers down" baseline was observed before starting and matched the table exactly.
-> - **§4 "What to do next"** — item 1 is closed. **A1.5 is now next**, and item 3 (spec A2) is
->   unchanged and still gated on T5, which is still open.
+> - **§2 "Suites"** — now **578 unit / 633 db / 80 integration** (from 508 / 555 / 80): 533 unit
+>   after A1, 578 after A1.5, whose work is all unit-tested library code. §9's "write those numbers
+>   down" baseline was observed before starting and matched the table exactly.
+> - **§4 "What to do next"** — items 1 AND 2 are closed. A1.5 landed straight after A1
+>   (`133cc12`…`05bf29b`), so **item 3, spec A2, is now next** — and it is still gated on T5,
+>   which is still open. That gate is now the only thing in front of A2.
 > - **§7 "Open decisions and hard gates"** — A2's *A1 gate* is closed: `GoldenLabel` has a writer.
 >   The **T5 RabbitMQ gate is untouched** and remains the reason A2 cannot start.
 > - **§5's annotator distinction was the right call and is now load-bearing in code**, not just in

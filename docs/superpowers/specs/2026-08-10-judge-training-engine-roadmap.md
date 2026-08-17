@@ -118,7 +118,7 @@ building Roadmap A end to end? Everything below is verified, not inferred.
 | 7 | RabbitMQ scrape/alerts/cap (T5) | **OPEN — gates A2 (this roadmap's A2, the calibration engine — not the lifecycle plan, which is now L2)** |
 | 4,5,6 | `startedAt`, format-compliance, token rollup | OPEN — needed during A |
 | — | **A1** | **done 2026-08-17** — `4ff04f4`…`eef73fb` on `feat/a0-golden-set-substrate`. `GoldenLabel` has its first writer; `v2h` adds the item revision log, assignment rows, `round` and `preference`. Exit gate met on all four clauses. Suites 533 unit / 633 db / 80 integration |
-| — | **A1.5** | **specced and planned 2026-08-17, not implemented.** The studio shell A2/A3 also consume. Independent of A1, which has now landed without it |
+| — | **A1.5** | **done 2026-08-17** — `133cc12`…`05bf29b`. The composable panel shell A2 and A3 also consume, plus A1's labelling view as its first composition. Every rule that can be silently wrong lives in `src/lib/studio/**` (100% statements) because this repo has no jsdom; `src/components/studio/**` is verified by `docs/runbooks/studio-manual-verification.md`, whose 12 rows were walked in a browser |
 | — | **A2** | **decisions recorded** (`2026-08-17-a2-calibration-and-reporting-decisions.md`), deliberately not specced — its design takes A1's real label data as an input |
 | — | Capturing `reasoning_content` | **OPEN, backlogged.** Chain-of-thought is discarded on every model call, so the studio's reasoning panel is structurally thin until it lands |
 | 11 | Golden sets absent from round-trip coverage | **done 2026-08-13** — A0's exit gate; classified in the `COVERAGE` map at `tests/db/config-roundtrip-fidelity.test.ts` |
@@ -441,8 +441,14 @@ survives an export/import round trip (which means adding it to the coverage list
 > execution"** table: three of its own snippets were wrong (one could not have passed under any
 > implementation) and two defects in the code were not predicted. Read that before reusing anything
 > from it. **Split:** the annotation studio — the panel shell A2 and A3 also consume — is **A1.5**,
-> still specced-and-planned only; A1 landed without it, since A1 owns the data and endpoints and
-> A1.5 owns the surface.
+> and it landed straight afterwards (`133cc12`…`05bf29b`). A1 owns the data and the endpoints,
+> A1.5 owns the surface; they were built in that order but neither depended on the other until
+> A1.5's last task, which composes A1's queue and submit routes into the labelling view.
+>
+> **A1.5's exit gate is met too**, and its five clauses are recorded against a walked browser
+> checklist rather than against tests — `src/components/**` cannot be unit-tested in this repo
+> (no jsdom), which is why every rule that can be silently wrong lives in `src/lib/studio/**`
+> instead. See `docs/runbooks/studio-manual-verification.md`.
 >
 > **Exit gate, all four clauses met.** A set reports a number with a stated method — statistic,
 > weighting, annotator count and the OVERLAP it was computed over. A deliberately inconsistent
