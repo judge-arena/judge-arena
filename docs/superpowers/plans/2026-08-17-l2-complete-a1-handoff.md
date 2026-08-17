@@ -57,10 +57,11 @@ rename and cannot move, because one lives in an applied migration Prisma checksu
 | `gitea/main` | `7306c2f` | The de-facto trunk. This branch is far ahead of it. |
 | `main` (local) | `a192300` | Badly stale. **Do not use as a base.** |
 
-**PR #12** is at `gitea.lab.asethi.com/trij/judge-arena/pulls/12`. Its body was rewritten to describe
-all three stages; the prepared text is in the scratchpad at `pr-12-body.md` if it needs restoring.
-Whether the PR is still open is not verifiable from `git ls-remote` — Gitea keeps `refs/pull/N/head`
-after close. Check the web UI.
+**PR #12** is at `gitea.lab.asethi.com/trij/judge-arena/pulls/12`. It opened describing **A0 only**
+and now carries A0 + L1 + L2 + R1 + R3, so its body is out of date unless the owner has pasted the
+replacement. **The prepared body is committed at `../pr-12-body.md`** — not left in a scratchpad,
+which does not survive a session. Whether the PR is still open is not verifiable from
+`git ls-remote` (Gitea keeps `refs/pull/N/head` after close); check the web UI.
 
 **Two other worktrees are not ours.** `/root/judge-arena` is on `feat/1c-deploy-readiness` with an
 uncommitted file; leave it alone. The others (`llamacpp`, `preflight`, `rebaseline`, `roundtrip`) are
