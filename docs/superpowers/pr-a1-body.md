@@ -32,6 +32,7 @@ the rows mean something.
 | `a3cdbf5` | **Queue + submit** — server-decided rounds, submit-side re-check. |
 | `eef73fb` | **Agreement, disagreements, history** — public iff published. |
 | `c440058` | Docs: A1 marked complete, with what the plan got wrong. |
+| `6528b32` | **R4 + R5** — the last two L1 residuals, closed. |
 
 ### The migration: three hand edits, and why each is invisible to tooling
 
@@ -108,9 +109,23 @@ break is not evidence" rule catching the plan.
 **31 injections were run and observed** across the seven tasks, every file restored byte-identical
 by `sha256sum -c`.
 
+### Also here: R4 and R5, the last two L1 residuals
+
+- **R4 — closed by DELETION.** `POST …/samples`' ownership select read `_count.samples` that nothing
+  consumed, carried with a comment warning the next reader not to filter it. A comment is the wrong
+  guard, and it was the only one available: **no behavioural test can protect a value nobody reads**,
+  so the warning could have gone stale with the suite green. The read is gone; its one load-bearing
+  fact moved to the `nextSampleIndex` call site, which is the only code that depends on it. **No new
+  test** — adding one would mean re-introducing a read to assert against, which is the defect.
+- **R5 — closed as ACCEPTED.** The pin-guard 409 is terminal, and that is now documented at
+  `findGoldenSetsPinningDataset` with why it follows from two rulings that are each correct on their
+  own, and what would change it. Verified rather than assumed: there is no `goldenSet.delete` or
+  `deleteMany` anywhere in `src/`, `scripts/` or `prisma/`.
+
 ### Not in this PR
 
 - **A1.5**, the annotation studio — specced and planned, independent, still to build.
 - **A2**, still hard-gated on rebaseline **T5**: RabbitMQ sits at 54.5% of its publisher-blocking
   watermark at idle with zero VMServiceScrapes and zero VMRules covering it.
-- Residuals **R4** and **R5**; the deploy + seed of the built image; `reasoning_content` capture.
+- The deploy + seed of the built image; `reasoning_content` capture (preflight Stage 5); roadmap
+  decisions #4 (perturbation set) and #7 (PPI config).
