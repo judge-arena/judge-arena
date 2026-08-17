@@ -8,6 +8,7 @@ import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib
 import { logger } from '@/lib/logger';
 import { fetchNRows, fetchDatasetMetadata } from '@/lib/huggingface';
 import { generateSlug } from '@/lib/config';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 // ── Dataset batch evaluation ──
 const createBatchSchema = z.object({
@@ -95,8 +96,17 @@ const evaluationInclude = {
   rubric: { select: { id: true, name: true, version: true, parentId: true } },
   project: { select: { id: true, name: true } },
   user: { select: { id: true, name: true, email: true } },
-  dataset: { select: { id: true, name: true, sampleCount: true } },
-  datasetSample: { select: { id: true, index: true, input: true, expected: true } },
+  // A1: both are OPTIONAL to-ONE relation args, so both carry a `where` and a
+  // hidden reference arrives as `null` — the shape `onDelete: SetNull` used to
+  // produce. `datasetSample` here carries `input`/`expected`, so unfiltered
+  // this served a withdrawn row's full text verbatim; and `liveSamplesOnly()`
+  // carries decision 16's parent clause, so hiding the whole CORPUS nulls the
+  // sample too, which is the only state `DELETE /api/datasets/[id]` produces.
+  dataset: { where: liveDatasetsOnly(), select: { id: true, name: true, sampleCount: true } },
+  datasetSample: {
+    where: liveSamplesOnly(),
+    select: { id: true, index: true, input: true, expected: true },
+  },
   modelSelections: {
     include: {
       modelConfig: {
@@ -266,6 +276,13 @@ export async function POST(request: Request) {
           ? persistedResponse || persistedPrompt || ''
           : persistedPrompt || '';
 
+      // Filtered like every other consumer of `evaluationInclude` — the filter
+      // lives in the shared include, so this site inherits it rather than
+      // opting in. It cannot yet produce a hidden reference anyway: a
+      // single-text evaluation sets neither `datasetId` nor `datasetSampleId`,
+      // so both sub-objects are already `null`. That reasoning stops holding
+      // the moment this create grows a dataset column, which is exactly why the
+      // filter belongs to the include and not to the call site.
       const evaluation = await prisma.evaluation.create({
         data: {
           projectId: data.projectId,
@@ -375,6 +392,10 @@ export async function POST(request: Request) {
 
       // Generate a unique slug for the dataset
       const dsSlug = generateSlug(`hf-${meta.name}`);
+      // MUST NOT BE TOMBSTONE-FILTERED (A1). Slug DEDUP against
+      // @@unique([userId, slug]) (schema.prisma:596) — same shape as
+      // datasets/route.ts's. A hidden dataset still owns its slug; filtered,
+      // this mints a duplicate and the create below raises P2002.
       const existingSlugs = (
         await prisma.dataset.findMany({
           where: { userId: session.user.id },
@@ -511,11 +532,34 @@ export async function POST(request: Request) {
     // ══════════════════════════════════════════════════════════════════════
     const batchData = createBatchSchema.parse(body);
 
-    // Load dataset + samples
-    const dataset = await prisma.dataset.findUnique({
-      where: { id: batchData.datasetId },
+    // Load dataset + samples.
+    //
+    // A1 / DECISION 15: `liveDatasetsOnly()` here is LOCAL rather than
+    // inherited. A batch create against a hidden corpus was already refused
+    // before this line existed — but only in the second order, because
+    // `liveSamplesOnly()` on the nested `samples` carries decision 16's parent
+    // arm, so the list came back empty and the route answered
+    // `400 'Dataset has no samples'` further down. That is a filter defined in
+    // another file, about another table, saying the wrong thing about why. Narrow
+    // decision 16's parent arm — which projects/[id]/export/route.ts calls "a
+    // plausible future change" in its own comment — and this becomes a WRITE
+    // path onto a deleted corpus with nothing failing anywhere near here.
+    //
+    // `findFirst`, not `findUnique`, for the reason datasets/[id]/route.ts
+    // spells out: a `DatasetWhereInput` cannot be spread into a
+    // `DatasetWhereUniqueInput`. `id` is still the primary key.
+    const dataset = await prisma.dataset.findFirst({
+      where: { id: batchData.datasetId, ...liveDatasetsOnly() },
       include: {
-        samples: { orderBy: { index: 'asc' } },
+        // One evaluation per LIVE sample. Unfiltered, every batch run scores
+        // rows the owner has already withdrawn, and the results look like
+        // ordinary judgments — indistinguishable after the fact from judgments
+        // on rows that were meant to be scored.
+        //
+        // NOT the include at the `dataset.create` in the HuggingFace path
+        // above: those rows are made in the same statement and cannot carry a
+        // tombstone.
+        samples: { where: liveSamplesOnly(), orderBy: { index: 'asc' } },
       },
     });
     if (!dataset) return NextResponse.json({ error: 'Dataset not found' }, { status: 404 });

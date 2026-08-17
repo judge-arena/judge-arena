@@ -3,6 +3,12 @@ import { join } from 'node:path';
 
 import type { PrismaClient } from '@prisma/client';
 
+// Relative, not `@/lib/tombstones`: this module is bundled by esbuild for the
+// runner image and run by `tsx` for `npm run db:seed`, and only the former is
+// given a `--tsconfig` to resolve `paths` from. `scripts/admin/create-user.ts`
+// reaches into src/ the same way and for the same reason.
+import { liveDatasetsOnly, liveSamplesOnly } from '../src/lib/tombstones';
+
 /**
  * JudgeBench — a public, read-only benchmark dataset seeded for every user.
  *
@@ -118,6 +124,52 @@ export async function seedJudgeBench(
 ) {
   const rows = flattenJudgeBench();
 
+  // A1 / DECISION 15 — A HIDDEN DATASET IS CLOSED TO WRITES, and this seeder
+  // is a write path onto a fixed id. It was the last one Decision 15 did not
+  // reach: all four HTTP verbs and the config importer already refuse, and
+  // without this the `update` arm below rewrote `visibility` and
+  // `sampleCount` on a deleted corpus, left `isTombstone: true` in place,
+  // printed a success line and exited 0.
+  //
+  // TWO READS, not one, because "absent" and "hidden" need different answers:
+  // absent is the ordinary first-run case and must create, hidden must
+  // refuse. The liveness half spreads `liveDatasetsOnly()` rather than
+  // spelling the tombstone predicate here — src/lib/tombstones.ts is the
+  // single definition of hidden, and a seeder with its own copy of it is
+  // exactly how the two drift apart.
+  //
+  // IT THROWS rather than warning and continuing, unlike the config
+  // importer's skip. The importer processes a document of independent
+  // entities and has a per-item diff report to carry a refusal in; this has
+  // neither, and its caller (`seedAll`) prints "✅ Database seeded
+  // successfully!" unconditionally afterwards, so a warning would be
+  // contradicted two lines later. A non-zero exit is the only refusal a
+  // deploy-time Job actually surfaces. The cost is stated plainly: a
+  // deployment whose `judgebench-v1` is deleted gets a failing seed step
+  // until an operator acts, which is the intended signal and not collateral —
+  // this call is the LAST thing `seedAll` does, so everything before it has
+  // already committed idempotently and a re-run after the repair is a no-op.
+  const existing = await client.dataset.findUnique({
+    where: { id: JUDGEBENCH_DATASET_ID },
+    select: { id: true },
+  });
+  if (existing) {
+    const live = await client.dataset.findFirst({
+      where: { id: JUDGEBENCH_DATASET_ID, ...liveDatasetsOnly() },
+      select: { id: true },
+    });
+    if (!live) {
+      throw new Error(
+        `JudgeBench (${JUDGEBENCH_DATASET_ID}) is DELETED on this instance and is closed to writes ` +
+          '(A1 tombstone overlay, decision 15). Nothing was seeded for it — not the samples, and not ' +
+          'visibility or sampleCount. Re-seeding cannot un-delete a dataset, deliberately: there is no ' +
+          'restore verb in the product yet, and a seeder that silently resurrected a corpus an admin ' +
+          'deleted would be a worse defect than this refusal. To repair, remove the hiding row and ' +
+          `re-run: DELETE FROM "Tombstone" WHERE "datasetId" = '${JUDGEBENCH_DATASET_ID}';`
+      );
+    }
+  }
+
   const dataset = await client.dataset.upsert({
     where: { id: JUDGEBENCH_DATASET_ID },
     // `update` re-asserts the public fields on every seed so a deployment
@@ -128,11 +180,20 @@ export async function seedJudgeBench(
     // `publishedAt` is NOT re-asserted here, deliberately: it records when
     // this dataset was first published, and re-stamping it on every seed
     // would walk that date forward forever. The create path below sets it
-    // once. Visibility and sampleCount ARE re-asserted, so a row that predates
-    // those fields (or was flipped private by hand) is corrected.
+    // once. Visibility IS re-asserted, so a row that predates that field (or
+    // was flipped private by hand) is corrected.
+    //
+    // `sampleCount` is NOT re-asserted here any more, and that is A1's doing.
+    // It used to be `rows.length` — the vendored file's 620 — which made this
+    // the one writer in the tree meaning "all rows" while the other seven mean
+    // LIVE rows. Deleting one JudgeBench sample and re-seeding then wrote 620
+    // over a live count of 619, and `toPublicDataset` reads the stored rung
+    // FIRST (`sampleCount ?? sampleTotal ?? _count.samples`), so the golden-set
+    // import picker advertised 620 while `POST /api/golden-sets` imported 619 —
+    // verbatim the failure `samples/route.ts` says this column exists to
+    // prevent. It is written once, below, from a live count, on both arms.
     update: {
       visibility: 'public',
-      sampleCount: rows.length,
     },
     create: {
       id: JUDGEBENCH_DATASET_ID,
@@ -183,6 +244,17 @@ export async function seedJudgeBench(
   // delete-then-insert: DatasetSample rows are referenced by Evaluation, so
   // deleting them on every re-seed would either fail on the FK or orphan real
   // evaluation history. Re-seeding is therefore additive and safe.
+  //
+  // ADDITIVE NO LONGER MEANS RESTORATIVE, post-A1. Before the overlay a
+  // deleted sample left the table and this insert re-created it, so a re-seed
+  // repaired the corpus. Now the hidden row survives HOLDING ITS ORDINAL,
+  // `skipDuplicates` skips the conflict, and nothing is restored. That is the
+  // intended outcome and not a gap to close here: `restoreSample`
+  // (src/lib/tombstones.ts) has no caller anywhere in the product, and a
+  // seeder quietly un-deleting rows an owner withdrew would be the same
+  // resurrection the config-export comments call worse than a leak. What
+  // changes is that the skip is now REPORTED rather than silent — see the
+  // live count and the warning below.
   const created = await client.datasetSample.createMany({
     data: rows.map((row, index) => ({
       datasetId: dataset.id,
@@ -205,8 +277,44 @@ export async function seedJudgeBench(
     skipDuplicates: true,
   });
 
+  // `sampleCount` MEANS LIVE ROWS here, exactly as it does at the other seven
+  // writers (datasets/route.ts's POST, dataset-versions.ts, refresh/route.ts,
+  // the three samples verbs, config/import). `rows.length` is the vendored
+  // file's length, which is the row count on disk and not the live count the
+  // moment anything is hidden.
+  //
+  // Written after `createMany`, not in the `upsert` arms, because that is the
+  // only point at which the live count is knowable: the insert is what decides
+  // how many of the 620 ordinals exist, and the tombstones are what decide how
+  // many of those are visible.
+  //
+  // Conditional so an unchanged re-seed writes nothing at all — an
+  // unconditional `update` would bump `updatedAt` on every seed and reshuffle
+  // every `orderBy: { updatedAt: 'desc' }` dataset list for no reason.
+  const live = await client.datasetSample.count({
+    where: { datasetId: dataset.id, ...liveSamplesOnly() },
+  });
+  const onDisk = await client.datasetSample.count({ where: { datasetId: dataset.id } });
+
+  if (dataset.sampleCount !== live) {
+    await client.dataset.update({
+      where: { id: dataset.id },
+      data: { sampleCount: live },
+    });
+  }
+
   console.log(
-    `  ✓ Created dataset: ${dataset.name} (${created.count} new samples, ${rows.length} total)`
+    `  ✓ Created dataset: ${dataset.name} (${created.count} new samples, ${live} live of ${onDisk} on disk)`
   );
+
+  if (onDisk > live) {
+    console.warn(
+      `  ⚠ ${onDisk - live} JudgeBench sample(s) are deleted on this instance and were NOT restored ` +
+        'by this re-seed — a hidden row keeps its ordinal, so the insert above skipped it as a ' +
+        `duplicate. sampleCount was written as ${live}, the live count. To restore them, clear their ` +
+        'rows in "Tombstone" and re-run.'
+    );
+  }
+
   return dataset;
 }

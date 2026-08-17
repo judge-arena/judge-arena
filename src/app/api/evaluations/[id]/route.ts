@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 const updateEvaluationSchema = z.object({
   rubricId: z.string().nullable().optional(),
@@ -55,8 +56,14 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
         },
         project: { select: { id: true, name: true } },
         user: { select: { id: true, name: true, email: true } },
-        dataset: { select: { id: true, name: true, sampleCount: true } },
-        datasetSample: { select: { id: true, index: true, input: true, expected: true } },
+        // A1: both are OPTIONAL to-ONE args, so both carry a `where` and a
+        // hidden reference comes back `null`. See the nested-to-ONE block in
+        // src/lib/tombstones.ts.
+        dataset: { where: liveDatasetsOnly(), select: { id: true, name: true, sampleCount: true } },
+        datasetSample: {
+          where: liveSamplesOnly(),
+          select: { id: true, index: true, input: true, expected: true },
+        },
         modelSelections: {
           include: {
             modelConfig: {
@@ -168,8 +175,13 @@ export async function PATCH(request: Request, props: { params: Promise<{ id: str
         include: {
           rubric: { include: { criteria: { orderBy: { order: 'asc' } } } },
           project: { select: { id: true, name: true } },
-          dataset: { select: { id: true, name: true, sampleCount: true } },
-          datasetSample: { select: { id: true, index: true, input: true, expected: true } },
+          // A1, same disposition as the GET above — the PATCH response
+          // re-renders the same page.
+          dataset: { where: liveDatasetsOnly(), select: { id: true, name: true, sampleCount: true } },
+          datasetSample: {
+            where: liveSamplesOnly(),
+            select: { id: true, index: true, input: true, expected: true },
+          },
           modelSelections: {
             include: {
               modelConfig: {

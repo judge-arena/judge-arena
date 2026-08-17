@@ -113,6 +113,26 @@ function computeSummary(evaluations: EvaluationForSummary[]): DatasetEvaluationS
  * dataset-refresh-update.ts, used by the separate HF-refresh route, is
  * untouched — it has its own preserve-evaluationSummary contract and isn't
  * part of this race.)
+ *
+ * MUST NOT BE TOMBSTONE-FILTERED (A1) — and, uniquely in that class, CANNOT
+ * BE, and it is the only member of the class with that property. The eight
+ * original members are Prisma reads that would compile perfectly well with the
+ * filter spread in and break a WRITE at runtime with P2002; the three added in
+ * wave 1 (`GoldenSet.dataset`, in golden-sets/shared.ts and
+ * config/export/route.ts) are REQUIRED to-one relation args, which Prisma
+ * refuses a `where` on anyway — and must not be nulled by any other means
+ * either, because the pin guard makes a hidden bound corpus unreachable and
+ * nulling one would export a fabricated slug. This one cannot be filtered at
+ * all: it is raw SQL, so there is no arg to refuse and no result to null.
+ *
+ * TOMBSTONE OVERLAY (A1): the row lock below is `$queryRaw`, and the only
+ * shape src/lib/tombstones.ts offers is unavailable to it. Both filter helpers
+ * compile to Prisma `where` fragments — spread into a top-level `where` or
+ * into a nested relation arg, it makes no difference — and a `where` fragment
+ * cannot reach raw SQL. So A1's rule does not apply to this statement, and
+ * nobody should try to make it. It selects one Dataset by primary key for an
+ * UPDATE it is about to make; hiding the dataset does not change which row
+ * that is.
  */
 export async function refreshDatasetEvaluationSummary(datasetId: string): Promise<void> {
   const commit = await prisma.$transaction(async (tx) => {
@@ -122,6 +142,39 @@ export async function refreshDatasetEvaluationSummary(datasetId: string): Promis
     const dataset = rows[0];
     if (!dataset) return null;
 
+    // THE SUMMARY DESCRIBES THE EVALUATIONS, NOT THE LIVE CORPUS, and that is
+    // a decision rather than an oversight (A1 wave 1 asked for it either way).
+    //
+    // This read is deliberately NOT narrowed to evaluations of live samples.
+    // Four reasons, in order of weight:
+    //
+    //   0. NOT EVERY EVALUATION HERE HAS A SAMPLE. `Evaluation.datasetId` and
+    //      `.datasetSampleId` are independent nullable columns, and the
+    //      summary fixtures in tests/db/leaderboard.test.ts set the first
+    //      without the second — a real shape. Any `datasetSample: { is: … }`
+    //      narrowing drops those rows outright: measured, it took three
+    //      pre-existing summary tests from 1 to 0 before it touched a hidden
+    //      row at all.
+    //   1. Its population is `Evaluation`, which A1 never hides. Those rows
+    //      stay listed on GET /api/evaluations and on the project page after a
+    //      sample is withdrawn — an evaluation carries its own copy of the
+    //      text it judged. A summary that excluded them would disagree with
+    //      the very lists the instance still shows.
+    //   2. A judgment that was performed was performed. Hiding the source row
+    //      afterwards withdraws the row from the corpus; it does not retract
+    //      the measurement, and averaging as if it had never happened would
+    //      silently rewrite history that `Dataset.remoteMetadata` PERSISTS.
+    //   3. `liveSamplesOnly()` carries decision 16's parent arm, so spreading
+    //      it here would make hiding a DATASET zero this summary — destroying
+    //      a persisted aggregate on a delete the overlay calls reversible, with
+    //      nothing to recompute it from if the dataset ever comes back.
+    //
+    // THE COST, stated so nobody rediscovers it as a bug:
+    // `evaluationSummary.samplesWithModelScores` can exceed the dataset's live
+    // `sampleCount`, because they count different things — judgments made
+    // versus rows still in the corpus. Pinned by 'a HIDDEN sample's judgments
+    // still count' in tests/db/leaderboard.test.ts, beside the other summary
+    // tests.
     const evaluations = await tx.evaluation.findMany({
       where: { datasetId },
       select: {

@@ -28,8 +28,15 @@ import type {
   JudgmentResult,
   RunProviderResponseInput,
   RespondResult,
+  PairwiseResult,
 } from './registry';
-import { prepareJudgmentCall, executeJudgmentCall, prepareRespondCall, executeRespondCall } from './registry';
+import {
+  prepareJudgmentCall,
+  executeJudgmentCall,
+  executePairwiseCall,
+  prepareRespondCall,
+  executeRespondCall,
+} from './registry';
 import { withRetry } from './resilience';
 import { classify, ProviderError } from './errors';
 import { getBreaker } from './breaker-redis';
@@ -127,11 +134,25 @@ export async function executeRespond(input: RunProviderResponseInput): Promise<R
   return callThroughResilience(input.judgeVersion.servingBackend, key, () => executeRespondCall(prepared));
 }
 
+/**
+ * Execute a PAIRWISE judgment through the registry, wrapped with retry +
+ * circuit breaker. Same `prepare` split as `executeJudgment` — and the same
+ * `prepareJudgmentCall`, because the branch that makes a call pairwise
+ * lives in `render.ts` and is driven by `input.template.protocol`, not by
+ * a separate preparation path.
+ */
+export async function executePairwise(input: RunProviderJudgmentInput): Promise<PairwiseResult> {
+  const prepared = prepareJudgmentCall(input);
+  const key = breakerKey(input.judgeVersion.servingBackend, input.endpoint.endpoint, prepared.modelId);
+  return callThroughResilience(input.judgeVersion.servingBackend, key, () => executePairwiseCall(prepared));
+}
+
 export type {
   RunProviderJudgmentInput,
   JudgmentResult,
   RunProviderResponseInput,
   RespondResult,
+  PairwiseResult,
 };
 export {
   getDescriptor,

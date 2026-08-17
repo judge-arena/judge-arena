@@ -8,6 +8,7 @@ import {
   dbRubricToConfig,
   dbModelToConfig,
   dbDatasetToConfig,
+  dbGoldenSetToConfig,
   configDocumentSchema,
 } from '@/lib/config';
 
@@ -76,6 +77,7 @@ describe('config', () => {
           { slug: 'claude', name: 'Claude', provider: 'anthropic', modelId: 'claude-3-haiku', isActive: true },
         ],
         datasets: [],
+        goldenSets: [],
       };
 
       const yaml = serializeConfig(config);
@@ -106,6 +108,7 @@ describe('config', () => {
           { slug: 'self-hosted-judge', name: 'Self-Hosted Judge', provider: 'vllm', modelId: 'meta-llama/Llama-3-70b-Instruct', isActive: true },
         ],
         datasets: [],
+        goldenSets: [],
       };
 
       const yaml = serializeConfig(config);
@@ -196,6 +199,128 @@ describe('config', () => {
         tags: '["nlp","benchmark"]',
       });
       expect(result.tags).toEqual(['nlp', 'benchmark']);
+    });
+
+    it('dbGoldenSetToConfig embeds items and candidates and emits the dataset as a slug', () => {
+      const result = dbGoldenSetToConfig({
+        slug: 'gs-alpha',
+        name: 'Golden Set Alpha',
+        description: 'a description',
+        visibility: 'private',
+        protocol: 'pairwise',
+        version: 2,
+        dataset: { slug: 'ds-alpha', name: 'Dataset Alpha' },
+        items: [
+          {
+            index: 0,
+            inputText: 'who wrote hamlet',
+            promptText: null,
+            responseText: null,
+            expected: 'A>B',
+            candidates: [
+              { position: 0, promptText: null, responseText: 'shakespeare', label: 'A' },
+              { position: 1, promptText: null, responseText: 'bacon', label: 'B' },
+            ],
+          },
+        ],
+      });
+
+      expect(result).toEqual({
+        slug: 'gs-alpha',
+        name: 'Golden Set Alpha',
+        description: 'a description',
+        visibility: 'private',
+        protocol: 'pairwise',
+        datasetSlug: 'ds-alpha',
+        version: 2,
+        items: [
+          {
+            index: 0,
+            inputText: 'who wrote hamlet',
+            expected: 'A>B',
+            candidates: [
+              { position: 0, responseText: 'shakespeare', label: 'A' },
+              { position: 1, responseText: 'bacon', label: 'B' },
+            ],
+          },
+        ],
+      });
+    });
+
+    it('dbGoldenSetToConfig falls back to a generated slug for both the set and its dataset', () => {
+      const result = dbGoldenSetToConfig({
+        name: 'Auto Slug Set',
+        visibility: 'public',
+        protocol: 'pointwise',
+        dataset: { slug: null, name: 'Auto Slug Dataset' },
+        items: [],
+      });
+      expect(result.slug).toBe('auto-slug-set');
+      expect(result.datasetSlug).toBe('auto-slug-dataset');
+      expect(result.version).toBe(1);
+      expect(result.items).toEqual([]);
+    });
+
+    it('dbGoldenSetToConfig emits item- and candidate-level prompt/response text when they are set, and omits empty ones', () => {
+      // The other direction of every conditional in the converter: the case
+      // above has promptText/responseText null on the item and no prompt on
+      // the candidates, which is what all three protocol mappings produce
+      // today (src/lib/golden-sets.ts). A hand-built or future set can carry
+      // them, and they have to survive the export.
+      const result = dbGoldenSetToConfig({
+        slug: 'gs-verbose',
+        name: 'Verbose Set',
+        protocol: 'pointwise',
+        dataset: { slug: 'ds-verbose' },
+        items: [
+          {
+            index: 3,
+            inputText: 'summarise this',
+            promptText: 'You are a summariser.',
+            responseText: 'a summary',
+            expected: null,
+            candidates: [
+              { position: 0, promptText: 'candidate prompt', responseText: 'candidate response', label: null },
+            ],
+          },
+        ],
+      });
+
+      expect(result.items[0]).toEqual({
+        index: 3,
+        inputText: 'summarise this',
+        promptText: 'You are a summariser.',
+        responseText: 'a summary',
+        candidates: [{ position: 0, promptText: 'candidate prompt', responseText: 'candidate response' }],
+      });
+      // Absent, not emitted as null — `goldenItemSchema` types these optional.
+      expect(result.items[0]).not.toHaveProperty('expected');
+      expect(result.items[0].candidates[0]).not.toHaveProperty('label');
+    });
+
+    it('configDocumentSchema accepts a goldenSets section and defaults it to []', () => {
+      const withGolden = configDocumentSchema.safeParse({
+        version: '1.0',
+        exportedAt: '2026-01-01',
+        goldenSets: [
+          {
+            slug: 'gs-alpha',
+            name: 'Golden Set Alpha',
+            protocol: 'pairwise',
+            datasetSlug: 'ds-alpha',
+            items: [{ index: 0, inputText: 'q', candidates: [{ position: 0, responseText: 'r' }] }],
+          },
+        ],
+      });
+      expect(withGolden.success).toBe(true);
+      if (withGolden.success) {
+        expect(withGolden.data.goldenSets[0].version).toBe(1);
+        expect(withGolden.data.goldenSets[0].visibility).toBe('private');
+      }
+
+      const withoutGolden = configDocumentSchema.safeParse({ version: '1.0', exportedAt: '2026-01-01' });
+      expect(withoutGolden.success).toBe(true);
+      if (withoutGolden.success) expect(withoutGolden.data.goldenSets).toEqual([]);
     });
   });
 });

@@ -50,6 +50,28 @@ async function mkModelConfig(userId: string) {
   });
 }
 
+// A0: GoldenSet.datasetId is required and `onDelete: Restrict`. The corpus is
+// owned by a SEPARATE user and marked public, mirroring the shape POST
+// /api/golden-sets admits (platform-owned public datasets) — deleteUserAccount
+// hard-deletes a departing user's PRIVATE datasets, which would abort on the
+// Restrict FK if the fixture put the corpus under the same owner. That
+// same-owner combination is REACHABLE — see the note on mkGoldenSet below —
+// and is a gap in deleteUserAccount, not in this fixture.
+let goldenCorpusCounter = 0;
+
+async function mkGoldenCorpus() {
+  const platformUser = await mkUser();
+  goldenCorpusCounter += 1;
+  return db.dataset.create({
+    data: {
+      name: `fixture-golden-corpus-${goldenCorpusCounter}`,
+      userId: platformUser.id,
+      source: 'local',
+      visibility: 'public',
+    },
+  });
+}
+
 // A CalibrationRun needs a JudgeModelVersion; kept file-local per the
 // established "shared only once actually shared" convention — same shape as
 // tests/db/meta-eval.test.ts's own copy.
@@ -71,6 +93,60 @@ async function mkJudgeModelVersion() {
       ordinal: 1,
       servingBackend: 'openai',
       protocolSupport: { pointwise: ['score'] },
+    },
+  });
+}
+
+// A GoldenSet needs a source Dataset and a protocol as of the v2d golden
+// substrate migration. The dataset is deliberately owned by a SEPARATE user:
+// golden sets are built from platform-curated public corpora, and a source
+// dataset owned by the *deleting* user would be hard-deleted by step 4 of
+// deleteUserAccount before step 5 ever runs — aborting on
+// GoldenSet.datasetId's Restrict FK.
+//
+// THE SAME-OWNER COMBINATION IS REACHABLE, and an earlier version of this
+// comment claimed otherwise ("POST /api/golden-sets only accepts
+// platform-owned public datasets, so that combination is unreachable through
+// the API"). POST /api/golden-sets does restrict its source that way, but it
+// is not the only creation path: POST /api/config/import resolves a set's
+// corpus to THIS USER's dataset first (arm (a) of its dataset resolution),
+// and one document can carry both a private dataset and a golden set over it.
+// So a user can end up owning a private dataset pinned by their own golden
+// set, which is exactly the shape this fixture avoids.
+//
+// It is left avoided here on purpose. `deleteUserAccount` has NO CALLERS
+// today — there is no account-deletion route — so the P2003 that shape would
+// raise cannot fire in production, and partitioning step 4 to leave pinned
+// private datasets alone is a change that belongs with whoever wires the
+// route up, tested against the real caller rather than inferred here.
+let goldenSetCounter = 0;
+
+async function mkGoldenSet(
+  ownerId: string,
+  overrides: Partial<Omit<Prisma.GoldenSetUncheckedCreateInput, 'ownerId'>> = {}
+) {
+  goldenSetCounter += 1;
+  const platformUser = await mkUser();
+  const dataset = await db.dataset.create({
+    data: {
+      name: `fixture-golden-source-${goldenSetCounter}`,
+      userId: platformUser.id,
+      visibility: 'public',
+    },
+  });
+  return db.goldenSet.create({
+    data: {
+      name: `fixture-golden-set-${goldenSetCounter}`,
+      // GoldenSet has a hand-edited @@unique([ownerId, slug]) with NULLS NOT
+      // DISTINCT (schema.prisma:689-696) — at most one slug-NULL set per
+      // owner. Default a real slug here so any caller building two or more
+      // sets under the same owner through this helper doesn't have to
+      // remember to supply one to avoid a P2002.
+      slug: `fixture-golden-set-${goldenSetCounter}`,
+      ownerId,
+      datasetId: dataset.id,
+      protocol: 'pairwise',
+      ...overrides,
     },
   });
 }
@@ -335,24 +411,45 @@ describe('deleteUserAccount (P1.7 account deletion)', () => {
     expect(result.reassigned.datasets).toBe(1);
   });
 
-  it('deletes a private GoldenSet but reassigns a public one', async () => {
+  it('tombstones a private GoldenSet but reassigns a public one', async () => {
     const archiveUser = await mkUser();
     const owner = await mkUser();
+    const corpus = await mkGoldenCorpus();
     const privateGoldenSet = await db.goldenSet.create({
-      data: { name: 'fixture-private-gs', ownerId: owner.id },
+      data: {
+        name: 'fixture-private-gs',
+        slug: 'fixture-private-gs',
+        ownerId: owner.id,
+        datasetId: corpus.id,
+        protocol: 'pointwise',
+      },
     });
     const publicGoldenSet = await db.goldenSet.create({
-      data: { name: 'fixture-public-gs', ownerId: owner.id, visibility: 'public' },
+      data: {
+        name: 'fixture-public-gs',
+        slug: 'fixture-public-gs',
+        ownerId: owner.id,
+        visibility: 'public',
+        datasetId: corpus.id,
+        protocol: 'pointwise',
+      },
     });
 
     const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
 
-    expect(await db.goldenSet.findUnique({ where: { id: privateGoldenSet.id } })).toBeNull();
+    // Private GoldenSets are never hard-deleted (see account-deletion.ts
+    // step 5) — the row is kept and tombstoned instead.
+    const survivedPrivate = await db.goldenSet.findUnique({ where: { id: privateGoldenSet.id } });
+    expect(survivedPrivate).not.toBeNull();
+    expect(survivedPrivate?.tombstonedAt).not.toBeNull();
+    expect(survivedPrivate?.retiredAt).toBeNull();
+
     const survived = await db.goldenSet.findUnique({ where: { id: publicGoldenSet.id } });
     expect(survived).not.toBeNull();
     expect(survived?.ownerId).toBe(archiveUser.id);
 
-    expect(result.purged.goldenSets).toBe(1);
+    expect(result.purged.goldenSets).toBe(0);
+    expect(result.retired.goldenSets).toBe(1);
     expect(result.reassigned.goldenSets).toBe(1);
   });
 
@@ -363,8 +460,15 @@ describe('deleteUserAccount (P1.7 account deletion)', () => {
     async () => {
       const archiveUser = await mkUser();
       const owner = await mkUser();
+      const corpus = await mkGoldenCorpus();
       const goldenSet = await db.goldenSet.create({
-        data: { name: 'fixture-golden-set-with-run', ownerId: owner.id },
+        data: {
+          name: 'fixture-golden-set-with-run',
+          slug: 'fixture-golden-set-with-run',
+          ownerId: owner.id,
+          datasetId: corpus.id,
+          protocol: 'pointwise',
+        },
       });
       const judgeModelVersion = await mkJudgeModelVersion();
       const calibrationRun = await db.calibrationRun.create({
@@ -396,19 +500,87 @@ describe('deleteUserAccount (P1.7 account deletion)', () => {
     }
   );
 
-  it('hard-deletes a private GoldenSet with no CalibrationRun referencing it', async () => {
-    const archiveUser = await mkUser();
-    const owner = await mkUser();
-    const goldenSet = await db.goldenSet.create({
-      data: { name: 'fixture-golden-set-no-run', ownerId: owner.id },
-    });
+  it(
+    'tombstones (sets tombstonedAt, keeps the row) a private GoldenSet no CalibrationRun ' +
+      'references, instead of hard-deleting it — and leaves retiredAt NULL, because the two ' +
+      'columns are not synonyms: retiredAt means out-of-circulation-but-still-valid-ground-' +
+      'truth (a product verb), tombstonedAt means pending-purge (an account-lifecycle verb)',
+    async () => {
+      const archiveUser = await mkUser();
+      const owner = await mkUser();
+      const goldenSet = await mkGoldenSet(owner.id, { name: 'fixture-golden-set-no-run' });
 
-    const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
+      const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
 
-    expect(await db.goldenSet.findUnique({ where: { id: goldenSet.id } })).toBeNull();
-    expect(result.purged.goldenSets).toBe(1);
-    expect(result.retired.goldenSets ?? 0).toBe(0);
-  });
+      expect(await db.user.findUnique({ where: { id: owner.id } })).toBeNull();
+
+      const survived = await db.goldenSet.findUnique({ where: { id: goldenSet.id } });
+      expect(survived).not.toBeNull();
+      expect(survived?.tombstonedAt).not.toBeNull();
+      // The load-bearing assertion: the tombstone write must stamp
+      // `tombstonedAt`, not `retiredAt`, so the two account-lifecycle-vs-
+      // product states stay distinguishable at the row level — and they are
+      // now read differently as well as written differently. Every golden-set
+      // read path spreads `goldenSetLifecycleWhere` (src/lib/golden-sets.ts),
+      // whose `?includeRetired=true` arm still pins `tombstonedAt: null`, so
+      // stamping the wrong column here would hand this row back to callers
+      // through a flag that must never reach a purge-pending set.
+      expect(survived?.retiredAt).toBeNull();
+      // GoldenSet.ownerId is `onDelete: SetNull` — the kept row needs no
+      // ownership reassignment to survive the final user.delete().
+      expect(survived?.ownerId).toBeNull();
+
+      // Nothing in deleteUserAccount deletes a GoldenSet row any more.
+      expect(result.purged.goldenSets).toBe(0);
+      expect(result.retired.goldenSets).toBe(1);
+    }
+  );
+
+  it(
+    'tombstones a FORKED CHILD golden set and its parent together and keeps the lineage edge — ' +
+      'hard-deleting the parent would abort the whole transaction on GoldenSet.parentId ' +
+      "(`onDelete: NoAction`) with a P2003, leaving the user row undeleted",
+    async () => {
+      const archiveUser = await mkUser();
+      const owner = await mkUser();
+      const parent = await mkGoldenSet(owner.id, { name: 'fixture-golden-parent' });
+      // GoldenSet has a hand-edited @@unique([ownerId, slug]) with NULLS NOT
+      // DISTINCT (schema.prisma:689-696) — at most one slug-NULL set per
+      // owner. `mkGoldenSet` defaults the parent to a real (non-NULL) slug,
+      // so the child below only needs its OWN distinct slug to avoid
+      // colliding with the parent's — matching the established convention
+      // of explicit slugs whenever a fixture puts two+ sets under one owner.
+      const child = await db.goldenSet.create({
+        data: {
+          name: 'fixture-golden-child',
+          slug: 'fixture-golden-child',
+          ownerId: owner.id,
+          datasetId: parent.datasetId,
+          protocol: parent.protocol,
+          parentId: parent.id,
+          version: 2,
+        },
+      });
+
+      const result = await deleteUserAccount(owner.id, { archiveUserId: archiveUser.id });
+
+      // The whole point: the transaction committed.
+      expect(await db.user.findUnique({ where: { id: owner.id } })).toBeNull();
+
+      const survivedParent = await db.goldenSet.findUnique({ where: { id: parent.id } });
+      const survivedChild = await db.goldenSet.findUnique({ where: { id: child.id } });
+      expect(survivedParent?.tombstonedAt).not.toBeNull();
+      expect(survivedChild?.tombstonedAt).not.toBeNull();
+
+      // Lineage survives the tombstone — the later purge wave needs it to
+      // delete children before parents.
+      expect(survivedChild?.parentId).toBe(parent.id);
+      expect(survivedChild?.version).toBe(2);
+
+      expect(result.purged.goldenSets).toBe(0);
+      expect(result.retired.goldenSets).toBe(2);
+    }
+  );
 
   it(
     '1b-prereq (c): purged/reassigned/retired result maps always carry the SAME full set of ' +

@@ -244,3 +244,74 @@ describe('Config import/export — models on the catalog+endpoint domain (Task 1
     expect(await db.modelConfig.count()).toBe(0);
   });
 });
+
+/**
+ * A1 wave 1 — the importer's dataset-CREATE branch is the one hide-then-write
+ * pair in the tree that is not a single transaction: `dataset.create` (which
+ * writes `sampleCount: samples.length`) and `datasetSample.createMany` (which
+ * writes the document's `index` verbatim) are two round trips with nothing
+ * between them. A duplicate index therefore reached P2002 in the SECOND, after
+ * the first had already committed — a 500 over a dataset row claiming N
+ * samples with zero sample rows behind it.
+ *
+ * Pre-existing in substance, and previously unlikely because exports were
+ * dense. A1 makes a filtered export GAPPED, which makes hand-renumbering a
+ * config document a natural thing to do and a collision a natural mistake.
+ */
+describe('Config import — duplicate sample indices are refused at the schema (A1 wave 1)', () => {
+  beforeEach(async () => {
+    await truncateAll();
+  });
+
+  function datasetDoc(indices: number[]) {
+    return JSON.stringify({
+      version: '1.0',
+      exportedAt: new Date().toISOString(),
+      projects: [],
+      rubrics: [],
+      models: [],
+      datasets: [
+        {
+          slug: 'dup-index-corpus',
+          name: 'Dup Index Corpus',
+          source: 'local',
+          visibility: 'private',
+          samples: indices.map((index) => ({ index, input: `row-${index}` })),
+        },
+      ],
+    });
+  }
+
+  it('400s naming the field, and leaves NO half-applied dataset behind', async () => {
+    const user = await mkUser();
+    mockSessionFor(user);
+
+    const res = await importConfig(importRequest(datasetDoc([0, 0, 1])));
+
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(await res.json())).toContain('duplicate index');
+
+    // The shape the 500 used to leave: a dataset row whose stored count
+    // describes rows that are not there.
+    await expect(db.dataset.count({ where: { slug: 'dup-index-corpus' } })).resolves.toBe(0);
+    await expect(db.datasetSample.count()).resolves.toBe(0);
+  });
+
+  it('a GAPPED index sequence still imports — the refine rejects duplicates, not holes', async () => {
+    // A filtered export emits gaps by construction (`config.ts` writes
+    // `index: s.index` verbatim from a `liveSamplesOnly()` read), so a refine
+    // that demanded a dense 0..n-1 run would break every export A1 produces.
+    const user = await mkUser();
+    mockSessionFor(user);
+
+    const res = await importConfig(importRequest(datasetDoc([0, 2, 7])));
+
+    expect(res.status).toBe(200);
+    const created = await db.dataset.findFirstOrThrow({
+      where: { slug: 'dup-index-corpus' },
+      include: { samples: { orderBy: { index: 'asc' } } },
+    });
+    expect(created.samples.map((s) => s.index)).toEqual([0, 2, 7]);
+    expect(created.sampleCount).toBe(3);
+  });
+});

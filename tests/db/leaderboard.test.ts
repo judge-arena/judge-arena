@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { db, truncateAll, mkUser } from './helpers';
 import { GET } from '@/app/api/leaderboard/route';
 import { refreshDatasetEvaluationSummary } from '@/lib/dataset-evaluation-summary';
+import { tombstoneDataset, tombstoneSample } from '@/lib/tombstones';
 
 // ─── Local fixture helpers ──────────────────────────────────────────────────
 // Project/Evaluation/EvaluationRun/ModelJudgment/HumanJudgment/Dataset chain
@@ -289,5 +290,93 @@ describe('Dataset evaluation summary: averageHumanScore excludes respond-mode pl
     expect(summary.sampleCount).toBe(2);
     expect(summary.samplesWithHumanScores).toBe(1);
     expect(summary.averageHumanScore).toBe(4);
+  });
+});
+
+/**
+ * A1 wave 1 — a decision, pinned rather than left to be rediscovered.
+ *
+ * `refreshDatasetEvaluationSummary` aggregates over `Evaluation`, which the
+ * tombstone overlay never hides, and writes the result to
+ * `Dataset.remoteMetadata` where it PERSISTS. Whether hiding a sample should
+ * retract the judgments made against it was undecided and untested either way.
+ * The decision is that it should not — the reasoning is in the module — and
+ * this test exists so the alternative cannot be adopted silently.
+ */
+describe('Dataset evaluation summary vs. the tombstone overlay (A1 wave 1)', () => {
+  beforeEach(async () => {
+    await truncateAll();
+  });
+
+  it('a HIDDEN sample\'s judgments still count — the summary describes the evaluations, not the live corpus', async () => {
+    const user = await mkUser();
+    const project = await mkProject(user.id);
+    const dataset = await mkDataset(user.id, { sampleCount: 2 });
+    const model = await mkModelConfig(user.id);
+
+    const samples = await Promise.all([
+      db.datasetSample.create({ data: { datasetId: dataset.id, index: 0, input: 'q0' } }),
+      db.datasetSample.create({ data: { datasetId: dataset.id, index: 1, input: 'q1' } }),
+    ]);
+
+    for (const [i, sample] of samples.entries()) {
+      const evaluation = await mkEvaluation(project.id, user.id, {
+        responseText: 'an actual response',
+        datasetId: dataset.id,
+        datasetSampleId: sample.id,
+      });
+      const run = await mkEvaluationRun(evaluation.id, { status: 'completed' });
+      await mkModelJudgment(run.id, model.id, { overallScore: i === 0 ? 2 : 8 });
+    }
+
+    // Withdraw the first row, through the one definition of hidden.
+    await tombstoneSample(db, samples[0].id, 'summary decision fixture');
+    await db.dataset.update({ where: { id: dataset.id }, data: { sampleCount: 1 } });
+
+    await refreshDatasetEvaluationSummary(dataset.id);
+
+    const updated = await db.dataset.findUniqueOrThrow({ where: { id: dataset.id } });
+    const summary = JSON.parse(updated.remoteMetadata!).evaluationSummary;
+
+    // BOTH judgments are still counted, and the average is still the mean of
+    // both. Filtering on sample liveness would give 1 / 8.
+    expect(summary.sampleCount).toBe(2);
+    expect(summary.samplesWithModelScores).toBe(2);
+    expect(summary.averageModelScore).toBe(5);
+
+    // The stated cost, asserted rather than described: the summary's count
+    // exceeds the corpus's live `sampleCount`. They measure different things.
+    expect(summary.samplesWithModelScores).toBeGreaterThan(updated.sampleCount!);
+  });
+
+  it('a hidden DATASET does not zero its own persisted summary', async () => {
+    // The third reason in the module doc, made concrete. `liveSamplesOnly()`
+    // carries decision 16's parent arm, so spreading it into that read would
+    // make a straggler run finalizing after a dataset delete overwrite the
+    // persisted aggregate with zeroes — destroying data on a delete the
+    // overlay calls reversible.
+    const user = await mkUser();
+    const project = await mkProject(user.id);
+    const dataset = await mkDataset(user.id, { sampleCount: 1 });
+    const model = await mkModelConfig(user.id);
+
+    const sample = await db.datasetSample.create({
+      data: { datasetId: dataset.id, index: 0, input: 'q0' },
+    });
+    const evaluation = await mkEvaluation(project.id, user.id, {
+      responseText: 'an actual response',
+      datasetId: dataset.id,
+      datasetSampleId: sample.id,
+    });
+    const run = await mkEvaluationRun(evaluation.id, { status: 'completed' });
+    await mkModelJudgment(run.id, model.id, { overallScore: 6 });
+
+    await tombstoneDataset(db, dataset.id, 'summary decision fixture');
+    await refreshDatasetEvaluationSummary(dataset.id);
+
+    const updated = await db.dataset.findUniqueOrThrow({ where: { id: dataset.id } });
+    const summary = JSON.parse(updated.remoteMetadata!).evaluationSummary;
+    expect(summary.samplesWithModelScores).toBe(1);
+    expect(summary.averageModelScore).toBe(6);
   });
 });

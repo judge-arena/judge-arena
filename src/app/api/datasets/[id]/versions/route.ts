@@ -5,6 +5,7 @@ import { requireAuth, requireScope, isAdmin, optionalAuth, resolveResourceAccess
 import { logger, serializeError } from '@/lib/logger';
 import { createVersionSchema } from './schema';
 import { createDatasetVersion, DatasetVersionConflictError } from '@/lib/dataset-versions';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 // POST /api/datasets/[id]/versions — create a new version from the current dataset
 export async function POST(request: Request, props: { params: Promise<{ id: string }> }) {
@@ -15,10 +16,18 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
   if (scopeCheck) return scopeCheck;
 
   try {
-    const existing = await prisma.dataset.findUnique({
-      where: { id: params.id },
+    // Decision 15: forking a hidden parent would mint a live child carrying a
+    // copy of the whole corpus — a hidden dataset walking back into
+    // circulation under a new id.
+    const existing = await prisma.dataset.findFirst({
+      where: { id: params.id, ...liveDatasetsOnly() },
       include: {
-        samples: { orderBy: { index: 'asc' } },
+        // NOT a leak — a RESURRECTION. The overlay is keyed on row id and the
+        // child's rows are `create`d fresh, so they are born untombstoned.
+        // Unfiltered, this copy does not merely show a hidden sample in the new
+        // version; it promotes it back to a permanently live row, and the only
+        // record that it was ever hidden stays behind on the parent.
+        samples: { where: liveSamplesOnly(), orderBy: { index: 'asc' } },
       },
     });
 
@@ -132,8 +141,8 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
       if (scopeCheck) return scopeCheck;
     }
 
-    const dataset = await prisma.dataset.findUnique({
-      where: { id: params.id },
+    const dataset = await prisma.dataset.findFirst({
+      where: { id: params.id, ...liveDatasetsOnly() },
       select: { id: true, parentId: true, userId: true, visibility: true },
     });
 
@@ -156,14 +165,31 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
           { id: rootId },
           { parentId: rootId },
         ],
+        // A1: a hidden version drops out of the history panel. SPREAD, not
+        // merged: this `where` already owns `OR`, and `liveDatasetsOnly()`
+        // sets only `NOT`, so the two coexist. An `OR`-shaped helper would
+        // have silently clobbered the family predicate above with no type
+        // error — which is why the helper returns `NOT`.
+        //
+        // NOT the same read as `dataset-versions.ts`'s family scan, which
+        // looks textually identical and MUST NOT be filtered: that one is the
+        // version high-water mark feeding @@unique([parentId, version]). This
+        // one only decides what the panel displays.
+        ...liveDatasetsOnly(),
       },
       select: {
         id: true,
         version: true,
+        // The stored rung, deliberately left as it stands — the panel reads
+        // `v.sampleCount ?? v._count?.samples`, so this value shadows the one
+        // below and the write side is what keeps it honest.
         sampleCount: true,
         createdAt: true,
         updatedAt: true,
-        _count: { select: { samples: true } },
+        // A1: the LIVE sample count — the panel's fallback rung, and the
+        // only one this read can fix. This one `select` carries BOTH rungs,
+        // which is exactly why it was easy to filter neither.
+        _count: { select: { samples: { where: liveSamplesOnly() } } },
       },
       orderBy: { version: 'desc' },
     });

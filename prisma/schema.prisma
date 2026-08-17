@@ -132,6 +132,7 @@ model User {
   modelEndpoints    ModelEndpoint[]
   goldenSets        GoldenSet[]
   goldenLabels      GoldenLabel[]
+  sampleRevisions   SampleRevision[]
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
@@ -463,6 +464,9 @@ model ModelJudgment {
   reasoningEnabled    Boolean?
   pairOrder           String? // e.g. "AB" | "BA" for pairwise position-bias tracking
 
+  // A0 decision #4: what the model SAID, against the pairOrder it was shown
+  // ('A' | 'B' | 'tie'). Raw, never normalised — derive, never encode.
+  verdict        String?
   overallScore   Float?
   reasoning      String?
   rawResponse    String? // full LLM response, never truncated
@@ -584,6 +588,8 @@ model Dataset {
 
   samples     DatasetSample[]
   evaluations Evaluation[]
+  goldenSets  GoldenSet[]
+  tombstone   Tombstone?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -607,7 +613,10 @@ model DatasetSample {
   metadata  String? // JSON: any extra fields from the source
 
   evaluations Evaluation[]
-  createdAt   DateTime     @default(now())
+  goldenItems GoldenItem[]
+  tombstone   Tombstone?
+  revisions   SampleRevision[]
+  createdAt   DateTime         @default(now())
 
   @@unique([datasetId, index])
   @@index([datasetId])
@@ -653,6 +662,26 @@ model GoldenSet {
   // pointing at the (now-deleted) owner and resolves to null via its own
   // `onDelete: SetNull`.
   retiredAt       DateTime?
+  // A0: distinct from retiredAt. `retiredAt` = out of circulation but still
+  // valid ground truth (a product verb); `tombstonedAt` = pending purge (an
+  // account-lifecycle verb). Purge itself is a later wave.
+  tombstonedAt    DateTime?
+
+  // ── A0: a golden set is the annotation layer over exactly ONE platform
+  // Dataset, imported at exactly ONE protocol. Restrict, so a Dataset with
+  // golden sets cannot be deleted. The set is homogeneous: letting its items
+  // disagree on protocol would make a single kappa uninterpretable.
+  datasetId       String
+  dataset         Dataset          @relation(fields: [datasetId], references: [id], onDelete: Restrict)
+  protocol        RunProtocol
+
+  // ── Versioning (A0: edit-after-freeze forks) ──
+  slug            String?
+  version         Int              @default(1)
+  parentId        String?
+  parent          GoldenSet?       @relation("GoldenSetVersions", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  versions        GoldenSet[]      @relation("GoldenSetVersions")
+
   ownerId         String?
   owner           User?            @relation(fields: [ownerId], references: [id], onDelete: SetNull)
   items           GoldenItem[]
@@ -660,37 +689,107 @@ model GoldenSet {
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
 
+  @@unique([parentId, version])
+  // Hand-edited to NULLS NOT DISTINCT in 20260812190000_v2d_golden_substrate —
+  // ownerId is nullable (onDelete: SetNull), and Postgres's default NULLS
+  // DISTINCT would let two ownerless sets share a slug. Prisma's DSL cannot
+  // express the option; the migration's raw SQL is the only record of it.
+  // Consequence: at most ONE slug-NULL set per owner. Every A0 write path
+  // assigns a slug (generateSlug never returns empty), so this only binds
+  // hand-written fixtures — give them slugs.
+  @@unique([ownerId, slug])
   @@index([ownerId])
+  @@index([parentId])
+  @@index([visibility])
+  @@index([datasetId])
 }
 
 model GoldenItem {
-  id           String        @id @default(cuid())
-  goldenSetId  String
-  goldenSet    GoldenSet     @relation(fields: [goldenSetId], references: [id], onDelete: Cascade)
-  index        Int
-  inputText    String
-  promptText   String?
-  responseText String?
-  protocol     RunProtocol   @default(pointwise)
-  expected     String?
-  labels       GoldenLabel[]
+  id                    String            @id @default(cuid())
+  goldenSetId           String
+  goldenSet             GoldenSet         @relation(fields: [goldenSetId], references: [id], onDelete: Cascade)
+  index                 Int
+  inputText             String
+  promptText            String?
+  responseText          String?
+  protocol              RunProtocol       @default(pointwise)
+  expected              String?
+  // ── A0 provenance: which DatasetSample this item was imported from.
+  // Restrict, so a sample a golden item annotates cannot be deleted — see
+  // the 409 guard on PUT /api/datasets/[id]/samples.
+  sourceDatasetSampleId String
+  sourceSample          DatasetSample     @relation(fields: [sourceDatasetSampleId], references: [id], onDelete: Restrict)
+  labels                GoldenLabel[]
+  candidates            GoldenCandidate[]
+  // A0 follow-up (owner ruling 2026-08-13): DELETE on an item is a
+  // same-transaction tombstone tag, never a row removal. NULL = live. The
+  // row KEEPS its `index` — @@unique([goldenSetId, index]) below is
+  // deliberately NOT partial, so a tombstoned ordinal stays taken and
+  // survivors are never re-packed. See nextGoldenItemIndex in
+  // src/lib/golden-sets.ts for what the next index is.
+  tombstonedAt          DateTime?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
 
   @@unique([goldenSetId, index])
+  // Serves the filtered COUNT on every paginated items read and every
+  // `_count.items` on the list page. The ordered read still comes off
+  // GoldenItem_goldenSetId_index_key.
+  @@index([goldenSetId, tombstonedAt])
+  @@index([sourceDatasetSampleId])
+}
+
+// Discrete candidates (pairwise/listwise) attached to a golden item.
+// RunCandidate (schema.prisma:417-427) field-for-field, different parent:
+// the team already accepted this shape once, and A2 compares a golden item's
+// candidates against a run's candidates.
+model GoldenCandidate {
+  id           String     @id @default(cuid())
+  goldenItemId String
+  goldenItem   GoldenItem @relation(fields: [goldenItemId], references: [id], onDelete: Cascade)
+  position     Int
+  promptText   String?
+  responseText String?
+  label        String?
+
+  @@unique([goldenItemId, position])
 }
 
 model GoldenLabel {
-  id             String     @id @default(cuid())
-  goldenItemId   String
-  goldenItem     GoldenItem @relation(fields: [goldenItemId], references: [id], onDelete: Cascade)
-  annotatorId    String?
-  annotator      User?      @relation(fields: [annotatorId], references: [id], onDelete: SetNull)
-  overallScore   Float
-  criteriaScores Json?
-  reasoning      String?
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  id               String     @id @default(cuid())
+  goldenItemId     String
+  goldenItem       GoldenItem @relation(fields: [goldenItemId], references: [id], onDelete: Cascade)
+  annotatorId      String?
+  annotator        User?      @relation(fields: [annotatorId], references: [id], onDelete: SetNull)
+  overallScore     Float
+  criteriaScores   Json?
+  reasoning        String?
+  // A human label is the expensive, irreplaceable artifact this roadmap
+  // exists to protect, so PATCH /api/golden-sets/[id]/items TOMBSTONES the
+  // labels of an item whose content changed rather than deleting them
+  // (owner ruling 2026-08-13, extended to labels — see that handler's doc).
+  // `tombstonedReason` records WHY: 'item-content-edit' is the only writer
+  // today; a future retraction or purge gets its own value rather than
+  // overloading this one.
+  tombstonedAt     DateTime?
+  tombstonedReason String?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
 
-  @@unique([goldenItemId, annotatorId])
+  // `@@unique([goldenItemId, annotatorId])` IS GONE ON PURPOSE. It is
+  // replaced by a PARTIAL unique index restricted to WHERE "tombstonedAt"
+  // IS NULL, hand-written in
+  // 20260813120000_v2e_golden_item_label_tombstones — Prisma's DSL has no
+  // syntax for a WHERE predicate, so this file cannot declare it and the
+  // migration's raw SQL is the only record. Whole-table uniqueness would let
+  // a tombstoned label occupy its annotator's slot forever, making
+  // re-annotation after an edit impossible. See CONTRIBUTING.md's "Known
+  // migrate-diff pseudo-drift" table.
+  //
+  // The index below is NOT redundant: dropping the unique also dropped the
+  // only btree serving `where: { goldenItemId }`, and the partial one covers
+  // live rows only.
+  @@index([goldenItemId])
   @@index([annotatorId])
 }
 
@@ -708,9 +807,104 @@ model CalibrationRun {
   flipRateVsParent    Float?
   verdictCount        Int               @default(0)
   passed              Boolean?
+  // A0 decision #3: `passed` alone is uninterpretable a year later — record
+  // the threshold that was in force and what it was applied to.
+  passThreshold       Float?
+  thresholdMetric     String?
+  kappaVariant        String? // 'cohen' | 'fleiss'
+  kappaWeighting      String? // 'linear' | 'quadratic'
   startedAt           DateTime          @default(now())
   finishedAt          DateTime?
 
   @@index([judgeModelVersionId])
   @@index([goldenSetId])
+}
+
+// ─── The tombstone overlay (A1) ─────────────────────────────────────────────
+// One row per HIDDEN entity. "No row" means live, so this table is empty until
+// something is deleted. Adopted by both Dataset and DatasetSample; a sample
+// inherits its parent dataset's hidden state through the read filter in
+// src/lib/tombstones.ts, never through a second row here.
+//
+// Deliberately NOT A0's `tombstonedAt` column form (GoldenSet, GoldenItem,
+// GoldenLabel). Those are one-way on purpose: goldenSetLifecycleWhere pins
+// `tombstonedAt: null` in BOTH arms so a tombstoned set has no way back. This
+// overlay is REVERSIBLE — un-hiding flips the flag rather than deleting the
+// row, so createdAt/updatedAt still record that the entity was once hidden.
+// Two mechanisms with different capabilities, coexisting on purpose. Do not
+// harmonise them.
+
+model Tombstone {
+  id String @id @default(cuid())
+
+  // Exactly one of these is non-null. That is a REAL constraint, not a
+  // comment: `Tombstone_exactly_one_entity`, a CHECK hand-edited into
+  // 20260814120000_v2f_tombstone_overlay because Prisma's DSL cannot express
+  // a CHECK at all. Without it Postgres accepts both-null orphans (a
+  // tombstone hiding nothing) and both-set rows (one row claiming to hide a
+  // dataset AND a sample), because a unique index permits unlimited NULLs.
+  // See CONTRIBUTING.md's "Known migrate-diff pseudo-drift" table.
+  //
+  // Each FK is @unique so the relation is to-ONE. That is what makes `upsert`
+  // correct and what makes `{ tombstone: { is: ... } }` match at most one row
+  // per entity. No @@index on either column: @unique already creates one.
+  //
+  // No @relation("name") on either side. Prisma demands a named relation only
+  // when TWO relations connect the SAME PAIR of models; these connect
+  // Tombstone↔DatasetSample and Tombstone↔Dataset — different pairs — so the
+  // disambiguation is not required and adding it would only add a name to
+  // keep in sync. Confirmed with `prisma validate` before landing.
+  datasetSampleId String?        @unique
+  datasetSample   DatasetSample? @relation(fields: [datasetSampleId], references: [id], onDelete: Cascade)
+  datasetId       String?        @unique
+  dataset         Dataset?       @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+
+  // Defaults to true because the only code that INSERTs here is a delete; a
+  // restore UPDATEs an existing row rather than creating one.
+  isTombstone Boolean @default(true)
+  reason      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ─── The revision log (L2) ──────────────────────────────────────────────────
+// Append-only. One row per mutation to a DatasetSample, carrying the values as
+// they stood BEFORE the change.
+//
+// Deliberately separate from Tombstone, and the two are not merge-able:
+// Tombstone is the CURRENT-STATE projection the read filters consult and needs
+// @unique per entity to be a to-one relation and to make upsert correct; a log
+// needs MANY rows per entity and therefore cannot carry that uniqueness.
+//
+// Nothing filters this table by the overlay. The history of a HIDDEN sample is
+// exactly what you read when deciding whether to restore it.
+
+model SampleRevision {
+  id String @id @default(cuid())
+
+  datasetSampleId String
+  datasetSample   DatasetSample @relation(fields: [datasetSampleId], references: [id], onDelete: Cascade)
+
+  // 'edit' | 'delete' | 'restore'. A String rather than an enum, matching
+  // GoldenLabel.tombstonedReason and Dataset.source — this schema uses enums
+  // only where Prisma already had one (Visibility, RunProtocol).
+  changeType String
+
+  // The values BEFORE the change. Null on 'delete' and 'restore', which change
+  // no content, so a before-image would be a copy of the live row.
+  input    String?
+  expected String?
+  metadata String?
+
+  // SetNull, matching GoldenLabel.annotatorId: account deletion anonymises
+  // rather than destroying. There is deliberately NO unique constraint on this
+  // table, so two deleted actors coexist freely on one sample's history.
+  actorId String?
+  actor   User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  at DateTime @default(now())
+
+  // Serves the only query: one sample's history, newest first.
+  @@index([datasetSampleId, at])
 }

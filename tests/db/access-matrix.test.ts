@@ -22,6 +22,13 @@ import { GET as getEvaluation, PATCH as patchEvaluation, DELETE as deleteEvaluat
 
 import { GET as getModelEndpoint, PATCH as patchModelEndpoint, DELETE as deleteModelEndpoint } from '@/app/api/models/[id]/route';
 
+import { GET as getGoldenSet, PATCH as patchGoldenSet, DELETE as deleteGoldenSet } from '@/app/api/golden-sets/[id]/route';
+import { GET as listGoldenSets, POST as createGoldenSetRoute } from '@/app/api/golden-sets/route';
+import { POST as forkGoldenSetRoute } from '@/app/api/golden-sets/[id]/fork/route';
+import { POST as retireGoldenSetRoute } from '@/app/api/golden-sets/[id]/retire/route';
+import { POST as restoreSampleRoute } from '@/app/api/datasets/[id]/samples/[sampleId]/restore/route';
+import { GET as sampleRevisionsRoute } from '@/app/api/datasets/[id]/samples/[sampleId]/revisions/route';
+
 import {
   GET as listApiKeys,
   POST as createApiKeyRoute,
@@ -168,6 +175,34 @@ async function mkModelEndpoint(userId: string) {
   return db.modelEndpoint.create({ data: { userId, judgeModelVersionId: version.id } });
 }
 
+async function mkGoldenSet(userId: string, visibility: Visibility = 'private') {
+  const dataset = await mkDataset(userId, 'public');
+  const sample = await db.datasetSample.create({
+    data: { datasetId: dataset.id, index: 0, input: 'q', expected: 'A>B', metadata: '{}' },
+  });
+  return db.goldenSet.create({
+    data: {
+      name: uniq('fixture-golden-set'),
+      slug: uniq('fixture-golden-set'),
+      ownerId: userId,
+      datasetId: dataset.id,
+      protocol: 'pairwise',
+      visibility,
+      items: {
+        create: [
+          {
+            index: 0,
+            inputText: 'q',
+            protocol: 'pairwise',
+            expected: 'A>B',
+            sourceDatasetSampleId: sample.id,
+          },
+        ],
+      },
+    },
+  });
+}
+
 // ─── Per-resource dispatch registry — routes a matrix row to the real
 // handler for that resource ──────────────────────────────────────────────
 
@@ -178,7 +213,7 @@ interface ResourceHandlers {
   del: (id: string) => Promise<Response>;
 }
 
-const registry: Record<'rubric' | 'dataset' | 'project' | 'evaluation' | 'modelEndpoint', ResourceHandlers> = {
+const registry: Record<'rubric' | 'dataset' | 'project' | 'evaluation' | 'modelEndpoint' | 'goldenSet', ResourceHandlers> = {
   rubric: {
     createTarget: (ctx, visibility) => mkRubric(ctx.ownerId, { visibility }),
     get: (id) => getRubric(new Request(`http://localhost/api/rubrics/${id}`), { params: Promise.resolve({ id }) }),
@@ -242,6 +277,24 @@ const registry: Record<'rubric' | 'dataset' | 'project' | 'evaluation' | 'modelE
       }),
     del: (id) =>
       deleteModelEndpoint(new Request(`http://localhost/api/models/${id}`, { method: 'DELETE' }), {
+        params: Promise.resolve({ id }),
+      }),
+  },
+  goldenSet: {
+    // GoldenSet keys on `ownerId`, not `userId` (auth-guard.ts:381) — the one
+    // ownable model that does. DELETE is a tombstone, so its 200 means
+    // "tombstonedAt stamped", not "row gone".
+    createTarget: (ctx, visibility) => mkGoldenSet(ctx.ownerId, visibility),
+    get: (id) =>
+      getGoldenSet(new Request(`http://localhost/api/golden-sets/${id}`), {
+        params: Promise.resolve({ id }),
+      }),
+    patch: (id) =>
+      patchGoldenSet(jsonRequest(`http://localhost/api/golden-sets/${id}`, 'PATCH', {}), {
+        params: Promise.resolve({ id }),
+      }),
+    del: (id) =>
+      deleteGoldenSet(new Request(`http://localhost/api/golden-sets/${id}`, { method: 'DELETE' }), {
         params: Promise.resolve({ id }),
       }),
   },
@@ -347,6 +400,29 @@ const ACCESS_MATRIX: MatrixRow[] = [
   { resource: 'modelEndpoint', method: 'PATCH',  visibility: 'private', actor: 'owner',     expected: 200 },
   { resource: 'modelEndpoint', method: 'DELETE', visibility: 'private', actor: 'stranger',  expected: 403 },
   { resource: 'modelEndpoint', method: 'DELETE', visibility: 'private', actor: 'owner',     expected: 200 },
+
+  // ── GoldenSet ── (public reads on a public set; every mutation gated,
+  // and ownership keys on ownerId rather than userId)
+  { resource: 'goldenSet', method: 'GET',    visibility: 'private', actor: 'anonymous', expected: 401 },
+  { resource: 'goldenSet', method: 'GET',    visibility: 'private', actor: 'stranger',  expected: 403 },
+  { resource: 'goldenSet', method: 'GET',    visibility: 'private', actor: 'owner',     expected: 200 },
+  { resource: 'goldenSet', method: 'GET',    visibility: 'private', actor: 'admin',     expected: 200 },
+  { resource: 'goldenSet', method: 'GET',    visibility: 'public',  actor: 'anonymous', expected: 200 },
+  { resource: 'goldenSet', method: 'GET',    visibility: 'public',  actor: 'stranger',  expected: 200 },
+  { resource: 'goldenSet', method: 'GET',    visibility: 'public',  actor: 'owner',     expected: 200 },
+  { resource: 'goldenSet', method: 'GET',    visibility: 'public',  actor: 'admin',     expected: 200 },
+  { resource: 'goldenSet', method: 'PATCH',  visibility: 'private', actor: 'anonymous', expected: 401 },
+  { resource: 'goldenSet', method: 'PATCH',  visibility: 'private', actor: 'stranger',  expected: 403 },
+  { resource: 'goldenSet', method: 'PATCH',  visibility: 'private', actor: 'owner',     expected: 200 },
+  { resource: 'goldenSet', method: 'PATCH',  visibility: 'private', actor: 'admin',     expected: 200 },
+  { resource: 'goldenSet', method: 'PATCH',  visibility: 'public',  actor: 'anonymous', expected: 401 },
+  { resource: 'goldenSet', method: 'PATCH',  visibility: 'public',  actor: 'stranger',  expected: 403 },
+  { resource: 'goldenSet', method: 'DELETE', visibility: 'private', actor: 'anonymous', expected: 401 },
+  { resource: 'goldenSet', method: 'DELETE', visibility: 'private', actor: 'stranger',  expected: 403 },
+  { resource: 'goldenSet', method: 'DELETE', visibility: 'private', actor: 'owner',     expected: 200 },
+  { resource: 'goldenSet', method: 'DELETE', visibility: 'private', actor: 'admin',     expected: 200 },
+  { resource: 'goldenSet', method: 'DELETE', visibility: 'public',  actor: 'anonymous', expected: 401 },
+  { resource: 'goldenSet', method: 'DELETE', visibility: 'public',  actor: 'stranger',  expected: 403 },
 ];
 
 describe('Access matrix — table-driven (spec §7 D3: public reads, gated writes)', () => {
@@ -948,4 +1024,255 @@ describe('Access matrix — versions routes: requireScope + public-read parity w
     });
     expect(res.status).toBe(200);
   });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// Golden-set sub-routes: /fork and /retire are MUTATIONS, gated exactly
+// like PATCH — the generic status-only table above only dispatches
+// GET/PATCH/DELETE, so these get their own block. The list route's
+// anonymous/public rule is asserted here too.
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('Access matrix — golden-set sub-routes (/fork, /retire) and list', () => {
+  let ctx: Ctx;
+
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+    (headers as unknown as Mock).mockReset();
+    (headers as unknown as Mock).mockImplementation(async () => new Headers());
+    const owner = await mkUser();
+    const stranger = await mkUser();
+    const admin = await mkUser({ role: 'admin' });
+    ctx = { ownerId: owner.id, strangerId: stranger.id, adminId: admin.id };
+  });
+
+  for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+    const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 201;
+    it(`POST /api/golden-sets/[id]/fork as ${actor} -> ${expected}`, async () => {
+      const target = await mkGoldenSet(ctx.ownerId, 'public');
+      setSessionFor(actor, ctx);
+      const res = await forkGoldenSetRoute(
+        jsonRequest(`http://localhost/api/golden-sets/${target.id}/fork`, 'POST', {}),
+        { params: Promise.resolve({ id: target.id }) }
+      );
+      expect(res.status).toBe(expected);
+    });
+  }
+
+  for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+    const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 200;
+    it(`POST /api/golden-sets/[id]/retire as ${actor} -> ${expected}`, async () => {
+      const target = await mkGoldenSet(ctx.ownerId, 'public');
+      setSessionFor(actor, ctx);
+      const res = await retireGoldenSetRoute(
+        jsonRequest(`http://localhost/api/golden-sets/${target.id}/retire`, 'POST', {}),
+        { params: Promise.resolve({ id: target.id }) }
+      );
+      expect(res.status).toBe(expected);
+    });
+  }
+
+  it('GET /api/golden-sets: anonymous sees ONLY public sets', async () => {
+    const pub = await mkGoldenSet(ctx.ownerId, 'public');
+    const priv = await mkGoldenSet(ctx.ownerId, 'private');
+
+    setSessionFor('anonymous', ctx);
+    const res = await listGoldenSets(new Request('http://localhost/api/golden-sets'));
+    const body = await res.json();
+    const ids = body.data.map((g: any) => g.id);
+    expect(ids).toContain(pub.id);
+    expect(ids).not.toContain(priv.id);
+  });
+
+  it('anonymous POST /api/golden-sets is 401 — creation is never public', async () => {
+    setSessionFor('anonymous', ctx);
+    const res = await createGoldenSetRoute(
+      jsonRequest('http://localhost/api/golden-sets', 'POST', {
+        datasetId: 'whatever',
+        protocol: 'pairwise',
+        name: 'Anon golden set',
+      })
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it('a scoped key WITHOUT golden-sets:read is 403 on a PUBLIC golden set — the new scopes are enforced, not decorative', async () => {
+    const target = await mkGoldenSet(ctx.ownerId, 'public');
+    const rawKey = `vgk_${Buffer.from(uniq('gs-scoped')).toString('base64url')}`;
+    const keyHash = createHash('sha256').update(rawKey).digest('hex');
+    await db.developerApiKey.create({
+      data: {
+        userId: ctx.strangerId,
+        name: 'Scoped Key',
+        prefix: rawKey.slice(0, 12),
+        keyHash,
+        scopes: JSON.stringify(['datasets:read']), // deliberately NOT golden-sets:read
+      },
+    });
+    (headers as unknown as Mock).mockImplementation(
+      async () => new Headers({ authorization: `Bearer ${rawKey}` })
+    );
+
+    const res = await getGoldenSet(new Request(`http://localhost/api/golden-sets/${target.id}`), {
+      params: Promise.resolve({ id: target.id }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  // ── golden-sets:write scope on the two mutation sub-routes ──────────────
+  // A session-authenticated caller never exercises requireScope (session
+  // auth has no apiKeyScopes, so requireScope short-circuits to "allowed"
+  // regardless of the scope name passed) — only a developer API key can
+  // prove the 'golden-sets:write' check on fork/route.ts and retire/route.ts
+  // is real and not dead code. The key's OWNER is the target set's owner in
+  // both rejection tests below, so ownership would otherwise pass; only the
+  // missing scope can be what turns these into 403s.
+
+  it('a scoped key holding golden-sets:read but NOT golden-sets:write is 403 on POST fork, even though its owner OWNS the target set', async () => {
+    const target = await mkGoldenSet(ctx.ownerId, 'public');
+    const rawKey = `vgk_${Buffer.from(uniq('gs-scoped-fork-noread')).toString('base64url')}`;
+    const keyHash = createHash('sha256').update(rawKey).digest('hex');
+    await db.developerApiKey.create({
+      data: {
+        userId: ctx.ownerId, // the set's actual owner — ownership alone would pass
+        name: 'Read-Only Golden-Set Key',
+        prefix: rawKey.slice(0, 12),
+        keyHash,
+        scopes: JSON.stringify(['golden-sets:read']), // deliberately NOT golden-sets:write
+      },
+    });
+    (headers as unknown as Mock).mockImplementation(
+      async () => new Headers({ authorization: `Bearer ${rawKey}` })
+    );
+
+    const res = await forkGoldenSetRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${target.id}/fork`, 'POST', {}),
+      { params: Promise.resolve({ id: target.id }) }
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it('a scoped key holding golden-sets:read but NOT golden-sets:write is 403 on POST retire, even though its owner OWNS the target set', async () => {
+    const target = await mkGoldenSet(ctx.ownerId, 'public');
+    const rawKey = `vgk_${Buffer.from(uniq('gs-scoped-retire-noread')).toString('base64url')}`;
+    const keyHash = createHash('sha256').update(rawKey).digest('hex');
+    await db.developerApiKey.create({
+      data: {
+        userId: ctx.ownerId, // the set's actual owner — ownership alone would pass
+        name: 'Read-Only Golden-Set Key',
+        prefix: rawKey.slice(0, 12),
+        keyHash,
+        scopes: JSON.stringify(['golden-sets:read']), // deliberately NOT golden-sets:write
+      },
+    });
+    (headers as unknown as Mock).mockImplementation(
+      async () => new Headers({ authorization: `Bearer ${rawKey}` })
+    );
+
+    const res = await retireGoldenSetRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${target.id}/retire`, 'POST', {}),
+      { params: Promise.resolve({ id: target.id }) }
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it('a scoped key holding golden-sets:write DOES succeed on POST fork — the scope check above rejects on the missing scope specifically, not every API key', async () => {
+    const target = await mkGoldenSet(ctx.ownerId, 'public');
+    const rawKey = `vgk_${Buffer.from(uniq('gs-scoped-fork-write')).toString('base64url')}`;
+    const keyHash = createHash('sha256').update(rawKey).digest('hex');
+    await db.developerApiKey.create({
+      data: {
+        userId: ctx.ownerId,
+        name: 'Write-Scoped Golden-Set Key',
+        prefix: rawKey.slice(0, 12),
+        keyHash,
+        scopes: JSON.stringify(['golden-sets:write']),
+      },
+    });
+    (headers as unknown as Mock).mockImplementation(
+      async () => new Headers({ authorization: `Bearer ${rawKey}` })
+    );
+
+    const res = await forkGoldenSetRoute(
+      jsonRequest(`http://localhost/api/golden-sets/${target.id}/fork`, 'POST', {}),
+      { params: Promise.resolve({ id: target.id }) }
+    );
+    expect(res.status).toBe(201);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// L2 sample sub-routes: POST …/restore and GET …/revisions.
+//
+// These get their own block rather than a `registry` entry, and the reason
+// is structural rather than stylistic: `ResourceHandlers` is
+// {createTarget, get, patch, del} over a SINGLE `id`, and `registry` is
+// typed to six fixed resource keys — neither a POST-only sub-resource nor
+// a two-parameter route fits it. This is the same shape the golden-set
+// /fork and /retire block above uses.
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('Access matrix — L2 sample sub-routes (/restore, /revisions)', () => {
+  let ctx: Ctx;
+
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+    (headers as unknown as Mock).mockReset();
+    (headers as unknown as Mock).mockImplementation(async () => new Headers());
+    const owner = await mkUser();
+    const stranger = await mkUser();
+    const admin = await mkUser({ role: 'admin' });
+    ctx = { ownerId: owner.id, strangerId: stranger.id, adminId: admin.id };
+  });
+
+  async function mkHiddenSample(visibility: Visibility = 'private') {
+    const dataset = await db.dataset.create({
+      data: { name: uniq('fixture-dataset'), userId: ctx.ownerId, visibility, inputType: 'query-response' },
+    });
+    const sample = await db.datasetSample.create({
+      data: { datasetId: dataset.id, index: 0, input: 'hidden row', expected: null, metadata: null },
+    });
+    await db.tombstone.create({ data: { datasetSampleId: sample.id, isTombstone: true } });
+    return { dataset, sample };
+  }
+
+  for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+    const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 200;
+    it(`POST /api/datasets/[id]/samples/[sampleId]/restore as ${actor} -> ${expected}`, async () => {
+      const { dataset, sample } = await mkHiddenSample();
+      setSessionFor(actor, ctx);
+      const res = await restoreSampleRoute(
+        jsonRequest(
+          `http://localhost/api/datasets/${dataset.id}/samples/${sample.id}/restore`,
+          'POST',
+          {}
+        ),
+        { params: Promise.resolve({ id: dataset.id, sampleId: sample.id }) }
+      );
+      expect(res.status).toBe(expected);
+    });
+  }
+
+  for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+    const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 200;
+    it(`GET /api/datasets/[id]/samples/[sampleId]/revisions as ${actor} -> ${expected}`, async () => {
+      // PUBLIC on purpose: the history is owner-only REGARDLESS of the
+      // dataset's visibility, unlike every sibling read. A sample's edit
+      // history names who made each change and carries pre-edit text, which is
+      // not public data even on a public dataset. A stranger getting 200 here
+      // would be the finding.
+      const { dataset, sample } = await mkHiddenSample('public');
+      setSessionFor(actor, ctx);
+      const res = await sampleRevisionsRoute(
+        new Request(
+          `http://localhost/api/datasets/${dataset.id}/samples/${sample.id}/revisions`
+        ),
+        { params: Promise.resolve({ id: dataset.id, sampleId: sample.id }) }
+      );
+      expect(res.status).toBe(expected);
+    
+    });
+  }
 });

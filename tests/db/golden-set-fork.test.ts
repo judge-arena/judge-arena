@@ -1,0 +1,438 @@
+import { describe, it, expect, beforeEach } from 'vitest';
+import { Prisma } from '@prisma/client';
+import { db, truncateAll, mkUser } from './helpers';
+import { forkGoldenSet, ForkGoldenSetInput } from '@/lib/golden-set-versions';
+
+// ─── A0 Task 4: golden-set forking ─────────────────────────────────────────
+//
+// Mirrors tests/db/dataset-version-race.test.ts (which covers the identical
+// max-version-read + create race for Dataset), tested directly against the
+// extracted lib function rather than through the route, per the precedent
+// tests/db/rubric-version-race.test.ts and dataset-version-race.test.ts set.
+//
+// What is specific to golden sets: the copy is two levels deep (items ->
+// candidates), and GoldenLabel rows ride along with their item. Labels are
+// copied UNCONDITIONALLY here because forkGoldenSet applies no edits — the
+// drop-on-edited-item half of decision #5 belongs to PATCH
+// /api/golden-sets/[id]/items, which is the only caller that can observe an
+// edit.
+
+let datasetCounter = 0;
+
+async function mkDatasetWithSamples(userId: string, count: number) {
+  datasetCounter += 1;
+  return db.dataset.create({
+    data: {
+      name: `fixture-golden-dataset-${datasetCounter}`,
+      slug: `fixture-golden-dataset-${datasetCounter}`,
+      userId,
+      visibility: 'public',
+      inputType: 'query-response',
+      samples: {
+        create: Array.from({ length: count }, (_, i) => ({
+          index: i,
+          input: `question-${i}`,
+          expected: 'A>B',
+          metadata: JSON.stringify({ response_A: `answer-a-${i}`, response_B: `answer-b-${i}` }),
+        })),
+      },
+    },
+    include: { samples: { orderBy: { index: 'asc' } } },
+  });
+}
+
+let goldenSetCounter = 0;
+
+async function mkGoldenSet(ownerId: string, datasetId: string, sampleIds: string[]) {
+  goldenSetCounter += 1;
+  return db.goldenSet.create({
+    data: {
+      name: `fixture-golden-set-${goldenSetCounter}`,
+      slug: `fixture-golden-set-${goldenSetCounter}`,
+      ownerId,
+      datasetId,
+      protocol: 'pairwise',
+      items: {
+        create: sampleIds.map((sampleId, i) => ({
+          index: i,
+          inputText: `question-${i}`,
+          protocol: 'pairwise' as const,
+          expected: 'A>B',
+          sourceDatasetSampleId: sampleId,
+          candidates: {
+            create: [
+              { position: 0, responseText: `answer-a-${i}`, label: 'A' },
+              { position: 1, responseText: `answer-b-${i}`, label: 'B' },
+            ],
+          },
+        })),
+      },
+    },
+    include: { items: { orderBy: { index: 'asc' } } },
+  });
+}
+
+const forkInput = (
+  rootGoldenSetId: string,
+  sourceGoldenSetId: string,
+  ownerId: string,
+  overrides: Partial<ForkGoldenSetInput> = {}
+): ForkGoldenSetInput => ({
+  rootGoldenSetId,
+  sourceGoldenSetId,
+  ownerId,
+  name: 'forked golden set',
+  description: null,
+  ...overrides,
+});
+
+/**
+ * Wraps the real `db` client so a `forkGoldenSet` call's `$transaction`
+ * invocations can be counted without touching its retry logic. Only
+ * `$transaction` is proxied — `forkGoldenSet` never reaches for anything
+ * else on `client` — and every call is delegated straight through to the
+ * real `db.$transaction`, so behaviour is untouched; the wrapper just counts.
+ *
+ * This exists so the concurrency test below can tell "the two calls
+ * genuinely raced on Postgres and one of them recovered via retry" apart
+ * from "the two calls happened to serialize and the retry path never ran at
+ * all" — both scenarios land on versions [2, 3] with distinct slugs, so
+ * that outcome alone cannot distinguish them.
+ */
+function withTransactionSpy() {
+  let calls = 0;
+  const client = {
+    $transaction: (...args: unknown[]) => {
+      calls += 1;
+      return (db.$transaction as (...a: unknown[]) => unknown)(...args);
+    },
+  } as unknown as typeof db;
+  return { client, callCount: () => calls };
+}
+
+describe('forkGoldenSet: versioning, lineage and deep copy', () => {
+  beforeEach(async () => {
+    await truncateAll();
+  });
+
+  it('copies LIVE items and LIVE labels only — a fork must not resurrect what a tombstone removed', async () => {
+    // forkGoldenSet does not copy `tombstonedAt`, so an unfiltered read would
+    // mint the tombstoned row as a LIVE item on the child, and an invalidated
+    // label as a LIVE score on text its annotator never saw — precisely the
+    // failure decision #5 exists to prevent. The originals stay in the parent
+    // where their provenance belongs; `parentId` is the pointer back.
+    const owner = await mkUser();
+    const annotator = await mkUser();
+    const dataset = await mkDatasetWithSamples(owner.id, 3);
+    const root = await mkGoldenSet(
+      owner.id,
+      dataset.id,
+      dataset.samples.map((s) => s.id)
+    );
+    const [item0, item1] = root.items;
+
+    await db.goldenItem.update({
+      where: { id: item0.id },
+      data: { tombstonedAt: new Date() },
+    });
+    await db.goldenLabel.create({
+      data: {
+        goldenItemId: item1.id,
+        annotatorId: annotator.id,
+        overallScore: 9,
+        tombstonedAt: new Date(),
+        tombstonedReason: 'item-content-edit',
+      },
+    });
+
+    const v2 = await forkGoldenSet(db, forkInput(root.id, root.id, owner.id));
+
+    const forkedItems = await db.goldenItem.findMany({
+      where: { goldenSetId: v2.id },
+      orderBy: { index: 'asc' },
+    });
+    expect(forkedItems).toHaveLength(2);
+    // Indices are copied VERBATIM, gaps included, so index-keyed comparison
+    // across versions still lines up. The child inherits a non-dense sequence
+    // and its next index is a high-water mark, same as the parent's.
+    expect(forkedItems.map((i) => i.index)).toEqual([1, 2]);
+    expect(forkedItems.every((i) => i.tombstonedAt === null)).toBe(true);
+
+    expect(await db.goldenLabel.count({ where: { goldenItem: { goldenSetId: v2.id } } })).toBe(0);
+    // The source keeps everything — a fork copies, it does not move or purge.
+    expect(await db.goldenItem.count({ where: { goldenSetId: root.id } })).toBe(3);
+    expect(await db.goldenLabel.count({ where: { goldenItem: { goldenSetId: root.id } } })).toBe(1);
+  });
+
+  it('forking the root lands on version 2, parented at the root, inheriting datasetId and protocol', async () => {
+    const owner = await mkUser();
+    const dataset = await mkDatasetWithSamples(owner.id, 2);
+    const root = await mkGoldenSet(
+      owner.id,
+      dataset.id,
+      dataset.samples.map((s) => s.id)
+    );
+
+    const v2 = await forkGoldenSet(db, forkInput(root.id, root.id, owner.id));
+
+    expect(v2.id).not.toBe(root.id);
+    expect(v2.version).toBe(2);
+    expect(v2.parentId).toBe(root.id);
+    expect(v2.datasetId).toBe(dataset.id);
+    expect(v2.protocol).toBe('pairwise');
+    expect(v2.ownerId).toBe(owner.id);
+    expect(v2.name).toBe('forked golden set');
+    // A fork is owned by the forking user, so it never inherits the source's
+    // public visibility — publishing stays a deliberate act.
+    expect(v2.visibility).toBe('private');
+    expect(v2.publishedAt).toBeNull();
+    expect(v2.slug).toBe('forked-golden-set-v2');
+  });
+
+  it('forking a v2 parents the v3 at the ROOT, not at the set it was forked from', async () => {
+    const owner = await mkUser();
+    const dataset = await mkDatasetWithSamples(owner.id, 2);
+    const root = await mkGoldenSet(
+      owner.id,
+      dataset.id,
+      dataset.samples.map((s) => s.id)
+    );
+
+    const v2 = await forkGoldenSet(db, forkInput(root.id, root.id, owner.id));
+    // The route computes rootGoldenSetId as `existing.parentId ?? existing.id`
+    // — forking v2 therefore passes the ROOT as parent and v2 as source.
+    const v3 = await forkGoldenSet(db, forkInput(root.id, v2.id, owner.id, { name: 'third cut' }));
+
+    expect(v3.version).toBe(3);
+    expect(v3.parentId).toBe(root.id);
+    expect(v3.parentId).not.toBe(v2.id);
+    expect(v3.slug).toBe('third-cut-v3');
+
+    const family = await db.goldenSet.findMany({
+      where: { OR: [{ id: root.id }, { parentId: root.id }] },
+      orderBy: { version: 'asc' },
+    });
+    expect(family.map((g) => g.version)).toEqual([1, 2, 3]);
+  });
+
+  it('items are copied with fresh ids, preserving index, content and source provenance', async () => {
+    const owner = await mkUser();
+    const dataset = await mkDatasetWithSamples(owner.id, 3);
+    const root = await mkGoldenSet(
+      owner.id,
+      dataset.id,
+      dataset.samples.map((s) => s.id)
+    );
+
+    const v2 = await forkGoldenSet(db, forkInput(root.id, root.id, owner.id));
+
+    expect(v2._count.items).toBe(3);
+    expect(v2.items.map((i) => i.index)).toEqual([0, 1, 2]);
+    expect(v2.items.map((i) => i.inputText)).toEqual(['question-0', 'question-1', 'question-2']);
+    expect(v2.items.map((i) => i.expected)).toEqual(['A>B', 'A>B', 'A>B']);
+    expect(v2.items.map((i) => i.protocol)).toEqual(['pairwise', 'pairwise', 'pairwise']);
+    // Provenance survives the fork: every copied item still points at the
+    // DatasetSample it was imported from (that FK is `Restrict`).
+    expect(v2.items.map((i) => i.sourceDatasetSampleId)).toEqual(
+      dataset.samples.map((s) => s.id)
+    );
+    // Fresh rows, not re-parented originals.
+    const rootItemIds = new Set(root.items.map((i) => i.id));
+    for (const item of v2.items) {
+      expect(rootItemIds.has(item.id)).toBe(false);
+      expect(item.goldenSetId).toBe(v2.id);
+    }
+    // The source keeps all of its items.
+    expect(await db.goldenItem.count({ where: { goldenSetId: root.id } })).toBe(3);
+  });
+
+  it('candidates are deep-copied under each forked item with fresh ids and stable positions', async () => {
+    const owner = await mkUser();
+    const dataset = await mkDatasetWithSamples(owner.id, 2);
+    const root = await mkGoldenSet(
+      owner.id,
+      dataset.id,
+      dataset.samples.map((s) => s.id)
+    );
+
+    const v2 = await forkGoldenSet(db, forkInput(root.id, root.id, owner.id));
+
+    expect(v2.items).toHaveLength(2);
+    for (const [i, item] of v2.items.entries()) {
+      expect(item.candidates.map((c) => c.position)).toEqual([0, 1]);
+      expect(item.candidates.map((c) => c.responseText)).toEqual([
+        `answer-a-${i}`,
+        `answer-b-${i}`,
+      ]);
+      expect(item.candidates.map((c) => c.label)).toEqual(['A', 'B']);
+      for (const candidate of item.candidates) {
+        expect(candidate.goldenItemId).toBe(item.id);
+      }
+    }
+
+    // Source candidates are untouched — the fork added rows, it did not move
+    // them. 2 items x 2 candidates on each side.
+    const rootCandidates = await db.goldenCandidate.count({
+      where: { goldenItem: { goldenSetId: root.id } },
+    });
+    const forkCandidates = await db.goldenCandidate.count({
+      where: { goldenItem: { goldenSetId: v2.id } },
+    });
+    expect(rootCandidates).toBe(4);
+    expect(forkCandidates).toBe(4);
+  });
+
+  it('labels are copied onto the forked items, preserving annotator, score, criteriaScores and reasoning', async () => {
+    const owner = await mkUser();
+    const annotatorA = await mkUser();
+    const annotatorB = await mkUser();
+    const dataset = await mkDatasetWithSamples(owner.id, 2);
+    const root = await mkGoldenSet(
+      owner.id,
+      dataset.id,
+      dataset.samples.map((s) => s.id)
+    );
+    const [item0, item1] = root.items;
+
+    await db.goldenLabel.create({
+      data: {
+        goldenItemId: item0.id,
+        annotatorId: annotatorA.id,
+        overallScore: 8.5,
+        criteriaScores: { accuracy: 9, tone: 8 },
+        reasoning: 'A is more accurate',
+      },
+    });
+    await db.goldenLabel.create({
+      data: {
+        goldenItemId: item0.id,
+        annotatorId: annotatorB.id,
+        overallScore: 6,
+        criteriaScores: Prisma.DbNull,
+        reasoning: null,
+      },
+    });
+    // annotatorId is nullable (`onDelete: SetNull` — a label survives its
+    // annotator's account deletion). That null must survive the fork too,
+    // rather than being silently re-attributed to the forking user.
+    await db.goldenLabel.create({
+      data: { goldenItemId: item1.id, annotatorId: null, overallScore: 3 },
+    });
+
+    const v2 = await forkGoldenSet(db, forkInput(root.id, root.id, owner.id));
+
+    const forkedLabels = await db.goldenLabel.findMany({
+      where: { goldenItem: { goldenSetId: v2.id } },
+      orderBy: [{ goldenItem: { index: 'asc' } }, { overallScore: 'desc' }],
+      include: { goldenItem: { select: { index: true } } },
+    });
+    expect(forkedLabels).toHaveLength(3);
+
+    expect(forkedLabels[0].goldenItem.index).toBe(0);
+    expect(forkedLabels[0].annotatorId).toBe(annotatorA.id);
+    expect(forkedLabels[0].overallScore).toBe(8.5);
+    expect(forkedLabels[0].criteriaScores).toEqual({ accuracy: 9, tone: 8 });
+    expect(forkedLabels[0].reasoning).toBe('A is more accurate');
+
+    expect(forkedLabels[1].goldenItem.index).toBe(0);
+    expect(forkedLabels[1].annotatorId).toBe(annotatorB.id);
+    expect(forkedLabels[1].overallScore).toBe(6);
+    expect(forkedLabels[1].criteriaScores).toBeNull();
+    expect(forkedLabels[1].reasoning).toBeNull();
+
+    expect(forkedLabels[2].goldenItem.index).toBe(1);
+    expect(forkedLabels[2].annotatorId).toBeNull();
+    expect(forkedLabels[2].overallScore).toBe(3);
+
+    // The source keeps its own labels — a fork copies, it does not move.
+    const rootLabels = await db.goldenLabel.count({
+      where: { goldenItem: { goldenSetId: root.id } },
+    });
+    expect(rootLabels).toBe(3);
+  });
+
+  it(
+    'concurrent forks both land on distinct versions and distinct slugs (looped 20x to force ' +
+      'the race — two callers can read the same max version AND derive the same ' +
+      '`${base}-v${n}` slug before either commits, so P2002 can surface on either index)',
+    async () => {
+      // Attempt counts collected across all 20 iterations — see the
+      // assertion after the loop for why this is aggregated rather than
+      // checked inline on every pass.
+      const totalAttemptsPerIteration: number[] = [];
+
+      for (let i = 0; i < 20; i++) {
+        await truncateAll();
+        const owner = await mkUser();
+        const dataset = await mkDatasetWithSamples(owner.id, 2);
+        const root = await mkGoldenSet(
+          owner.id,
+          dataset.id,
+          dataset.samples.map((s) => s.id)
+        );
+
+        const spyA = withTransactionSpy();
+        const spyB = withTransactionSpy();
+
+        const [forkA, forkB] = await Promise.all([
+          forkGoldenSet(spyA.client, forkInput(root.id, root.id, owner.id)),
+          forkGoldenSet(spyB.client, forkInput(root.id, root.id, owner.id)),
+        ]);
+
+        // Both must succeed on distinct versions — never the same number (a
+        // silent duplicate) and never a P2002 bubbling out as a rejection.
+        const versions = [forkA.version, forkB.version].sort((a, b) => a - b);
+        expect(versions).toEqual([2, 3]);
+
+        // Same base name on both calls, so the slugs collide unless the
+        // retry recomputes them alongside the version.
+        expect(forkA.slug).not.toBeNull();
+        expect(forkB.slug).not.toBeNull();
+        expect(forkA.slug).not.toBe(forkB.slug);
+
+        // With no race, each call makes exactly one `$transaction` attempt
+        // (total 2); a total > 2 means at least one call hit the
+        // version/slug P2002 and retried. Recorded per-iteration and
+        // checked in aggregate after the loop (see below) rather than
+        // asserted inline here: under real Postgres connection-pool
+        // contention (e.g. this file running alongside the rest of
+        // `npm run test:db` right after `prisma migrate reset`), any SINGLE
+        // iteration can legitimately fail to overlap and land both calls
+        // fully serialized with zero retries — that is not a bug, it is
+        // this test's own concurrency being at the mercy of the scheduler.
+        // Asserting it on every one of 20 iterations trades a real race
+        // test for a flaky one; aggregating keeps the guarantee ("the retry
+        // path is not dead code — it demonstrably fires") without coupling
+        // pass/fail to a single iteration's timing luck.
+        totalAttemptsPerIteration.push(spyA.callCount() + spyB.callCount());
+
+        const family = await db.goldenSet.findMany({
+          where: { OR: [{ id: root.id }, { parentId: root.id }] },
+          orderBy: { version: 'asc' },
+        });
+        expect(family.map((g) => g.version)).toEqual([1, 2, 3]);
+        expect(new Set(family.map((g) => g.version)).size).toBe(family.length);
+
+        // Each fork got its own items and candidates — no bleed, no
+        // half-committed transaction.
+        expect(forkA._count.items).toBe(2);
+        expect(forkB._count.items).toBe(2);
+        const candidateCount = await db.goldenCandidate.count({
+          where: { goldenItem: { goldenSet: { OR: [{ id: root.id }, { parentId: root.id }] } } },
+        });
+        expect(candidateCount).toBe(12); // 3 sets x 2 items x 2 candidates
+      }
+
+      // The aggregate check this whole loop exists to support: at least ONE
+      // of the 20 iterations must show a `$transaction` attempt count > 2,
+      // i.e. a genuine P2002-and-retry, not just 20 passes that all
+      // happened to serialize. Without this, the test cannot distinguish
+      // "raced and recovered" from "never raced" — a `while (true)` in
+      // place of the bounded retry loop, or the retry recomputing nothing
+      // and getting lucky, would pass this file identically as long as the
+      // version/slug assertions above kept holding.
+      expect(totalAttemptsPerIteration.some((attempts) => attempts > 2)).toBe(true);
+    },
+    60_000
+  );
+});

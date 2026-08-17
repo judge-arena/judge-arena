@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { requireAuth, requireScope, optionalAuth, resolveResourceAccess, requireOwnership, RateLimitedError } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicProject } from '@/lib/serializers';
+import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 const updateProjectSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -68,7 +69,11 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
       // author-email join, ever. Only datasets that are THEMSELVES
       // public, filtered in the DB rather than fetched-then-discarded.
       const publicDatasets = await prisma.dataset.findMany({
-        where: { projectId: projectMeta.id, visibility: 'public' },
+        // A1, read 1 of 3 IN THIS FILE. Its twin is the owner's nested
+        // `datasets:` select in the heavy query below. Both filter or
+        // neither does — a hidden dataset that still shows on the owner's
+        // own project page is the failure this pairing exists to prevent.
+        where: { projectId: projectMeta.id, visibility: 'public', ...liveDatasetsOnly() },
         select: {
           id: true,
           name: true,
@@ -93,13 +98,28 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
         user: { select: { id: true, name: true, email: true } },
         evaluations: {
           include: {
+            // A1, read 2 of 3 IN THIS FILE. The other two are
+            // `dataset.findMany` calls that take `liveDatasetsOnly()` directly;
+            // these are nested to-ONE relation args, but OPTIONAL ones, so they
+            // take the same filters in the same place — restoring the `null`
+            // that `Evaluation.datasetId`'s `onDelete: SetNull` produced before
+            // the overlay.
+            //
+            // The project page groups these into dataset batches
+            // (src/lib/dataset-run-groups.ts) keyed on the SCALAR `datasetId`,
+            // which is left populated, so grouping is unaffected; the group's
+            // display name falls back from `dataset.name` to the project's own
+            // `datasets:` list below (already filtered) and then to
+            // `Dataset ${datasetId}`.
             dataset: {
+              where: liveDatasetsOnly(),
               select: {
                 id: true,
                 name: true,
               },
             },
             datasetSample: {
+              where: liveSamplesOnly(),
               select: {
                 id: true,
                 index: true,
@@ -160,6 +180,10 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
         },
         _count: { select: { evaluations: true } },
         datasets: {
+          // A1, read 3 of 3 IN THIS FILE — the OWNER's copy of the same
+          // list. A `dataset.findMany` grep does NOT surface this line; it
+          // is a nested relation arg. See the anonymous read above.
+          where: liveDatasetsOnly(),
           select: {
             id: true,
             name: true,

@@ -37,6 +37,10 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
       orderBy: { createdAt: 'desc' },
     });
 
+    // A1: `runDetailInclude` carries the tombstone filter on its own nested
+    // `Evaluation.dataset`/`.datasetSample` args, so these rows arrive already
+    // filtered and this route has nothing to remember. That is the whole
+    // reason the filter lives in the shared include rather than here.
     return NextResponse.json(runs);
   } catch (error) {
     logger.error('Failed to fetch runs', { error: serializeError(error) });

@@ -1,0 +1,589 @@
+/**
+ * ─── Golden sets: the import mapping (A0) ──────────────────────────────────
+ *
+ * A golden set is not free-form content. It is the annotation layer over
+ * exactly one platform-curated `Dataset`, imported at exactly one protocol
+ * (A0 design, "Creation is import"), so every `GoldenItem` is derived from a
+ * `DatasetSample` by a pure function. That function lives here rather than
+ * inside the route handler: `src/app/api/**` is outside every vitest
+ * coverage `include`, and this is the part of A0 whose correctness is
+ * cheapest to pin down in a unit test and most expensive to discover in a
+ * 620-row import.
+ *
+ * WHAT THE SOURCE ROWS ACTUALLY LOOK LIKE (verified against the live
+ * `judgebench-v1` corpus, 620 rows, 2026-08-12):
+ *
+ *     DatasetSample.input    = the question, ALONE
+ *     DatasetSample.expected = 'A>B' (336) | 'B>A' (284)
+ *     DatasetSample.metadata = a STRING holding JSON, keys exactly
+ *                              split, source, pair_id, original_id,
+ *                              response_model, response_A, response_B
+ *                              (written at prisma/seed-judgebench.ts:195-203)
+ *
+ * The two candidate responses exist ONLY inside `metadata`. That is why this
+ * mapping exists, and why the dataset mapping at
+ * `src/app/api/evaluations/route.ts:538-546` must not be reused: for
+ * `inputType: 'query-response'` it takes `sample.expected || sample.input`,
+ * which here produces `inputText: 'A>B'` — a two-character string judged
+ * against a rubric, on every row, with no error anywhere.
+ *
+ * THE ONLY THING THIS BRANCHES ON IS THE TARGET PROTOCOL, never
+ * `dataset.inputType`:
+ *
+ *     pointwise   1 candidate  (response_A)   expected = null
+ *     pairwise    2 candidates (A, B)         expected = 'A>B' | 'B>A'
+ *     listwise    2 candidates (A, B)         expected = '0,1' | '1,0'
+ *
+ * A pointwise import of a preference corpus therefore has NO ground truth,
+ * and that is correct rather than broken: the label is a preference between
+ * two responses, not a score for one. Such a set is not calibration-ready
+ * until A1's annotators label it.
+ *
+ * RESPONSE TEXT LIVES IN THE CANDIDATES AND NOWHERE ELSE. Item-level
+ * `promptText`/`responseText` are null at every protocol, including pointwise
+ * where the single response would "fit" in `responseText`. Two homes for one
+ * string is two places to edit, and the fork's content comparison (A0 design,
+ * "Freeze and fork") would have to keep them agreeing forever.
+ *
+ * `label` on a candidate is null: position IS the identity (0 = A, 1 = B),
+ * which is what `pairOrder: 'AB'` means on the judgment that scores it.
+ *
+ * A CORRUPT SOURCE ROW FAILS LOUDLY. `metadata` is nullable and free-form, so
+ * every accessor below is checked and every error names the sample id. A
+ * golden set built from a row with no responses would be ground truth made
+ * of empty strings — which nothing downstream can detect, because it is a
+ * perfectly well-formed set.
+ */
+
+import type { Prisma, RunProtocol } from '@prisma/client';
+
+/**
+ * Owner of every corpus a golden set may be built from. Duplicated from
+ * `PLATFORM_USER_EMAIL` (prisma/seed-core.ts:60) rather than imported:
+ * `prisma/seed-core.ts` is a seeding module that pulls in the whole seed
+ * graph, and nothing under src/ should drag that into a Next.js bundle.
+ * `tests/lib/golden-sets.test.ts` asserts the two values agree.
+ */
+export const PLATFORM_OWNER_EMAIL = 'platform@judgearena.local';
+
+export interface GoldenCandidateInput {
+  position: number;
+  promptText: string | null;
+  responseText: string | null;
+  label: string | null;
+}
+
+export interface GoldenItemInput {
+  index: number;
+  inputText: string;
+  promptText: string | null;
+  responseText: string | null;
+  protocol: RunProtocol;
+  expected: string | null;
+  sourceDatasetSampleId: string;
+  candidates: GoldenCandidateInput[];
+}
+
+/**
+ * The subset of `DatasetSample` this mapping reads. `metadata` is a STRING
+ * holding JSON, not a Json column — see the model at schema.prisma:600-614.
+ */
+export interface SourceSample {
+  id: string;
+  input: string;
+  expected: string | null;
+  metadata: string | null;
+}
+
+/**
+ * The preference vocabulary that can be imported for any protocol. A Map,
+ * not an object literal: `{}['constructor']` is a function rather than
+ * undefined, so an object lookup keyed on untrusted `expected` text has a
+ * prototype hole a Map does not.
+ */
+const ALLOWED_PREFERENCE_LABELS = new Set<string>(['A>B', 'B>A']);
+
+/**
+ * The mapping from preference labels to listwise rankings. Subset of
+ * ALLOWED_PREFERENCE_LABELS with computed values.
+ */
+const LISTWISE_RANKING_BY_PREFERENCE = new Map<string, string>([
+  ['A>B', '0,1'],
+  ['B>A', '1,0'],
+]);
+
+interface PairResponses {
+  responseA: string;
+  responseB: string;
+}
+
+function readPairResponses(sample: SourceSample): PairResponses {
+  if (sample.metadata === null || sample.metadata.trim() === '') {
+    throw new Error(
+      `mapSampleToGoldenItem: dataset sample ${sample.id} has no metadata, so it carries no ` +
+        'candidate responses (expected a JSON object with response_A and response_B)'
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(sample.metadata);
+  } catch (error) {
+    throw new Error(
+      `mapSampleToGoldenItem: dataset sample ${sample.id} has metadata that is not valid JSON: ` +
+        (error instanceof Error ? error.message : String(error))
+    );
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(
+      `mapSampleToGoldenItem: dataset sample ${sample.id} has metadata that is not a JSON object`
+    );
+  }
+
+  const { response_A: responseA, response_B: responseB } = parsed as Record<string, unknown>;
+  if (typeof responseA !== 'string' || typeof responseB !== 'string') {
+    throw new Error(
+      `mapSampleToGoldenItem: dataset sample ${sample.id} is missing response_A/response_B in ` +
+        'its metadata; it is not a pair, and no protocol can be built from it'
+    );
+  }
+
+  return { responseA, responseB };
+}
+
+function validatePreferenceLabel(sample: SourceSample): void {
+  if (sample.expected === null) return;
+  if (!ALLOWED_PREFERENCE_LABELS.has(sample.expected)) {
+    throw new Error(
+      `mapSampleToGoldenItem: dataset sample ${sample.id} has expected ` +
+        `${JSON.stringify(sample.expected)}, which is not an allowed preference label (known ` +
+        `labels: ${[...ALLOWED_PREFERENCE_LABELS].join(', ')})`
+    );
+  }
+}
+
+function toListwiseRanking(sample: SourceSample): string | null {
+  if (sample.expected === null) return null;
+  const ranking = LISTWISE_RANKING_BY_PREFERENCE.get(sample.expected);
+  if (ranking === undefined) {
+    throw new Error(
+      `mapSampleToGoldenItem: dataset sample ${sample.id} has expected ` +
+        `${JSON.stringify(sample.expected)}, which has no listwise ranking (known preference ` +
+        `labels: ${[...LISTWISE_RANKING_BY_PREFERENCE.keys()].join(', ')})`
+    );
+  }
+  return ranking;
+}
+
+function toCandidate(position: number, responseText: string): GoldenCandidateInput {
+  return { position, promptText: null, responseText, label: null };
+}
+
+/**
+ * Maps one `DatasetSample` to one `GoldenItemInput` for the target protocol.
+ * Pure: no DB, no clock, no ids minted. `index` is the caller's position in
+ * the SELECTION (0..n-1 over `sampleIndices`), never the sample's own index.
+ */
+export function mapSampleToGoldenItem(
+  sample: SourceSample,
+  protocol: RunProtocol,
+  index: number
+): GoldenItemInput {
+  const { responseA, responseB } = readPairResponses(sample);
+
+  const base = {
+    index,
+    inputText: sample.input,
+    promptText: null,
+    responseText: null,
+    protocol,
+    sourceDatasetSampleId: sample.id,
+  };
+
+  if (protocol === 'pointwise') {
+    return { ...base, expected: null, candidates: [toCandidate(0, responseA)] };
+  }
+
+  if (protocol === 'pairwise') {
+    validatePreferenceLabel(sample);
+    return {
+      ...base,
+      expected: sample.expected,
+      candidates: [toCandidate(0, responseA), toCandidate(1, responseB)],
+    };
+  }
+
+  if (protocol === 'listwise') {
+    return {
+      ...base,
+      expected: toListwiseRanking(sample),
+      candidates: [toCandidate(0, responseA), toCandidate(1, responseB)],
+    };
+  }
+
+  // Exhaustive over RunProtocol — `protocol` is `never` here. Reachable only
+  // from an unvalidated caller, which must not silently get a listwise item.
+  const unsupported: never = protocol;
+  throw new Error(`mapSampleToGoldenItem: unsupported protocol ${String(unsupported)}`);
+}
+
+/**
+ * ─── Freeze ────────────────────────────────────────────────────────────────
+ *
+ * A golden set is frozen iff any CalibrationRun references it:
+ *
+ *     frozen(goldenSetId) := calibrationRun.count({ where: { goldenSetId } }) > 0
+ *
+ * WHAT FREEZES is item content — items, candidates, `protocol`, `expected`.
+ * WHAT DOES NOT is `name`, `description`, `visibility`, `retiredAt`: renaming
+ * a set changes nothing a calibration run measured, and refusing a typo fix is
+ * hostile and buys nothing.
+ *
+ * `datasetId` IS IN NEITHER LIST ANY MORE. Listing it as frozen content made
+ * it editable on any set without a CalibrationRun, which is backwards: a
+ * golden set annotates exactly one dataset, so repointing it is illegitimate
+ * whether or not anything has measured it. It is now immutable for the life of
+ * the row, refused with a 400 in the PATCH route, and never reaches this
+ * predicate at all.
+ *
+ * `finishedAt` IS NOT CONSULTED. CalibrationRun has no status enum, only
+ * `startedAt`/`finishedAt`, so "still running" and "crashed" are the same
+ * state; excluding unfinished runs would let a crashed run's set drift
+ * underneath the numbers it already produced.
+ *
+ * IT TAKES THE CALLER'S TRANSACTION CLIENT, deliberately. The count and the
+ * mutation it guards must commit or roll back together — separated, a
+ * calibration run that starts between them measures a set that changed
+ * underneath it, and nothing logs.
+ *
+ * ONE DEFINITION, TWO CALLERS. `src/lib/account-deletion.ts` had this
+ * predicate inline first (its golden-set branch, closing 1b-prereq (a)); it
+ * now calls this function, so the account-lifecycle path and the golden-set
+ * write-guards cannot drift into disagreeing about what "frozen" means.
+ */
+
+export async function isGoldenSetFrozen(
+  tx: Prisma.TransactionClient,
+  goldenSetId: string
+): Promise<boolean> {
+  const pinningCalibrationRunCount = await tx.calibrationRun.count({ where: { goldenSetId } });
+  return pinningCalibrationRunCount > 0;
+}
+
+/**
+ * Thrown by a write-guard that refused to change the content of a frozen set.
+ * Routes map it to a 409 whose body points at POST /api/golden-sets/[id]/fork
+ * — the whole point of decision #6 is that editing a measured set is not
+ * forbidden, it is redirected to a new version.
+ */
+export class GoldenSetFrozenError extends Error {
+  readonly goldenSetId: string;
+
+  constructor(goldenSetId: string) {
+    super(
+      `Golden set ${goldenSetId} is frozen: a calibration run has already measured it. ` +
+        'Fork it to a new version to change its items.'
+    );
+    this.name = 'GoldenSetFrozenError';
+    this.goldenSetId = goldenSetId;
+  }
+}
+
+/* ─── The dataset pin ───────────────────────────────────────────────────────
+ *
+ * A golden set holds its corpus down with TWO `onDelete: Restrict` FKs, and
+ * both were added by A0:
+ *
+ *   GoldenSet.datasetId            (schema.prisma:671) — the set is the
+ *                                  annotation layer over exactly one Dataset,
+ *                                  so that Dataset cannot be deleted.
+ *   GoldenItem.sourceDatasetSampleId (schema.prisma:717) — the row an item was
+ *                                  imported from cannot be deleted.
+ *
+ * Four handlers destroy one or the other, and the design doc states the
+ * requirement for all of them (2026-08-12-a0-golden-set-substrate-design.md:
+ * 236-240): the refusal "must fail as a deliberate 409 with a message naming
+ * the golden sets that pinned it, not as a raw P2003". Only `PUT
+ * /api/datasets/[id]/samples` did. `DELETE /api/datasets/[id]/samples`,
+ * `DELETE /api/datasets/[id]` and the config importer's sample replace each
+ * surfaced the P2003 as a generic 500 — the importer's worst of all, because
+ * that route commits incrementally and has no `$transaction`, so the throw
+ * left the document half-applied.
+ *
+ * ONE PREDICATE, FOUR CALLERS, so they cannot drift.
+ *
+ * DELIBERATELY NOT LIFECYCLE-FILTERED, on either level. A TOMBSTONED golden
+ * item still holds `sourceDatasetSampleId`, and a RETIRED or TOMBSTONED golden
+ * set still holds `datasetId`; Postgres does not care that a row is logically
+ * dead. Sweeping a `tombstonedAt: null` through here would make the guard
+ * report "not pinned", let the delete proceed, and convert a clean 409 into
+ * the raw P2003 this exists to prevent. Pinned by 'a TOMBSTONED golden item
+ * still pins the dataset' in tests/db/dataset-sample-freeze.test.ts.
+ *
+ * BOTH FK ARMS ARE IN THE PREDICATE, not just the item one. For any set with
+ * items over this corpus the two arms agree — a set's items source its own
+ * dataset's samples, which POST /api/golden-sets guarantees and the importer's
+ * `datasetId`-immutability refusal preserves. The `datasetId` arm therefore
+ * adds exactly one case: a set with NO items (reachable, `items` defaults to
+ * `[]` in `configDocumentSchema`), which the item arm would report as
+ * unpinned while `dataset.delete` still raised P2003. On the sample paths that
+ * arm can only ever over-report, and "this corpus is annotated by set X" is
+ * true of an empty set too — it declared itself the annotation layer over it.
+ */
+export async function findGoldenSetsPinningDataset(
+  client: Prisma.TransactionClient,
+  datasetId: string
+): Promise<{ id: string; name: string }[]> {
+  return client.goldenSet.findMany({
+    where: {
+      OR: [{ datasetId }, { items: { some: { sourceSample: { datasetId } } } }],
+    },
+    select: { id: true, name: true },
+    orderBy: { name: 'asc' },
+  });
+}
+
+/* ─── Set lifecycle read filter ─────────────────────────────────────────────
+ *
+ * GoldenSet carries two nullable timestamps that are NOT synonyms:
+ *
+ *   retiredAt     Out of circulation, still valid ground truth. A PRODUCT
+ *                 verb. Written by POST /api/golden-sets/[id]/retire, and by
+ *                 src/lib/account-deletion.ts when a CalibrationRun still
+ *                 pins the set (that run's kappa is uninterpretable without
+ *                 the set it measured). Reversible; readable again with
+ *                 ?includeRetired=true.
+ *
+ *   tombstonedAt  Pending purge, with TWO writers that differ in what they
+ *                 leave behind. src/lib/account-deletion.ts stamps it when
+ *                 the owning account is deleted and nothing references the
+ *                 set, and `GoldenSet.ownerId` is `onDelete: SetNull`, so
+ *                 that row also ends up with `ownerId: null`. DELETE
+ *                 /api/golden-sets/[id] stamps it when the owner deletes
+ *                 their own set, and the OWNER STAYS SET. Anything scoping
+ *                 on `ownerId` therefore still sees the second kind, which
+ *                 is why this column is filtered explicitly rather than
+ *                 left to an ownership clause. Neither writer is reversible
+ *                 and neither is escapable — the row stays hidden from every
+ *                 read path until the purge wave (not part of A0) removes it.
+ *
+ * THE ASYMMETRY IS THE WHOLE POINT, and it is what this function adds over
+ * the hand-rolled `if (!includeRetired) { where.retiredAt = null;
+ * where.tombstonedAt = null; }` it replaced at each call site. That shape
+ * made ?includeRetired=true release BOTH columns, so a set belonging to a
+ * deleted account came back in the list under "Show retired" — and with no
+ * badge, because the list card keys off `retiredAt` alone.
+ *
+ * Every golden-set read path spreads `goldenSetLifecycleWhere(...)` into its
+ * `where`. There is exactly one definition so the list route, the detail
+ * route, the items route and the config export cannot drift apart.
+ */
+export function goldenSetLifecycleWhere(includeRetired: boolean): Prisma.GoldenSetWhereInput {
+  return includeRetired ? { tombstonedAt: null } : { retiredAt: null, tombstonedAt: null };
+}
+
+/** The one spelling of the escape hatch every golden-set read path accepts.
+ * Strict `=== 'true'`, matching the `includeSamples` compare in
+ * src/app/api/config/export/route.ts — so `?includeRetired=1` is false
+ * everywhere rather than true on some routes.
+ *
+ * Named, not line-numbered, on purpose: the line reference this replaced was
+ * falsified by the very task that added `?includeRetired` to that route. */
+export function parseIncludeRetired(searchParams: URLSearchParams): boolean {
+  return searchParams.get('includeRetired') === 'true';
+}
+
+/**
+ * Thrown when a write targets a set that is out of circulation. Routes map it
+ * to a 409 naming the state and the way out — see `notInCirculationResponse`
+ * in src/app/api/golden-sets/shared.ts, which is the one body all of them
+ * return.
+ *
+ * MODULE-LEVEL, NOT ROUTE-LEVEL, since three routes now throw it: the items
+ * verbs, PATCH /api/golden-sets/[id], and the fork. (It began life private to
+ * items/route.ts because Next.js 15 rejects arbitrary named exports from a
+ * `route.ts`; that constraint is why it moves HERE rather than being exported
+ * from where it was.)
+ */
+export class GoldenSetNotInCirculationError extends Error {
+  readonly goldenSetId: string;
+  readonly state: 'retired' | 'tombstoned';
+
+  constructor(goldenSetId: string, state: 'retired' | 'tombstoned') {
+    super(
+      state === 'retired'
+        ? `Golden set ${goldenSetId} is retired: it is out of circulation, so it is not editable. ` +
+            'Un-retire it, or fork it to a new version.'
+        : `Golden set ${goldenSetId} is tombstoned and pending purge; it cannot be edited.`
+    );
+    this.name = 'GoldenSetNotInCirculationError';
+    this.goldenSetId = goldenSetId;
+    this.state = state;
+  }
+}
+
+/**
+ * Refuses a write on a set `goldenSetLifecycleWhere` hides from every read
+ * path. Closes the gap recorded when the items verbs landed: GET filtered
+ * `retiredAt`/`tombstonedAt` and the writes did not, so a retired set's items
+ * were unreadable through the API and still freely editable through it.
+ *
+ * IT DOES NOT ANSWER THE WAY GET DOES, on purpose. GET 404s, because an
+ * anonymous or stranger caller must not learn the id exists. Every caller of
+ * this sits past `requireOwnership`, so the only ones who reach it are the
+ * owner and an admin — both of whom already know — and a bare 404 to the owner
+ * of a set they can see in their own list under "Show retired" is confusing
+ * rather than protective. They get a 409 naming the state and the way out, the
+ * same shape `GoldenSetFrozenError` uses.
+ *
+ * THERE IS DELIBERATELY NO ?includeRetired ESCAPE ON A WRITE. Retire is
+ * reversible, so the route back to editing is to un-retire (POST
+ * /api/golden-sets/[id]/retire with `{ retired: false }`) or to fork — both of
+ * which leave the decision on the row. A query flag would instead let an edit
+ * land silently on a set every read path reports as out of circulation.
+ * Tombstoned has no route back at all, by design.
+ *
+ * TWO CALLERS AT TWO LEVELS, and that is the point of sharing it: PATCH/DELETE
+ * `/api/golden-sets/[id]/items` (item content) and PATCH
+ * `/api/golden-sets/[id]` (the set's own metadata). Without the second, a
+ * tombstoned set's name stayed owner-editable while its items were frozen.
+ *
+ * Takes the caller's transaction client for the same reason
+ * `isGoldenSetFrozen` does: read-then-write across a commit boundary is a race
+ * against a concurrent retire.
+ */
+export async function assertGoldenSetInCirculation(
+  tx: Prisma.TransactionClient,
+  goldenSetId: string
+): Promise<void> {
+  const goldenSet = await tx.goldenSet.findUnique({
+    where: { id: goldenSetId },
+    select: { retiredAt: true, tombstonedAt: true },
+  });
+  // `tombstonedAt` is checked first: a set can carry both (account deletion
+  // retires a pinned set, DELETE tombstones), and pending-purge is the state
+  // with no way back, so it is the one worth reporting.
+  if (goldenSet?.tombstonedAt) {
+    throw new GoldenSetNotInCirculationError(goldenSetId, 'tombstoned');
+  }
+  if (goldenSet?.retiredAt) {
+    throw new GoldenSetNotInCirculationError(goldenSetId, 'retired');
+  }
+}
+
+/**
+ * The WEAKER half of the assertion above: refuses a tombstoned set and admits
+ * a retired one.
+ *
+ * Exactly one caller, POST /api/golden-sets/[id]/fork, and the asymmetry is
+ * deliberate rather than an oversight to be tidied up later. Forking a RETIRED
+ * set is the documented escape hatch — every "un-retire it, or fork it"
+ * message this feature produces points at it, and `assertGoldenSetInCirculation`
+ * would make all of them lie. Forking a TOMBSTONED set is the opposite: it
+ * copies the items, candidates and LIVE labels of a row pending purge into a
+ * fresh, live, visible set, laundering it back into circulation.
+ */
+export async function assertGoldenSetNotTombstoned(
+  tx: Prisma.TransactionClient,
+  goldenSetId: string
+): Promise<void> {
+  const goldenSet = await tx.goldenSet.findUnique({
+    where: { id: goldenSetId },
+    select: { tombstonedAt: true },
+  });
+  if (goldenSet?.tombstonedAt) {
+    throw new GoldenSetNotInCirculationError(goldenSetId, 'tombstoned');
+  }
+}
+
+/* ─── Item lifecycle: tombstone, never delete ───────────────────────────────
+ *
+ * Owner ruling 2026-08-13: "delete is ALWAYS a same-transaction tombstone
+ * tag; no actual data removal, anywhere." `GoldenItem.tombstonedAt` is that
+ * tag. NULL = live.
+ *
+ * NOTE THE ASYMMETRY WITH A SET'S `tombstonedAt`, IT IS DELIBERATE. A SET's
+ * `tombstonedAt` marks the whole set pending purge, and it has TWO writers:
+ * src/lib/account-deletion.ts when the owning account goes (which leaves
+ * `ownerId: null`), and DELETE /api/golden-sets/[id] when the owner deletes
+ * the set themselves (which leaves the owner intact). Neither is reversible
+ * and nothing may ever hand one back — `goldenSetLifecycleWhere` above pins
+ * `tombstonedAt: null` in BOTH its arms, so there is no escape hatch at any
+ * read path. An ITEM's `tombstonedAt` removes one row from a set that is
+ * still live and still being worked on: a PRODUCT verb, its owner curating
+ * their own set. The owner therefore has to
+ * be able to see what they removed (to notice a mistake, and because the row
+ * is being kept precisely so it can be looked at), so the item filter DOES
+ * take an escape — gated to the owner/admin branch by its caller, never
+ * offered to a public reader of a public set.
+ *
+ * `true` returns an EMPTY predicate rather than `{ tombstonedAt: { not: null } }`:
+ * "include tombstoned" means live AND tombstoned, not tombstoned only.
+ */
+export function goldenItemLifecycleWhere(includeTombstoned: boolean): Prisma.GoldenItemWhereInput {
+  return includeTombstoned ? {} : { tombstonedAt: null };
+}
+
+/** The one spelling of the item escape hatch. Strict `=== 'true'`, matching
+ * this repo's other boolean query flags — `parseIncludeRetired` above and the
+ * `includeSamples` compare in src/app/api/config/export/route.ts — so
+ * `?includeTombstoned=1` is false everywhere rather than true on some
+ * routes. */
+export function parseIncludeTombstoned(searchParams: URLSearchParams): boolean {
+  return searchParams.get('includeTombstoned') === 'true';
+}
+
+/** The only `GoldenLabel.tombstonedReason` any code writes today. A future
+ * annotator retraction or purge gets its OWN value rather than overloading
+ * this one — the column exists so "why did this score stop applying" is
+ * answerable without reading git history. */
+export const GOLDEN_LABEL_TOMBSTONE_REASON_CONTENT_EDIT = 'item-content-edit';
+
+/**
+ * The other writer: `POST /api/config/import` replacing a set's items wholesale
+ * from a config document.
+ *
+ * NOT folded into the constant above, even though both are "the text this score
+ * applied to is gone". An import replace tombstones EVERY live item of the set,
+ * including items whose content the document did not change, because the
+ * document is the new truth for the whole set and the old rows are not
+ * re-identified against it. Labelling those `'item-content-edit'` would assert
+ * something false about the items that did not change — and a reason that lies
+ * is worse than no reason, which is the whole point of the column.
+ */
+export const GOLDEN_LABEL_TOMBSTONE_REASON_CONFIG_IMPORT_REPLACE = 'config-import-replace';
+
+/**
+ * The next `GoldenItem.index` for a set: a HIGH-WATER MARK over every row,
+ * tombstoned included, never a count and never a reused ordinal.
+ *
+ *     nextIndex = max(index) over ALL rows of the set + 1
+ *
+ * WHY NOT `count()` of live rows: tombstone item 0 of 3 and the count is 2,
+ * but index 2 is occupied — P2002 on the very first insert.
+ *
+ * WHY NOT `max` over LIVE rows: tombstone the tail (items 0..4, tombstone 3
+ * and 4) and live-max + 1 is 3, which is occupied by a tombstoned row.
+ *
+ * The consequence, stated so nobody rediscovers it as a bug: after the first
+ * tombstone, `index` is NOT dense. Its only guarantees are uniqueness within
+ * the set and monotonic insertion order. Any code treating it as a 0-based
+ * position into the live item array is wrong. The importer's 0..n-1
+ * (mapSampleToGoldenItem, above) stays correct only because import runs
+ * against an empty set.
+ *
+ * Takes the caller's transaction client for the same reason
+ * `isGoldenSetFrozen` does: read-then-insert across a commit boundary is a
+ * race against a concurrent append.
+ */
+export async function nextGoldenItemIndex(
+  tx: Prisma.TransactionClient,
+  goldenSetId: string
+): Promise<number> {
+  const highWaterMark = await tx.goldenItem.aggregate({
+    where: { goldenSetId },
+    _max: { index: true },
+  });
+  return (highWaterMark._max.index ?? -1) + 1;
+}

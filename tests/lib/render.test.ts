@@ -3,7 +3,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { renderJudgmentSystemPrompt, buildJudgmentUserPrompt, renderJudgmentPrompt } from '@/lib/llm/render';
-import { V1_LEGACY_JUDGMENT_SYSTEM_PROMPT } from '../../prisma/seed-prompt-templates';
+import {
+  V1_LEGACY_JUDGMENT_SYSTEM_PROMPT,
+  V1_PAIRWISE_JUDGMENT_SYSTEM_PROMPT,
+} from '../../prisma/seed-prompt-templates';
 import type { RubricCriterionView } from '@/types';
 
 /**
@@ -85,6 +88,7 @@ function makeCriteria(): RubricCriterionView[] {
 const criteria = makeCriteria();
 
 const v1LegacyTemplate = { body: V1_LEGACY_JUDGMENT_SYSTEM_PROMPT, protocol: 'pointwise' as const };
+const v1PairwiseTemplate = { body: V1_PAIRWISE_JUDGMENT_SYSTEM_PROMPT, protocol: 'pairwise' as const };
 
 describe('render: renderJudgmentSystemPrompt — v1-legacy golden byte-parity', () => {
   it('renders byte-identical output to the old buildJudgmentSystemPrompt, with a description', () => {
@@ -153,13 +157,13 @@ describe('render: renderJudgmentSystemPrompt — v1-legacy golden byte-parity', 
     ).toThrow(/PromptTemplate body/);
   });
 
-  it('throws a clear error for a non-pointwise template protocol (not yet implemented)', () => {
+  it('throws a clear error for a listwise template protocol (storable in A0, not runnable)', () => {
     expect(() =>
       renderJudgmentSystemPrompt(
-        { body: V1_LEGACY_JUDGMENT_SYSTEM_PROMPT, protocol: 'pairwise' },
+        { body: V1_LEGACY_JUDGMENT_SYSTEM_PROMPT, protocol: 'listwise' },
         { name: 'x', description: undefined, criteria: [] }
       )
-    ).toThrow(/unsupported PromptTemplate protocol "pairwise"/);
+    ).toThrow(/unsupported PromptTemplate protocol "listwise"/);
   });
 });
 
@@ -229,6 +233,35 @@ describe('render: evalTemplateLiteral safety — Task 10 review CRITICAL fix (no
         criteria: makeCriteria(),
       });
       expect(actual).toBe(expected);
+    }
+  });
+
+  // A0: the pairwise sibling of the case above. There is no golden oracle to
+  // compare against — `v1-pairwise` has no v1 predecessor, it is a new
+  // contract — so what this pins is the property that actually breaks in
+  // production: the seeded body must PARSE under the renderer's bounded,
+  // whitelisted grammar. The seam matters (`render.ts`, not a fixture): a
+  // body referencing a fourth identifier, or carrying a bare top-level
+  // backtick, throws `non_retryable` for EVERY pairwise judgment, and the
+  // only other assertion on this constant anywhere (`body === constant`, in
+  // tests/integration/pairwise-run.test.ts) holds just as well for an
+  // unparseable body.
+  it('the real v1-pairwise body parses and renders across all 3 rubricDescription branches', () => {
+    const branches: Array<string | undefined> = ['A multi-line\ndescription', undefined, ''];
+    for (const description of branches) {
+      const actual = renderJudgmentSystemPrompt(v1PairwiseTemplate, {
+        name: 'Pinned Rubric',
+        description,
+        criteria: makeCriteria(),
+      });
+      // Every `${...}` slot resolved — an unsubstituted one means the parser
+      // treated a placeholder as literal text rather than interpolating it.
+      expect(actual).not.toContain('${');
+      expect(actual).toContain('## Rubric: Pinned Rubric');
+      // criteriaList sorts by `order`, not array position — same as pointwise.
+      expect(actual.indexOf('Clarity')).toBeLessThan(actual.indexOf('Accuracy'));
+      // The ternary branch, taken both ways.
+      expect(actual.includes('A multi-line\ndescription')).toBe(description === branches[0]);
     }
   });
 });

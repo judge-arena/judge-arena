@@ -79,9 +79,14 @@ export async function callOpenAICompatible(opts: ProviderCallOptions): Promise<P
   );
 
   if (structuredOutputRequested && opts.descriptor) {
+    // A0: the schema is now caller-selected (pointwise vs. pairwise), with
+    // the pointwise one as the default so every pre-A0 call site keeps its
+    // exact prior behavior. The schema NAME stays `JUDGMENT_JSON_SCHEMA_NAME`
+    // in both cases — it is a response-format label, not a discriminator.
+    const schema = opts.jsonSchema ?? JUDGMENT_JSON_SCHEMA;
     const extraFields = opts.descriptor.structuredRequestFields
-      ? opts.descriptor.structuredRequestFields(JUDGMENT_JSON_SCHEMA)
-      : defaultStructuredRequestFields(JUDGMENT_JSON_SCHEMA);
+      ? opts.descriptor.structuredRequestFields(schema)
+      : defaultStructuredRequestFields(schema);
     Object.assign(params, extraFields);
   }
 

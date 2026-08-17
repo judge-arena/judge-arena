@@ -118,6 +118,7 @@ const createdRunIds: string[] = [];
 const createdEvaluationIds: string[] = [];
 const createdVersionIds: string[] = [];
 const createdJudgeModelIds: string[] = [];
+const createdPromptTemplateIds: string[] = [];
 
 let uniqCounter = 0;
 function uniq(label: string): string {
@@ -226,6 +227,9 @@ afterAll(async () => {
   await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
   await prisma.judgeModelVersion.deleteMany({ where: { id: { in: createdVersionIds } } });
   await prisma.judgeModel.deleteMany({ where: { id: { in: createdJudgeModelIds } } });
+  // After the runs above (ModelJudgment.promptTemplate is onDelete: Restrict,
+  // and deleting a run cascades its judgments).
+  await prisma.promptTemplate.deleteMany({ where: { id: { in: createdPromptTemplateIds } } });
 
   await closeRabbit();
   await prisma.$disconnect();
@@ -384,6 +388,70 @@ describe('launchSingleRun (src/lib/run-launch.ts)', () => {
       status: 400,
       message: expect.stringContaining(model.version.id),
     });
+  });
+
+  // A0 (Task 12): every rejection in launchSingleRun's protocol/candidate
+  // validation block, pinned as a 400 with an actionable message. Each of
+  // these otherwise surfaces as something that describes a symptom instead
+  // of the cause: duplicate positions escape as a raw Prisma P2002 on
+  // RunCandidate's @@unique([runId, position]) (a 500), and text-less
+  // candidates survive all the way into buildPairwiseUserPrompt and come
+  // back as a non_retryable "Failed to render judgment prompt".
+  it('rejects unrunnable pairwise/listwise launches at the launch layer, before any row is written', async () => {
+    const user = await mkUser();
+    const project = await mkProject(user.id);
+    const rubric = await mkRubric(user.id);
+    const model = await mkJudgeVersionWithEndpoint(user.id);
+    const evaluation = await mkEvaluation(project.id, user.id, {
+      rubricId: rubric.id,
+      judgeModelVersionIds: [model.version.id],
+    });
+    const base = { evaluationId: evaluation.id, triggeredById: user.id };
+    const ok = [
+      { position: 0, responseText: 'candidate zero' },
+      { position: 1, responseText: 'candidate one' },
+    ];
+
+    await expect(
+      launchSingleRun({ ...base, protocol: 'listwise', candidates: ok })
+    ).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/not executable/i) });
+
+    await expect(
+      launchSingleRun({ ...base, protocol: 'pairwise', candidates: [ok[0]] })
+    ).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/exactly 2 candidates, got 1/) });
+
+    await expect(
+      launchSingleRun({ ...base, protocol: 'pointwise', candidates: ok })
+    ).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/takes no candidates/i) });
+
+    await expect(
+      launchSingleRun({
+        ...base,
+        protocol: 'pairwise',
+        candidates: [
+          { position: 0, responseText: 'a' },
+          { position: 0, responseText: 'b' },
+        ],
+      })
+    ).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/distinct candidate positions/i) });
+
+    // Blank-text detection mirrors render.ts's `candidateText` exactly:
+    // responseText ?? promptText, then trimmed. Whitespace-only counts as
+    // empty; a null responseText falls back to promptText rather than
+    // failing.
+    await expect(
+      launchSingleRun({
+        ...base,
+        protocol: 'pairwise',
+        candidates: [
+          { position: 0, responseText: 'a' },
+          { position: 1, responseText: '   ', promptText: null },
+        ],
+      })
+    ).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/position\(s\) \[1\] are empty/) });
+
+    // Nothing above wrote a run — every rejection precedes the transaction.
+    expect(await prisma.evaluationRun.count({ where: { evaluationId: evaluation.id } })).toBe(0);
   });
 });
 
@@ -564,6 +632,97 @@ describe('launchBulkRunCreates (src/lib/run-launch.ts)', () => {
     const { confirmChannel } = await getRabbit();
     const published = await drainQueue(confirmChannel, QUEUE_RUN_CREATE);
     expect(published.length).toBeGreaterThanOrEqual(2);
+  });
+
+  // A0 (Task 12): `RunCreateMsg.protocol` became a real `RunProtocol`, so a
+  // non-pointwise value is now REPRESENTABLE on this queue even though no
+  // producer emits one (`launchBulkRunCreates` hardcodes 'pointwise'). The
+  // consumer cannot expand one correctly — `RunCreateMsg` carries no
+  // candidate set — so it must refuse rather than half-honour it.
+  //
+  // A PAIRWISE TEMPLATE HAS TO EXIST FOR THIS TEST TO DISCRIMINATE. With none,
+  // `resolveCurrentPromptTemplate('pairwise')` finds nothing, throws, and lands
+  // in the SAME `recordExpansionFailure` for a completely different reason — so
+  // every assertion here would hold with or without the guard, and the test
+  // would certify nothing. That is not hypothetical: it is how the first
+  // version of this test was written, and it passed against the unguarded
+  // consumer.
+  //
+  // With a pairwise row present, the unguarded consumer expands successfully
+  // instead. Measured by deleting the guard and re-running: `status:
+  // 'pending'`, one `ModelJudgment` (promptTemplateId set, `pairOrder` NULL),
+  // one `RunModelSelection`, and one published judgment.execute — all against a
+  // run with zero `RunCandidate` rows and nothing to compare. The status,
+  // judgment-count and selection-count assertions below were each observed to
+  // fail in that state.
+  //
+  // Task 13 made the SEEDER ship a pairwise row (`v1-pairwise`), so this
+  // file's own `beforeEach` seeding already supplies one. The row created
+  // inline below is kept anyway, and deliberately: it keeps this test's
+  // discrimination a property of the test itself rather than of whatever the
+  // seeder happens to contain. It cannot collide with the seeded row —
+  // PromptTemplate is @@unique([name, version]) and the name is uniq()'d — and
+  // it cannot change the guarded outcome either way, because the protocol
+  // refusal is the first statement in `handle()`'s try block, before any
+  // template is resolved.
+  it('refuses a non-pointwise run.create even when a template for that protocol exists: books an errored run and expands nothing', async () => {
+    const user = await mkUser();
+    const project = await mkProject(user.id);
+    const rubric = await mkRubric(user.id);
+    const model = await mkJudgeVersionWithEndpoint(user.id);
+    const evaluation = await mkEvaluation(project.id, user.id, {
+      rubricId: rubric.id,
+      judgeModelVersionIds: [model.version.id],
+    });
+
+    // Uniquely named so it never collides with the seeded rows or with
+    // Task 13's v1-pairwise (PromptTemplate is @@unique([name, version])).
+    const pairwiseTemplate = await prisma.promptTemplate.create({
+      data: {
+        name: uniq('test-pairwise'),
+        protocol: 'pairwise',
+        version: 0,
+        body: 'Compare the two responses against ${criteriaList}.',
+      },
+    });
+    createdPromptTemplateIds.push(pairwiseTemplate.id);
+
+    const { confirmChannel } = await getRabbit();
+    await assertTopology(confirmChannel);
+    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_EXECUTE);
+
+    const msg: RunCreateMsg = {
+      evaluationId: evaluation.id,
+      runSpec: {
+        rubricId: rubric.id,
+        modelSelections: [{ judgeModelVersionId: model.version.id, modelConfigId: null }],
+        triggeredById: user.id,
+        protocol: 'pairwise',
+      },
+    };
+
+    const consumer = createRunCreateConsumer();
+    const ch = fakeChannel();
+    await consumer.handle(fakeMessage(msg), ch);
+
+    // Acked, not requeued — a deterministic refusal would fail identically forever.
+    expect(ch.ackCalls).toHaveLength(1);
+
+    // Recorded as a visible errored run (recordExpansionFailure's
+    // never-committed branch), not silently swallowed. Unguarded this row is
+    // 'pending' — the expansion succeeds with the template above in place.
+    const run = await prisma.evaluationRun.findFirstOrThrow({ where: { evaluationId: evaluation.id } });
+    createdRunIds.push(run.id);
+    expect(run.status).toBe('error');
+
+    // Nothing expanded: no judgments and no selections, so no judgment row
+    // exists against a run that has nothing to compare.
+    expect(await prisma.modelJudgment.count({ where: { runId: run.id } })).toBe(0);
+    expect(await prisma.runModelSelection.count({ where: { runId: run.id } })).toBe(0);
+
+    // And no downstream work enqueued — the unguarded path publishes one
+    // judgment.execute per created judgment before this point is reached.
+    expect(await drainQueue(confirmChannel, QUEUE_JUDGMENT_EXECUTE)).toHaveLength(0);
   });
 });
 
