@@ -21,6 +21,8 @@
  * offer" would be unanswerable.
  */
 
+import { retestEligibility } from '@/lib/retest';
+
 export type QueueCandidate = {
   itemId: string;
   /** Which reading this WOULD be. Decided by the caller from stored labels. */
@@ -37,6 +39,144 @@ export type QueueResult =
       reason: 'no-assignment' | 'set-complete' | 'retest-not-yet-eligible';
       labelsUntilRetest?: number;
     };
+
+/**
+ * What one annotator has already read on one item, reduced to the three facts
+ * the protocol turns into a round. Built from LIVE labels only: a tombstoned
+ * reading applied to text that no longer exists, so it neither counts as
+ * having read the item nor blocks re-reading it.
+ */
+export type ItemReadingState = {
+  itemId: string;
+  hasRound1: boolean;
+  hasRound2: boolean;
+  /** OTHER items this annotator has labelled since their round-1 reading of THIS one. */
+  labelledSinceRound1: number;
+};
+
+/**
+ * WHICH READING WOULD THIS BE — 1, 2, or null when the item is finished.
+ *
+ * THE SINGLE SOURCE OF THE ROUND, and the reason it is exported rather than
+ * inlined into the queue. The submit route must re-derive the round rather
+ * than trust one that travelled through a browser, and "re-derives it exactly
+ * as the queue did" is a claim a comment cannot keep true. Both callers go
+ * through this function, so they cannot drift apart.
+ */
+export function nextRoundFor(state: { hasRound1: boolean; hasRound2: boolean }): 1 | 2 | null {
+  if (!state.hasRound1) return 1;
+  if (!state.hasRound2) return 2;
+  return null;
+}
+
+/**
+ * Turn per-item reading state into queue candidates.
+ *
+ * A finished item (both rounds read) is DROPPED rather than carried as
+ * ineligible: it will never become eligible, and leaving it in would make it
+ * a candidate for the `retest-not-yet-eligible` shortfall — reporting a wait
+ * for something that is already done.
+ */
+export function buildCandidates(
+  states: ItemReadingState[],
+  intervalItems: number
+): QueueCandidate[] {
+  const out: QueueCandidate[] = [];
+  for (const state of states) {
+    const round = nextRoundFor(state);
+    if (round === null) continue;
+    if (round === 1) {
+      out.push({ itemId: state.itemId, round: 1, eligible: true });
+      continue;
+    }
+    const verdict = retestEligibility({
+      intervalItems,
+      labelledSinceRound1: state.labelledSinceRound1,
+      hasRound1: state.hasRound1,
+      hasRound2: state.hasRound2,
+    });
+    out.push({
+      itemId: state.itemId,
+      round: 2,
+      eligible: verdict.eligible,
+      ...(verdict.eligible ? {} : { labelsUntilEligible: verdict.labelsUntilEligible }),
+    });
+  }
+  return out;
+}
+
+/** One live GoldenLabel of this annotator's, reduced to what the protocol reads. */
+export type LabelRow = { goldenItemId: string; round: number; createdAt: Date };
+
+/**
+ * Reading state per item, from this annotator's LIVE labels across the WHOLE
+ * SET.
+ *
+ * `labels` must be every live label this annotator holds in the set, not only
+ * the ones on `itemIds`: the retest gate counts K OTHER items labelled since
+ * the round-1 reading, and "other" ranges over the set rather than over the
+ * current assignment. Passing a narrowed list understates the count and makes
+ * a retest permanently unreachable.
+ *
+ * A TOMBSTONED label is not a reading. Its item's content has since changed,
+ * so it neither counts as having read the item nor blocks re-reading it —
+ * which is the same predicate the partial unique index uses, so the two can
+ * never disagree about what "already labelled" means.
+ */
+export function deriveReadingStates(itemIds: string[], labels: LabelRow[]): ItemReadingState[] {
+  const round1At = new Map<string, Date>();
+  const round2 = new Set<string>();
+  for (const label of labels) {
+    if (label.round === 1) round1At.set(label.goldenItemId, label.createdAt);
+    else round2.add(label.goldenItemId);
+  }
+
+  return itemIds.map((itemId) => {
+    const first = round1At.get(itemId) ?? null;
+    return {
+      itemId,
+      hasRound1: first !== null,
+      hasRound2: round2.has(itemId),
+      // DISTINCT items, not label count: labelling one item twice is not two
+      // items of intervening work, and counting it as such would let an
+      // annotator shorten their own retest gap.
+      labelledSinceRound1:
+        first === null
+          ? 0
+          : new Set(
+              labels
+                .filter((l) => l.goldenItemId !== itemId && l.createdAt > first)
+                .map((l) => l.goldenItemId)
+            ).size,
+    };
+  });
+}
+
+/**
+ * Does any of this annotator's ACTIVE assignments cover this (item, round)?
+ *
+ * Two granularities, two rules:
+ *
+ *   - A WHOLE-SET assignment (`goldenItemId: null`) means "work this set under
+ *     its protocol", and the blind re-read IS the protocol — so it covers
+ *     every item at every round. Requiring a second assignment for round 2
+ *     would make the retest visible as a queue event, which is precisely the
+ *     leak blinding exists to prevent.
+ *   - An ITEM assignment is a targeted request — an adjudication, or one
+ *     specific re-read — so it covers exactly the round it names. That is also
+ *     what the active-assignment unique index is keyed on, so the two
+ *     descriptions of "this piece of work" agree.
+ */
+export function coversCandidate(
+  assignments: Array<{ goldenItemId: string | null; round: number }>,
+  candidate: { itemId: string; round: number }
+): boolean {
+  return assignments.some((a) =>
+    a.goldenItemId === null
+      ? true
+      : a.goldenItemId === candidate.itemId && a.round === candidate.round
+  );
+}
 
 /**
  * FNV-1a, 32-bit. Chosen for being short enough to read and verify inline

@@ -31,6 +31,8 @@ import {
   POST as createAssignmentRoute,
   DELETE as revokeAssignmentRoute,
 } from '@/app/api/golden-sets/[id]/assignments/route';
+import { GET as queueRoute } from '@/app/api/golden-sets/[id]/queue/route';
+import { POST as submitLabelRoute } from '@/app/api/golden-sets/[id]/items/[itemId]/labels/route';
 import { POST as restoreSampleRoute } from '@/app/api/datasets/[id]/samples/[sampleId]/restore/route';
 import { GET as sampleRevisionsRoute } from '@/app/api/datasets/[id]/samples/[sampleId]/revisions/route';
 
@@ -1132,6 +1134,53 @@ describe('Access matrix — golden-set sub-routes (/fork, /retire) and list', ()
           assignmentId: assignment.id,
         }),
         { params: Promise.resolve({ id: target.id }) }
+      );
+      expect(res.status).toBe(expected);
+    });
+  }
+
+  // ── A1: the queue and the submit route ──────────────────────────────────
+  // Neither has a public branch, even on a PUBLISHED PUBLIC set. A queue is
+  // personal work rather than a published artifact, and a reading is a write.
+  // The target below is public precisely so that "public" is shown not to be
+  // the thing granting access.
+  for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+    const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 200;
+    it(`GET /api/golden-sets/[id]/queue as ${actor} -> ${expected}`, async () => {
+      const target = await mkGoldenSet(ctx.ownerId, 'public');
+      setSessionFor(actor, ctx);
+      const res = await queueRoute(
+        new Request(`http://localhost/api/golden-sets/${target.id}/queue`),
+        { params: Promise.resolve({ id: target.id }) }
+      );
+      expect(res.status).toBe(expected);
+    });
+  }
+
+  for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+    const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 201;
+    it(`POST /api/golden-sets/[id]/items/[itemId]/labels as ${actor} -> ${expected}`, async () => {
+      const target = await mkGoldenSet(ctx.ownerId, 'public');
+      const item = await db.goldenItem.findFirstOrThrow({ where: { goldenSetId: target.id } });
+      // Owner and admin each hold a whole-set assignment, so the ONLY thing
+      // that can move the status is the check under test. The stranger's 403
+      // is the submit-side re-check refusing an unassigned annotator.
+      for (const annotatorId of [ctx.ownerId, ctx.adminId]) {
+        await db.goldenAssignment.create({
+          data: { goldenSetId: target.id, annotatorId, round: 1 },
+        });
+      }
+      setSessionFor(actor, ctx);
+      const res = await submitLabelRoute(
+        jsonRequest(
+          `http://localhost/api/golden-sets/${target.id}/items/${item.id}/labels`,
+          'POST',
+          // mkGoldenSet builds PAIRWISE items, so a preference is the correct
+          // field; a score here would be a 400 on protocol before access is
+          // ever reached, and every row would read 400.
+          { preference: 'A>B' }
+        ),
+        { params: Promise.resolve({ id: target.id, itemId: item.id }) }
       );
       expect(res.status).toBe(expected);
     });

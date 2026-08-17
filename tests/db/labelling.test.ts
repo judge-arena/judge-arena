@@ -35,6 +35,10 @@ const {
   POST: POST_ASSIGNMENT,
   DELETE: DELETE_ASSIGNMENT,
 } = await import('@/app/api/golden-sets/[id]/assignments/route');
+const { GET: GET_QUEUE } = await import('@/app/api/golden-sets/[id]/queue/route');
+const { POST: POST_LABEL } = await import(
+  '@/app/api/golden-sets/[id]/items/[itemId]/labels/route'
+);
 
 let counter = 0;
 function uniq(prefix: string): string {
@@ -364,5 +368,231 @@ describe('A1 assignment — overlap is designed, not accidental', () => {
       params(set.id)
     );
     expect(res.status).toBe(400);
+  });
+});
+
+// ─── Task 6 fixtures: a set the owner already holds a whole-set assignment on ──
+
+async function mkAssignedSet(
+  ownerId: string,
+  opts: { itemCount?: number; retestIntervalItems?: number; protocol?: 'pointwise' | 'pairwise' } = {}
+) {
+  const { set, items } = await mkGoldenSet(ownerId, {
+    count: opts.itemCount ?? 1,
+    protocol: opts.protocol ?? 'pointwise',
+  });
+  if (opts.retestIntervalItems !== undefined) {
+    await db.goldenSet.update({
+      where: { id: set.id },
+      data: { retestIntervalItems: opts.retestIntervalItems },
+    });
+  }
+  await db.goldenAssignment.create({
+    data: { goldenSetId: set.id, annotatorId: ownerId, round: 1 },
+  });
+  return { set, items };
+}
+
+function submitLabel(setId: string, itemId: string, body: unknown) {
+  return POST_LABEL(jsonRequest(body, 'POST'), {
+    params: Promise.resolve({ id: setId, itemId }),
+  });
+}
+
+function queueRequest(setId: string) {
+  return GET_QUEUE(new Request(`http://localhost/api/golden-sets/${setId}/queue`), {
+    params: Promise.resolve({ id: setId }),
+  });
+}
+
+describe('A1 queue and submit — blinding, and the two security properties', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  it('the queue never reveals that an item is a RE-READ', async () => {
+    // Blinding is the whole reliability signal. A response that differs in
+    // shape — or that helpfully includes the previous answer — defeats it.
+    const owner = await mkUser();
+    const { set, items } = await mkAssignedSet(owner.id, { itemCount: 3, retestIntervalItems: 1 });
+    sessionFor(owner);
+    await submitLabel(set.id, items[0].id, { overallScore: 4 });
+    await submitLabel(set.id, items[1].id, { overallScore: 2 });
+
+    const body = await (await queueRequest(set.id)).json();
+    expect(body.next).not.toBeNull();
+    expect(Object.keys(body.next).sort()).toEqual([
+      'candidates',
+      'inputText',
+      'itemId',
+      'promptText',
+      'protocol',
+      'responseText',
+    ]);
+    expect(JSON.stringify(body)).not.toContain('round');
+    expect(JSON.stringify(body)).not.toContain('overallScore');
+  });
+
+  it('a RETEST and a FIRST reading are byte-identical in shape', async () => {
+    // The assertion above pins the key set of whatever the queue happened to
+    // serve. This one forces the comparison the annotator would actually make:
+    // one set where the next item is a first reading, one where it can only be
+    // a re-read, same keys either way.
+    const owner = await mkUser();
+    sessionFor(owner);
+
+    const fresh = await mkAssignedSet(owner.id, { itemCount: 1 });
+    const freshBody = await (await queueRequest(fresh.set.id)).json();
+
+    const retest = await mkAssignedSet(owner.id, { itemCount: 1, retestIntervalItems: 0 });
+    await submitLabel(retest.set.id, retest.items[0].id, { overallScore: 3 });
+    const retestBody = await (await queueRequest(retest.set.id)).json();
+
+    expect(retestBody.next.itemId).toBe(retest.items[0].id); // it IS the re-read
+    expect(Object.keys(retestBody.next).sort()).toEqual(Object.keys(freshBody.next).sort());
+    expect(Object.keys(retestBody).sort()).toEqual(Object.keys(freshBody).sort());
+  });
+
+  it('the SERVER decides the round — a client-supplied round is ignored', async () => {
+    const owner = await mkUser();
+    const { set, items } = await mkAssignedSet(owner.id, { itemCount: 1, retestIntervalItems: 0 });
+    sessionFor(owner);
+    await submitLabel(set.id, items[0].id, { overallScore: 4 });
+    const res = await submitLabel(set.id, items[0].id, { overallScore: 5, round: 1 }); // asks for round 1 again
+    expect(res.status).toBe(201);
+    expect((await res.json()).round).toBe(2); // server said 2
+  });
+
+  it('refuses a submit for an item the annotator holds no active assignment for', async () => {
+    // The queue never offered it; a back button, a stale tab or a crafted POST
+    // must not be able to write a reading anyway.
+    const owner = await mkUser();
+    const stranger = await mkUser();
+    const { set, items } = await mkAssignedSet(owner.id, { itemCount: 1 });
+    sessionFor(stranger);
+    const res = await submitLabel(set.id, items[0].id, { overallScore: 4 });
+    expect(res.status).toBe(403);
+    expect(await db.goldenLabel.count()).toBe(0);
+  });
+
+  it('refuses a submit once the assignment is REVOKED — eligibility is re-checked, not remembered', async () => {
+    const owner = await mkUser();
+    const { set, items } = await mkAssignedSet(owner.id, { itemCount: 2 });
+    sessionFor(owner);
+    await submitLabel(set.id, items[0].id, { overallScore: 4 });
+
+    await db.goldenAssignment.updateMany({
+      where: { goldenSetId: set.id },
+      data: { revokedAt: new Date(), revokedReason: 'reassigned' },
+    });
+
+    const res = await submitLabel(set.id, items[1].id, { overallScore: 4 });
+    expect(res.status).toBe(403);
+    expect(await db.goldenLabel.count()).toBe(1);
+  });
+
+  it('refuses a RETEST submit that is not yet eligible, even though round 1 was fine', async () => {
+    // The submit-side re-check is not only about assignment. A crafted POST
+    // that skips the interval would produce a second reading the annotator
+    // still remembers, and a test-retest number computed over it measures
+    // memory rather than consistency.
+    const owner = await mkUser();
+    const { set, items } = await mkAssignedSet(owner.id, { itemCount: 1, retestIntervalItems: 20 });
+    sessionFor(owner);
+    expect((await submitLabel(set.id, items[0].id, { overallScore: 4 })).status).toBe(201);
+
+    const res = await submitLabel(set.id, items[0].id, { overallScore: 5 });
+    expect(res.status).toBe(409);
+    expect(await db.goldenLabel.count()).toBe(1);
+  });
+
+  it('refuses a score on a PAIRWISE item and a preference on a POINTWISE one', async () => {
+    // The CHECK would refuse it at the database as a 500; the route refuses it
+    // as a 400 that names the field.
+    const owner = await mkUser();
+    const { set, items } = await mkAssignedSet(owner.id, { itemCount: 1, protocol: 'pairwise' });
+    sessionFor(owner);
+    expect((await submitLabel(set.id, items[0].id, { overallScore: 4 })).status).toBe(400);
+    expect((await submitLabel(set.id, items[0].id, { preference: 'A>B' })).status).toBe(201);
+  });
+
+  it('a set with no assignment reports no-assignment, not set-complete', async () => {
+    // Two different facts: 'you have done everything asked of you' versus
+    // 'nothing was asked of you'. Only one of them means the annotator is
+    // finished, and an empty queue conflates them.
+    const owner = await mkUser();
+    const { set } = await mkGoldenSet(owner.id, { count: 2 });
+    sessionFor(owner);
+    const body = await (await queueRequest(set.id)).json();
+    expect(body).toEqual({ next: null, reason: 'no-assignment' });
+  });
+
+  it('a fully-read set reports set-complete', async () => {
+    const owner = await mkUser();
+    const { set, items } = await mkAssignedSet(owner.id, { itemCount: 1, retestIntervalItems: 0 });
+    sessionFor(owner);
+    await submitLabel(set.id, items[0].id, { overallScore: 4 });
+    await submitLabel(set.id, items[0].id, { overallScore: 4 });
+    const body = await (await queueRequest(set.id)).json();
+    expect(body).toEqual({ next: null, reason: 'set-complete' });
+  });
+
+  it('a too-small set says retest-not-yet-eligible WITH a shortfall, not "empty"', async () => {
+    // The accepted limitation of intervening-items-only: a set smaller than K
+    // can never produce a retest. The queue must say so explicitly rather than
+    // look finished.
+    const owner = await mkUser();
+    const { set, items } = await mkAssignedSet(owner.id, { itemCount: 1, retestIntervalItems: 20 });
+    sessionFor(owner);
+    await submitLabel(set.id, items[0].id, { overallScore: 4 });
+    const body = await (await queueRequest(set.id)).json();
+    expect(body).toEqual({ next: null, reason: 'retest-not-yet-eligible', labelsUntilRetest: 20 });
+  });
+
+  it('an ITEM-level assignment covers only the round it names', async () => {
+    const owner = await mkUser();
+    const { set, items } = await mkGoldenSet(owner.id, { count: 2 });
+    await db.goldenSet.update({ where: { id: set.id }, data: { retestIntervalItems: 0 } });
+    // Assigned item 0 at round 1 only — nothing else.
+    await db.goldenAssignment.create({
+      data: { goldenSetId: set.id, annotatorId: owner.id, goldenItemId: items[0].id, round: 1 },
+    });
+    sessionFor(owner);
+
+    expect((await submitLabel(set.id, items[0].id, { overallScore: 4 })).status).toBe(201);
+    // Item 1 was never assigned...
+    expect((await submitLabel(set.id, items[1].id, { overallScore: 4 })).status).toBe(403);
+    // ...and neither was item 0's SECOND round.
+    expect((await submitLabel(set.id, items[0].id, { overallScore: 5 })).status).toBe(403);
+  });
+
+  it('completing every item of a whole-set assignment stamps completedAt', async () => {
+    const owner = await mkUser();
+    const { set, items } = await mkAssignedSet(owner.id, { itemCount: 2 });
+    sessionFor(owner);
+
+    await submitLabel(set.id, items[0].id, { overallScore: 4 });
+    let assignment = await db.goldenAssignment.findFirstOrThrow({ where: { goldenSetId: set.id } });
+    expect(assignment.completedAt).toBeNull();
+
+    await submitLabel(set.id, items[1].id, { overallScore: 4 });
+    assignment = await db.goldenAssignment.findFirstOrThrow({ where: { goldenSetId: set.id } });
+    expect(assignment.completedAt).not.toBeNull();
+  });
+
+  it('a label written now points at NO revision — it saw the current content', async () => {
+    // The other half of the provenance invariant, from the write side:
+    // goldenItemRevisionId IS NULL means "current content", and it is the EDIT
+    // that back-fills it. A writer that set it here would be claiming the
+    // annotator saw a before-image that does not exist yet.
+    const owner = await mkUser();
+    const { set, items } = await mkAssignedSet(owner.id, { itemCount: 1 });
+    sessionFor(owner);
+    await submitLabel(set.id, items[0].id, { overallScore: 4, reasoning: 'clear' });
+    const label = await db.goldenLabel.findFirstOrThrow({ where: { goldenItemId: items[0].id } });
+    expect(label.goldenItemRevisionId).toBeNull();
+    expect(label.round).toBe(1);
+    expect(label.reasoning).toBe('clear');
   });
 });
