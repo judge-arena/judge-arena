@@ -22,13 +22,13 @@
 
 **Follows:** Plan L1 (`docs/superpowers/plans/2026-08-14-l1-tombstone-overlay.md`) — **which must be merged first.** **Precedes:** Plan B (the lifecycle).
 
-## What A1 left for this plan
+## What L1 left for this plan
 
-A1 delivered the overlay and hooked four destructive verbs. Three things it left standing are A2's:
+L1 delivered the overlay and hooked four destructive verbs. Three things it left standing are L2's:
 
-- **`PATCH /api/datasets/[id]/samples` is untouched by A1.** It still overwrites `input`/`expected`/`metadata` in place with no history. A2 owns it end to end.
-- **`restoreSample(tx, id)` exists in `src/lib/tombstones.ts` with no caller.** A1 implemented and unit-tested it because the filters' `NOT` formulation is only justified by an `isTombstone: false` row being reachable, and because A1's DB tests needed a way to produce one. A2 gives it a route.
-- **A1's `DELETE`, `PUT` and config-importer verbs write no revision.** A2 adds that write to each, which is the one place these two plans touch the same transactions. A1's implementers were told to leave those transactions shaped so a second write drops in cleanly.
+- **`PATCH /api/datasets/[id]/samples` is untouched by L1.** It still overwrites `input`/`expected`/`metadata` in place with no history. L2 owns it end to end.
+- **`restoreSample(tx, id)` exists in `src/lib/tombstones.ts` with no caller.** L1 implemented and unit-tested it because the filters' `NOT` formulation is only justified by an `isTombstone: false` row being reachable, and because L1's DB tests needed a way to produce one. L2 gives it a route.
+- **L1's `DELETE`, `PUT` and config-importer verbs write no revision.** L2 adds that write to each, which is the one place these two plans touch the same transactions. L1's implementers were told to leave those transactions shaped so a second write drops in cleanly.
 
 ## Global Constraints
 
@@ -42,6 +42,42 @@ A1 delivered the overlay and hooked four destructive verbs. Three things it left
 - **Do not assert an absolute suite count in any task.** The contract each task verifies is **zero failures, and no fewer tests than the previous task left.** Record the number you observe in your report.
 - **Local Postgres** is the podman container `judge-arena-pg` on `localhost:5432`. **Real production is the Kubernetes pod `judge-arena-pg-1` in namespace `tenant-public` and must never be touched.**
 - **Demonstrate discrimination, do not assert it.** Break the thing under test, observe the specific failure, restore, confirm byte-identical by sha256, and put that evidence in the report.
+
+---
+
+## Corrections applied 2026-08-16, before execution
+
+This plan was written before L1 was implemented, and L1 changed shape during execution. Everything
+below was verified by opening the files at `1dcd73c`; the task bodies further down have been edited
+in place, so **the snippets you copy are now correct** and this section is the record of what moved.
+
+| # | What the plan said | What is true at HEAD |
+|---|---|---|
+| 1 | `RateLimitedError` from `@/lib/rate-limit` | It is exported from **`@/lib/auth-guard`** (`:250`). |
+| 2 | Test helpers `./helpers/db` and `./helpers/factories` | Neither exists. **`tests/db/helpers.ts`** exports `db`, `mkUser`, `mkRubric`, `truncateAll`. |
+| 3 | `PATCH`'s lookup is a `findUnique` to be replaced | L1 already made it `findFirst` + `...liveSamplesOnly()`. **The only edit is widening the `select`.** |
+| 4 | Task 3's import line lists three names | The real block imports **four** — `liveDatasetsOnly` too, used by PATCH, DELETE and PUT. Replacing it verbatim breaks the file. |
+| 5 | `DELETE` records `tombstoneSamples(tx, sampleIds)` | Drops L1's `'sample deleted'` reason and names a variable that does not exist. The resolved set is **`samples.map((s) => s.id)`**. |
+| 6 | `PUT` re-derives `outgoingIds` | L1 already computes **`outgoing`** under an `if (outgoing.length > 0)` guard with reason `'bulk replace'`. Reuse it; do not re-read. |
+| 7 | Task 4 Step 7 calls `importDoc(...)` and destructures `{ dataset }` | Neither exists in `tests/db/config-golden-sets.test.ts`. It drives the route as **`importConfig(importRequest(JSON.stringify(doc)))`**, and `mkAnnotatedDataset` returns the dataset **directly**. |
+| 8 | Tasks 5/6 add rows "following the dataset registry entry's shape" | Not possible — `ResourceHandlers` is `{createTarget, get, patch, del}` over a single `id`, and the registry is typed to six fixed resource keys. **Follow the golden-set sub-routes block instead** (`tests/db/access-matrix.test.ts:1034`), which loops actors over a `POST …/fork`-shaped route and is exactly this shape. |
+| 9 | Task 6's ordering test seeds two revisions in one `createMany` | `@default(now())` resolves to the **transaction** timestamp, identical for both rows, so `orderBy: { at: 'desc' }` is undefined between them. **Seed distinct `at` values.** |
+| 10 | Every `DATABASE_URL="$(grep … \| cut -d= -f2-)"` | `.env.local` holds a **quoted** value and `cut` keeps the quotes → `P1012`. Use `sh -c 'set -a; . ./.env.local; set +a; …'`. Bare `npx prisma …` fails the same way: Prisma loads `.env`, and this tree has none. |
+| 11 | Task 3's line refs `:97`, `:120-127`, `:133-146` | At HEAD they are `:212`, `:240-243`, `:256-259`. **Anchor by symbol, not line.** The plan's *config and test* line refs are current and can be trusted. |
+
+**Two owner decisions are folded into Tasks 5 and 6** (2026-08-16, handoff §6.5 and §6.6):
+
+- The history `GET` is **owner-only** (plus admin), as drafted. Confirmed, not changed.
+- Both new routes read the parent dataset with **`findFirst` + `liveDatasetsOnly()`**, not a bare
+  `findUnique`, so a hidden dataset 404s on either. This follows the spec's Decision 15 (a hidden
+  dataset is closed to writes) and Decision 16 (samples inherit their parent's hidden state), and it
+  matches every sibling handler in `samples/route.ts`. **The sample's own tombstone is still not
+  filtered** — that is the point of both routes.
+
+**One thing the plan got right that is worth not re-litigating.** `tombstoneSamples` returns the
+count of *distinct ids now hidden*, not the count of rows that *transitioned* — a retried delete
+reports `1`. So "one revision per row actually hidden" genuinely does need its own filtered read
+before the tombstone write, exactly as Task 4's implementer note says.
 
 ---
 
@@ -136,7 +172,7 @@ export function recordSampleRevisions(
 
 **The log is never filtered by the overlay.** `liveSamplesOnly()` has no business here: the history of a hidden sample is exactly what you want to read when deciding whether to restore it. Task 6's route reads revisions for a sample regardless of its tombstone, and says so in a comment — this is the one place in either plan where reading a hidden row is the point.
 
-**A2 does not surface history in the UI.** The `GET` route exists so the log is reachable and testable; a history panel on the dataset page is a UI change with no test harness to verify it and belongs with whoever next works on that page.
+**L2 does not surface history in the UI.** The `GET` route exists so the log is reachable and testable; a history panel on the dataset page is a UI change with no test harness to verify it and belongs with whoever next works on that page.
 
 ---
 
@@ -219,7 +255,7 @@ Append at the end of the file:
 
 ```prisma
 
-// ─── The revision log (A2) ──────────────────────────────────────────────────
+// ─── The revision log (L2) ──────────────────────────────────────────────────
 // Append-only. One row per mutation to a DatasetSample, carrying the values as
 // they stood BEFORE the change.
 //
@@ -263,12 +299,16 @@ model SampleRevision {
 
 - [ ] **Step 4: Generate the migration**
 
+> **The `grep | cut` idiom this plan was written with does not work here** — `.env.local` holds a
+> **quoted** `DATABASE_URL` and `cut` keeps the quotes, so Prisma fails `P1012` ("the URL must start
+> with the protocol `postgresql://`"), which reads like schema drift and is not. Source the file
+> instead. Bare `npx prisma …` fails identically: Prisma auto-loads `.env`, and this tree has none.
+
 ```bash
-DATABASE_URL="$(grep -m1 '^DATABASE_URL=' .env.local | cut -d= -f2-)" \
-  npx prisma migrate diff \
+sh -c 'set -a; . ./.env.local; set +a; npx prisma migrate diff \
     --from-schema-datasource prisma/schema.prisma \
     --to-schema-datamodel prisma/schema.prisma \
-    --script > /tmp/v2g.sql
+    --script' > /tmp/v2g.sql
 cat /tmp/v2g.sql
 ```
 
@@ -283,7 +323,7 @@ mkdir -p prisma/migrations/20260815120000_v2g_sample_revisions
 Create `prisma/migrations/20260815120000_v2g_sample_revisions/migration.sql` with this header above the generated SQL:
 
 ```sql
--- v2g — the sample revision log (Plan A2)
+-- v2g — the sample revision log (Plan L2)
 --
 -- Append-only history for DatasetSample mutations. One row per edit, delete or
 -- restore, carrying the values as they stood BEFORE the change.
@@ -304,9 +344,9 @@ Then append `/tmp/v2g.sql` verbatim.
 - [ ] **Step 6: Apply to the LOCAL dev database and regenerate the client**
 
 ```bash
-DATABASE_URL="$(grep -m1 '^DATABASE_URL=' .env.local | cut -d= -f2-)" \
+sh -c 'set -a; . ./.env.local; set +a; \
   PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION=approved-plan-2026-08-15-a2-revision-log \
-  npx prisma migrate deploy
+  npx prisma migrate deploy'
 npx prisma generate
 ```
 
@@ -315,11 +355,10 @@ This hits `localhost:5432` only. **Never the cluster pod `judge-arena-pg-1`.**
 - [ ] **Step 7: Verify the migration produces no drift**
 
 ```bash
-DATABASE_URL="$(grep -m1 '^DATABASE_URL=' .env.local | cut -d= -f2-)" \
-  npx prisma migrate diff \
+sh -c 'set -a; . ./.env.local; set +a; npx prisma migrate diff \
     --from-schema-datasource prisma/schema.prisma \
     --to-schema-datamodel prisma/schema.prisma \
-    --script
+    --script'
 ```
 
 Expected output: `-- This is an empty migration.`
@@ -344,7 +383,7 @@ Expected: zero failures. Record the observed counts in your report.
 
 ```bash
 git add prisma/schema.prisma prisma/migrations/20260815120000_v2g_sample_revisions tests/db/config-roundtrip-fidelity.test.ts
-git commit -m "feat(a2): add the SampleRevision log
+git commit -m "feat(l2): add the SampleRevision log
 
 Append-only history for DatasetSample mutations, carrying the values as
 they stood before each change. Separate from the Tombstone overlay
@@ -633,7 +672,7 @@ Expected: zero failures. Note `src/lib/sample-revisions.ts` lands in both covera
 
 ```bash
 git add src/lib/sample-revisions.ts tests/lib/sample-revisions.test.ts
-git commit -m "feat(a2): the revision writers
+git commit -m "feat(l2): the revision writers
 
 recordSampleRevision and recordSampleRevisions, storing before-images and
 taking the caller's transaction so a rolled-back mutation leaves no
@@ -645,7 +684,7 @@ revision claiming it happened."
 ### Task 3: `PATCH` records the prior values before updating
 
 **Files:**
-- Modify: `src/app/api/datasets/[id]/samples/route.ts` — the `PATCH` handler (`export async function PATCH` at `:97`; the sample lookup at `:120-127`; the update at `:133-146`)
+- Modify: `src/app/api/datasets/[id]/samples/route.ts` — the `PATCH` handler. **Anchor by symbol:** `export async function PATCH`, then the `prisma.datasetSample.findFirst` inside it, then the `prisma.datasetSample.update` below that. (At `1dcd73c` those are `:212`, `:240` and `:256`; the plan's original `:97`/`:120-127`/`:133-146` are ~115 lines stale.)
 - Test: `tests/db/sample-revision.test.ts` (create)
 
 **Interfaces:**
@@ -660,9 +699,7 @@ Create `tests/db/sample-revision.test.ts`:
 
 ```ts
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { NextResponse } from 'next/server';
-import { db, truncateAll } from './helpers/db';
-import { mkUser } from './helpers/factories';
+import { db, truncateAll, mkUser } from './helpers';
 import { PATCH } from '@/app/api/datasets/[id]/samples/route';
 
 // The DB suite shares a 120/min Redis budget across FILES, so route-driving
@@ -813,16 +850,16 @@ Expected: FAIL on the first test with `expected [] to have a length of 1 but got
 
 - [ ] **Step 3: Widen the sample lookup to fetch the before-image**
 
-In `src/app/api/datasets/[id]/samples/route.ts`'s `PATCH`, the membership lookup currently selects only `datasetId`:
+In `src/app/api/datasets/[id]/samples/route.ts`'s `PATCH`, the membership lookup is **already** a filtered `findFirst` — L1 got here first, so this is not the `findUnique` replacement the plan originally described. At HEAD it reads:
 
 ```ts
-    const sample = await prisma.datasetSample.findUnique({
-      where: { id: data.sampleId },
+    const sample = await prisma.datasetSample.findFirst({
+      where: { id: data.sampleId, ...liveSamplesOnly() },
       select: { datasetId: true },
     });
 ```
 
-Replace it with a lookup that also carries the values the revision needs. Note this read is **filtered** — A1's Task 8 added `...liveSamplesOnly()` here so a hidden sample 404s; keep that spread exactly as A1 left it:
+**The only change is widening the `select`.** Leave the `where` alone — `...liveSamplesOnly()` is L1's, and a hidden sample must 404 rather than stay silently editable. Keep L1's comment above the read; add only the sentence about the before-image:
 
 ```ts
     // The before-image the revision will carry. Selected here rather than
@@ -842,10 +879,20 @@ Replace it with a lookup that also carries the values the revision needs. Note t
     });
 ```
 
-Add the import beside the existing `@/lib/tombstones` import A1 created:
+**Add one import line. Do not touch the `@/lib/tombstones` block.** The plan originally printed a
+three-name replacement for it; the real block at HEAD imports **four** names, and PATCH, DELETE and
+PUT all use `liveDatasetsOnly`, so pasting the three-name version breaks the file:
 
 ```ts
-import { liveSamplesOnly, nextSampleIndex, tombstoneSamples } from '@/lib/tombstones';
+// ALREADY THERE — leave exactly as it is:
+import {
+  liveDatasetsOnly,
+  liveSamplesOnly,
+  nextSampleIndex,
+  tombstoneSamples,
+} from '@/lib/tombstones';
+
+// ADD THIS:
 import { recordSampleRevision } from '@/lib/sample-revisions';
 ```
 
@@ -911,7 +958,7 @@ Expected: zero failures.
 
 ```bash
 git add src/app/api/datasets/[id]/samples/route.ts tests/db/sample-revision.test.ts
-git commit -m "feat(a2): PATCH records the prior values before updating
+git commit -m "feat(l2): PATCH records the prior values before updating
 
 An edit previously overwrote sample text with no history. It now writes a
 revision carrying the full before-image in the same transaction, so a
@@ -1036,36 +1083,54 @@ Expected: FAIL on the first with `expected [] to have a length of 2 but got +0`.
 
 - [ ] **Step 3: Record in `DELETE`**
 
-In the `DELETE` handler's transaction, beside the existing `tombstoneSamples` call:
+In the `DELETE` handler's transaction, **immediately before** the existing `tombstoneSamples` call.
+Order matters: the "which of these are still live" read has to happen while they are still live.
 
 ```ts
-      const hidden = await tombstoneSamples(tx, sampleIds);
+    const result = await prisma.$transaction(async (tx) => {
+      // Which of the resolved ids are still LIVE — precisely the set about to
+      // transition, and precisely what the log must record. It has to be read
+      // BEFORE the tombstone write, or every id looks already-hidden.
+      //
+      // Filtered ON PURPOSE. This is not the membership lookup above, which L1
+      // deliberately left unfiltered so a retried delete converges on hidden
+      // instead of 400ing; that one stays exactly as L1 wrote it.
+      const newlyHidden = await tx.datasetSample.findMany({
+        where: { id: { in: samples.map((s) => s.id) }, ...liveSamplesOnly() },
+        select: { id: true },
+      });
+
+      // UNCHANGED from L1 — keep the resolved `samples` and keep the reason.
+      const tombstoned = await tombstoneSamples(
+        tx,
+        samples.map((s) => s.id),
+        'sample deleted'
+      );
 
       // One revision per row ACTUALLY hidden, not per id requested. A retried
-      // delete converges on hidden without re-hiding anything, and the log
-      // must agree — a second revision would record a deletion that did not
-      // happen. `tombstoneSamples` returns exactly the ids it transitioned.
+      // delete converges on hidden without re-hiding anything, and the log must
+      // agree — a second revision would record a deletion that did not happen.
       await recordSampleRevisions(tx, {
-        datasetSampleIds: newlyHiddenIds,
+        datasetSampleIds: newlyHidden.map((s) => s.id),
         changeType: 'delete',
         actorId: session.user.id,
       });
+
+      // ... the rest of L1's transaction body is unchanged: the deleted
+      // re-index-loop comment block, the live `remaining` count, the
+      // `dataset.update`, and `return { tombstoned, remaining }`.
 ```
 
-**Note for the implementer:** A1's `tombstoneSamples` returns a *count*, not the ids. To record only newly-hidden rows you need the ids, so read them inside the transaction before the tombstone write:
+**Why the ids and not `tombstoneSamples`'s return value.** That helper returns
+`updated.count + created.count` — the number of **distinct ids now hidden**, which counts an
+already-hidden row again (its `updateMany` arm matches it). The route's own comment says so: a
+repeated delete reports `tombstoned: 1`. "Now hidden" is the right number for the *response*; it is
+the wrong number for the *log*, which needs "transitioned". Two different questions, deliberately.
 
-```ts
-      const newlyHiddenIds = (
-        await tx.datasetSample.findMany({
-          where: { id: { in: sampleIds }, ...liveSamplesOnly() },
-          select: { id: true },
-        })
-      ).map((s) => s.id);
-```
+**Do not rename `tombstoned` or drop `'sample deleted'`.** The response body is
+`{ tombstoned, remaining }` and `tombstoned` is what L1 renamed `deleted` to.
 
-This read is **filtered on purpose** — it is asking "which of these are still live", which is precisely the set that is about to transition. It is not the membership lookup A1 deliberately left unfiltered; that one stays as A1 wrote it.
-
-Add the import:
+Add one import line (the `@/lib/tombstones` block already imports what this needs):
 
 ```ts
 import { recordSampleRevision, recordSampleRevisions } from '@/lib/sample-revisions';
@@ -1081,37 +1146,63 @@ Expected: PASS, 2 tests.
 
 - [ ] **Step 5: Record in `PUT`, the same way**
 
-In the `PUT` handler's transaction, using the same newly-hidden-ids read beside its `tombstoneSamples` call:
+`PUT` needs **no second read at all**, unlike `DELETE`. L1 already computes `outgoing` with the
+lifecycle filter applied, so by construction every row in it is live and every one of them
+transitions. Add one call inside L1's existing guard:
 
 ```ts
-      const outgoingIds = (
-        await tx.datasetSample.findMany({
+        // UNCHANGED from L1 — `outgoing` is already filtered to live rows.
+        const outgoing = await tx.datasetSample.findMany({
           where: { datasetId: params.id, ...liveSamplesOnly() },
           select: { id: true },
-        })
-      ).map((s) => s.id);
+        });
 
-      await tombstoneSamples(tx, outgoingIds);
-      await recordSampleRevisions(tx, {
-        datasetSampleIds: outgoingIds,
-        changeType: 'delete',
-        actorId: session.user.id,
-      });
+        if (outgoing.length > 0) {
+          await tombstoneSamples(tx, outgoing.map((s) => s.id), 'bulk replace');
+
+          // Every outgoing row is live by construction — `outgoing` IS the
+          // filtered read — so there is no "which of these transitioned"
+          // question here and no second query. Inside the guard, so an empty
+          // replace writes nothing rather than logging a no-op.
+          await recordSampleRevisions(tx, {
+            datasetSampleIds: outgoing.map((s) => s.id),
+            changeType: 'delete',
+            actorId: session.user.id,
+          });
+        }
 ```
 
-If A1's `PUT` already computes that id list for its own tombstone call, reuse it rather than reading twice.
+**Three things the plan's original snippet would have destroyed**, all of them L1's and all silent:
+the `if (outgoing.length > 0)` guard, the `'bulk replace'` reason (an `upsert` update arm with
+`reason: null` overwrites the reason a row was previously hidden with), and the shared `outgoing`
+binding the appends below depend on.
 
 - [ ] **Step 6: Record in the config importer**
 
-In `src/app/api/config/import/route.ts`'s dataset-section sample replace, beside its `tombstoneSamples` call, with the same shape. The actor is the importing session:
+In `src/app/api/config/import/route.ts`'s dataset-section sample replace — same shape as `PUT`, and
+the same reasoning: L1's `outgoing` is already lifecycle-filtered, so it goes **inside** the existing
+`if (outgoing.length > 0)` guard with no extra read. Anchor on the `tombstoneSamples(… 'config-import-replace')`
+call. The actor is the importing session — `const userId = session.user.id` is already in scope:
 
 ```ts
-              await recordSampleRevisions(tx, {
-                datasetSampleIds: outgoingIds,
-                changeType: 'delete',
-                actorId: userId,
-              });
+                  if (outgoing.length > 0) {
+                    await tombstoneSamples(
+                      tx,
+                      outgoing.map((s) => s.id),
+                      'config-import-replace'
+                    );
+
+                    await recordSampleRevisions(tx, {
+                      datasetSampleIds: outgoing.map((s) => s.id),
+                      changeType: 'delete',
+                      actorId: userId,
+                    });
+                  }
 ```
+
+This transaction is L1's too — the section had none before it, so a failure between the two writes
+used to leave a corpus with every row hidden and nothing to show. The revision write joins that
+atomic unit rather than sitting beside it.
 
 - [ ] **Step 7: Add a test for the importer's revisions**
 
@@ -1124,12 +1215,15 @@ Append to `tests/db/config-golden-sets.test.ts`, beside the replace tests A1 upd
     // exactly the moment the history becomes most useful.
     const owner = await mkUser();
     mockSessionFor(owner);
-    const { dataset } = await mkAnnotatedDataset(owner.id, { slug: 'rev-import', visibility: 'public' });
+    // `mkAnnotatedDataset` returns the dataset ROW, not `{ dataset }`, and
+    // seeds it with two samples. There is no `importDoc` helper in this file —
+    // it drives the real route through `importConfig(importRequest(...))`.
+    const dataset = await mkAnnotatedDataset(owner.id, { slug: 'rev-import', visibility: 'public' });
 
     const before = await db.datasetSample.count({ where: { datasetId: dataset.id } });
     expect(before).toBeGreaterThan(0);
 
-    await importDoc({
+    const doc = {
       version: 1,
       datasets: [
         {
@@ -1139,7 +1233,9 @@ Append to `tests/db/config-golden-sets.test.ts`, beside the replace tests A1 upd
           samples: [{ index: 0, input: 'replacement row', expected: null }],
         },
       ],
-    });
+    };
+    const res = await importConfig(importRequest(JSON.stringify(doc)));
+    expect(res.status).toBe(200);
 
     const revisions = await db.sampleRevision.findMany({ where: { changeType: 'delete' } });
     expect(revisions).toHaveLength(before);
@@ -1171,7 +1267,7 @@ Restore, `sha256sum -c /tmp/del.sha` → `OK`.
 
 ```bash
 git add src/app/api/datasets/[id]/samples/route.ts src/app/api/config/import/route.ts tests/db/sample-revision.test.ts tests/db/config-golden-sets.test.ts
-git commit -m "feat(a2): the bulk verbs record a revision per row they hide
+git commit -m "feat(l2): the bulk verbs record a revision per row they hide
 
 DELETE, PUT and the config importer each write one delete revision per
 row ACTUALLY hidden — not per id requested, so a retried delete does not
@@ -1287,9 +1383,8 @@ Create `src/app/api/datasets/[id]/samples/[sampleId]/restore/route.ts`:
 ```ts
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
-import { RateLimitedError } from '@/lib/rate-limit';
-import { restoreSample } from '@/lib/tombstones';
+import { requireAuth, requireScope, isAdmin, RateLimitedError } from '@/lib/auth-guard';
+import { liveDatasetsOnly, restoreSample } from '@/lib/tombstones';
 import { recordSampleRevision } from '@/lib/sample-revisions';
 
 /**
@@ -1315,8 +1410,14 @@ export async function POST(
   if (scopeCheck) return scopeCheck;
 
   try {
-    const dataset = await prisma.dataset.findUnique({
-      where: { id: params.id },
+    // FILTERED, like every other mutation guard in samples/route.ts: a hidden
+    // dataset is closed to writes (design decision 15) and its samples are
+    // hidden by inheritance (decision 16), so restoring one beneath it would
+    // un-hide nothing a reader could see — there is no `restoreDataset`.
+    // `findFirst`, because the overlay predicate is a relation filter layered
+    // on top of the id.
+    const dataset = await prisma.dataset.findFirst({
+      where: { id: params.id, ...liveDatasetsOnly() },
       select: { userId: true },
     });
     if (!dataset) {
@@ -1326,7 +1427,8 @@ export async function POST(
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    // Deliberately UNFILTERED: this route exists to act on a hidden row, so
+    // The SAMPLE read, by contrast, is deliberately UNFILTERED: this route
+    // exists to act on a hidden row, so
     // filtering it out would make the endpoint unreachable. It still verifies
     // membership, which is what turns a foreign id into a 404 rather than a
     // confusing success.
@@ -1372,7 +1474,16 @@ Expected: PASS, 2 tests.
 
 - [ ] **Step 5: Register the route in the access matrix**
 
-`tests/db/access-matrix.test.ts` enumerates every route × caller combination. Add rows for this one, following the `dataset` registry entry's existing shape: anonymous → 401, stranger → 403, owner → 200/409, admin → 200/409.
+`tests/db/access-matrix.test.ts` enumerates every route × caller combination. **Do not try to add a
+registry entry** — `ResourceHandlers` is `{createTarget, get, patch, del}` over a single `id`, and
+`registry` is typed to exactly six resource keys, so a POST-only two-param sub-resource does not fit
+and the plan's original "follow the `dataset` registry entry's shape" is not achievable.
+
+**Follow the golden-set sub-routes block instead** (`describe('Access matrix — golden-set sub-routes
+(/fork, /retire) and list')`, around `:1034`). It already does exactly this shape: a `for (const
+actor of ['anonymous', 'stranger', 'owner', 'admin'])` loop, `setSessionFor(actor, ctx)`, and a
+per-actor expected status. Add a sibling block for the restore route with anonymous → 401,
+stranger → 403, owner → 200, admin → 200 against a hidden sample.
 
 - [ ] **Step 6: Run the full suites**
 
@@ -1386,7 +1497,7 @@ Expected: zero failures.
 
 ```bash
 git add src/app/api/datasets/[id]/samples/[sampleId]/restore tests/db/sample-revision.test.ts tests/db/access-matrix.test.ts
-git commit -m "feat(a2): restore a hidden sample
+git commit -m "feat(l2): restore a hidden sample
 
 The first caller of A1's restoreSample. Flips the tombstone rather than
 deleting it, so the record still says the sample was hidden once, and the
@@ -1433,10 +1544,27 @@ describe('GET /api/datasets/[id]/samples/[sampleId]/revisions', () => {
     const sample = await db.datasetSample.create({
       data: { datasetId: dataset.id, index: 0, input: 'v3', expected: null, metadata: null },
     });
+    // `at` is set EXPLICITLY and distinctly. `@default(now())` is Postgres's
+    // `now()`, which is the TRANSACTION timestamp — so both rows of a single
+    // `createMany` get the identical value and `orderBy: { at: 'desc' }` has no
+    // defined order between them. The test would then pass or fail on
+    // insertion-order luck, which is worse than not having it.
     await db.sampleRevision.createMany({
       data: [
-        { datasetSampleId: sample.id, changeType: 'edit', input: 'v1', actorId: owner.id },
-        { datasetSampleId: sample.id, changeType: 'edit', input: 'v2', actorId: owner.id },
+        {
+          datasetSampleId: sample.id,
+          changeType: 'edit',
+          input: 'v1',
+          actorId: owner.id,
+          at: new Date('2026-08-15T10:00:00.000Z'),
+        },
+        {
+          datasetSampleId: sample.id,
+          changeType: 'edit',
+          input: 'v2',
+          actorId: owner.id,
+          at: new Date('2026-08-15T11:00:00.000Z'),
+        },
       ],
     });
     // Hidden. The history of a hidden sample is exactly what you read when
@@ -1500,8 +1628,8 @@ Create `src/app/api/datasets/[id]/samples/[sampleId]/revisions/route.ts`:
 ```ts
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { requireAuth, requireScope, isAdmin } from '@/lib/auth-guard';
-import { RateLimitedError } from '@/lib/rate-limit';
+import { requireAuth, requireScope, isAdmin, RateLimitedError } from '@/lib/auth-guard';
+import { liveDatasetsOnly } from '@/lib/tombstones';
 
 /**
  * One sample's mutation history, newest first.
@@ -1524,8 +1652,10 @@ export async function GET(
   if (scopeCheck) return scopeCheck;
 
   try {
-    const dataset = await prisma.dataset.findUnique({
-      where: { id: params.id },
+    // FILTERED on the PARENT, for the same reason the restore route is: a
+    // hidden dataset is closed, and its samples are hidden by inheritance.
+    const dataset = await prisma.dataset.findFirst({
+      where: { id: params.id, ...liveDatasetsOnly() },
       select: { userId: true },
     });
     if (!dataset) {
@@ -1535,6 +1665,9 @@ export async function GET(
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
+    // NOT filtered on the sample's OWN tombstone — that is the point of this
+    // route, and Step 5 below proves it by adding the filter and watching the
+    // hidden-sample test fail.
     const sample = await prisma.datasetSample.findUnique({
       where: { id: params.sampleId },
       select: { datasetId: true },
@@ -1584,7 +1717,8 @@ Restore and confirm byte-identical by sha256.
 
 - [ ] **Step 6: Register in the access matrix and run the full suites**
 
-Add the route's rows to `tests/db/access-matrix.test.ts`, then:
+Add the route's rows to `tests/db/access-matrix.test.ts` — same sibling-block pattern as Task 5
+Step 5, with anonymous → 401, stranger → 403, owner → 200, admin → 200. Then:
 
 ```bash
 npx tsc --noEmit && npm run lint && npm test && npm run test:db && npm run test:integration
@@ -1596,7 +1730,7 @@ Expected: zero failures.
 
 ```bash
 git add src/app/api/datasets/[id]/samples/[sampleId]/revisions tests/db/sample-revision.test.ts tests/db/access-matrix.test.ts
-git commit -m "feat(a2): read one sample's mutation history
+git commit -m "feat(l2): read one sample's mutation history
 
 Owner-only, newest first, and deliberately unfiltered — the history of a
 hidden sample is what you read when deciding whether to restore it."
@@ -1606,6 +1740,6 @@ hidden sample is what you read when deciding whether to restore it."
 
 ## Self-review notes
 
-**Spec coverage.** A2 implements the spec's "Recording a mutation" section in full: edits (Task 3), deletes (Task 4), restores (Task 5), the two-table justification (Task 1), and the closing of the gap A0 recorded — that a golden label preserves who/what/when but not the text the annotator saw (Task 3's before-image is that text).
+**Spec coverage.** L2 implements the spec's "Recording a mutation" section in full: edits (Task 3), deletes (Task 4), restores (Task 5), the two-table justification (Task 1), and the closing of the gap A0 recorded — that a golden label preserves who/what/when but not the text the annotator saw (Task 3's before-image is that text).
 
 **Deliberately not covered, and why.** Revision history for `Dataset` rows themselves is out of scope per the spec. A history UI is out of scope per the decision above. `restoreDataset` does not exist: A1's `DELETE /api/datasets/[id]` remains one-way, which is a real asymmetry — a hidden *sample* can be restored, a hidden *dataset* cannot. Left for Plan B, which owns the dataset lifecycle and is where an un-delete belongs alongside publish/unpublish semantics. **Flag this to the owner rather than letting it be discovered.**
