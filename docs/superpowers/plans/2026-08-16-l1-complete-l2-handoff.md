@@ -1,5 +1,13 @@
 # L1 complete — handoff for picking up L2
 
+> **SUPERSEDED 2026-08-17 by [`2026-08-17-l2-complete-a1-handoff.md`](2026-08-17-l2-complete-a1-handoff.md).**
+> L2 is complete, R1 and R3 are closed, and A1/A1.5 are specced and planned — so §1's branch table
+> and §5's residual list are both stale here. **Two things in this document are worth reading
+> anyway:** §3 (what L1 shipped, still accurate) and §8 (method notes). **One thing in it is wrong
+> and is corrected there:** §5's instruction to flip the test pinning the ordinal collision. That
+> test does not fail when the retry lands and must not be flipped — it pins the function, not the
+> route.
+
 **Written 2026-08-16.** Supersedes `docs/superpowers/plans/2026-08-13-a0-status-and-handoff.md`,
 every quantitative claim in which is now stale.
 **Revised 2026-08-16 (second pass)** — the rename in §0 is now done, §1's push status was wrong

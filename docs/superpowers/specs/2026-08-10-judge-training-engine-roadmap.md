@@ -117,6 +117,9 @@ building Roadmap A end to end? Everything below is verified, not inferred.
 | — | CI cannot run the DB or integration suites | **done 2026-08-12** — ephemeral Job with service sidecars; 286 DB + 74 integration tests green in CI, `build-push` gates on it |
 | 7 | RabbitMQ scrape/alerts/cap (T5) | **OPEN — gates A2 (this roadmap's A2, the calibration engine — not the lifecycle plan, which is now L2)** |
 | 4,5,6 | `startedAt`, format-compliance, token rollup | OPEN — needed during A |
+| — | **A1 + A1.5** | **specced and planned 2026-08-17, not implemented.** A1 = labelling, assignment, agreement. A1.5 = the studio shell A2/A3 also consume. Independent; buildable in parallel |
+| — | **A2** | **decisions recorded** (`2026-08-17-a2-calibration-and-reporting-decisions.md`), deliberately not specced — its design takes A1's real label data as an input |
+| — | Capturing `reasoning_content` | **OPEN, backlogged.** Chain-of-thought is discarded on every model call, so the studio's reasoning panel is structurally thin until it lands |
 | 11 | Golden sets absent from round-trip coverage | **done 2026-08-13** — A0's exit gate; classified in the `COVERAGE` map at `tests/db/config-roundtrip-fidelity.test.ts` |
 
 ### The dev endpoint: live, reachable, and missing a descriptor
@@ -409,6 +412,7 @@ cannot claim a distilled judge is better before calibration works.
 > `launchSingleRun`. Wiring it is follow-on work that A1 (this roadmap's) will need.
 >
 > Current state, decisions outstanding, and the next pickup:
+> `plans/2026-08-17-l2-complete-a1-handoff.md` (current), which supersedes
 > `plans/2026-08-16-l1-complete-l2-handoff.md`.
 
 Nothing exists above the schema. This phase is the API and the UI, with no new modelling.
@@ -430,9 +434,41 @@ survives an export/import round trip (which means adding it to the coverage list
 
 ### A1 — Human verification and a measured agreement floor · ~4 days
 
+> **SPECCED AND PLANNED 2026-08-17.** Design:
+> `2026-08-17-a1-human-verification-design.md`. Plan (7 tasks):
+> `../plans/2026-08-17-a1-human-verification.md`. **Split:** the annotation studio — the panel shell
+> A2 and A3 also consume — is now **A1.5**, specced and planned separately and buildable in
+> parallel. Nothing is implemented yet.
+
 The point of this phase is that **a golden set with no agreement measurement is not ground truth,
 it is one person's opinion**, and calibrating a judge against it would produce a confidently wrong
 number.
+
+#### ONE ANNOTATOR IS A DEVELOPMENT CONSTRAINT, NOT A PRODUCT ONE — read this before writing A1
+
+This distinction is easy to collapse and expensive to collapse wrongly, so state it three ways.
+
+**What is true today.** Exactly one account exists, so exactly one annotator exists. Every
+inter-annotator statistic is therefore *unavailable* rather than bad: `agreement()` returns
+`{ value: null, reason: 'insufficient-annotators' }`, never `0`, because `0` reads as total
+disagreement — the opposite of "not measurable". **`testRetest` is the only reliability signal that
+produces a number at launch**, which is precisely what that column was put in the schema for.
+
+**What is NOT true.** That the multi-annotator paths can be deferred. **Multiple annotators will be
+available through the owner's backend**, so the overlap model, the assignment rows, Fleiss's kappa
+for three or more raters, and the disagreement queue are all real product paths — they are simply
+not *exercisable end to end* on this machine yet.
+
+**What follows, concretely.** Multi-annotator behaviour is **built and tested now**, using fixtures
+that create N `User` rows — a DB test does not need the backend to have three annotators disagree
+about an item. What waits on access is only the **annotation-validation code against those APIs**:
+how annotators are provisioned, authenticated and routed work from the external service. That
+integration is a later, separate piece, and A1 must not be shaped as though it were the blocker.
+
+The failure mode this warning exists to prevent: building A1 against a single annotator, discovering
+at integration time that overlap was never modelled, and finding that the agreement number shipped
+for months was computed over an overlap of one — which is not a floor, and not detectable from the
+number itself.
 
 - A labelling/verification UI: present an item, collect `overallScore`, optional
   `criteriaScores` and `reasoning`, write one `GoldenLabel` per annotator.
@@ -450,9 +486,12 @@ number.
 **Exit gate:** a golden set reports an agreement number with a stated method, and a
 deliberately-inconsistent re-label moves `testRetest` in the expected direction.
 
-**Open question:** who may annotate whose data? Under the platform tier the operator has rights to
-granted datasets, but "has rights" and "should route to an annotation queue" are different claims,
-and cross-user annotation needs an explicit policy before any second account exists.
+**Open question — NARROWED 2026-08-17.** Who may annotate whose data? A1 settles the *mechanism*:
+explicit `GoldenAssignment` rows, so overlap is designed rather than accidental, plus a policy of
+owner + admin only while one account exists. What remains open is the *policy* once annotators
+arrive from the backend — whether a granted dataset routes to an annotation queue automatically, and
+who may see whose readings. The mechanism does not need redesigning for either answer; that is why
+it was built as assignment rows rather than a free-for-all.
 
 ### A2 — The calibration engine · ~5 days
 
@@ -645,7 +684,7 @@ its supporting metrics are recorded.
 |---|---|---|
 | ~~**#3** canonical agreement statistic + threshold~~ | ~~A0/A1~~ | **RESOLVED 2026-08-12** — weighted kappa, threshold stored as data. See below. |
 | ~~**#6** golden set immutable once referenced~~ | ~~A0~~ | **RESOLVED 2026-08-12** — yes, immutable once a `CalibrationRun` references it. See below. |
-| **#5** who may annotate whose data | **A1** | Only once a second account exists — but the labelling UI's ownership checks are written in A1. |
+| **#5** who may annotate whose data | **A1** | **Mechanism settled 2026-08-17** (assignment rows; owner+admin while one account exists). The POLICY once backend annotators arrive is still open, and does not require redesigning the mechanism. |
 | **#4** `biasSensitivityRate` perturbation set | **A2/A3** | Its value is meaningless without its definition; needs versioning from the first run. |
 | **#7** PPI configuration | **A2/A3** | An interval is only worth computing if something acts on it. |
 | **#8** throughput/latency percentiles in the verdict | **A3/A4** | Also depends on `startedAt` (item 4) existing first. |

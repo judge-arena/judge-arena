@@ -14,8 +14,8 @@ colliding with the `A0…A5` phases of `2026-08-10-judge-training-engine-roadmap
 something different.* Commit prefixes, `(A1)` comments in `src/`, and the applied `v2f` migration
 header keep the old letters permanently — see `../plans/2026-08-16-l1-complete-l2-handoff.md` §0.
 
-**Current state, residual findings, and the L2 pickup:
-[`../plans/2026-08-16-l1-complete-l2-handoff.md`](../plans/2026-08-16-l1-complete-l2-handoff.md).**
+**Current state and what to pick up next:
+[`../plans/2026-08-17-l2-complete-a1-handoff.md`](../plans/2026-08-17-l2-complete-a1-handoff.md).**
 
 Every `file:line` in this document was opened and verified against the working tree at `af58c96`. Where a claim was found wrong during fact-checking, the corrected version is what appears here.
 
