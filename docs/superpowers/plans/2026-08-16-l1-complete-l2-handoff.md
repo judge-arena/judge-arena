@@ -5,6 +5,19 @@ every quantitative claim in which is now stale.
 **Revised 2026-08-16 (second pass)** — the rename in §0 is now done, §1's push status was wrong
 within hours of being written, §4 gains a seventh defect, and §6's decisions are answered.
 
+> **L2 IS NOW COMPLETE (2026-08-16).** All six tasks landed on `feat/a2-revision-log`
+> (`cf23fd7…68f26dc`). Suites moved 493/522/80 → **499 unit / 552 db / 80 integration**, tsc and
+> lint clean, 17 migrations. §4 below remains worth reading — it is the record of what was wrong
+> with the plan and was corrected in place before execution — and §5's residuals are unchanged by
+> L2 except **R6, which is now closed**: `restoreSample` has its first production caller.
+>
+> **The one thing to raise with the owner rather than let it be discovered** (plan self-review, and
+> decision 9 below): **there is still no `restoreDataset`.** A hidden *sample* can now be restored
+> through the API; a hidden *dataset* cannot, and `DELETE /api/datasets/[id]` remains one-way. That
+> asymmetry is deliberate — un-deleting a dataset belongs with publish/unpublish in Plan B — but it
+> is now visible in the product rather than theoretical, because the sample-level verb exists and
+> the dataset-level one does not.
+
 ---
 
 ## 0. The naming collision, and how it was resolved
@@ -219,7 +232,7 @@ re-verification existed to catch — treat the list below as authoritative over 
 | **R3** | Importer CREATE branch unatomic; no duplicate-`index` refine | **half fixed** — refine landed (`8b7972c`), atomicity did not | Cheap to fold into L2 Task 4 |
 | **R4** | An inert `_count` has no automated guard | **still true** | Delete the `_count` rather than guard it |
 | **R5** | Pin-guard 409 is terminal — no purge path | **half fixed** — message honest (`531dc6d`), terminality stands | Accept and document |
-| **R6** | `tombstoneSample`/`restoreSample` have no production caller | **still true** | L2 Task 5 gives `restoreSample` its first caller |
+| **R6** | `tombstoneSample`/`restoreSample` have no production caller | **CLOSED for `restoreSample`** (L2 Task 5, `92ccf24`) — `tombstoneSample` (singular) still has none; the verbs all use `tombstoneSamples` | Done |
 
 Detail worth carrying:
 

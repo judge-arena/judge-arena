@@ -1,9 +1,9 @@
 # Dataset lifecycle and the mutation record
 
-**Date:** 2026-08-14 · **Status (2026-08-16):** approved and **partly implemented** — plan L1 (the
-tombstone overlay) is complete and merged into `feat/a0-golden-set-substrate` locally; plan L2 (the
-revision log) is planned in six tasks and **not started**; Plan B (the lifecycle: publish, freeze,
-version-on-edit) is not planned.
+**Date:** 2026-08-14 · **Status (2026-08-16):** approved and **fully implemented for Plan A** —
+plan L1 (the tombstone overlay) is complete and merged into `feat/a0-golden-set-substrate` locally;
+plan L2 (the revision log) is **complete**, six tasks on `feat/a2-revision-log`; Plan B (the
+lifecycle: publish, freeze, version-on-edit) is not planned.
 **Supersedes:** Ruling 9 of `docs/superpowers/plans/2026-08-13-a0-status-and-handoff.md` ("staged datasets").
 **Depends on:** A0 (`feat/a0-golden-set-substrate`, PR #12) being merged first. *In practice L1 was
 built on top of A0's branch before that merge happened, so both are stacked ahead of `main`.*

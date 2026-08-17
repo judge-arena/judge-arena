@@ -1,5 +1,26 @@
 # Plan L2 — The Revision Log Implementation Plan
 
+> **COMPLETE 2026-08-16.** All six tasks landed on `feat/a2-revision-log`, six commits
+> `cf23fd7…68f26dc` on top of `1dcd73c`. Final suites: **499 unit / 552 db / 80 integration**, `tsc`
+> and `lint` clean, 17 migrations. Baseline at the start was 493 / 522 / 80, so L2 added 6 unit and
+> 30 db tests and removed none — the contract each task verified.
+>
+> **Three defects were found during execution that this plan did not predict**, on top of the eleven
+> in "Corrections applied" below. They are recorded here rather than only in commit messages,
+> because each is the kind that returns:
+>
+> 1. **`Dataset.sampleCount` under-reported after every restore.** L1 made it a LIVE row count and
+>    had `DELETE` rewrite it; a restore moves it the other way and nothing rewrote it, so the stored
+>    value lost one per restored row, permanently — the UI ladder reads the stored value first, so
+>    it shadows the live count beneath. Fixed inside the restore transaction (Task 5).
+> 2. **The Task 3 test omitted the `next/headers` mock.** `requireAuth()` awaits `headers()` before
+>    any auth work and there is no request scope in a node-environment test, so every route call
+>    throws before reaching the handler. All five existing route-driving DB tests mock it.
+> 3. **The importer test would have passed vacuously.** The replace is gated on
+>    `changes.length > 0`, and that diff compares dataset fields plus the sample COUNT — never
+>    sample text. Editing only `samples[0].input` is a *skip*, so the test must also rename the
+>    dataset, as the neighbouring M1 test does.
+
 > **Renamed 2026-08-16 from "Plan A2".** The lifecycle plans are now `L1`/`L2`, leaving `A0…A5`
 > to `specs/2026-08-10-judge-training-engine-roadmap.md`, whose A2 is *the calibration engine* and
 > is unrelated work. **Three classes of artifact keep the old label and cannot be changed:** the
@@ -189,7 +210,7 @@ export function recordSampleRevisions(
 - Consumes: nothing from A2. Assumes A1 is merged, so `Tombstone` exists.
 - Produces: Prisma model `SampleRevision` with scalar columns `id: String`, `datasetSampleId: String`, `changeType: String`, `input: String?`, `expected: String?`, `metadata: String?`, `actorId: String?`, `at: DateTime`; relations `datasetSample: DatasetSample`, `actor: User?`; back-relations `DatasetSample.revisions` and `User.sampleRevisions`; the `tx.sampleRevision` delegate.
 
-- [ ] **Step 1: Write the failing test — add `SampleRevision` to `COVERAGE`**
+- [x] **Step 1: Write the failing test — add `SampleRevision` to `COVERAGE`**
 
 The fidelity suite iterates `Object.entries(COVERAGE)` and never the datamodel, so a model absent from the map is unchecked. Adding the entry first is what makes this task test-driven: it names a model that does not exist yet.
 
@@ -227,7 +248,7 @@ Open `tests/db/config-roundtrip-fidelity.test.ts` and insert this into the `COVE
 
 The eight keys are exactly the model's eight scalar columns. The stale-key guard filters `f.kind === 'scalar' || f.kind === 'enum'`, so the two relation fields are correctly absent — listing either fails that guard.
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run:
 
@@ -237,7 +258,7 @@ sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.t
 
 Expected: FAIL with `SampleRevision is not in the Prisma datamodel: expected undefined not to be undefined`. That is the `expect(model, …).toBeDefined()` line firing — `Prisma.dmmf.datamodel.models` comes from the generated client and has no `SampleRevision` yet.
 
-- [ ] **Step 3: Add the model and its two back-relations**
+- [x] **Step 3: Add the model and its two back-relations**
 
 In `prisma/schema.prisma`, add to the `DatasetSample` relations block, beside the `tombstone Tombstone?` line A1 added:
 
@@ -297,7 +318,7 @@ model SampleRevision {
 }
 ```
 
-- [ ] **Step 4: Generate the migration**
+- [x] **Step 4: Generate the migration**
 
 > **The `grep | cut` idiom this plan was written with does not work here** — `.env.local` holds a
 > **quoted** `DATABASE_URL` and `cut` keeps the quotes, so Prisma fails `P1012` ("the URL must start
@@ -314,7 +335,7 @@ cat /tmp/v2g.sql
 
 Read the output. It should contain exactly one `CREATE TABLE "SampleRevision"`, one `CREATE INDEX` for `@@index([datasetSampleId, at])`, and two `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` statements. **If it contains anything else, stop** — the schema has drifted and a later migration will fight this one.
 
-- [ ] **Step 5: Write the migration with its prose header**
+- [x] **Step 5: Write the migration with its prose header**
 
 ```bash
 mkdir -p prisma/migrations/20260815120000_v2g_sample_revisions
@@ -341,7 +362,7 @@ Create `prisma/migrations/20260815120000_v2g_sample_revisions/migration.sql` wit
 
 Then append `/tmp/v2g.sql` verbatim.
 
-- [ ] **Step 6: Apply to the LOCAL dev database and regenerate the client**
+- [x] **Step 6: Apply to the LOCAL dev database and regenerate the client**
 
 ```bash
 sh -c 'set -a; . ./.env.local; set +a; \
@@ -352,7 +373,7 @@ npx prisma generate
 
 This hits `localhost:5432` only. **Never the cluster pod `judge-arena-pg-1`.**
 
-- [ ] **Step 7: Verify the migration produces no drift**
+- [x] **Step 7: Verify the migration produces no drift**
 
 ```bash
 sh -c 'set -a; . ./.env.local; set +a; npx prisma migrate diff \
@@ -363,7 +384,7 @@ sh -c 'set -a; . ./.env.local; set +a; npx prisma migrate diff \
 
 Expected output: `-- This is an empty migration.`
 
-- [ ] **Step 8: Run the fidelity test and watch it pass**
+- [x] **Step 8: Run the fidelity test and watch it pass**
 
 ```bash
 sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/config-roundtrip-fidelity.test.ts'
@@ -371,7 +392,7 @@ sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.t
 
 Expected: PASS, including the gap-ledger assertion — which stays green because this entry records no `knownGaps`.
 
-- [ ] **Step 9: Run the full suites**
+- [x] **Step 9: Run the full suites**
 
 ```bash
 npx tsc --noEmit && npm run lint && npm test && npm run test:db
@@ -379,7 +400,7 @@ npx tsc --noEmit && npm run lint && npm test && npm run test:db
 
 Expected: zero failures. Record the observed counts in your report.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add prisma/schema.prisma prisma/migrations/20260815120000_v2g_sample_revisions tests/db/config-roundtrip-fidelity.test.ts
@@ -402,7 +423,7 @@ because current-state needs @unique per entity and a log cannot have it."
 - Consumes: `Prisma.TransactionClient`; the `tx.sampleRevision` delegate from Task 1.
 - Produces: `SampleChangeType`, `recordSampleRevision`, `recordSampleRevisions` — exactly the signatures in this plan's interface contract.
 
-- [ ] **Step 1: Write the failing unit test**
+- [x] **Step 1: Write the failing unit test**
 
 Create `tests/lib/sample-revisions.test.ts`:
 
@@ -522,7 +543,7 @@ describe('recordSampleRevisions', () => {
 });
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 ```bash
 npx vitest run --config vitest.config.ts tests/lib/sample-revisions.test.ts
@@ -530,7 +551,7 @@ npx vitest run --config vitest.config.ts tests/lib/sample-revisions.test.ts
 
 Expected: FAIL at collection with `Failed to resolve import "@/lib/sample-revisions"`. The module does not exist yet.
 
-- [ ] **Step 3: Implement `src/lib/sample-revisions.ts`**
+- [x] **Step 3: Implement `src/lib/sample-revisions.ts`**
 
 ```ts
 import type { Prisma } from '@prisma/client';
@@ -629,7 +650,7 @@ export async function recordSampleRevisions(
 }
 ```
 
-- [ ] **Step 4: Run it and watch it pass**
+- [x] **Step 4: Run it and watch it pass**
 
 ```bash
 npx vitest run --config vitest.config.ts tests/lib/sample-revisions.test.ts
@@ -637,7 +658,7 @@ npx vitest run --config vitest.config.ts tests/lib/sample-revisions.test.ts
 
 Expected: PASS, 6 tests.
 
-- [ ] **Step 5: Prove the tests discriminate**
+- [x] **Step 5: Prove the tests discriminate**
 
 Break each of the three properties in turn, observe the named failure, restore, and confirm byte-identical:
 
@@ -660,7 +681,7 @@ sha256sum -c /tmp/rev.sha
 
 Expected: `src/lib/sample-revisions.ts: OK`. Put all three observed failure messages in your report.
 
-- [ ] **Step 6: Run the full suites**
+- [x] **Step 6: Run the full suites**
 
 ```bash
 npx tsc --noEmit && npm run lint && npm test && npm run test:db
@@ -668,7 +689,7 @@ npx tsc --noEmit && npm run lint && npm test && npm run test:db
 
 Expected: zero failures. Note `src/lib/sample-revisions.ts` lands in both coverage `include` sets while only the unit suite exercises it, so the DB-suite aggregate dips slightly. Margins hold (floors are 2pp/3pp below actuals) and Task 3 recovers it. **Do not touch a floor.**
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/lib/sample-revisions.ts tests/lib/sample-revisions.test.ts
@@ -693,7 +714,7 @@ revision claiming it happened."
 
 **This is the task that makes "edits get a history" true.** Everything else in A2 logs events that A1 already made non-destructive; this one recovers information that was previously overwritten and lost.
 
-- [ ] **Step 1: Write the failing DB test**
+- [x] **Step 1: Write the failing DB test**
 
 Create `tests/db/sample-revision.test.ts`:
 
@@ -840,7 +861,7 @@ describe('PATCH /api/datasets/[id]/samples — the revision log', () => {
 });
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 ```bash
 sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/sample-revision.test.ts'
@@ -848,7 +869,7 @@ sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.t
 
 Expected: FAIL on the first test with `expected [] to have a length of 1 but got +0` — `PATCH` writes no revision yet.
 
-- [ ] **Step 3: Widen the sample lookup to fetch the before-image**
+- [x] **Step 3: Widen the sample lookup to fetch the before-image**
 
 In `src/app/api/datasets/[id]/samples/route.ts`'s `PATCH`, the membership lookup is **already** a filtered `findFirst` — L1 got here first, so this is not the `findUnique` replacement the plan originally described. At HEAD it reads:
 
@@ -896,7 +917,7 @@ import {
 import { recordSampleRevision } from '@/lib/sample-revisions';
 ```
 
-- [ ] **Step 4: Record the revision inside the same transaction as the update**
+- [x] **Step 4: Record the revision inside the same transaction as the update**
 
 Replace the bare `prisma.datasetSample.update(...)` with a transaction that writes both:
 
@@ -924,7 +945,7 @@ Replace the bare `prisma.datasetSample.update(...)` with a transaction that writ
 
 Keep whatever the handler already returns; only the write path changes.
 
-- [ ] **Step 5: Run it and watch it pass**
+- [x] **Step 5: Run it and watch it pass**
 
 ```bash
 sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/sample-revision.test.ts'
@@ -932,7 +953,7 @@ sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.t
 
 Expected: PASS, 4 tests.
 
-- [ ] **Step 6: Prove the before-image test discriminates**
+- [x] **Step 6: Prove the before-image test discriminates**
 
 The load-bearing claim is that the log holds the OLD text. A revision written with the NEW values would still produce one row of the right `changeType`, so the assertion must be on the content:
 
@@ -946,7 +967,7 @@ Expected: FAIL with `expected 'edited question' to be 'original question'`.
 
 Restore, then `sha256sum -c /tmp/patch.sha` → `OK`. Put the observed message in your report.
 
-- [ ] **Step 7: Run the full suites**
+- [x] **Step 7: Run the full suites**
 
 ```bash
 npx tsc --noEmit && npm run lint && npm test && npm run test:db && npm run test:integration
@@ -954,7 +975,7 @@ npx tsc --noEmit && npm run lint && npm test && npm run test:db && npm run test:
 
 Expected: zero failures.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/app/api/datasets/[id]/samples/route.ts tests/db/sample-revision.test.ts
@@ -980,7 +1001,7 @@ rolled-back edit leaves no revision claiming it happened."
 
 **These are the three places A1 and A2 touch the same transaction.** A1's implementers were asked to leave them shaped so a second write drops in. In each case the revision write goes **immediately before or after the `tombstoneSamples` call, inside the same `tx`** — never outside it.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/db/sample-revision.test.ts`. These need `DELETE` and `PUT` imported — extend the existing import at the top of the file:
 
@@ -1073,7 +1094,7 @@ describe('the bulk verbs record a revision per hidden row', () => {
 });
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+- [x] **Step 2: Run them and watch them fail**
 
 ```bash
 sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/sample-revision.test.ts -t "bulk verbs"'
@@ -1081,7 +1102,7 @@ sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.t
 
 Expected: FAIL on the first with `expected [] to have a length of 2 but got +0`.
 
-- [ ] **Step 3: Record in `DELETE`**
+- [x] **Step 3: Record in `DELETE`**
 
 In the `DELETE` handler's transaction, **immediately before** the existing `tombstoneSamples` call.
 Order matters: the "which of these are still live" read has to happen while they are still live.
@@ -1136,7 +1157,7 @@ Add one import line (the `@/lib/tombstones` block already imports what this need
 import { recordSampleRevision, recordSampleRevisions } from '@/lib/sample-revisions';
 ```
 
-- [ ] **Step 4: Run the DELETE tests and watch them pass**
+- [x] **Step 4: Run the DELETE tests and watch them pass**
 
 ```bash
 sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/sample-revision.test.ts -t "bulk verbs"'
@@ -1144,7 +1165,7 @@ sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.t
 
 Expected: PASS, 2 tests.
 
-- [ ] **Step 5: Record in `PUT`, the same way**
+- [x] **Step 5: Record in `PUT`, the same way**
 
 `PUT` needs **no second read at all**, unlike `DELETE`. L1 already computes `outgoing` with the
 lifecycle filter applied, so by construction every row in it is live and every one of them
@@ -1177,7 +1198,7 @@ the `if (outgoing.length > 0)` guard, the `'bulk replace'` reason (an `upsert` u
 `reason: null` overwrites the reason a row was previously hidden with), and the shared `outgoing`
 binding the appends below depend on.
 
-- [ ] **Step 6: Record in the config importer**
+- [x] **Step 6: Record in the config importer**
 
 In `src/app/api/config/import/route.ts`'s dataset-section sample replace — same shape as `PUT`, and
 the same reasoning: L1's `outgoing` is already lifecycle-filtered, so it goes **inside** the existing
@@ -1204,7 +1225,7 @@ This transaction is L1's too — the section had none before it, so a failure be
 used to leave a corpus with every row hidden and nothing to show. The revision write joins that
 atomic unit rather than sitting beside it.
 
-- [ ] **Step 7: Add a test for the importer's revisions**
+- [x] **Step 7: Add a test for the importer's revisions**
 
 Append to `tests/db/config-golden-sets.test.ts`, beside the replace tests A1 updated there — that file already owns the importer fixtures:
 
@@ -1243,7 +1264,7 @@ Append to `tests/db/config-golden-sets.test.ts`, beside the replace tests A1 upd
   });
 ```
 
-- [ ] **Step 8: Run the full suites**
+- [x] **Step 8: Run the full suites**
 
 ```bash
 npx tsc --noEmit && npm run lint && npm test && npm run test:db && npm run test:integration
@@ -1251,7 +1272,7 @@ npx tsc --noEmit && npm run lint && npm test && npm run test:db && npm run test:
 
 Expected: zero failures.
 
-- [ ] **Step 9: Prove the retry test discriminates**
+- [x] **Step 9: Prove the retry test discriminates**
 
 ```bash
 sha256sum src/app/api/datasets/[id]/samples/route.ts > /tmp/del.sha
@@ -1263,7 +1284,7 @@ Expected: FAIL with `expected 2 to be 1` on the retried-DELETE test.
 
 Restore, `sha256sum -c /tmp/del.sha` → `OK`.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add src/app/api/datasets/[id]/samples/route.ts src/app/api/config/import/route.ts tests/db/sample-revision.test.ts tests/db/config-golden-sets.test.ts
@@ -1288,7 +1309,7 @@ record a deletion that did not happen."
 
 **Why this route exists at all.** A1 shipped hiding with no way back through the API: `restoreSample` was implemented and unit-tested but had no caller, because A1's read filters only needed an `isTombstone: false` row to be *reachable*. Until this task, "delete" is one-way in the product, which makes the whole "hide, don't destroy" promise hard to justify to a user.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `tests/db/sample-revision.test.ts`:
 
@@ -1368,7 +1389,7 @@ Add the import at the top of the file:
 import { POST as POST_RESTORE } from '@/app/api/datasets/[id]/samples/[sampleId]/restore/route';
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 ```bash
 sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/sample-revision.test.ts -t "restore"'
@@ -1376,7 +1397,7 @@ sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.t
 
 Expected: FAIL at collection with `Failed to resolve import "@/app/api/datasets/[id]/samples/[sampleId]/restore/route"`.
 
-- [ ] **Step 3: Create the route**
+- [x] **Step 3: Create the route**
 
 Create `src/app/api/datasets/[id]/samples/[sampleId]/restore/route.ts`:
 
@@ -1464,7 +1485,7 @@ export async function POST(
 }
 ```
 
-- [ ] **Step 4: Run it and watch it pass**
+- [x] **Step 4: Run it and watch it pass**
 
 ```bash
 sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/sample-revision.test.ts -t "restore"'
@@ -1472,7 +1493,7 @@ sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.t
 
 Expected: PASS, 2 tests.
 
-- [ ] **Step 5: Register the route in the access matrix**
+- [x] **Step 5: Register the route in the access matrix**
 
 `tests/db/access-matrix.test.ts` enumerates every route × caller combination. **Do not try to add a
 registry entry** — `ResourceHandlers` is `{createTarget, get, patch, del}` over a single `id`, and
@@ -1485,7 +1506,7 @@ actor of ['anonymous', 'stranger', 'owner', 'admin'])` loop, `setSessionFor(acto
 per-actor expected status. Add a sibling block for the restore route with anonymous → 401,
 stranger → 403, owner → 200, admin → 200 against a hidden sample.
 
-- [ ] **Step 6: Run the full suites**
+- [x] **Step 6: Run the full suites**
 
 ```bash
 npx tsc --noEmit && npm run lint && npm test && npm run test:db && npm run test:integration
@@ -1493,7 +1514,7 @@ npx tsc --noEmit && npm run lint && npm test && npm run test:db && npm run test:
 
 Expected: zero failures.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/app/api/datasets/[id]/samples/[sampleId]/restore tests/db/sample-revision.test.ts tests/db/access-matrix.test.ts
@@ -1518,7 +1539,7 @@ sample returns to its original ordinal because nothing ever reused it."
 
 **A log nobody can read is hard to justify.** This is the minimum surface that makes the log reachable and testable. A history panel on the dataset page is a UI change with no test harness and belongs with whoever next works on that page.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `tests/db/sample-revision.test.ts`:
 
@@ -1613,7 +1634,7 @@ Add the import:
 import { GET as GET_REVISIONS } from '@/app/api/datasets/[id]/samples/[sampleId]/revisions/route';
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 ```bash
 sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/sample-revision.test.ts -t "revisions"'
@@ -1621,7 +1642,7 @@ sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.t
 
 Expected: FAIL at collection with `Failed to resolve import`.
 
-- [ ] **Step 3: Create the route**
+- [x] **Step 3: Create the route**
 
 Create `src/app/api/datasets/[id]/samples/[sampleId]/revisions/route.ts`:
 
@@ -1699,7 +1720,7 @@ export async function GET(
 }
 ```
 
-- [ ] **Step 4: Run it and watch it pass**
+- [x] **Step 4: Run it and watch it pass**
 
 ```bash
 sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.ts tests/db/sample-revision.test.ts -t "revisions"'
@@ -1707,7 +1728,7 @@ sh -c 'set -a; . ./.env.test; set +a; npx vitest run --config vitest.db.config.t
 
 Expected: PASS, 2 tests.
 
-- [ ] **Step 5: Prove the hidden-sample case discriminates**
+- [x] **Step 5: Prove the hidden-sample case discriminates**
 
 The load-bearing claim is that this route does **not** filter. Add `...liveSamplesOnly()` to the `datasetSample.findUnique` where-clause and re-run.
 
@@ -1715,7 +1736,7 @@ Expected: FAIL with `expected 404 to be 200` on the hidden-sample test — the r
 
 Restore and confirm byte-identical by sha256.
 
-- [ ] **Step 6: Register in the access matrix and run the full suites**
+- [x] **Step 6: Register in the access matrix and run the full suites**
 
 Add the route's rows to `tests/db/access-matrix.test.ts` — same sibling-block pattern as Task 5
 Step 5, with anonymous → 401, stranger → 403, owner → 200, admin → 200. Then:
@@ -1726,7 +1747,7 @@ npx tsc --noEmit && npm run lint && npm test && npm run test:db && npm run test:
 
 Expected: zero failures.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/app/api/datasets/[id]/samples/[sampleId]/revisions tests/db/sample-revision.test.ts tests/db/access-matrix.test.ts
