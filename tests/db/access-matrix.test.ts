@@ -26,6 +26,11 @@ import { GET as getGoldenSet, PATCH as patchGoldenSet, DELETE as deleteGoldenSet
 import { GET as listGoldenSets, POST as createGoldenSetRoute } from '@/app/api/golden-sets/route';
 import { POST as forkGoldenSetRoute } from '@/app/api/golden-sets/[id]/fork/route';
 import { POST as retireGoldenSetRoute } from '@/app/api/golden-sets/[id]/retire/route';
+import {
+  GET as listAssignmentsRoute,
+  POST as createAssignmentRoute,
+  DELETE as revokeAssignmentRoute,
+} from '@/app/api/golden-sets/[id]/assignments/route';
 import { POST as restoreSampleRoute } from '@/app/api/datasets/[id]/samples/[sampleId]/restore/route';
 import { GET as sampleRevisionsRoute } from '@/app/api/datasets/[id]/samples/[sampleId]/revisions/route';
 
@@ -1067,6 +1072,65 @@ describe('Access matrix — golden-set sub-routes (/fork, /retire) and list', ()
       setSessionFor(actor, ctx);
       const res = await retireGoldenSetRoute(
         jsonRequest(`http://localhost/api/golden-sets/${target.id}/retire`, 'POST', {}),
+        { params: Promise.resolve({ id: target.id }) }
+      );
+      expect(res.status).toBe(expected);
+    });
+  }
+
+  // ── A1: the assignments sub-resource ────────────────────────────────────
+  // Registered as a loop rather than as a `registry` entry on purpose:
+  // ResourceHandlers is {createTarget, get, patch, del} over a single `id`,
+  // and the registry is typed to six fixed resource keys, so a two-parameter
+  // sub-resource does not fit it. Same shape as /fork and /retire above.
+  //
+  // Every verb is coordinator-only — there is no public read of who was asked
+  // to annotate what, on a public set or otherwise. That is deliberate: the
+  // published artifacts are the labels and the agreement number (Task 7), not
+  // the workflow that produced them.
+  for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+    const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 200;
+    it(`GET /api/golden-sets/[id]/assignments as ${actor} -> ${expected}`, async () => {
+      const target = await mkGoldenSet(ctx.ownerId, 'public');
+      setSessionFor(actor, ctx);
+      const res = await listAssignmentsRoute(
+        new Request(`http://localhost/api/golden-sets/${target.id}/assignments`),
+        { params: Promise.resolve({ id: target.id }) }
+      );
+      expect(res.status).toBe(expected);
+    });
+  }
+
+  for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+    const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 201;
+    it(`POST /api/golden-sets/[id]/assignments as ${actor} -> ${expected}`, async () => {
+      const target = await mkGoldenSet(ctx.ownerId, 'public');
+      setSessionFor(actor, ctx);
+      const res = await createAssignmentRoute(
+        jsonRequest(`http://localhost/api/golden-sets/${target.id}/assignments`, 'POST', {
+          // The SET OWNER is the holder in every row, so `mayHoldAssignment`
+          // passes for both the owner and the admin actor and the only thing
+          // that can move the status is the access check under test.
+          annotatorId: ctx.ownerId,
+        }),
+        { params: Promise.resolve({ id: target.id }) }
+      );
+      expect(res.status).toBe(expected);
+    });
+  }
+
+  for (const actor of ['anonymous', 'stranger', 'owner', 'admin'] as Actor[]) {
+    const expected = actor === 'anonymous' ? 401 : actor === 'stranger' ? 403 : 200;
+    it(`DELETE /api/golden-sets/[id]/assignments as ${actor} -> ${expected}`, async () => {
+      const target = await mkGoldenSet(ctx.ownerId, 'public');
+      const assignment = await db.goldenAssignment.create({
+        data: { goldenSetId: target.id, annotatorId: ctx.ownerId, round: 1 },
+      });
+      setSessionFor(actor, ctx);
+      const res = await revokeAssignmentRoute(
+        jsonRequest(`http://localhost/api/golden-sets/${target.id}/assignments`, 'DELETE', {
+          assignmentId: assignment.id,
+        }),
         { params: Promise.resolve({ id: target.id }) }
       );
       expect(res.status).toBe(expected);

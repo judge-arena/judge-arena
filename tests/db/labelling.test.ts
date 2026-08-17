@@ -30,6 +30,11 @@ vi.mock('@/lib/rate-limit-redis', async (importOriginal) => {
 });
 
 const { PATCH } = await import('@/app/api/golden-sets/[id]/items/route');
+const {
+  GET: GET_ASSIGNMENTS,
+  POST: POST_ASSIGNMENT,
+  DELETE: DELETE_ASSIGNMENT,
+} = await import('@/app/api/golden-sets/[id]/assignments/route');
 
 let counter = 0;
 function uniq(prefix: string): string {
@@ -176,5 +181,188 @@ describe('A1 provenance — an item edit records the before-image', () => {
     const again = await db.goldenLabel.findUniqueOrThrow({ where: { id: first.id } });
     expect(again.goldenItemRevisionId).toBe(stampedWith);
     expect(await db.goldenItemRevision.count()).toBe(2);
+  });
+});
+
+describe('A1 assignment — overlap is designed, not accidental', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  const params = (id: string) => ({ params: Promise.resolve({ id }) });
+
+  it('assigns a WHOLE SET with a null goldenItemId — 620 rows is the exception, not the norm', async () => {
+    const owner = await mkUser();
+    const { set } = await mkGoldenSet(owner.id, { count: 3 });
+    sessionFor(owner);
+
+    const res = await POST_ASSIGNMENT(
+      jsonRequest({ annotatorId: owner.id }, 'POST'),
+      params(set.id)
+    );
+    expect(res.status).toBe(201);
+    const { assignment } = await res.json();
+    expect(assignment.goldenItemId).toBeNull();
+    expect(assignment.round).toBe(1);
+    expect(assignment.revokedAt).toBeNull();
+  });
+
+  it('assigns a SINGLE ITEM, for adjudication or a targeted re-read', async () => {
+    const owner = await mkUser();
+    const { set, items } = await mkGoldenSet(owner.id, { count: 3 });
+    sessionFor(owner);
+
+    const res = await POST_ASSIGNMENT(
+      jsonRequest({ annotatorId: owner.id, goldenItemId: items[1].id, round: 2 }, 'POST'),
+      params(set.id)
+    );
+    expect(res.status).toBe(201);
+    const { assignment } = await res.json();
+    expect(assignment.goldenItemId).toBe(items[1].id);
+    expect(assignment.round).toBe(2);
+  });
+
+  it('records WHO DID THE ASKING, not just who was asked', async () => {
+    // Decision 6 is "assignment is explicit rows"; the audit trail is half the
+    // reason. An assignment with no assignedBy cannot answer "who put this on
+    // my queue", which is the first question an annotator asks.
+    const owner = await mkUser();
+    const admin = await mkUser({ role: 'admin' });
+    const { set } = await mkGoldenSet(owner.id);
+    sessionFor(admin);
+
+    const res = await POST_ASSIGNMENT(
+      jsonRequest({ annotatorId: owner.id }, 'POST'),
+      params(set.id)
+    );
+    expect(res.status).toBe(201);
+    const { assignment } = await res.json();
+    expect(assignment.assignedById).toBe(admin.id);
+    expect(assignment.annotatorId).toBe(owner.id);
+  });
+
+  it('DELETE REVOKES — the row survives, because it records what was asked', async () => {
+    const owner = await mkUser();
+    const { set, items } = await mkGoldenSet(owner.id);
+    sessionFor(owner);
+    const created = await (
+      await POST_ASSIGNMENT(
+        jsonRequest({ annotatorId: owner.id, goldenItemId: items[0].id }, 'POST'),
+        params(set.id)
+      )
+    ).json();
+
+    const res = await DELETE_ASSIGNMENT(
+      jsonRequest({ assignmentId: created.assignment.id, reason: 'reassigned' }, 'DELETE'),
+      params(set.id)
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ revoked: true });
+
+    // NOT deleted. A delete would destroy the audit trail the model exists for.
+    const row = await db.goldenAssignment.findUniqueOrThrow({
+      where: { id: created.assignment.id },
+    });
+    expect(row.revokedAt).not.toBeNull();
+    expect(row.revokedReason).toBe('reassigned');
+    expect(await db.goldenAssignment.count()).toBe(1);
+  });
+
+  it('a re-assignment after revocation SUCCEEDS — the partial index permits it', async () => {
+    // The whole reason the active-assignment unique is partial. A whole-table
+    // unique would let one revoked row block that annotator from ever being
+    // given the same item and round again.
+    const owner = await mkUser();
+    const { set, items } = await mkGoldenSet(owner.id);
+    sessionFor(owner);
+    const body = { annotatorId: owner.id, goldenItemId: items[0].id, round: 1 };
+
+    const first = await (
+      await POST_ASSIGNMENT(jsonRequest(body, 'POST'), params(set.id))
+    ).json();
+
+    // The same assignment again, while the first is ACTIVE, is refused.
+    const dupe = await POST_ASSIGNMENT(jsonRequest(body, 'POST'), params(set.id));
+    expect(dupe.status).toBe(409);
+
+    await DELETE_ASSIGNMENT(
+      jsonRequest({ assignmentId: first.assignment.id }, 'DELETE'),
+      params(set.id)
+    );
+
+    const again = await POST_ASSIGNMENT(jsonRequest(body, 'POST'), params(set.id));
+    expect(again.status).toBe(201);
+    expect(await db.goldenAssignment.count()).toBe(2);
+  });
+
+  it('GET lists ACTIVE assignments, and revoked ones only when asked for', async () => {
+    const owner = await mkUser();
+    const { set, items } = await mkGoldenSet(owner.id, { count: 2 });
+    sessionFor(owner);
+    const a = await (
+      await POST_ASSIGNMENT(
+        jsonRequest({ annotatorId: owner.id, goldenItemId: items[0].id }, 'POST'),
+        params(set.id)
+      )
+    ).json();
+    await POST_ASSIGNMENT(
+      jsonRequest({ annotatorId: owner.id, goldenItemId: items[1].id }, 'POST'),
+      params(set.id)
+    );
+    await DELETE_ASSIGNMENT(
+      jsonRequest({ assignmentId: a.assignment.id }, 'DELETE'),
+      params(set.id)
+    );
+
+    const active = await (
+      await GET_ASSIGNMENTS(
+        new Request(`http://localhost/api/golden-sets/${set.id}/assignments`),
+        params(set.id)
+      )
+    ).json();
+    expect(active.assignments).toHaveLength(1);
+
+    const all = await (
+      await GET_ASSIGNMENTS(
+        new Request(`http://localhost/api/golden-sets/${set.id}/assignments?includeRevoked=true`),
+        params(set.id)
+      )
+    ).json();
+    expect(all.assignments).toHaveLength(2);
+  });
+
+  it('refuses to assign work to somebody who may not HOLD an assignment', async () => {
+    // Decision 8, and the reason mechanism and policy are separate concerns:
+    // with one account owner+admin collapse to "the owner", but the check is
+    // written as a policy so widening it later is a one-line change rather
+    // than a redesign. Without it, a coordinator could queue work onto a
+    // stranger's account and there is no path by which they would ever see it.
+    const owner = await mkUser();
+    const stranger = await mkUser();
+    const { set } = await mkGoldenSet(owner.id);
+    sessionFor(owner);
+
+    const res = await POST_ASSIGNMENT(
+      jsonRequest({ annotatorId: stranger.id }, 'POST'),
+      params(set.id)
+    );
+    expect(res.status).toBe(403);
+    expect(await db.goldenAssignment.count()).toBe(0);
+  });
+
+  it('refuses an item that belongs to a DIFFERENT golden set', async () => {
+    // Otherwise the id in the URL is decoration and an assignment can point
+    // across sets, which every downstream queue query would then mis-scope.
+    const owner = await mkUser();
+    const { set } = await mkGoldenSet(owner.id);
+    const other = await mkGoldenSet(owner.id);
+    sessionFor(owner);
+
+    const res = await POST_ASSIGNMENT(
+      jsonRequest({ annotatorId: owner.id, goldenItemId: other.items[0].id }, 'POST'),
+      params(set.id)
+    );
+    expect(res.status).toBe(400);
   });
 });
