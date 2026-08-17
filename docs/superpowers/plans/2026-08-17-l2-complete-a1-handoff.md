@@ -23,7 +23,8 @@ and §8 (method notes), which remain accurate.
 >   assignment rows and Fleiss path are all built and tested against multi-`User` fixtures exactly as
 >   §5 said they should be.
 >
-> **Still open and NOT touched by A1:** residuals R4 and R5, the deploy + seed of the built image,
+> **R4 and R5 are now CLOSED too** — R4 by deleting the inert read, R5 as accepted-and-documented.
+> **Still open:** the deploy + seed of the built image,
 > roadmap decisions #4 and #7, and `reasoning_content` capture (preflight Stage 5).
 >
 > §8's method notes are unchanged and were repeatedly vindicated — see the plan's own **"Defects
@@ -203,9 +204,17 @@ All are recorded in the specs with their reasoning; this is the index.
 
 **Still-open residuals from L1** (`2026-08-16` handoff §5 — R1 and R3 are now closed):
 
-- **R4** — POST's guard read selects an inert `_count.samples` that nothing consumes. The fix is to
-  **delete the select**, not to add a comment-only guard: nothing can test a value no one reads.
-- **R5** — the pin-guard 409 is terminal, with no purge path. Dispositioned as accept-and-document.
+- ~~**R4**~~ — **CLOSED 2026-08-17.** The inert `_count.samples` is deleted from POST's guard
+  select, so there is nothing left to guard. Not a comment-only fix, for the reason this line always
+  gave: nothing can test a value no one reads, so the warning could have gone stale with the suite
+  green. The one load-bearing fact it carried — a LIVE count is the wrong basis for an ordinal —
+  moved to the `nextSampleIndex` call site, which is the only code that depends on it.
+- ~~**R5**~~ — **CLOSED 2026-08-17 as ACCEPTED.** Terminality stands and is documented at
+  `findGoldenSetsPinningDataset`, the one predicate its four callers share: it follows from two
+  rulings that are each correct on their own (a golden set is never destroyed, so it never releases
+  its FKs; and this predicate is deliberately not lifecycle-filtered, because filtering it converts
+  a clean 409 into the raw P2003 it exists to prevent). Only a purge wave, authorised separately,
+  could lift it. The doc warns against the tempting wrong fix.
 
 **Also open:** the deploy + seed of the built image (prod still runs an old tag with an empty
 catalog), and roadmap decisions #4 (perturbation set) and #7 (PPI config), both of which gate A2/A3.

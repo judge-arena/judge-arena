@@ -77,25 +77,21 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
   try {
     const dataset = await prisma.dataset.findFirst({
       where: { id: params.id, ...liveDatasetsOnly() },
-      // `_count.samples` is UNFILTERED and stays that way. Do not spread
-      // `liveSamplesOnly()` into it.
+      // R4, closed: this select used to also read `_count.samples`, which
+      // nothing in this handler consumed. It was carried with a long comment
+      // warning the next reader not to filter it — because filtering it, and
+      // then re-deriving `startIndex` from it, is the formulation that
+      // collides on @@unique([datasetId, index]).
       //
-      // The instinct this comment exists to stop is "sampleCount became a live
-      // count, so filter this too" — and the step straight after that is
-      // re-deriving `startIndex` from it, which is the exact formulation that
-      // collides: hide sample 0 of 3 and a live count says 2 while index 2 is
-      // occupied, so the very first insert P2002s on
-      // @@unique([datasetId, index]). A tombstone frees no ordinal.
-      //
-      // Be clear about what this value is NOT: since A1 it is no longer the
-      // ordinal source. `nextSampleIndex` below is, and it does its own
-      // unfiltered read inside the insert transaction, which is where the
-      // race-free high-water mark has to be read anyway. Nothing in this
-      // handler consumes `_count.samples` any more; it is kept as the site
-      // this disposition attaches to, and it is deliberately NOT one of the
-      // `_count.samples` producers the rest of A1 filters — those all feed a
-      // displayed total, and this one feeds nothing.
-      select: { userId: true, _count: { select: { samples: true } } },
+      // A comment is the wrong guard for that, and it was the only one
+      // available: NO BEHAVIOURAL TEST CAN PROTECT A VALUE NOBODY READS, so
+      // the warning could go stale with the suite green. Deleting the read
+      // removes the thing that needed guarding. The ordinal source is
+      // `nextSampleIndex` below, which does its own unfiltered high-water read
+      // inside the insert transaction — and the reasoning about why a count is
+      // the wrong basis for an ordinal now lives there, at the one call site
+      // that actually depends on it.
+      select: { userId: true },
     });
 
     if (!dataset) {
@@ -142,6 +138,13 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
     // FROM A FILTERED EXPORT: src/lib/config.ts:389 emits `index: s.index`
     // verbatim and the importer writes it back, so the rows arrive with GAPS,
     // count < max + 1, and the first append lands on an occupied ordinal.
+    //
+    // THE OTHER WAY BACK INTO THAT BUG, recorded here because the read it used
+    // to be attached to is gone (R4): counting only LIVE samples and deriving
+    // an ordinal from it. Hide sample 0 of 3 and a live count says 2 while
+    // index 2 is occupied, so the very first insert P2002s. A tombstone frees
+    // no ordinal — which is why the high-water read below is deliberately
+    // unfiltered.
     const created = await appendWithRetry(() => prisma.$transaction(
       async (tx) => {
         const startIndex = await nextSampleIndex(tx, params.id);
