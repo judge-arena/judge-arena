@@ -36,6 +36,13 @@ const {
   DELETE: DELETE_ASSIGNMENT,
 } = await import('@/app/api/golden-sets/[id]/assignments/route');
 const { GET: GET_QUEUE } = await import('@/app/api/golden-sets/[id]/queue/route');
+const { GET: GET_AGREEMENT } = await import('@/app/api/golden-sets/[id]/agreement/route');
+const { GET: GET_DISAGREEMENTS } = await import(
+  '@/app/api/golden-sets/[id]/disagreements/route'
+);
+const { GET: GET_HISTORY } = await import(
+  '@/app/api/golden-sets/[id]/items/[itemId]/history/route'
+);
 const { POST: POST_LABEL } = await import(
   '@/app/api/golden-sets/[id]/items/[itemId]/labels/route'
 );
@@ -594,5 +601,238 @@ describe('A1 queue and submit — blinding, and the two security properties', ()
     expect(label.goldenItemRevisionId).toBeNull();
     expect(label.round).toBe(1);
     expect(label.reasoning).toBe('clear');
+  });
+});
+
+// ─── Task 7 fixtures: reporting ───────────────────────────────────────────
+
+function setAnonymous() {
+  (getServerSession as unknown as Mock).mockResolvedValue(null);
+}
+
+function getRequest(path: string) {
+  return new Request(`http://localhost/api/golden-sets/${path}`);
+}
+
+/** N items, two annotators, the first `overlapping` of them read by BOTH. */
+async function mkTwoAnnotatorSet(opts: { items: number; overlapping: number }) {
+  const owner = await mkUser();
+  const second = await mkUser();
+  const { set, items } = await mkGoldenSet(owner.id, { count: opts.items });
+  for (const [i, item] of items.entries()) {
+    await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: owner.id, round: 1, overallScore: 4 },
+    });
+    if (i < opts.overlapping) {
+      await db.goldenLabel.create({
+        data: { goldenItemId: item.id, annotatorId: second.id, round: 1, overallScore: i === 0 ? 4 : 2 },
+      });
+    }
+  }
+  return { owner, second, set, items };
+}
+
+async function mkSingleAnnotatorSet() {
+  const owner = await mkUser();
+  const { set, items } = await mkGoldenSet(owner.id, { count: 3 });
+  for (const item of items) {
+    await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: owner.id, round: 1, overallScore: 3 },
+    });
+  }
+  return { owner, set, items };
+}
+
+async function mkPublicSet(published: boolean) {
+  const owner = await mkUser();
+  const { set, items } = await mkGoldenSet(owner.id, { count: 1 });
+  const updated = await db.goldenSet.update({
+    where: { id: set.id },
+    data: { visibility: 'public', publishedAt: published ? new Date() : null },
+  });
+  return { owner, set: updated, items };
+}
+
+describe('A1 reporting — the number, its method, and what it was computed over', () => {
+  beforeEach(async () => {
+    await truncateAll();
+    (getServerSession as unknown as Mock).mockReset();
+  });
+
+  const params = (id: string) => ({ params: Promise.resolve({ id }) });
+
+  it('reports the method and the OVERLAP, not the set size', async () => {
+    // An agreement number over 2 shared items in a 50-item set is an anecdote.
+    // The only thing that makes that visible is reporting what it was over.
+    const { owner, set } = await mkTwoAnnotatorSet({ items: 50, overlapping: 2 });
+    sessionFor(owner);
+    const body = await (
+      await GET_AGREEMENT(getRequest(`${set.id}/agreement`), params(set.id))
+    ).json();
+    expect(body.itemCount).toBe(2);
+    expect(body.annotatorCount).toBe(2);
+    expect(body.statistic).toBe('cohen');
+  });
+
+  it('a set with ONE annotator reports insufficient-annotators, not a number', async () => {
+    const { owner, set } = await mkSingleAnnotatorSet();
+    sessionFor(owner);
+    const body = await (
+      await GET_AGREEMENT(getRequest(`${set.id}/agreement`), params(set.id))
+    ).json();
+    expect(body.value).toBeNull();
+    expect(body.reason).toBe('insufficient-annotators');
+  });
+
+  it('a TOMBSTONED reading is not a reading — it applied to text that is gone', async () => {
+    const { owner, second, set, items } = await mkTwoAnnotatorSet({ items: 2, overlapping: 2 });
+    sessionFor(owner);
+    await db.goldenLabel.updateMany({
+      where: { annotatorId: second.id },
+      data: { tombstonedAt: new Date(), tombstonedReason: 'item-content-edit' },
+    });
+    const body = await (
+      await GET_AGREEMENT(getRequest(`${set.id}/agreement`), params(set.id))
+    ).json();
+    expect(body.annotatorCount).toBe(1);
+    expect(body.reason).toBe('insufficient-annotators');
+    expect(items).toHaveLength(2);
+  });
+
+  it('an ANONYMISED reading is excluded, and the exclusion is REPORTED not hidden', async () => {
+    // Account deletion nulls annotatorId by design. Such a reading cannot be
+    // attributed, and two deleted annotators would otherwise collapse into one
+    // rater — silently changing the statistic. Dropping it is right; dropping
+    // it quietly is the confidently-wrong-number failure this phase exists to
+    // prevent, so the count travels with the result.
+    const { owner, second, set } = await mkTwoAnnotatorSet({ items: 2, overlapping: 2 });
+    sessionFor(owner);
+    await db.goldenLabel.updateMany({ where: { annotatorId: second.id }, data: { annotatorId: null } });
+    const body = await (
+      await GET_AGREEMENT(getRequest(`${set.id}/agreement`), params(set.id))
+    ).json();
+    expect(body.excludedAnonymisedReadings).toBe(2);
+    expect(body.annotatorCount).toBe(1);
+    expect(body.reason).toBe('insufficient-annotators');
+  });
+
+  it('ranks disagreements by spread, descending — A3 reads this as its next round', async () => {
+    const { owner, set, items } = await mkTwoAnnotatorSet({ items: 3, overlapping: 3 });
+    sessionFor(owner);
+    const body = await (
+      await GET_DISAGREEMENTS(getRequest(`${set.id}/disagreements`), params(set.id))
+    ).json();
+    // Item 0 is 4-vs-4 (spread 0); items 1 and 2 are 4-vs-2 (spread 2).
+    expect(body.items[0].spread).toBe(2);
+    expect(body.items.map((i: { spread: number }) => i.spread)).toEqual([2, 2, 0]);
+    expect(body.items[0].itemId).not.toBe(items[0].id);
+  });
+
+  it('history resolves each reading to the text THAT annotator saw, after an edit', async () => {
+    const owner = await mkUser();
+    const { set, item } = await mkGoldenSetWithItem(owner.id, { inputText: 'as first seen' });
+    await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: owner.id, round: 1, overallScore: 4 },
+    });
+    sessionFor(owner);
+    await PATCH(jsonRequest({ items: [{ id: item.id, inputText: 'edited later' }] }), params(set.id));
+
+    const body = await (
+      await GET_HISTORY(getRequest(`${set.id}/items/${item.id}/history`), {
+        params: Promise.resolve({ id: set.id, itemId: item.id }),
+      })
+    ).json();
+    // NOT 'edited later'. Without the revision join this returns the current
+    // text and looks perfectly fine.
+    expect(body.readings[0].sawText.inputText).toBe('as first seen');
+    expect(body.readings[0].sawRevisionId).not.toBeNull();
+  });
+
+  it('history falls back to CURRENT content when no revision is stamped', async () => {
+    // The other half of the invariant: a null revision id means the annotator
+    // saw what is there now. A fallback that returned null instead would make
+    // every un-edited item look like missing provenance.
+    const owner = await mkUser();
+    const { set, item } = await mkGoldenSetWithItem(owner.id, { inputText: 'never edited' });
+    await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: owner.id, round: 1, overallScore: 4 },
+    });
+    sessionFor(owner);
+    const body = await (
+      await GET_HISTORY(getRequest(`${set.id}/items/${item.id}/history`), {
+        params: Promise.resolve({ id: set.id, itemId: item.id }),
+      })
+    ).json();
+    expect(body.readings[0].sawRevisionId).toBeNull();
+    expect(body.readings[0].sawText.inputText).toBe('never edited');
+  });
+
+  it('anonymous gets agreement for a PUBLISHED public set, and 401 for an unpublished one', async () => {
+    const pub = await mkPublicSet(true);
+    const draft = await mkPublicSet(false);
+    setAnonymous();
+    expect((await GET_AGREEMENT(getRequest(`${pub.set.id}/agreement`), params(pub.set.id))).status).toBe(200);
+    expect((await GET_AGREEMENT(getRequest(`${draft.set.id}/agreement`), params(draft.set.id))).status).toBe(401);
+  });
+
+  it('the public branch does not name the annotators', async () => {
+    // Every other public read path in this codebase strips user data to
+    // { id, name } of the OWNER and nothing else (src/lib/serializers.ts).
+    // A published agreement number is an artifact; who scored what is not
+    // part of it.
+    const owner = await mkUser();
+    const { set, item } = await mkGoldenSetWithItem(owner.id);
+    await db.goldenSet.update({
+      where: { id: set.id },
+      data: { visibility: 'public', publishedAt: new Date() },
+    });
+    await db.goldenLabel.create({
+      data: { goldenItemId: item.id, annotatorId: owner.id, round: 1, overallScore: 4 },
+    });
+
+    sessionFor(owner);
+    const asOwner = await (
+      await GET_HISTORY(getRequest(`${set.id}/items/${item.id}/history`), {
+        params: Promise.resolve({ id: set.id, itemId: item.id }),
+      })
+    ).json();
+    expect(asOwner.readings[0].annotator).toEqual({ id: owner.id, name: owner.name });
+
+    setAnonymous();
+    const asAnon = await (
+      await GET_HISTORY(getRequest(`${set.id}/items/${item.id}/history`), {
+        params: Promise.resolve({ id: set.id, itemId: item.id }),
+      })
+    ).json();
+    expect(asAnon.readings[0].annotator).toBeNull();
+    expect(JSON.stringify(asAnon)).not.toContain(owner.id);
+  });
+
+  it('a deliberately INCONSISTENT re-read moves testRetest in the expected direction', async () => {
+    // The exit-gate clause that is only exercisable once two rounds exist.
+    // Two items, each read twice: consistent readings give 1, and flipping one
+    // of the second readings must move the number DOWN.
+    const owner = await mkUser();
+    const { set, items } = await mkAssignedSet(owner.id, { itemCount: 2, retestIntervalItems: 0 });
+    sessionFor(owner);
+    for (const item of items) await submitLabel(set.id, item.id, { overallScore: 4 });
+    for (const item of items) await submitLabel(set.id, item.id, { overallScore: 4 });
+
+    const consistent = await (
+      await GET_AGREEMENT(getRequest(`${set.id}/agreement`), params(set.id))
+    ).json();
+    expect(consistent.testRetest.value).toBe(1);
+    expect(consistent.testRetest.itemCount).toBe(2);
+
+    // Now make one re-read disagree with its own first reading.
+    const secondReading = await db.goldenLabel.findFirstOrThrow({
+      where: { goldenItemId: items[0].id, round: 2 },
+    });
+    await db.goldenLabel.update({ where: { id: secondReading.id }, data: { overallScore: 1 } });
+
+    const inconsistent = await (
+      await GET_AGREEMENT(getRequest(`${set.id}/agreement`), params(set.id))
+    ).json();
+    expect(inconsistent.testRetest.value).toBeLessThan(consistent.testRetest.value);
   });
 });
