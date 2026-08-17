@@ -227,19 +227,25 @@ re-verification existed to catch — treat the list below as authoritative over 
 
 | Id | Finding | State at HEAD | Disposition |
 |---|---|---|---|
-| **R1** | `nextSampleIndex` concurrent-append race; POST has no retry loop | **still true** | Separate branch — L2 never opens POST |
+| **R1** | `nextSampleIndex` concurrent-append race; POST has no retry loop | **CLOSED 2026-08-17** (`96b7c12`) — POST wraps its transaction in `appendWithRetry`. `nextSampleIndex` itself is still unserialised, deliberately; the CALLER retries | Done for POST. `PUT` and the importer replace share the exposure and are **not** wrapped — recorded at `nextSampleIndex` |
 | **R2** | Golden-set replace had no transaction ceiling | **fixed** (`8b7972c`) | Closed |
-| **R3** | Importer CREATE branch unatomic; no duplicate-`index` refine | **half fixed** — refine landed (`8b7972c`), atomicity did not | Cheap to fold into L2 Task 4 |
+| **R3** | Importer CREATE branch unatomic; no duplicate-`index` refine | **CLOSED 2026-08-17** (`cb88692`) — the branch is one `$transaction`; the refine had landed earlier at `8b7972c` | Done. Both defences kept: the refine answers 400 naming the field, the transaction rolls back |
 | **R4** | An inert `_count` has no automated guard | **still true** | Delete the `_count` rather than guard it |
 | **R5** | Pin-guard 409 is terminal — no purge path | **half fixed** — message honest (`531dc6d`), terminality stands | Accept and document |
 | **R6** | `tombstoneSample`/`restoreSample` have no production caller | **CLOSED for `restoreSample`** (L2 Task 5, `92ccf24`) — `tombstoneSample` (singular) still has none; the verbs all use `tombstoneSamples` | Done |
 
 Detail worth carrying:
 
-- **R1** is *pinned rather than fixed*. `tests/db/dataset-sample-tombstone.test.ts:2506` asserts the
-  losing transaction takes a P2002 — **it is written to fail when the retry loop is added, by
-  design.** Whoever lands the retry must flip that test and correct two comments in the same commit.
-  Compare `src/lib/dataset-versions.ts` (`isRetryableVersionConflict`, `MAX_ATTEMPTS`) for the shape.
+- **R1 — and the instruction this document gave about it was WRONG, which is worth more than the
+  fix.** It said `tests/db/dataset-sample-tombstone.test.ts`'s collision test "is written to fail
+  when the retry loop is added, by design" and that whoever landed the retry must flip it.
+  **It does not fail, and it should not be flipped.** Verified by running it after `96b7c12`: that
+  test calls `nextSampleIndex` DIRECTLY, so it pins a property of the *function* — still
+  unserialised, still true — not of the route. R1 changed the level above it: the losing caller
+  retries. The test stayed; its *comment*, which promised a failure that cannot happen, is what was
+  corrected. Route behaviour is pinned separately in `tests/db/sample-index-retry.test.ts`, which
+  **injects** the collision, because two concurrent POSTs may not interleave and a retry test that
+  does not force the collision can pass without ever exercising the retry.
 - **R4**: the site is POST's guard read in `src/app/api/datasets/[id]/samples/route.ts`. Nothing
   consumes the value, so no behavioural test can protect it and none does. Deleting `_count` from
   the select removes the thing needing a guard. Do not add a comment-only "fix".
