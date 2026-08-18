@@ -1,11 +1,11 @@
 # Roadmap A: the judge training engine
 
 **Date:** 2026-08-10 · **Last verified against the live cluster:** **2026-08-17**
-**Status:** **A0, A1 and A1.5 are DONE in code and NONE of it is deployed.** Preflight cleared,
-DB-backed CI live. Production runs a pre-A0 image, sits 5 migrations behind and holds 0 golden sets;
-A1/A1.5 are not merged. **That gap — not T5 alone — is what stands between here and A2**, because
-A2's design needs real label data and none exists. The path is
-`2026-08-17-integration-release-and-a2-roadmap.md`.
+**Status:** **A0, A1 and A1.5 are DONE, merged (PR #13) and DEPLOYED** — production runs
+`sha-bee1d121ea7d` at 18 migrations as of 2026-08-17. Preflight cleared, DB-backed CI live.
+**What still stands between here and A2 is real label data**, of which there is none: prod holds
+**0 golden sets**, so the catalog must be seeded and actually annotated. That plus **T5**, which is
+untouched. The path is `2026-08-17-integration-release-and-a2-roadmap.md`.
 Owner decisions **#3 and #6 were settled 2026-08-12** (weighted kappa with the threshold stored as
 data; golden sets immutable once a `CalibrationRun` references them); **#4 and #7 remain open** and
 are settled when A2 is specced. **#5** (cross-user annotation) now has its mechanism built by A1 and
@@ -107,7 +107,8 @@ building Roadmap A end to end? Everything below is verified, not inferred.
 > dataset-lifecycle plans used to be labelled `A1`/`A2` for something else entirely; they are now
 > **`L1`** (the tombstone overlay, complete) and **`L2`** (the revision log, not started), in
 > `specs/2026-08-14-dataset-lifecycle-and-tombstone-overlay-design.md`. This roadmap's A1 is *human
-> verification* and its A2 is *the calibration engine*; neither has begun. Note that lifecycle
+> verification* (**done and deployed 2026-08-17**) and its A2 is *the calibration engine* (not
+> begun). Note that lifecycle
 > commit prefixes (`feat(a1):`), `(A1)` comments in `src/`, and the applied `v2f` migration header
 > keep the old letters and cannot be changed — so **`(A1)` in code means L1, never this roadmap's
 > A1.** See `plans/2026-08-16-l1-complete-l2-handoff.md` §0.
@@ -125,7 +126,7 @@ building Roadmap A end to end? Everything below is verified, not inferred.
 | — | **A1** | **done 2026-08-17** — `4ff04f4`…`eef73fb` on `feat/a0-golden-set-substrate`. `GoldenLabel` has its first writer; `v2h` adds the item revision log, assignment rows, `round` and `preference`. Exit gate met on all four clauses. Suites 533 unit / 633 db / 80 integration |
 | — | **A1.5** | **done 2026-08-17** — `133cc12`…`05bf29b`. The composable panel shell A2 and A3 also consume, plus A1's labelling view as its first composition. Every rule that can be silently wrong lives in `src/lib/studio/**` (100% statements) because this repo has no jsdom; `src/components/studio/**` is verified by `docs/runbooks/studio-manual-verification.md`, whose 12 rows were walked in a browser |
 | — | **A2** | **decisions recorded** (`2026-08-17-a2-calibration-and-reporting-decisions.md`), deliberately not specced — its design takes A1's real label data as an input, and **no real labels exist yet**. Path to it: `2026-08-17-integration-release-and-a2-roadmap.md` |
-| — | **Merge, promote, migrate, seed, end-to-end** | **OPEN, and now the critical path.** Absorbs the old "deploy + seed the built image" row, which was written when this gated A0 and now gates *everything after A1*. Verified 2026-08-17: prod runs `sha-70fce84bee11` (a pre-A0 build), is **5 migrations behind** and has **0 golden sets**; A1/A1.5 are not merged and their PR is not open. See `2026-08-17-integration-release-and-a2-roadmap.md` |
+| — | **Merge, promote, migrate** | **DONE 2026-08-17.** PR #13 merged as `bee1d12`; prod promoted off its pre-A0 image to `sha-bee1d121ea7d`; all 5 pending migrations applied, 0 unfinished. **Seed + end-to-end remain OPEN** and are the critical path — prod still holds 0 golden sets. See `2026-08-17-integration-release-and-a2-roadmap.md` |
 | — | Capturing `reasoning_content` | **OPEN, backlogged.** Chain-of-thought is discarded on every model call, so the studio's reasoning panel is structurally thin until it lands |
 | 11 | Golden sets absent from round-trip coverage | **done 2026-08-13** — A0's exit gate; classified in the `COVERAGE` map at `tests/db/config-roundtrip-fidelity.test.ts` |
 
@@ -524,7 +525,9 @@ it was built as assignment rows rather than a free-for-all.
 
 > **NOT STARTABLE YET, and the reason is longer than "T5 is open".** A1 and A1.5 are done, but A1
 > shipped the ABILITY to produce labels and has not produced any: production has zero golden sets
-> and is five migrations behind. A2's decisions document requires *real* label data as an input to
+> and — when this note was written — was five migrations behind. **The migrations landed
+> 2026-08-17 and prod is now current; the zero golden sets did not change.** A2's decisions document
+> requires *real* label data as an input to
 > its design, so the merge → promote → migrate → seed → annotate chain is a genuine gate rather
 > than housekeeping. It is written out, with the verified state of prod, in
 > **`2026-08-17-integration-release-and-a2-roadmap.md`** — read that before planning A2.

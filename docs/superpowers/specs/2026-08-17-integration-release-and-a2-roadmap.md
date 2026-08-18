@@ -1,6 +1,18 @@
 # Integration, release, end-to-end verification, and A2 — roadmap
 
 **Date:** 2026-08-17 · **Status:** roadmap, not a plan. Each numbered item becomes its own plan.
+
+> **UPDATE 2026-08-17, later the same day: M1, M2 and M3 are DONE.** The A1/A1.5 PR (#13) merged as
+> `bee1d12`; production was promoted from `sha-70fce84bee11` to **`sha-bee1d121ea7d`**; and all five
+> pending migrations applied cleanly — prod is now at **18 migrations, zero unfinished**, with all
+> three of `v2h`'s hand-edited objects verified present in the live database. `judgearena.com`
+> returns 200 in-cluster and publicly, both pods `1/1` with zero restarts.
+>
+> **M4 (seed) is now the next thing, and it is what gates E1.** Production still holds
+> **2 datasets and 0 golden sets** — there is still nothing to annotate, so the argument below is
+> unchanged in substance: A2 waits on real labels, and real labels wait on someone doing the work.
+> What changed is that the deploy is no longer in the way.
+
 **Supersedes nothing.** It sits between `2026-08-10-judge-training-engine-roadmap.md` (which says
 *what* A2 is) and `2026-08-17-a2-calibration-and-reporting-decisions.md` (which says what about A2
 is already settled). This says **what has to happen first, and why the order is not negotiable.**
@@ -14,18 +26,19 @@ broker safety. A1 is now done. So the natural reading is "one gate left".
 
 **That reading is wrong, and the reason is worth stating plainly:**
 
-> **A1 shipped the ability to produce labels. It did not produce any.**
-> Production has **zero golden sets** and is **five migrations behind** — it has never run A0's
-> substrate, let alone A1's. And A2 cannot be *specced* — by its own decisions document — until real
-> label data exists, because the shape of that data is an input to the calibration design rather
-> than an assumption to be made ahead of it.
+> **A1 shipped the ability to produce labels. It has not produced any.**
+> *(As first written, production also had zero golden sets AND was five migrations behind. The
+> migrations landed 2026-08-17; the **zero golden sets** did not change.)* A2 cannot be *specced* —
+> by its own decisions document — until real label data exists, because the shape of that data is an
+> input to the calibration design rather than an assumption to be made ahead of it.
 
 So the chain is longer than it looks:
 
 ```
 merge  →  promote  →  migrate  →  seed  →  annotate for real  →  A2 can be SPECCED
-                                                              ↘
+  ✅         ✅          ✅        ← YOU ARE HERE              ↘
                                                     T5  →  A2 can be RUN
+                                                    (still open)
 ```
 
 The merge and deploy work below is therefore **not preliminary chores before the interesting
@@ -45,22 +58,22 @@ in fact already moved.
 
 | Thing | State | How it was checked |
 |---|---|---|
-| `feat/a0-golden-set-substrate` | `4e7028f` — A0+L1+L2+R1+R3+A1+A1.5+R4+R5 | `git rev-parse` |
-| `gitea/feat/a0-golden-set-substrate` | `4e7028f` — **in sync, pushed** | `git ls-remote` |
-| `gitea/main` | `ddfc55b` — **PR #12 is MERGED**, carrying A0+L1+L2+R1+R3 | `git ls-remote`, merge commit read |
-| PR for A1/A1.5 | **Does not exist yet.** `refs/pull/12/head` is `7afa2ac`, the pre-A1 tip | `git ls-remote 'refs/pull/*'` |
-| Suites at `4e7028f` | 578 unit / 633 db / 80 integration; `tsc` + `lint` exit 0 | full run |
-| Migrations on the branch | **18**, through `20260818120000_v2h_human_verification` | `ls prisma/migrations` |
+| `gitea/main` | **`bee1d12`** — carries A0+L1+L2+R1+R3+A1+A1.5+R4+R5 | PR **#13** merged 2026-08-17 as a merge commit |
+| Why a merge commit, not a squash | The docs cite specific SHAs **44 times across 8 files**; a squash or rebase would dangle every one | `grep` before merging |
+| `feat/a0-golden-set-substrate` | `4e7028f`→`8397c4a`, now merged | Safe to delete |
+| Suites at the merge point | 578 unit / 633 db / 80 integration; `tsc` + `lint` exit 0 | full run |
+| Migrations on `main` | **18**, through `20260818120000_v2h_human_verification` | `git ls-tree` |
+| CI for `bee1d12` | `ci`, `db-tests`, `build-push` all **success**; kaniko Job `Complete` | Gitea API + `kubectl get jobs -n tenant-builds` |
 
 ### Production
 
 | Thing | State | Consequence |
 |---|---|---|
-| Running image | `sha-70fce84bee11` | A build from the **preflight** branch, predating A0 entirely |
-| Prod DB migrations | **13**, latest `20260810180000_v2c_llamacpp_backend` | **5 behind**: `v2d`, `v2e`, `v2f`, `v2g`, `v2h` |
-| Prod catalog | **2 datasets, 0 golden sets, 2 users** | The golden-set substrate has never existed in prod |
-| Flux | Fully in sync — `main@sha1:5c5c000b…`, HelmRelease v48 healthy | Nothing is stuck; the old tag is *deliberate* |
-| Promote model | **Manual** — judge-arena is excluded from the build-lag exporter (`286da59`) | No automatic promotion will ever happen. Someone must do it. |
+| Running image | ~~`sha-70fce84bee11`~~ → **`sha-bee1d121ea7d`** | Promoted 2026-08-17. Was a **preflight**-branch build predating A0 entirely. |
+| Prod DB migrations | ~~13~~ → **18**, latest `20260818120000_v2h_human_verification` | All five applied, **0 unfinished** (no P3009 wedge). `v2h`'s CHECK and both partial unique indexes verified present in the live DB. |
+| Prod catalog | **2 datasets, 0 golden sets, 2 users** | **STILL TRUE.** The substrate now exists; nothing has been created in it. This is what M4 fixes. |
+| Flux | In sync — `main@sha1:47e0603…`, HelmRelease Ready | Reconciled after the promote. |
+| Promote model | **Manual** — judge-arena is excluded from the build-lag exporter (`286da59`) | No automatic promotion will ever happen. Someone must do it — and did, on 2026-08-17. |
 
 ### The T5 gate, re-measured rather than quoted
 
@@ -78,31 +91,39 @@ that changed.
 
 ---
 
-## THE TRAP — read before touching the promote path
+## The promote lever, and the guard that does not guard it
 
-**`charts/judge-arena/values.yaml` has `tag: "sha-ed67eb87bc2a"`, and that value is inert.**
+**The authoritative image tag is `apps/public/judge-arena/helmrelease.yaml`** (~line 195), whose
+inline `values:` block overrides the chart default in `charts/judge-arena/values.yaml`.
 
-The authoritative tag lives in **`apps/public/judge-arena/helmrelease.yaml`** (line ~195), whose
-inline `values:` block overrides the chart default. It reads `sha-70fce84bee11`, which is what is
-actually running.
+**CORRECTION to an earlier version of this section.** It called the chart default an undocumented
+trap. It is not: `values.yaml`'s own comment states plainly that the HelmRelease "is the authority
+and overrides this; the default exists so `helm template ./charts/judge-arena` renders standalone in
+CI and in review." That is deliberate and correct, and anyone reading the file top to bottom is told
+so. The claim was written before that comment had been read properly.
 
-Someone bumping the chart's `values.yaml` and reconciling would see **no change and no error**, and
-would have no way to tell why. Fix the tag in the HelmRelease; leave the chart default alone or
-delete it.
+**The real defect is one line further in**, and it is recorded as homelab divergence **entry 67**.
+`templates/deployment.yaml` guards the tag with `required "… The chart ships no default so a public
+deploy can never silently float on :latest."` — but the chart *does* ship a default. Helm's
+`required` fires only on nil or empty, so **the guard can never fire**, and its explanation is false
+about its own chart. If the HelmRelease ever loses its `image.tag`, nothing errors and the deploy
+silently pins a months-old image.
 
-Two more facts that belong with it, both already written into that file and repeated here because
-they are the ones that matter under pressure:
+Two facts that matter under pressure, both already written into the HelmRelease:
 
 - **A wrong tag stalls safely.** The Deployment is `maxUnavailable: 0` / `maxSurge: 1`, so a pull
   failure surges a pod that never becomes Ready while the **old pod keeps serving**. The symptom is
-  a stalled rollout with the site up — not an outage.
-- **Rollback is `git revert` + `flux reconcile kustomization judge-arena --with-source`.**
+  a stalled rollout with the site up — not an outage. Confirmed in practice on 2026-08-17: the real
+  promote rolled with zero restarts and no gap.
+- **Rollback is `git revert` + `flux reconcile kustomization judge-arena --with-source`** — and note
+  it restores the **image only**. The schema stays migrated, which is safe here because the five
+  migrations are additive, non-destructive and backward-compatible.
 
 ---
 
 ## Part M — Merge and promote
 
-### M1 · Open and land the A1/A1.5 PR
+### M1 · Open and land the A1/A1.5 PR — ✅ DONE 2026-08-17
 
 The branch is pushed; the PR is not created, because there is no Gitea CLI or token on the
 workstation. The prepared body is committed at `docs/superpowers/pr-a1-body.md`.
@@ -118,7 +139,14 @@ workstation. The prepared body is committed at `docs/superpowers/pr-a1-body.md`.
 
 **Exit:** `gitea/main` contains `4e7028f`'s tree, and CI has published `sha-<merge-commit>`.
 
-### M2 · Promote the image
+**Outcome:** PR **#13** merged as `bee1d12`, deliberately as a **merge commit** — the docs cite
+specific SHAs 44 times across 8 files, and a squash or rebase would have dangled every one. It was
+merged whole rather than split; splitting after the PR existed would have required the rebase that
+breaks those citations. CI `build-push` published `sha-bee1d121ea7d` (kaniko Job `Complete` —
+worth checking directly, because that job is written to report success when it no-ops on a
+non-main push).
+
+### M2 · Promote the image — ✅ DONE 2026-08-17
 
 One line, in the right file.
 
@@ -130,7 +158,7 @@ One line, in the right file.
 **Exit:** `kubectl get deploy -n tenant-public judge-arena-web -o jsonpath='{…image}'` returns the
 new tag, and pods are Ready.
 
-### M3 · The five migrations — the step with real risk
+### M3 · The five migrations — ✅ DONE 2026-08-17, cleanly
 
 Migrations run as a **Helm hook Job** (`judge-arena-migrate`) from the same image, so M2 triggers
 them. That is convenient and it is also where this can go wrong, so it gets its own item.
@@ -152,7 +180,22 @@ them. That is convenient and it is also where this can go wrong, so it gets its 
 
 **Exit:** prod `_prisma_migrations` has **18** rows and `prisma migrate status` reports up to date.
 
-### M4 · Seed the catalog
+**Outcome — and the pre-flight review is why it was boring.** All five applied, **0 unfinished**.
+The review established beforehand that (a) there is **no destructive DDL** in any of them — zero
+`DROP TABLE`/`DROP COLUMN`/`DELETE`/`TRUNCATE`, the only `DROP INDEX` acting on an empty table;
+(b) every `NOT NULL`-without-default addition lands on `GoldenSet`/`GoldenItem`, both verified at
+**0 rows**; and (c) the only pre-existing, actively-written table touched is `ModelJudgment`,
+which gains one **nullable** column — so the window where migrated schema meets old code was safe
+by construction rather than by luck. All three of `v2h`'s hand-edited objects were then verified
+present in the live database, which is the only way to see them: no drift tool can.
+
+**One thing went wrong and is worth carrying forward: the migrate Job's logs were lost.**
+`hook-delete-policy: hook-succeeded` reaps the Job on success, and a `kubectl logs` attempt that
+attaches during `PodInitializing` errors out rather than waiting. Start a follow **before** the
+reconcile, not after. The outcome was fully recoverable from `_prisma_migrations` and
+`pg_constraint` — but had a migration failed, there would have been less to work with.
+
+### M4 · Seed the catalog — ⬅ NEXT
 
 Prod has 2 datasets and 0 golden sets. Seeding is deliberately manual (`70fce84`'s own commit
 message records the in-cluster invocation and that it is manual on purpose).
@@ -327,11 +370,11 @@ effect.
 
 ```
 M1 merge ─► M2 promote ─► M3 migrate ─► M4 seed ─┬─► E1 first real session
-                                                  │      └─► E2 provenance + blinding in prod
+   ✅           ✅            ✅          ⬅ NEXT   │      └─► E2 provenance + blinding in prod
                                                   └─► E3 second annotator ──► real kappa
                                                                     │
                                      T5 (observability first) ──────┼──► E4 load shape
-                                                                    │
+                                          (still open)              │
                                                                     └──► A2.0 spec ─► A2.1 ─► A2.2 ─► A2.3
 ```
 

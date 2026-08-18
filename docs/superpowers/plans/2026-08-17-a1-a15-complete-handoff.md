@@ -30,35 +30,42 @@ everything."**
 
 | Ref | SHA | Note |
 |---|---|---|
-| `feat/a0-golden-set-substrate` | `4e7028f` | **A0 + L1 + L2 + R1 + R3 + A1 + A1.5 + R4 + R5.** Worktree `/root/judge-arena-worktrees/a0`. Clean. |
-| `gitea/feat/a0-golden-set-substrate` | `4e7028f` | **In sync — pushed.** |
-| `gitea/main` | `ddfc55b` | **PR #12 is MERGED**, carrying A0+L1+L2+R1+R3. |
-| PR for A1/A1.5 | **does not exist** | Branch pushed, PR never opened — see §2. |
-| `main` (local) | badly stale | **Do not use as a base.** |
+| `gitea/main` | **`bee1d12`** | **Everything is here.** PR **#13** merged 2026-08-17 as a merge commit — A0+L1+L2+R1+R3+A1+A1.5+R4+R5. **Branch from this.** |
+| `feat/a0-golden-set-substrate` | `8397c4a` | Merged. Safe to delete locally and on the remote. |
+| PR #13 | **merged** | Merged whole rather than split, and as a **merge commit** on purpose — the docs cite SHAs 44 times across 8 files, and a squash or rebase would dangle every one. |
+| `main` (local) | stale | Fetch before using. `gitea/main` is the truth. |
 
 Latest migration: `20260818120000_v2h_human_verification` — **18 in the chain**.
 
 **Other worktrees are not ours.** `/root/judge-arena` is on `feat/1c-deploy-readiness`; `llamacpp`,
 `preflight`, `rebaseline`, `roundtrip` are older branches.
 
-## 2. The one thing waiting on a human
+## 2. Production is now CURRENT — the first time since before A0
 
-**The A1/A1.5 PR is not open.** There is no `tea` CLI and no Gitea token on this workstation, and
-the credential was deliberately not hunted for — reading a cluster secret for this was refused in an
-earlier session, and the right move is to stop and hand it over rather than find another route to
-the same secret.
+Promoted and migrated 2026-08-17, after a pre-flight blast-radius review.
 
-- **Compare URL:** `https://gitea.lab.asethi.com/trij/judge-arena/compare/main...feat/a0-golden-set-substrate`
-- **Body:** committed at `docs/superpowers/pr-a1-body.md` — not left in a scratchpad, because a
-  scratchpad does not survive a session and PR #12's body went stale for exactly that reason.
-  Pasting it is the owner's step; nothing here claims it has been applied.
-- **Decide before opening:** ten commits is a large review surface. Splitting A1.5 onto its own
-  branch off `main` is cheap **now** and annoying once the PR exists.
+| | Before | Now |
+|---|---|---|
+| Image | `sha-70fce84bee11` (a pre-A0 **preflight**-branch build) | **`sha-bee1d121ea7d`** |
+| Migrations | 13 | **18** — all five applied, **0 unfinished** |
+| Flux (homelab) | `main@5c5c000` | `main@47e0603`, Ready |
+| `judgearena.com` | — | **200**, in-cluster and public; both pods `1/1`, 0 restarts |
 
-`/pulls` looking empty is correct and not a symptom: #12 is merged and closed, and that page
-defaults to open PRs.
+Verified directly rather than inferred: all three of `v2h`'s hand-edited objects exist in the live
+database (the `score_xor_preference` CHECK and both partial unique indexes). **No drift tool can see
+those**, so a direct query is the only way to know. A backup
+(`judge-arena-pg-preflight-a1-20260818001346`) completed *before* any schema change.
 
-## 3. Suites at `4e7028f`
+**What is still NOT done: M4, the seed.** Production holds **2 datasets and 0 golden sets**. There
+is nothing to annotate, so no real labels exist, so A2 still cannot be specced. That is now the
+whole of the critical path.
+
+**One thing went wrong, and it will recur:** the migrate Job's logs were lost.
+`hook-delete-policy: hook-succeeded` reaps it on success, and a `kubectl logs` that attaches during
+`PodInitializing` errors rather than waiting. **Start the follow before the reconcile.** The outcome
+was recoverable from `_prisma_migrations` and `pg_constraint`; a *failure* would have left less.
+
+## 3. Suites at the merge point (`8397c4a` / `bee1d12`)
 
 | Suite | Files | Tests |
 |---|---|---|
@@ -88,11 +95,15 @@ touches no route and no schema.
 
 ## 4. Traps, each of which cost something
 
-- **`charts/judge-arena/values.yaml`'s image tag is INERT.** The authoritative tag is in
-  `apps/public/judge-arena/helmrelease.yaml`. Bumping the chart default produces no change and no
-  error. Full detail in the roadmap's "THE TRAP" section.
-- **Production is five migrations behind and has zero golden sets.** A0's substrate has never
-  existed there. Do not assume anything about prod from the fact that the suites are green.
+- **The promote lever is `apps/public/judge-arena/helmrelease.yaml`, not the chart's `values.yaml`.**
+  The chart ships a default that the HelmRelease overrides — which is **documented and deliberate**
+  (it exists so `helm template` renders standalone). An earlier version of this line called it an
+  undocumented trap; that was wrong. **The real defect is that the chart's `required` guard on
+  `image.tag` can never fire**, because a non-empty default is always present, so if the HelmRelease
+  ever loses its tag the deploy silently pins a months-old image. Recorded as homelab divergence
+  **entry 67** (PR #904).
+- **Prod is CURRENT as of 2026-08-17** — 18 migrations, `sha-bee1d121ea7d`. But it holds **0 golden
+  sets**, so do not assume the product has ever been *used* from the fact that it is deployed.
 - **judge-arena is manual-promote** (`286da59`, excluded from the build-lag exporter). Nothing
   deploys itself. Flux being green means Flux is doing what it was told, not that the app is current.
 - **A quoted `DATABASE_URL`.** `.env.local` holds it quoted, so `grep | cut` yields a quoted string
@@ -167,14 +178,16 @@ Additions to the previous handoff's §8, not replacements. In descending order o
 
 | Item | State | Waiting on |
 |---|---|---|
-| **A1/A1.5 PR** | branch pushed, PR not created | **the owner** — §2 |
-| **Promote + migrate + seed** | prod 5 migrations behind, 0 golden sets | roadmap M1–M4 |
-| **Real labels** | none exist anywhere | roadmap E1–E3 |
+| **A1/A1.5 PR** | ✅ **merged** — PR #13 as `bee1d12` | — |
+| **Promote + migrate** | ✅ **done** — `sha-bee1d121ea7d`, 18 migrations | — |
+| **M4 seed the catalog** | **OPEN — the critical path.** 2 datasets, **0 golden sets** | someone running the seed |
+| **Real labels** | none exist anywhere | M4, then E1–E3 |
 | **T5** | zero scrapes, zero rules, 54.6% at idle | roadmap Part T5 — **hard gate on A2** |
 | **A2 spec** | decisions recorded, spec deliberately unwritten | real label data + T5 |
 | **`reasoning_content` capture** | backlogged | preflight Stage 5 |
 | **Roadmap decisions #4, #7** | open | settled when A2 is specced |
 | **Cross-user annotation policy (#5)** | mechanism built, policy is owner's | a second account existing |
+| **homelab divergence entry 67** | PR **#904** open | review |
 | Preflight Stage 5 | the only open preflight stage | — |
 | R1–R6 residuals | **all closed** | — |
 
@@ -182,8 +195,7 @@ Additions to the previous handoff's §8, not replacements. In descending order o
 
 ```bash
 cd /root/judge-arena-worktrees/a0
-git status                                     # expect clean at 4e7028f
-git ls-remote gitea main                       # has the PR landed? do not trust this file
+git fetch gitea && git checkout -B work gitea/main    # main IS the truth now
 sh -c 'set -a; . ./.env.local; set +a; npx prisma migrate status'   # 18, up to date
 npx tsc --noEmit && npm run lint
 npm test                                       # 578
@@ -194,15 +206,18 @@ npm run test:integration                       # 80 — needs Redis :6379 and Ra
 Write those numbers down; the plans forbid asserting absolute suite counts, so each task's contract
 is zero failures and no fewer tests than the previous task left.
 
-Then re-check the two facts most likely to have moved, because both moved *during* the session that
-wrote this:
+Then re-check prod, because **this is the pair that moved during the session that wrote this** —
+and the whole point of §6's last note is that a cluster fact decays faster than a tree fact:
 
 ```bash
 kubectl get deploy -n tenant-public judge-arena-web \
-  -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'    # still sha-70fce84bee11?
+  -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'    # expect sha-bee1d121ea7d
 kubectl exec -n tenant-public judge-arena-pg-1 -- \
-  psql -U postgres -d judge_arena -tAc 'select count(*) from "_prisma_migrations"'   # still 13?
+  psql -U postgres -d judge_arena -tAc 'select count(*) from "_prisma_migrations"'   # expect 18
+kubectl exec -n tenant-public judge-arena-pg-1 -- \
+  psql -U postgres -d judge_arena -tAc 'select count(*) from "GoldenSet"'            # 0 until M4
 ```
 
-**If the PR has landed and the image has been promoted, the roadmap's Part M is done and you start
-at E1.** If not, start at M1 — and it is a five-minute job that unblocks everything downstream.
+**Start at M4 — seed the catalog.** It is small, and it is the only thing between here and the first
+real annotation session, which is what everything downstream is waiting on. Roadmap Part M/E in
+`specs/2026-08-17-integration-release-and-a2-roadmap.md`.
