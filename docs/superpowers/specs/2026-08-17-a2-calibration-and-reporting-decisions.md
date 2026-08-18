@@ -4,10 +4,11 @@
 **Phase:** Roadmap A's **A2**, the calibration engine.
 **Depends on:** **A1** for labels, and on rebaseline **T5** for broker safety.
 
-> **UPDATE 2026-08-17: A1 and A1.5 are DONE** (`4ff04f4`…`05bf29b`), and that changes less than it
-> looks like it does. **A1 shipped the ability to produce labels; it has not produced any.**
-> Production has zero golden sets and is five migrations behind, so the input this document says
-> A2's design requires — *real* label data — still does not exist.
+> **UPDATE 2026-08-17: A1 and A1.5 are DONE** (`4ff04f4`…`05bf29b`), **merged (PR #13) and
+> DEPLOYED** — production now runs `sha-bee1d121ea7d` at 18 migrations. And it *still* changes less
+> than it looks like it does. **A1 shipped the ability to produce labels; none have been produced.**
+> Production holds **0 golden sets**, so the input this document says A2's design requires — *real*
+> label data — still does not exist. The deploy is no longer in the way; the annotation work is.
 >
 > **Both gates below therefore still stand**, and the sequencing between them is now written out in
 > **`2026-08-17-integration-release-and-a2-roadmap.md`**, which is the document to read next. T5 was

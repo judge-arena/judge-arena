@@ -25,7 +25,8 @@ and §8 (method notes), which remain accurate.
 > - **§4 "What to do next"** — items 1 AND 2 are closed. A1.5 landed straight after A1
 >   (`133cc12`…`05bf29b`). **Item 3, spec A2, is NOT simply next**, and an earlier version of this
 >   line said T5 was the only thing in front of it. That was wrong: A1 shipped the ability to
->   produce labels and has produced none, prod is 5 migrations behind with 0 golden sets, and A2's
+>   produce labels and has produced none, prod had 0 golden sets (still true; the 5-migration gap
+>   was closed 2026-08-17), and A2's
 >   design needs REAL label data. See `specs/2026-08-17-integration-release-and-a2-roadmap.md`.
 > - **§7 "Open decisions and hard gates"** — A2's *A1 gate* is closed: `GoldenLabel` has a writer.
 >   The **T5 RabbitMQ gate is untouched** and remains the reason A2 cannot start.
@@ -35,8 +36,9 @@ and §8 (method notes), which remain accurate.
 >   §5 said they should be.
 >
 > **R4 and R5 are now CLOSED too** — R4 by deleting the inert read, R5 as accepted-and-documented.
-> **Still open:** the merge/promote/migrate/seed chain (prod runs a pre-A0 image), roadmap
-> decisions #4 and #7, and `reasoning_content` capture (preflight Stage 5).
+> **Merge, promote and migrate are now DONE too** (2026-08-17): PR #13 merged as `bee1d12`, prod
+> promoted to `sha-bee1d121ea7d` at 18 migrations. **Still open:** the SEED (prod holds 0 golden
+> sets), roadmap decisions #4 and #7, and `reasoning_content` capture (preflight Stage 5).
 >
 > §8's method notes are unchanged and were repeatedly vindicated — see the plan's own **"Defects
 > found during execution"** table, in which its "a malformed break is not evidence" rule caught the
