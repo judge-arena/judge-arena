@@ -6,6 +6,7 @@ import { requireAuth, requireScope, isAdmin, type AuthSession } from '@/lib/auth
 import { logger, serializeError } from '@/lib/logger';
 import { goldenSetLifecycleWhere } from '@/lib/golden-sets';
 import { mayHoldAssignment } from '@/lib/assignment-policy';
+import { toPublicOwner } from '@/lib/serializers';
 
 /**
  * A1 — `…/golden-sets/[id]/assignments`. WHO WAS ASKED to annotate WHAT.
@@ -39,7 +40,20 @@ const revokeAssignmentSchema = z.object({
   reason: z.string().max(500).optional(),
 });
 
-/** The one shape every verb here returns a row in. */
+/**
+ * The one shape every verb here returns a row in.
+ *
+ * `annotator` and `assignedBy` are RESOLVED TO NAMES, not left as raw ids.
+ * The ids alone are unusable by any surface that has to show a human who was
+ * asked to do what — a coordinator reading a list of cuids learns nothing —
+ * and making each caller fetch users separately is how an N+1 gets written.
+ *
+ * Projected through `toPublicOwner`, which is the allow-list every
+ * user-bearing response in this codebase goes through: `{ id, name }` and
+ * never the email. A deleted account resolves to `null` here rather than
+ * vanishing, because the assignment is still a record of what was asked —
+ * the same anonymise-rather-than-destroy rule the FK's `SetNull` encodes.
+ */
 const assignmentSelect = {
   id: true,
   goldenSetId: true,
@@ -51,7 +65,21 @@ const assignmentSelect = {
   completedAt: true,
   revokedAt: true,
   revokedReason: true,
+  annotator: { select: { id: true, name: true } },
+  assignedBy: { select: { id: true, name: true } },
 } as const;
+
+/** Row → wire shape, with both users allow-listed. */
+function toAssignmentView(row: {
+  annotator: { id: string; name: string | null } | null;
+  assignedBy: { id: string; name: string | null } | null;
+} & Record<string, unknown>) {
+  return {
+    ...row,
+    annotator: row.annotator ? toPublicOwner(row.annotator) : null,
+    assignedBy: row.assignedBy ? toPublicOwner(row.assignedBy) : null,
+  };
+}
 
 /**
  * Load the set and confirm the caller may coordinate it.
@@ -102,7 +130,7 @@ export async function GET(request: Request, props: { params: Promise<{ id: strin
       orderBy: { assignedAt: 'desc' },
     });
 
-    return NextResponse.json({ assignments });
+    return NextResponse.json({ assignments: assignments.map(toAssignmentView) });
   } catch (error) {
     logger.error('Failed to list golden-set assignments', { error: serializeError(error) });
     return NextResponse.json({ error: 'Failed to list assignments' }, { status: 500 });
@@ -169,7 +197,7 @@ export async function POST(request: Request, props: { params: Promise<{ id: stri
       select: assignmentSelect,
     });
 
-    return NextResponse.json({ assignment }, { status: 201 });
+    return NextResponse.json({ assignment: toAssignmentView(assignment) }, { status: 201 });
   } catch (error) {
     // P2002 here is the partial active-assignment unique, and it means the
     // annotator ALREADY holds this work — a 409 rather than a 500, because the

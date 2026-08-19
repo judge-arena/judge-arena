@@ -148,8 +148,13 @@ export default function GoldenSetsPage() {
   const [protocol, setProtocol] = useState<Protocol>('pairwise');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [limitSamples, setLimitSamples] = useState(false);
+  // Four selection modes. 'random-count'/'random-percent' are resolved
+  // SERVER-SIDE — the client cannot enumerate DatasetSample.index (there is no
+  // GET on dataset samples, and the indices are not dense because tombstoning
+  // keeps a row's ordinal), so only the server knows which indices exist.
+  const [subsetMode, setSubsetMode] = useState<'all' | 'first' | 'random-count' | 'random-percent'>('all');
   const [sampleLimit, setSampleLimit] = useState('50');
+  const [randomPercent, setRandomPercent] = useState('10');
 
   const loadGoldenSets = useCallback(async () => {
     try {
@@ -208,10 +213,11 @@ export default function GoldenSetsPage() {
   }, [createOpen]);
 
   const resetCreate = () => {
+    setSubsetMode('all');
+    setRandomPercent('10');
     setName('');
     setDescription('');
     setProtocol('pairwise');
-    setLimitSamples(false);
     setSampleLimit('50');
     setCreating(false);
   };
@@ -219,7 +225,12 @@ export default function GoldenSetsPage() {
   const handleCreate = async () => {
     if (!datasetId || !name.trim()) return;
     const parsedLimit = Number.parseInt(sampleLimit, 10);
-    if (limitSamples && (!Number.isFinite(parsedLimit) || parsedLimit < 1)) {
+    const parsedPercent = Number.parseFloat(randomPercent);
+    if (subsetMode === 'random-percent' && (!Number.isFinite(parsedPercent) || parsedPercent <= 0 || parsedPercent > 100)) {
+      toast.error('Percent must be between 0 and 100');
+      return;
+    }
+    if ((subsetMode === 'first' || subsetMode === 'random-count') && (!Number.isFinite(parsedLimit) || parsedLimit < 1)) {
       toast.error('Sample count must be a positive number');
       return;
     }
@@ -240,7 +251,12 @@ export default function GoldenSetsPage() {
           // replaced named hidden rows, and the route 400s on the first one it
           // cannot resolve. Omitted entirely = import every live sample;
           // GoldenItem.index is assigned 0..n-1 over the SELECTION, server-side.
-          limit: limitSamples ? parsedLimit : undefined,
+          // Exactly one of these is ever sent — the API refines on that,
+          // because all four answer the same question and any two could
+          // disagree.
+          limit: subsetMode === 'first' ? parsedLimit : undefined,
+          randomCount: subsetMode === 'random-count' ? parsedLimit : undefined,
+          randomPercent: subsetMode === 'random-percent' ? parsedPercent : undefined,
         }),
       });
       if (res.ok) {
@@ -529,27 +545,69 @@ export default function GoldenSetsPage() {
               />
 
               <div className="rounded-lg border border-surface-200 dark:border-surface-700 p-3 space-y-2">
-                <label className="flex items-center gap-2 text-sm font-medium text-surface-700 dark:text-surface-300">
-                  <input
-                    type="checkbox"
-                    checked={limitSamples}
-                    onChange={(e) => setLimitSamples(e.target.checked)}
-                    className="h-4 w-4 rounded border-surface-300 dark:border-surface-600 text-brand-600 focus:ring-brand-500"
-                  />
-                  Import only the first N samples
-                </label>
-                {limitSamples ? (
+                <span className="block text-sm font-medium text-surface-700 dark:text-surface-300">
+                  Which samples to import
+                </span>
+
+                {(
+                  [
+                    ['all', 'Every live sample'],
+                    ['first', 'The first N samples'],
+                    ['random-count', 'A random N samples'],
+                    ['random-percent', 'A random percentage'],
+                  ] as const
+                ).map(([mode, label]) => (
+                  <label key={mode} className="flex items-center gap-2 text-sm text-surface-700 dark:text-surface-300">
+                    <input
+                      type="radio"
+                      name="subsetMode"
+                      value={mode}
+                      checked={subsetMode === mode}
+                      onChange={() => setSubsetMode(mode)}
+                      className="h-4 w-4 border-surface-300 dark:border-surface-600 text-brand-600 focus:ring-brand-500"
+                    />
+                    {label}
+                  </label>
+                ))}
+
+                {(subsetMode === 'first' || subsetMode === 'random-count') && (
                   <Input
                     type="number"
                     min={1}
                     value={sampleLimit}
                     onChange={(e) => setSampleLimit(e.target.value)}
-                    hint="Subsetting is how a labelling session is made finite."
+                    hint={
+                      subsetMode === 'first'
+                        ? 'Subsetting is how a labelling session is made finite.'
+                        : 'Random is what makes a subset a SAMPLE rather than a PREFIX — the first N of an ordered corpus is systematically biased.'
+                    }
                   />
-                ) : (
+                )}
+
+                {subsetMode === 'random-percent' && (
+                  <Input
+                    type="number"
+                    min={0.01}
+                    max={100}
+                    step={0.5}
+                    value={randomPercent}
+                    onChange={(e) => setRandomPercent(e.target.value)}
+                    hint="Percent of the live samples, rounded, never below 1 item."
+                  />
+                )}
+
+                {subsetMode === 'all' && (
                   <p className="text-xs text-surface-500 dark:text-surface-400">
                     Every live sample in the dataset is imported. Deleted samples
                     are never imported, with or without a limit.
+                  </p>
+                )}
+
+                {(subsetMode === 'random-count' || subsetMode === 'random-percent') && (
+                  <p className="text-xs text-surface-500 dark:text-surface-400">
+                    The selection is made on the server, over the indices that actually exist —
+                    deleted samples leave gaps, so a client-side pick could name rows that are
+                    not there.
                   </p>
                 )}
               </div>

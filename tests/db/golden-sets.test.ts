@@ -1416,3 +1416,122 @@ describe('POST /api/golden-sets/[id]/retire', () => {
     expect(anon.status).toBe(401);
   });
 });
+
+describe('POST /api/golden-sets — random subset selection (server-side)', () => {
+  beforeEach(async () => {
+    await truncateAll();
+  });
+
+  it('randomCount imports exactly N items, and not the first N', async () => {
+    const owner = await mkUser();
+    const { dataset } = await mkPlatformDataset(60);
+    mockSessionFor(owner);
+
+    const res = await createGoldenSet(
+      jsonRequest('http://localhost/api/golden-sets', 'POST', {
+        datasetId: dataset.id,
+        protocol: 'pairwise',
+        name: uniq('random-count-set'),
+        randomCount: 12,
+      })
+    );
+    expect(res.status).toBe(201);
+    const created = await res.json();
+
+    const picked = await db.goldenItem.findMany({
+      where: { goldenSetId: created.id },
+      select: { sourceSample: { select: { index: true } } },
+    });
+    const idx = picked.map((p) => p.sourceSample.index).sort((a, b) => a - b);
+    expect(idx).toHaveLength(12);
+    expect(new Set(idx).size).toBe(12);
+    // Not the prefix. With 12 of 60 chosen uniformly, drawing exactly
+    // 0..11 has probability 1 / C(60,12) — about 1 in 1.4 billion.
+    expect(idx).not.toEqual(Array.from({ length: 12 }, (_, i) => i));
+  });
+
+  it('randomPercent resolves against the LIVE sample count', async () => {
+    const owner = await mkUser();
+    const { dataset } = await mkPlatformDataset(40);
+    mockSessionFor(owner);
+
+    const res = await createGoldenSet(
+      jsonRequest('http://localhost/api/golden-sets', 'POST', {
+        datasetId: dataset.id,
+        protocol: 'pairwise',
+        name: uniq('random-percent-set'),
+        randomPercent: 25,
+      })
+    );
+    expect(res.status).toBe(201);
+    const created = await res.json();
+    expect(await db.goldenItem.count({ where: { goldenSetId: created.id } })).toBe(10);
+  });
+
+  it('draws only from LIVE indices — a tombstoned sample is never selected', async () => {
+    // The reason random selection is server-side at all. Indices are not dense
+    // once anything is hidden, and a client picking numbers in [0, count)
+    // would name rows that are not there.
+    const owner = await mkUser();
+    const { dataset } = await mkPlatformDataset(20);
+    const doomed = await db.datasetSample.findMany({
+      where: { datasetId: dataset.id, index: { lt: 15 } },
+      select: { id: true, index: true },
+    });
+    for (const s of doomed) {
+      await db.tombstone.create({ data: { datasetSampleId: s.id, isTombstone: true } });
+    }
+    mockSessionFor(owner);
+
+    const res = await createGoldenSet(
+      jsonRequest('http://localhost/api/golden-sets', 'POST', {
+        datasetId: dataset.id,
+        protocol: 'pairwise',
+        name: uniq('sparse-random-set'),
+        randomCount: 5,
+      })
+    );
+    expect(res.status).toBe(201);
+    const created = await res.json();
+    const picked = await db.goldenItem.findMany({
+      where: { goldenSetId: created.id },
+      select: { sourceSample: { select: { index: true } } },
+    });
+    const idx = picked.map((p) => p.sourceSample.index);
+    expect(idx).toHaveLength(5);
+    // Every index must come from the 5 that survived (15..19).
+    expect(idx.every((i) => i >= 15)).toBe(true);
+  });
+
+  it('asking for more than exists clamps rather than failing', async () => {
+    const owner = await mkUser();
+    const { dataset } = await mkPlatformDataset(8);
+    mockSessionFor(owner);
+    const res = await createGoldenSet(
+      jsonRequest('http://localhost/api/golden-sets', 'POST', {
+        datasetId: dataset.id,
+        protocol: 'pairwise',
+        name: uniq('clamped-set'),
+        randomCount: 500,
+      })
+    );
+    expect(res.status).toBe(201);
+    expect(await db.goldenItem.count({ where: { goldenSetId: (await res.json()).id } })).toBe(8);
+  });
+
+  it('refuses two selection modes at once — they could disagree', async () => {
+    const owner = await mkUser();
+    const { dataset } = await mkPlatformDataset(10);
+    mockSessionFor(owner);
+    const res = await createGoldenSet(
+      jsonRequest('http://localhost/api/golden-sets', 'POST', {
+        datasetId: dataset.id,
+        protocol: 'pairwise',
+        name: uniq('conflicting-set'),
+        randomCount: 3,
+        limit: 5,
+      })
+    );
+    expect(res.status).toBe(400);
+  });
+});

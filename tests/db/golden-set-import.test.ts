@@ -320,8 +320,11 @@ describe('POST /api/golden-sets — create-by-import against real JudgeBench row
     expect(res.status).toBe(400);
     const body = await res.json();
     // The route's standard zod envelope; the specific sentence rides in
-    // `details`, which is what tells the caller which two keys collided.
-    expect(JSON.stringify(body.details)).toContain('not both');
+    // `details`, which is what tells the caller which keys collided. The
+    // wording widened from 'not both' to 'at most one of' when
+    // randomCount/randomPercent joined the group — four fields now answer the
+    // same question, so 'both' had stopped being true.
+    expect(JSON.stringify(body.details)).toContain('at most one of');
     await expect(db.goldenSet.count()).resolves.toBe(before);
   });
 });
