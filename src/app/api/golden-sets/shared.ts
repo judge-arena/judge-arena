@@ -97,7 +97,7 @@ export type GoldenSetDetailRow = Prisma.GoldenSetGetPayload<{
 
 /**
  * `POST /api/golden-sets` — creation IS import (A0 design, "Creation is
- * import"). Two ways to select a subset, and they are MUTUALLY EXCLUSIVE:
+ * import"). FOUR ways to select a subset, and they are MUTUALLY EXCLUSIVE:
  *
  *   - `sampleIndices` names `DatasetSample.index` values, IN THE ORDER GIVEN.
  *     Duplicates are rejected rather than silently minting two golden items
@@ -109,11 +109,17 @@ export type GoldenSetDetailRow = Prisma.GoldenSetGetPayload<{
  *     400s on the first one it cannot resolve. Only the server knows which
  *     rows are live.
  *
- * Neither present = every live sample.
+ *   - `randomCount` / `randomPercent` mean "N (or N%) LIVE samples, drawn at
+ *     random", and are resolved SERVER-SIDE for the same reason `limit` is:
+ *     only the server knows which ordinals are live. The client sends intent,
+ *     never indices. See `src/lib/sample-selection.ts` for why a random SAMPLE
+ *     and a PREFIX are different things on an ordered corpus.
  *
- * Sending BOTH is a 400 rather than a precedence rule: they are two different
- * selections, and honouring one silently would import rows the caller did not
- * ask for.
+ * None present = every live sample.
+ *
+ * Sending MORE THAN ONE is a 400 rather than a precedence rule: they are four
+ * different selections, and honouring one silently would import rows the
+ * caller did not ask for.
  */
 export const createGoldenSetSchema = z
   .object({

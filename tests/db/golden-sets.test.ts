@@ -1451,8 +1451,19 @@ describe('POST /api/golden-sets — random subset selection (server-side)', () =
   });
 
   it('randomPercent resolves against the LIVE sample count', async () => {
+    // The denominator has to be the LIVE count, not the raw row count. With
+    // nothing tombstoned the two are equal and this test would pass either
+    // way — so half the dataset is hidden first. 25% of the 20 live rows is 5;
+    // 25% of the 40 raw rows would be 10, and that is the failure this pins.
     const owner = await mkUser();
     const { dataset } = await mkPlatformDataset(40);
+    const doomed = await db.datasetSample.findMany({
+      where: { datasetId: dataset.id, index: { lt: 20 } },
+      select: { id: true },
+    });
+    for (const s of doomed) {
+      await db.tombstone.create({ data: { datasetSampleId: s.id, isTombstone: true } });
+    }
     mockSessionFor(owner);
 
     const res = await createGoldenSet(
@@ -1465,7 +1476,7 @@ describe('POST /api/golden-sets — random subset selection (server-side)', () =
     );
     expect(res.status).toBe(201);
     const created = await res.json();
-    expect(await db.goldenItem.count({ where: { goldenSetId: created.id } })).toBe(10);
+    expect(await db.goldenItem.count({ where: { goldenSetId: created.id } })).toBe(5);
   });
 
   it('draws only from LIVE indices — a tombstoned sample is never selected', async () => {

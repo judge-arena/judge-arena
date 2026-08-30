@@ -232,6 +232,12 @@ export default function GoldenSetDetailPage() {
       } else {
         toast.error(data.error || 'Failed to revoke');
       }
+    } catch {
+      // Mirrors handleAssignToMe. Without this a rejected fetch (offline, DNS,
+      // an aborted navigation) escapes as an unhandled rejection, and because
+      // `finally` still re-enables the button the screen looks exactly like a
+      // successful revoke — the stale row simply stays put.
+      toast.error('Failed to revoke');
     } finally {
       setAssignBusy(false);
     }

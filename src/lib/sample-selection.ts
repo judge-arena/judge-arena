@@ -25,13 +25,23 @@
  * make impossible — it takes the available indices and picks from them.
  */
 
+/**
+ * NOTE ON REACH: production constructs only `random-count` and `random-percent`
+ * — see the sole caller, `src/app/api/golden-sets/route.ts`. `all` and `first`
+ * are the API's OTHER two modes expressed here for completeness, but the route
+ * answers those without this module (absent fields, and `limit`, respectively),
+ * so they are exercised by unit tests alone. They are kept, not deleted,
+ * because `resolveCount` is exported and total over `SubsetSpec`; a partial
+ * function would be the worse shape. Do not read their presence as evidence of
+ * a caller.
+ */
 export type SubsetSpec =
   | { kind: 'all' }
   | { kind: 'first'; count: number }
   | { kind: 'random-count'; count: number }
   | { kind: 'random-percent'; percent: number };
 
-/** Exactly what `POST /api/golden-sets` accepts — never both at once. */
+/** The subset fields of `POST /api/golden-sets` — never more than one at once. */
 export type ImportSelection = { limit?: number; sampleIndices?: number[] };
 
 /**
@@ -75,12 +85,18 @@ function pickDistinct(from: readonly number[], count: number, rng: () => number)
 }
 
 /**
- * Turn a spec into the request body fields.
+ * Resolve a spec into concrete selection fields.
  *
- * `all` sends neither field — the absence of both is what the API reads as
- * "every live sample". `first` sends `limit` and lets the server slice, so the
- * client never has to know the ordering. The random kinds send explicit
- * `sampleIndices`, because random is the one thing the server cannot infer.
+ * READ THE CALLER FIRST: this runs on the SERVER, inside `POST
+ * /api/golden-sets`, against the live indices that route has just read. An
+ * earlier draft had the browser call this and post `sampleIndices`; that design
+ * was abandoned precisely because the client cannot enumerate live ordinals —
+ * there is no GET on dataset samples — so it would have named rows that are not
+ * there. The client sends `randomCount`/`randomPercent`; the server draws.
+ *
+ * The return shape is still the API's field shape rather than a bare array,
+ * because the route feeds it back through the one code path that also serves
+ * an explicit `sampleIndices` request.
  *
  * `rng` is injected so tests are deterministic; production passes
  * `Math.random`, which is the correct tool here — this is a sample, not a
