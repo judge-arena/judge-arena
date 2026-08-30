@@ -1,15 +1,42 @@
 # Roadmap A: the judge training engine
 
-**Date:** 2026-08-10 · **Last verified against the live cluster:** **2026-08-17**
-**Status:** **A0, A1 and A1.5 are DONE, merged (PR #13) and DEPLOYED** — production runs
-`sha-bee1d121ea7d` at 18 migrations as of 2026-08-17. Preflight cleared, DB-backed CI live.
-**What still stands between here and A2 is real label data**, of which there is none: prod holds
-**0 golden sets**, so the catalog must be seeded and actually annotated. That plus **T5**, which is
-untouched. The path is `2026-08-17-integration-release-and-a2-roadmap.md`.
+**Date:** 2026-08-10 · **Last verified against the live cluster:** **2026-08-29**
+**Status:** **A0, A1 and A1.5 are DONE, merged (PR #13) and DEPLOYED** — production ran
+`sha-bee1d121ea7d` at 18 migrations from 2026-08-17, and runs **`sha-14d75f7d46de`** from
+**2026-08-30 01:47Z** (`kubectl -n tenant-public get deploy judge-arena-web -o
+jsonpath='{.spec.template.spec.containers[*].image}'`; still 18 migrations — `14d75f7` ships no
+migration). Preflight cleared, DB-backed CI live.
+**A1.5 grew its assignment surface on 2026-08-29**: `feat/assignment-ui-and-random-subset`
+(`0309a7e`) plus a fixes commit (`ded6e1f`) merged to `gitea/main` as **`14d75f7`**. No migration.
+**What still stands between here and A2 is real label data**, of which there is still none — but
+the reason this header used to give was wrong.
+
+> **CORRECTION 2026-08-29 — the false zero.** This header read: *"prod holds **0 golden sets**, so
+> the catalog must be seeded and actually annotated."* The seeding half has been done since
+> **2026-08-19 13:44**. Verified against `judge_arena` on prod: **2 `GoldenSet`** ("JudgeBench
+> pairwise — full", 620 items; "JudgeBenchSample — 30 random", 30 items), **650 `GoldenItem`**,
+> **1300 `GoldenCandidate`** and **2 `GoldenAssignment`** rows — both whole-set, both self-assigned
+> by the owner in the same breath as the sets were created — set 1 at 13:44:04.753, assigned
+> 13:44:04.995; set 2 at 13:44:05.028, assigned 13:44:05.07, so a **242 ms** and a **42 ms** gap,
+> not the sub-100 ms an earlier revision of this line claimed (read from `GoldenSet.createdAt` and
+> `GoldenAssignment.assignedAt`) — neither revoked, neither completed. The zero
+> that is real is **`GoldenLabel` = 0**, ten days later.
+>
+> So neither the catalog nor the surface is the gap: **the identity the owner signs in with today
+> cannot reach that account.** (Stated that way on purpose — somebody plainly *did* have a
+> working session on 2026-08-19, or these rows would not exist. What is refused is every
+> sign-in attempt on the `trijeet` Authentik identity. See the audit-table note below.) That
+> distinction is worth the paragraph, because "seed and curate a golden set" and "repoint one
+> `oidcSubject`" are different days of work, and this header pointed at the first. See
+> **"The real blocker on the first label"** below.
+
+That plus **T5**, which is **~5% done with its first item untouched** — an earlier version of this
+line said "untouched" flat; see the re-measure under blocker 7. The path is
+`2026-08-17-integration-release-and-a2-roadmap.md`.
 Owner decisions **#3 and #6 were settled 2026-08-12** (weighted kappa with the threshold stored as
 data; golden sets immutable once a `CalibrationRun` references them); **#4 and #7 remain open** and
-are settled when A2 is specced. **#5** (cross-user annotation) now has its mechanism built by A1 and
-waits only on a second account.
+are settled when A2 is specced. **#5** (cross-user annotation) has its mechanism built by A1, a **UI
+as of `14d75f7`**, and waits only on a second annotator account.
 **Scope:** labelling, entry, human verification, and distillation — everything whose purpose is
 **producing a stronger judge.**
 **Sibling:** `2026-08-10-benchmark-sharing-roadmap.md` (Roadmap B) measures and publishes the
@@ -22,6 +49,36 @@ resilience and cluster constraints all roadmaps inherit.
 ## The one thing to know before reading further
 
 **This half of the product is fully modelled in the schema and has zero lines of code.**
+
+> **THAT SENTENCE IS DATED 2026-08-10 AND IS NO LONGER TRUE. Read this section as the starting
+> position, not the current one** — it is kept because the argument it makes still governs A2, and
+> because deleting it would erase what the phases were built against. As of `14d75f7` (2026-08-29),
+> **17 files under `src/app/api/` reference `goldenSet` or `goldenLabel`** — the whole
+> `/api/golden-sets/**` tree, including `queue`, `agreement`, `disagreements`, `assignments`,
+> `items/[itemId]/labels`, `fork` and `retire` — plus UI routes under `src/app/golden-sets/**` and
+> the studio components. Decision #6's freeze guard is real code
+> (`src/lib/golden-sets.ts:270`, `calibrationRun.count({ where: { goldenSetId } }) > 0`), and
+> `retiredAt` has a writer.
+>
+> **One clause of it survives, and it is exactly A2's scope: `CalibrationRun` still has no
+> producer at all.** `grep -rn "calibrationRun\|CalibrationRun" src/ prisma/*.ts prisma/schema.prisma`
+> returns only reads (`tx.calibrationRun.count` in the freeze guard), relation declarations and
+> comments — no `.create` anywhere. So the "zero lines of code" claim, narrowed to the
+> calibration half, is still accurate.
+>
+> **CORRECTION 2026-08-30 — an earlier revision of this note also claimed `trustState` "still has
+> zero writers … written nowhere". That is false, and the false version was the more dangerous
+> one.** `prisma/seed-core.ts:192` writes `trustState: 'trusted'` on the `judgeModelVersion`
+> catalog upsert — added 2026-08-11 in `ed4ce67`, i.e. the day *after* the 2026-08-10 sentence
+> above was true. The consequence is live and worth stating plainly: prod holds **3
+> `JudgeModelVersion` rows and all 3 read `trustState = 'trusted'`**
+> (`select "trustState", count(*) from "JudgeModelVersion" group by 1` → `trusted|3`), with
+> `CalibrationRun` at 0. Nothing has ever been calibrated; the seeder's own comment says so
+> ("a claim about the catalog entry, not about any calibration that has happened"). What A2
+> actually gives `trustState` is its first *transition* — the `untrusted → calibrating →
+> trusted|rejected` lifecycle — not its first write. It is read at
+> `src/app/api/models/catalog/route.ts:46` and typed at
+> `src/components/models/model-config-form.tsx:15`.
 
 Five models already exist and describe the entire loop: `GoldenSet` → `GoldenItem` →
 `GoldenLabel` → `CalibrationRun` → `JudgeModelVersion.trustState`. `CalibrationRun` already
@@ -124,11 +181,75 @@ building Roadmap A end to end? Everything below is verified, not inferred.
 | 7 | RabbitMQ scrape/alerts/cap (T5) | **OPEN — gates A2 (this roadmap's A2, the calibration engine — not the lifecycle plan, which is now L2)** |
 | 4,5,6 | `startedAt`, format-compliance, token rollup | OPEN — needed during A |
 | — | **A1** | **done 2026-08-17** — `4ff04f4`…`eef73fb` on `feat/a0-golden-set-substrate`. `GoldenLabel` has its first writer; `v2h` adds the item revision log, assignment rows, `round` and `preference`. Exit gate met on all four clauses. Suites 533 unit / 633 db / 80 integration |
-| — | **A1.5** | **done 2026-08-17** — `133cc12`…`05bf29b`. The composable panel shell A2 and A3 also consume, plus A1's labelling view as its first composition. Every rule that can be silently wrong lives in `src/lib/studio/**` (100% statements) because this repo has no jsdom; `src/components/studio/**` is verified by `docs/runbooks/studio-manual-verification.md`, whose 12 rows were walked in a browser |
+| — | **A1.5** | **done 2026-08-17** — `133cc12`…`05bf29b`. The composable panel shell A2 and A3 also consume, plus A1's labelling view as its first composition. Every rule that can be silently wrong lives in `src/lib/studio/**` (100% statements) because this repo has no jsdom; `src/components/studio/**` is verified by `docs/runbooks/studio-manual-verification.md`, whose 12 rows were walked in a browser. **Extended 2026-08-29 by `14d75f7`:** the assignment panel on `/golden-sets/<id>` (Assign to me / Revoke / a shortcut into the studio), a `toPublicOwner` projection returning `{id,name}` and never the email (null for a deleted account), and server-side random subset selection (`randomCount`/`randomPercent`) in `src/lib/sample-selection.ts`. The runbook is now **18 rows, not 12**; rows 14/16/17/18 were walked in a browser on 2026-08-29 |
 | — | **A2** | **decisions recorded** (`2026-08-17-a2-calibration-and-reporting-decisions.md`), deliberately not specced — its design takes A1's real label data as an input, and **no real labels exist yet**. Path to it: `2026-08-17-integration-release-and-a2-roadmap.md` |
-| — | **Merge, promote, migrate** | **DONE 2026-08-17.** PR #13 merged as `bee1d12`; prod promoted off its pre-A0 image to `sha-bee1d121ea7d`; all 5 pending migrations applied, 0 unfinished. **Seed + end-to-end remain OPEN** and are the critical path — prod still holds 0 golden sets. See `2026-08-17-integration-release-and-a2-roadmap.md` |
+| — | **Merge, promote, migrate** | **DONE 2026-08-17.** PR #13 merged as `bee1d12`; prod promoted off its pre-A0 image to `sha-bee1d121ea7d`; all 5 pending migrations applied, 0 unfinished. **Seed is DONE** and **end-to-end is PARTIALLY EXECUTED, not un-started** — an earlier version of this row said "prod still holds 0 golden sets", which stopped being true on 2026-08-19. Steps 1–3 (sign in, create a set, assign it) ran that day; step 4 (label the items) has produced **0 `GoldenLabel`** because sign-in is now refused. See `2026-08-17-integration-release-and-a2-roadmap.md` and "The real blocker on the first label" below |
 | — | Capturing `reasoning_content` | **OPEN, backlogged.** Chain-of-thought is discarded on every model call, so the studio's reasoning panel is structurally thin until it lands |
 | 11 | Golden sets absent from round-trip coverage | **done 2026-08-13** — A0's exit gate; classified in the `COVERAGE` map at `tests/db/config-roundtrip-fidelity.test.ts` |
+
+### The real blocker on the first label (found 2026-08-29)
+
+**It is an identity mismatch, and it was on no list in this document.** The judge-arena `User` row
+that owns both golden sets and holds both assignments (`cmsj951c30000881a4l63sx4b`,
+trijeet@protonmail.com, role admin) carries `oidcSubject = 26f57dc2-77b6-455b-a939-d897dbdad6ee`.
+Authentik has **two accounts on that email**: `akadmin` (uuid `26f57dc2-…`) and `trijeet` (uuid
+`e8b087cc-b38b-492a-bbb3-b34bdfb50c16`). The judge-arena OAuth2 provider's `sub_mode` is
+`user_uuid`, so `sub` **is** the uuid. The 2026-08-07 invite-claim happened while signed in as
+**akadmin**; every attempt since has been as **trijeet**, whose sub matches nothing. `resolveOidcUser`
+falls to branch 3, `ALLOW_OIDC_AUTOPROVISION` is absent from the deployment env, and sign-in is
+**refused**.
+
+That is a matched pair of records rather than an inference: three authentik
+`authorize_application|trijeet` events (2026-08-18 21:33:35, 2026-08-19 13:41:28, 13:41:32) are each
+followed within a second by a judge_arena `AuditLog` row
+`user.login.failed {"method":"oidc","reason":"no_match_autoprovision_disabled"}`. **No successful
+`user.login` has ever been written to that table.** Credentials fallback cannot rescue it either: the
+row's `passwordHash` is `!oidc-managed`, and `findCredentialsUserByEmail` excludes `!`-prefixed
+hashes by design.
+
+> **Read that last sentence precisely — added 2026-08-30, because the short version over-claims.**
+> The whole `AuditLog` table is two actions:
+> `user.invite_claimed` × 1 (2026-08-07 19:21:17) and `user.login.failed` × 44 (2026-08-07
+> 19:33:55 → 2026-08-19 13:41:33). Two things follow that "no `user.login` row" alone does not
+> say. (a) **A successful OIDC sign-in does not always write `user.login`**: `src/lib/auth.ts:157-161`
+> writes `user.invite_claimed` when the pass claims an invite and `user.register` when it
+> autoprovisions, so the one sign-in we know succeeded is in the table under a different name.
+> Absence of `user.login` is evidence about *repeat* sign-ins, not about sign-in as such.
+> (b) **Something authenticated on 2026-08-19**: the sets were created at 13:44:04, three minutes
+> after the last recorded failure, with no successful sign-in audited that day at all. The
+> session config (`src/lib/auth.ts:58`, JWT `maxAge` 24h with `updateAge` 1h) rolls a live
+> session forward on activity, so a long-lived akadmin session is a mechanism that fits — but
+> that is a hypothesis, not a checked fact, and nothing in the audit trail settles it. **None of
+> this changes the prescription**: the `oidcSubject` on the owning row points at `akadmin`, the
+> identity in use is `trijeet`, and repointing it is still one row.
+
+- **Fastest path, no mutation:** sign in to Authentik as **`akadmin`** (private window, or log out of
+  the `trijeet` SSO session first). That sub matches, and akadmin is in `users-primary` — the single
+  enabled policy binding on the judge-arena application.
+- **Durable fix — one row, and an admin decision:**
+  `UPDATE "User" SET "oidcSubject"='e8b087cc-b38b-492a-bbb3-b34bdfb50c16' WHERE id='cmsj951c30000881a4l63sx4b';`
+  or consolidate the duplicate Authentik accounts.
+- **Do NOT issue a fresh CLI invite and do NOT enable `ALLOW_OIDC_AUTOPROVISION`.** Both mint a
+  **second, empty** `User` row that owns nothing, and the queue would hard-403 it on both sets. The
+  email partial unique index (`UNIQUE (email) WHERE passwordHash NOT LIKE '!%'`) does not prevent it.
+
+**Two further things block a clean first label, and the assignment UI fixed neither.**
+
+1. **There is no agreement panel.** `GET /api/golden-sets/[id]/agreement` exists and works, but
+   nothing under `src/app/**` or `src/components/**` ever calls it — the only "Agreement" on screen
+   is a hard-coded, permanently-empty progression-rail stage at
+   `src/app/golden-sets/[id]/label/page.tsx:87`. A1's exit gate is met **at the API**; the phase's
+   reporting surface is **missing**, which is a different defect from a wrong number and is not
+   visible from the exit gate. Workaround until it is built: point the signed-in tab straight at
+   `/api/golden-sets/<id>/agreement` and read the JSON.
+2. **Every production `GoldenCandidate` has `label IS NULL`** — 1300 of 1300, because `toCandidate()`
+   at `src/lib/golden-sets.ts:180` hard-codes `label: null`. The studio then renders
+   `candidate.label ?? 'Option ' + (position + 1)` while the verdict control asks for `A>B` / `tie` /
+   `B>A`, so **nothing on screen says Option 1 is A.** The mapping *is* deterministic in code
+   (`toCandidate(0, responseA)`, `toCandidate(1, responseB)`, and the queue orders by `position asc`)
+   — but the annotator cannot see it, and guessing it the other way inverts every preference in the
+   session **silently**. Fix this before the first labelling run rather than after: a session
+   labelled under the wrong assumption is indistinguishable, from the data alone, from a correct one.
 
 ### The dev endpoint: live, reachable, and missing a descriptor
 
@@ -187,6 +308,25 @@ mechanism, declared caps that the reliability metric can trust.
    the deployment still runs `sha-ed67eb87bc2a` while `sha-70fce84bee11` sits in Harbor. See
    "The two commands" below.
 
+   > **UPDATE 2026-08-29 — the 2026-08-12 snapshot above is left exactly as written, because it was
+   > true that day.** Re-verified against `judge_arena` on prod today: migrations are **18 of 18**
+   > with 0 unfinished (latest `20260818120000_v2h_human_verification`); `Dataset` is **2** with 620
+   > `DatasetSample`; `PromptTemplate` is **2**; `GoldenSet` is **2** with 650 `GoldenItem` and 1300
+   > `GoldenCandidate`; `User` is **2**. The seeder has run.
+   >
+   > **Image, corrected 2026-08-30.** When this block was first written the deployment still ran
+   > `sha-bee1d121ea7d` with a promote to the `14d75f7` build *in flight*. That promote has
+   > **landed**: both `judge-arena-web` and `judge-arena-worker` now run
+   > `harbor.cluster.asethi.com/homelab/judge-arena:sha-14d75f7d46de`, pods created
+   > `2026-08-30T01:47:21Z`, `rollout status` reports successfully rolled out. Migration count is
+   > unchanged at 18/18 because `14d75f7` ships no migration.
+   >
+   > **`User` is 2 and the annotator count is still 1.** The second row is the seeder's non-login
+   > service principal `platform@judgearena.local`, created with
+   > `passwordHash: '!platform-system-user'` (`prisma/seed-core.ts:69-75`) — an `!`-prefixed hash,
+   > which `findCredentialsUserByEmail` excludes, so it can neither sign in nor annotate. Do not read
+   > that row as "a second annotator exists".
+
 3. ~~**The `llamacpp` descriptor.**~~ **CLEARED 2026-08-11**, above.
 
 ### The two commands between here and A0
@@ -200,9 +340,22 @@ catalog, and the gap is two deliberate manual steps:
 #    This also applies migration 13/13 (the llamacpp enum) via the chart's
 #    pre-install/pre-upgrade migrate hook.
 
-# 2. after it rolls out — idempotent, safe to repeat, reports 0 new rows on a re-run
+# 2. after it rolls out — idempotent and safe to repeat, but it does NOT
+#    "report 0 new rows" on a re-run. See the correction below.
 kubectl -n tenant-public exec deploy/judge-arena-web -- node /app/seed.js
 ```
+
+> **CORRECTION 2026-08-29 — "reports 0 new rows on a re-run" is false**, and so is the same sentence
+> at `prisma/seed.ts:29`. The upserts are genuinely idempotent; the **output** is not diagnostic.
+> `prisma/seed-prompt-templates.ts:120` and `:135` log `✓ Created prompt template: …`
+> **unconditionally** — after the upsert, outside any branch — so a re-run prints "Created" for rows
+> that already existed. `prisma/seed-judgebench.ts:307` is the only line carrying a real delta, in its
+> `${created.count} new samples` parenthetical, and `seed-core.ts` never prints the word at all.
+> **Do not read the seeder's log as evidence of what production was missing** — query the table
+> either side instead (`select name, version, "createdAt" from "PromptTemplate"`). For anyone
+> tempted to fix the logging: `PromptTemplate` has **no `updatedAt` column**, so branching on
+> `createdAt === updatedAt` is not implementable; it needs a `findUnique` before the upsert, a
+> `count()` either side, or a `create` with a P2002 catch.
 
 **Both are manual on purpose, and both are worth a decision rather than a habit.** There is no
 auto-promote for judge-arena (jobops opens a promote PR; this repo pins `values.image.tag` by hand),
@@ -287,6 +440,15 @@ All four re-verified against the tree and cluster on 2026-08-12 — none has mov
 4. **Run-grain `startedAt`** on `EvaluationRun` — without it "how fast" conflates queueing with
    judging (see the selection-metrics section). Confirmed absent: the model carries `createdAt` and
    `finalizedAt` and nothing between them.
+
+   > **Re-verified 2026-08-29 against `prisma/schema.prisma` at `14d75f7`: still absent.** The model
+   > carries `deadlineAt`, `finalizedAt`, `createdAt` and `updatedAt`, and no `startedAt`. Worth
+   > knowing why a grep misleads here: `startedAt` **does** appear in the schema twice — on
+   > `ModelJudgment` (judgment grain) and on `CalibrationRun` (`@default(now())`, run header) — so
+   > the column name is present, just never at `EvaluationRun` grain. A2's drain-rate question
+   > (decisions doc, open question 6) inherits exactly this: a calibration run can time itself, but
+   > it cannot split that elapsed time into queue wait and judging.
+
 5. **A per-judgment format-compliance signal.** No column exists; it is the fourth reliability
    component. Confirmed: no `formatCompliant`/`parseOk`-shaped field anywhere in the schema.
 6. **Token aggregation.** Per-judgment capture already works (`ModelJudgment.tokenCount`); nothing
@@ -304,6 +466,49 @@ All four re-verified against the tree and cluster on 2026-08-12 — none has mov
 
    Treat T5 as a hard gate on A2, not a nice-to-have. It is the one item on this list whose failure
    mode is silent *and* whose blast radius is the whole run pipeline.
+
+   > **UPDATE 2026-08-29 — still the gate; the 2026-08-12 figures above stand as recorded.**
+   > Re-measured at idle: **0.1197 GB against the same 0.2577 GB watermark = 46%**, no alarms, and
+   > **3.9393 GB** free disk against a **2.0 GB** low watermark. The percentage moved; the shape did
+   > not. **T5 itself is ~5% done and item 1 is untouched** — VictoriaMetrics returns
+   > `seriesFetched: "0"` for `{__name__=~"rabbitmq_.*"}`, meaning **not one RabbitMQ sample has ever
+   > been stored in this cluster**, with zero VMServiceScrapes and zero VMRules matching rabbit or
+   > judge.
+   >
+   > **Everything the scrape needs already works**, which makes item 1 smaller than it reads:
+   > `rabbitmq_prometheus 4.2.4` is enabled, both Services publish `prometheus 15692`, the endpoint
+   > answers 2818 lines, and the existing `allow-external-communication` CiliumNetworkPolicy already
+   > permits cross-namespace scraping — **no NetworkPolicy work is needed.**
+   >
+   > **Two spec corrections and one new fact, for whoever writes T5.** (a) There are now **two**
+   > brokers, not three: `apps/managed/rabbitmq-shared.yaml` was deleted in `6f1a460` and Flux pruned
+   > `tenant-root/bus`. (b) A request body size limit **does** exist — at the ingress, at `50m`,
+   > nginx's 1m default deliberately raised 50x. (c) **RabbitMQ's default `/metrics` carries no queue
+   > label at all**, so the `judgment.execute` backlog and `judge.dlq` depth alerts T5 asks for are
+   > **impossible** from it; they need a second scrape of
+   > `/metrics/detailed?family=queue_coarse_metrics`, where only the **leader** node emits a depth
+   > sample. Plan for two scrape targets, not one.
+   >
+   > **AND THE PIPELINE WAS DEAD WHEN THIS WAS WRITTEN — not a T5 item, but it bites this same
+   > phase.** Every one of the five queues reported `consumer_count=0` from
+   > **2026-08-24T17:55Z** (see the 2026-08-30 note below for how that ended). The Cozystack
+   > v1.6.2 roll recreated `judge-arena-pg-1` at 17:54:57Z; the worker logged a burst of `Can't reach
+   > database server` / `terminating connection due to administrator command` (SQLSTATE 57P01) 21
+   > seconds later and has emitted **no log line since**, while sitting 1/1 Running with 0 restarts.
+   > Its database socket reconnected; its **AMQP consumers never re-registered**. A worker rollout
+   > restores service, but the underlying defect — consumers are registered on boot and not on
+   > reconnect — is **unfixed**, and a calibration burst is exactly the workload that would trip it
+   > again and then present as a hung run rather than a dead consumer.
+   >
+   > **RESOLVED INCIDENTALLY 2026-08-30, and the code defect is still not fixed.** The `14d75f7`
+   > promote rolled `judge-arena-worker` at `2026-08-30T01:47:21Z`, which is exactly the "worker
+   > rollout" this note prescribed — nobody fixed anything, a deploy happened to do it.
+   > `rabbitmqctl list_queues name messages consumers` on `rabbitmq-judge-arena-server-0` now
+   > reports `run.create 0 1` and `judgment.execute 0 1`; `judge.dlq`, `judgment.retry.30s` and
+   > `judgment.retry.5m` remain at 0 consumers, which is their normal state and not the outage.
+   > **Read the six-day gap, not the current number:** the pipeline stayed silently dead from
+   > 2026-08-24T17:55Z until an unrelated promote, and the reconnect defect that caused it is
+   > still in the tree, so the next broker or database blip reproduces it.
 
 ### The one to do first, and it is not on the list above
 
@@ -482,6 +687,17 @@ inter-annotator statistic is therefore *unavailable* rather than bad: `agreement
 disagreement — the opposite of "not measurable". **`testRetest` is the only reliability signal that
 produces a number at launch**, which is precisely what that column was put in the schema for.
 
+> **STILL TRUE 2026-08-29, with two refinements.** Prod now holds **2 `User` rows**, not 1 — but the
+> second is the seeder's non-login service principal `platform@judgearena.local`
+> (`passwordHash: '!platform-system-user'`, `prisma/seed-core.ts:69-75`), which `findCredentialsUserByEmail`
+> excludes and which has no OIDC identity. One human annotator, exactly as this section says.
+>
+> The sharper refinement: **that one annotator cannot currently sign in** (see "The real blocker on
+> the first label"). So the live state is not "one annotator" but **zero readings from one intended
+> annotator** — `GoldenLabel` is 0, which means `testRetest`, the signal this section calls the only
+> available one, has nothing to compute over either. Both statistics are unavailable today, for two
+> different reasons, and only one of them is the one-annotator constraint described here.
+
 **What is NOT true.** That the multi-annotator paths can be deferred. **Multiple annotators will be
 available through the owner's backend**, so the overlap model, the assignment rows, Fleiss's kappa
 for three or more raters, and the disagreement queue are all real product paths — they are simply
@@ -535,8 +751,23 @@ it was built as assignment rows rather than a free-for-all.
 > T5 below was re-measured 2026-08-17 rather than quoted: **0.1407 GB against a 0.2577 GB
 > watermark, 54.6% at idle, still zero VMServiceScrapes and zero VMRules.** Unchanged, so the gate
 > is stable rather than a spike.
+>
+> **UPDATE 2026-08-29 — still not startable, and the sentence "production has zero golden sets" is
+> now wrong.** It was true when written; it stopped being true on **2026-08-19**, when 2 sets (650
+> items, 1300 candidates) were created and both self-assigned. The chain got further than this note
+> assumed: merge -> promote -> migrate -> **seed -> assign** are all done. It stalls at *annotate*,
+> and not for want of a surface — `14d75f7` shipped the assignment UI, and sign-in is refused by an
+> OIDC subject mismatch. **`GoldenLabel` is still 0**, so the input A2's design needs is still
+> absent and the gate still holds — but the next action is an identity fix, not a curation session.
+> T5 re-measured today: **0.1197 GB / 0.2577 GB = 46% at idle**, still zero scrapes and zero rules,
+> and the run pipeline itself had **zero AMQP consumers from 2026-08-24 until 2026-08-30**, when
+> the `14d75f7` promote rolled the worker and they re-registered — by accident, not by fix; the
+> reconnect defect is still in the tree. See blocker 7.
 
-This is the phase that gives `trustState` its first writer.
+This is the phase that gives `trustState` its first *transition*. (Not its first writer —
+`prisma/seed-core.ts:192` stamps `trustState: 'trusted'` on every seeded catalog row, which is
+why all 3 production `JudgeModelVersion` rows read `trusted` with `CalibrationRun` at 0. A2 is
+what makes that column mean something.)
 
 - Run a `JudgeModelVersion` over a `GoldenSet` and populate `CalibrationRun`: `kappa`,
   `rawAgreement`, `verdictCount`, `passed`.
@@ -557,7 +788,9 @@ This is the phase that gives `trustState` its first writer.
 calibration run, with every metric populated and the threshold recorded.
 
 **Cluster note:** calibration is a burst of judgment work over the same broker whose memory
-watermark sits at 54% at idle and cannot be raised via GitOps. **The rebaseline's T5 (RabbitMQ
+watermark sits at 54% at idle and cannot be raised via GitOps. (**Re-measured 2026-08-29: 46% —
+0.1197 GB against the same 0.2577 GB watermark, no alarms.** The figure moved, the argument did
+not, and GitOps still cannot raise the watermark.) **The rebaseline's T5 (RabbitMQ
 scrape + alerts, and the per-run concurrency cap) is a hard prerequisite for this phase** —
 calibration is exactly the workload that would discover the watermark the invisible way.
 
@@ -725,7 +958,7 @@ its supporting metrics are recorded.
 |---|---|---|
 | ~~**#3** canonical agreement statistic + threshold~~ | ~~A0/A1~~ | **RESOLVED 2026-08-12** — weighted kappa, threshold stored as data. See below. |
 | ~~**#6** golden set immutable once referenced~~ | ~~A0~~ | **RESOLVED 2026-08-12** — yes, immutable once a `CalibrationRun` references it. See below. |
-| **#5** who may annotate whose data | **A1** | **Mechanism settled 2026-08-17** (assignment rows; owner+admin while one account exists). The POLICY once backend annotators arrive is still open, and does not require redesigning the mechanism. |
+| **#5** who may annotate whose data | **A1** | **Mechanism settled 2026-08-17** (assignment rows; owner+admin while one account exists), and **given a UI 2026-08-29** by `14d75f7`: Assign to me / Revoke on `/golden-sets/<id>`, with the annotator rendered through a `toPublicOwner` projection that returns `{id,name}` and never the email. The POLICY once backend annotators arrive is still open, and does not require redesigning the mechanism. |
 | **#4** `biasSensitivityRate` perturbation set | **A2/A3** | Its value is meaningless without its definition; needs versioning from the first run. |
 | **#7** PPI configuration | **A2/A3** | An interval is only worth computing if something acts on it. |
 | **#8** throughput/latency percentiles in the verdict | **A3/A4** | Also depends on `startedAt` (item 4) existing first. |

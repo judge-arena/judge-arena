@@ -7,72 +7,324 @@ Thanks for your interest! This guide covers the repo layout, conventions, and co
 ## Table of Contents
 
 1. [Development Setup](#development-setup)
-2. [Project Structure at a Glance](#project-structure-at-a-glance)
-3. [Conventions](#conventions)
-4. [Adding a New LLM Provider](#adding-a-new-llm-provider)
-5. [Adding a New UI Component](#adding-a-new-ui-component)
-6. [Adding a New API Route](#adding-a-new-api-route)
-7. [Adding a New Page](#adding-a-new-page)
-8. [Extending the Database Schema](#extending-the-database-schema)
-9. [API wire-format changes (v2, 1a)](#api-wire-format-changes-v2-1a)
-10. [Modifying the Rubric / Evaluation Flow](#modifying-the-rubric--evaluation-flow)
-11. [Adding a Keyboard Shortcut](#adding-a-keyboard-shortcut)
-12. [Deployment: Docker Compose v2](#deployment-docker-compose-v2-task-16)
-13. [Continuous Integration](#continuous-integration-task-17)
+2. [Running the Tests](#running-the-tests)
+3. [Testing Conventions](#testing-conventions)
+4. [Project Structure at a Glance](#project-structure-at-a-glance)
+5. [Conventions](#conventions)
+6. [Adding a New LLM Provider](#adding-a-new-llm-provider)
+7. [Adding a New UI Component](#adding-a-new-ui-component)
+8. [Adding a New API Route](#adding-a-new-api-route)
+9. [Adding a New Page](#adding-a-new-page)
+10. [Extending the Database Schema](#extending-the-database-schema)
+11. [API wire-format changes (v2, 1a)](#api-wire-format-changes-v2-1a)
+12. [API wire-format changes (v2, 1b Task 12)](#api-wire-format-changes-v2-1b-task-12)
+13. [Content Security Policy (CSP) script nonces](#content-security-policy-csp-script-nonces-task-14)
+14. [Modifying the Rubric / Evaluation Flow](#modifying-the-rubric--evaluation-flow)
+15. [Adding a Keyboard Shortcut](#adding-a-keyboard-shortcut)
+16. [Expansion Ideas](#expansion-ideas)
+17. [Deployment: production (judgearena.com)](#deployment-production-judgearenacom)
+18. [Deployment: Docker Compose v2](#deployment-docker-compose-v2-task-16)
+19. [Continuous Integration](#continuous-integration-task-17)
+20. [Pull Request Guidelines](#pull-request-guidelines)
+
+*(Entries 12, 13, 16 and 20 were missing from this list until 2026-08-29 — the sections existed,
+the contents page did not name them.)*
 
 ---
 
 ## Development Setup
 
+> **CORRECTION (2026-08-29).** Every previous version of this section said *"The database is SQLite
+> (`prisma/dev.db`). You can wipe it and re-seed at any time: `rm prisma/dev.db && npm run db:push
+> && npm run db:seed`."* **That has been false since the v2 migration (1a), and it contradicted the
+> rest of this same document** — [Extending the Database Schema](#extending-the-database-schema)
+> already said the project runs Postgres with checked-in migrations. Checked against the tree:
+> `prisma/schema.prisma`'s datasource is `provider = "postgresql"`; `.env.example`, `.env.test` and
+> `docker-compose.yml` all carry `postgresql://` URLs; there is no `prisma/dev.db` file and a
+> case-insensitive `grep` for `sqlite` across `src/`, `prisma/`, `scripts/` and the workflow files
+> returns nothing. **The database is PostgreSQL 16.** The old recipe is not merely dated — running
+> `db push` against a migrated database is the wrong verb here (see the schema section).
+
 ```bash
-git clone <repo-url> judge-arena && cd judge-arena
-cp .env.example .env          # fill in at least one API key
-npm install
-npm run setup                 # prisma generate → db push → seed
-npm run dev                   # http://localhost:3000
+git clone ssh://git@10.10.0.211/trij/judge-arena.git judge-arena && cd judge-arena
+cp .env.example .env.local    # .env.example's own header says .env.local — see trap (a)
+npm install                   # `postinstall` runs `prisma generate` (v2 client) for you
+npm run db:generate:v1        # the SECOND Prisma client, for the importer — tsc fails without it
+# start the three podman services first — see below
+sh -c 'set -a; . ./.env.local; set +a; npx prisma migrate deploy'   # 18 migrations
+sh -c 'set -a; . ./.env.local; set +a; npm run db:seed'             # same wrapper — see below
+npm run dev                   # http://localhost:3000  (Next.js loads .env.local itself)
 ```
 
-The database is SQLite (`prisma/dev.db`). You can wipe it and re-seed at any time:
+Fill in, at minimum: `DATABASE_URL` (already correct for the podman container below),
+`NEXTAUTH_SECRET` (`openssl rand -base64 32`), `ENCRYPTION_KEY` (`openssl rand -hex 32` — API keys
+are AES-256-GCM encrypted at rest) and one provider key. `.env.example` documents the rest inline,
+including the Authentik OIDC block.
+
+**`db:seed` needs the same wrapper as `migrate deploy`, for a different reason** — this was wrong in
+the first version of this rewritten section, which called it as a bare `npm run db:seed`.
+`db:seed` is `npx tsx prisma/seed.ts`, and `prisma/seed.ts` constructs `new PrismaClient()` with no
+dotenv loading anywhere in it or in `seed-core.ts`. The Prisma **CLI** loads `.env`; the Prisma
+**Client** loads nothing. Verified 2026-08-29 in a checkout that *does* have a `.env`, by running
+`env -u DATABASE_URL node -e "…new PrismaClient().$queryRawUnsafe('SELECT 1')"` — it fails
+`Environment variable not found: DATABASE_URL.` So a bare `npm run db:seed` straight after
+`cp .env.example .env.local` fails, and it fails looking like a database problem rather than a
+missing variable. `npm run dev` is the exception: Next.js reads `.env.local` itself.
+
+`npm run setup` still exists — verbatim, `npm install && npx prisma generate && npx prisma db push
+&& npx tsx prisma/seed.ts` — and is left in `package.json`, but **prefer the sequence above**:
+`setup` ends in `prisma db push`, which lays the schema on directly and never records a row in
+`_prisma_migrations`. A database created that way will diverge from every other environment the
+first time a migration carries hand-written SQL — and eight of ours do (see [Known migrate-diff
+pseudo-drift](#known-migrate-diff-pseudo-drift)).
+
+**Do not read `db:seed`'s output as a report of what it inserted.** `seedPromptTemplates` upserts
+and then logs `✓ Created prompt template: …` **unconditionally**, outside any branch;
+`seed-judgebench.ts` opens with an unconditional `✓ Created dataset: …` the same way. No log line in
+the seeder is gated on an actual insert — only the parenthetical `${created.count} new samples`
+carries a real delta. If you need to know whether a row was new, query the table before and after
+(`select name, version, "createdAt" from "PromptTemplate"`). Note also that `prisma/seed.ts:29`'s
+claim that "a second run … reports zero new rows" is true for judgebench and **false for prompt
+templates.**
+
+### The services the test suites need — they are not optional
+
+Two of the three test suites talk to a real Postgres, a real Redis and a real RabbitMQ. Nothing
+starts them for you. **If they are not running, `npm run test:db` fails with a connection error that
+reads like a code failure. It is not a code failure; it is a missing container.** The local rig is
+three podman containers, by these exact names:
+
+| Container | Image | Host port | Needed by |
+|---|---|---|---|
+| `judge-arena-pg` | `postgres:16-alpine` | `5432` | `npm run test:db`, `npm run dev`, every Prisma command |
+| `judge-arena-redis` | `redis:7-alpine` (`--maxmemory-policy noeviction`) | `6379` | `npm run test:integration` — SSE bus, rate limiter, breaker state |
+| `judge-arena-rabbitmq` | `rabbitmq:3.13-management-alpine` | `5672` (management UI on `15672`) | `npm run test:integration` — `tests/integration/queue.test.ts` |
 
 ```bash
-rm prisma/dev.db
-npm run db:push
-npm run db:seed
+podman run -d --name judge-arena-pg -p 5432:5432 \
+  -e POSTGRES_USER=judge_arena -e POSTGRES_PASSWORD=password -e POSTGRES_DB=judge_arena \
+  postgres:16-alpine
+podman run -d --name judge-arena-redis -p 6379:6379 \
+  redis:7-alpine redis-server --maxmemory-policy noeviction
+podman run -d --name judge-arena-rabbitmq -p 5672:5672 -p 15672:15672 \
+  rabbitmq:3.13-management-alpine
 ```
+
+The credentials are not arbitrary. `.env.test` and `.gitea/workflows/ci.yml`'s `env:` block both
+hard-code `judge_arena:password@localhost:5432`, so a failure reproduces identically on a laptop and
+in CI. **Three databases live on that one container:** `judge_arena` (dev), `judge_arena_test`
+(`npm run test:db`, dropped and recreated on every run) and `judge_arena_v1` (the frozen v1 scratch
+schema the importer's DB tests read — created by `npm run db:push:v1`, which `prisma migrate reset`
+never touches because it only knows about `DATABASE_URL`).
+
+`bash scripts/ci-local.sh` opens with a pure-bash TCP probe of all three and fails fast, naming the
+unreachable one, rather than letting it surface later as a test failure. When a suite fails
+mysteriously, run that first.
+
+### Two traps that have each cost a session here
+
+Both are recorded in `docs/superpowers/plans/2026-08-17-a1-a15-complete-handoff.md` §4 and are
+repeated here because a contributor hits them before ever reading a handoff.
+
+**(a) `.env.local` holds a QUOTED `DATABASE_URL`.** So the obvious idiom —
+
+```bash
+# WRONG — do not copy this
+DATABASE_URL="$(grep -m1 '^DATABASE_URL=' .env.local | cut -d= -f2-)" npx prisma migrate status
+```
+
+— hands Prisma a value with its double quotes still attached, and Prisma fails **`P1012`** ("the URL
+must start with the protocol `postgresql://`"). **That error reads like schema drift and it is not
+— it is a quoting bug.** A bare `npx prisma …` fails the same way for a different reason: the Prisma
+CLI auto-loads `.env` and never `.env.local`, and this tree has no `.env`. Source the file instead:
+
+```bash
+sh -c 'set -a; . ./.env.local; set +a; npx prisma migrate status'   # 18 migrations, up to date
+```
+
+That `set -a` / dot-source / `set +a` wrapper is not an invention for this note — it is exactly what
+`package.json`'s `test:db`, `test:db:coverage`, `test:integration` and `db:push:v1` scripts already
+do to `.env.test`. Copy the working idiom rather than writing a new one. (Related: `prisma db
+execute` needs `--schema` or `--url`; it is not a drop-in for a `psql` one-liner.)
+
+**(b) Local Postgres is the podman container `judge-arena-pg`. PRODUCTION is the Kubernetes pod
+`judge-arena-pg-1`, in namespace `tenant-public`.** The names differ by **one character**, and one
+of them serves `judgearena.com`. Everything in this guide that touches a database — `migrate
+deploy`, `migrate reset`, `db push`, `db:seed`, `psql` — means the local container only.
+**Production must never be touched from a development shell**; its schema changes arrive through the
+deploy. `npm run test:db` is the sharpest edge, because it runs `prisma migrate reset --force`,
+which drops and recreates whatever database it is pointed at. See
+[Deployment: production](#deployment-production-judgearenacom) for what is actually up there.
+
+### Creating an account
+
+Self-service registration is retired — accounts are admin-invite-only (spec §7). The CLI is
+`scripts/admin/create-user.ts`, wired as an npm script:
+
+```bash
+npm run admin:create-user -- --email=alice@example.com --name="Alice" --admin --dry-run
+```
+
+With `--password=<pw>` it creates a credentials account (bcrypt, 12 rounds) that can sign in
+immediately — that is what you want for local development. Without it, you get an OIDC-pending
+invite row that only becomes usable on a matching Authentik sign-in (see
+`docs/runbooks/authentik-oidc-setup.md`). `--dry-run` prints what would be created and touches
+nothing. The CLI refuses (exit 1) if a `User` row already exists for that email — `email` is not a
+DB-unique column, so this is CLI policy, not a database constraint.
+
+---
+
+## Running the Tests
+
+Three suites, three vitest configs, three npm scripts. **There is no `test:unit`** — the unit suite
+is plain `npm test`.
+
+| Command | Config | What it covers | Services needed |
+|---|---|---|---|
+| `npm test` | `vitest.config.ts` | Unit, DB-free. `src/**/*.test.ts(x)` + `tests/**/*.test.ts`, explicitly excluding `tests/db/**`, `tests/importer/**/*.db.test.ts` and `tests/integration/**` | none |
+| `npm run test:coverage` | same | **Coverage gate 1.** The unit run plus `coverage.thresholds` | none |
+| `npm run test:db` | `vitest.db.config.ts` | `tests/db/**` + `tests/importer/**/*.db.test.ts`. Runs `prisma migrate reset --force --skip-seed` first, replaying the whole migration chain | Postgres |
+| `npm run test:db:coverage` | same | **Coverage gate 2.** The DB run plus its own per-glob thresholds | Postgres |
+| `npm run test:integration` | `vitest.integration.config.ts` | `tests/integration/**` — RabbitMQ consumers, SSE over real Redis. **No coverage gate** (see [Test coverage](#test-coverage)) | Postgres + Redis + RabbitMQ |
+| `npm run lint` | — | `eslint src/ prisma/ scripts/ tests/` | none |
+| `npx tsc --noEmit` | — | Type check. Fails `TS2307: Cannot find module '@prisma/v1-client'` unless `npm run db:generate:v1` has been run | none |
+| `bash scripts/ci-local.sh` | — | All of the above, in CI's exact order, 11 steps, from a clean `npm ci` | all three |
+
+The two coverage gates are `test:coverage` and `test:db:coverage` — those are the only two commands
+that can fail on coverage, and both are run by CI. `test:integration` has no `coverage` block at
+all.
+
+**Where the numbers stood at the merge point** (`14d75f7`, 2026-08-29), all run locally against the
+podman services above: **lint 0, `tsc` 0, 594 unit / 43 files, 641 db / 42 files, 80 integration /
+10 files, both coverage gates 0, `npm run build` 0.** The previous recorded baseline, at `bee1d12`,
+was 578 / 633 / 80. Quote a measurement with its commit when you update this; a bare count ages
+badly and cannot be checked.
+
+---
+
+## Testing Conventions
+
+Two rules here are unusual enough to be worth stating outright, because neither is discoverable from
+reading the test files.
+
+### 1. TDD — and an injection that leaves the suite green is a FINDING, not a formality
+
+Write the failing test first; watch it fail for the reason you expect; then make it pass. The
+second half is the part this repo actually holds itself to: once a test is green, **break the code
+it covers on purpose and confirm the test goes red.**
+
+If the injection leaves the suite green, **that is a finding. If breaking the code changes nothing,
+either the code or the test is decoration** — and your job is to work out which before moving on.
+
+This is not a theoretical hygiene rule; it is written from what it has already caught. Across A1 and
+A1.5, five prescribed injections left the suite green, and every one of the five was a real gap: an
+unreachable guard, a dead special case, an untested equality check, a clamp test using `-5` (a value
+the standard library clamps anyway, so only `-1` discriminates), and a de-dup test asserting a length
+that a `Map` gives for free. The write-up is
+`docs/superpowers/plans/2026-08-17-a1-a15-complete-handoff.md` §6. The same record carries two
+corollaries worth internalising:
+
+- **A green test can be impossible to fail.** One fixture could not pass under any implementation
+  (`0 > 0`); another asserted a length that depended on the source file's encoding, where the
+  obvious fix — changing a 7 to a 6 — would have made it green while deleting the only thing under
+  test. Work the arithmetic by hand before you write the module.
+- **A failure message that does not describe the defect is not evidence.** An injection that fails
+  with `expected 500 to be 201` because the bad value collided with a unique index has not proved
+  your assertion; it has proved that *something* rejected the row. Write a second, cleaner
+  injection.
+
+Some of these injections have a browser-level twin. Row 14 of the studio runbook exists precisely
+because the `sample-selection` injection needed one: it checks that "Random N" is not returning the
+first N.
+
+### 2. Anything that RENDERS cannot be unit-tested here
+
+All three vitest configs declare `environment: 'node'` and none of them loads jsdom
+(`vitest.config.ts:7`, `vitest.db.config.ts:12`, `vitest.integration.config.ts:12`). There is no DOM
+to render into, so a component cannot be asserted on at all. Three consequences, in the order they
+matter:
+
+1. **Put every rule that can be silently wrong into `src/lib/**` so that it *can* be unit-tested.**
+   Span segmentation, the word diff, layout reconciliation and sample selection all live under
+   `src/lib/studio/` and `src/lib/sample-selection.ts` for exactly this reason. If a manual checklist
+   step is checking a *rule* rather than a *rendering*, that rule is in the wrong place — move it.
+2. **UI is covered by the browser-walk runbook instead:**
+   `docs/runbooks/studio-manual-verification.md`. It is 18 rows today, walked against `npm run dev`
+   plus local Postgres in a real browser, and it is the thing a change to the studio or the
+   golden-set surfaces is re-run against.
+3. **A new UI surface is expected to add rows to that runbook.** This is a real expectation, not an
+   aspiration: `0309a7e` shipped the golden-set assignment panel and the random-subset selector and
+   added rows 13–18 to cover them, because `src/app/golden-sets/**` sits outside every coverage
+   `include` and has no DOM environment either.
+
+Two more things the runbook's own history establishes. **Walk it — do not write it and defer it:**
+A1.5's row 7 caught a defect no unit test could have, a progression rail reading "not started"
+directly above a message saying a reading had just been recorded (the rule was right and the
+*composition* was wrong, which is the whole class the checklist exists for). And **record the run**
+in the runbook's dated table at the bottom, with the commit, who walked it, and any row that failed
+with what changed — the 2026-08-29 entry recording rows 14/16/17/18 against `0309a7e` is the shape
+to copy.
 
 ---
 
 ## Project Structure at a Glance
 
+> **CORRECTION (2026-08-29).** The tree drawn here until now was the v1 map, and the 2026-08-29
+> rewrite of this document did not touch it. It showed **five** API folders (there are 13), no
+> `golden-sets/` anywhere, no `worker/` at all, `src/lib/` as three entries (there are ~40 plus four
+> subdirectories), and "13 generic primitives" in `ui/` (`ls src/components/ui/ | wc -l` → **14**).
+> Everything below is `ls`-verified against the tree at `14d75f7`. Only top-level shape is drawn —
+> the point is where a thing *belongs*, not an inventory.
+
 ```
 src/
 ├── app/                       # Next.js App Router
-│   ├── api/                   # REST API (one folder per resource)
-│   │   ├── evaluations/       # CRUD + /judge + /human-judgment
-│   │   ├── models/            # CRUD
+│   ├── api/                   # REST API (one folder per resource) — 13 of them
+│   │   ├── api-keys/          # DeveloperApiKey CRUD (interactive session only)
+│   │   ├── auth/              # NextAuth (credentials + Authentik OIDC)
+│   │   ├── config/            # Config export / import
+│   │   ├── datasets/          # Datasets: samples, versions, refresh, export, HF import
+│   │   ├── evaluations/       # CRUD + /runs + /human-judgment (/judge is a 410 stub)
+│   │   ├── events/            # SSE stream (realtime bus)
+│   │   ├── golden-sets/       # Sets, items, assignments, queue, agreement, disagreements, fork
+│   │   ├── health/            # Liveness/readiness
+│   │   ├── leaderboard/       # Public read
+│   │   ├── models/            # JudgeModel catalog + ModelEndpoint CRUD (1b Task 12)
 │   │   ├── projects/          # CRUD
 │   │   ├── rubrics/           # CRUD + /versions
 │   │   └── stats/             # Dashboard counters
-│   ├── evaluate/[id]/page.tsx # Core evaluation workspace
-│   ├── models/page.tsx        # Model management
-│   ├── projects/              # Projects list + [id] detail
-│   ├── rubrics/page.tsx       # Rubric management + versioning
-│   ├── layout.tsx             # Root layout
-│   └── page.tsx               # Dashboard
+│   ├── evaluate/[id]/         # Evaluation workspace + runs/[runId] detail
+│   ├── golden-sets/           # List, [id] detail (assignment panel), [id]/label (the studio)
+│   ├── datasets/ dashboard/ evaluations/ models/ projects/ rubrics/ settings/
+│   ├── login/ register/       # Sign-in; registration is retired (admin-invite only)
+│   ├── layout.tsx             # Root layout (reads the CSP nonce off x-nonce)
+│   └── page.tsx               # Landing
 ├── components/
+│   ├── auth/                  # Sign-in surfaces
 │   ├── evaluation/            # Feature components for the evaluation flow
 │   ├── layout/                # App shell, sidebar, header, shortcuts dialog
-│   ├── models/                # ModelConfigForm
-│   ├── rubric/                # RubricBuilder
-│   └── ui/                    # 13 generic primitives (button, dialog, …)
-├── lib/
+│   ├── models/ rubric/        # ModelConfigForm, RubricBuilder
+│   ├── studio/                # A1.5 panel shell (PascalCase filenames — see Conventions)
+│   └── ui/                    # 14 generic primitives (button, dialog, …)
+├── lib/                       # ~40 modules. Rules live HERE so they can be unit-tested
 │   ├── db.ts                  # Prisma singleton
-│   ├── utils.ts               # Shared utilities
-│   └── llm/                   # Provider abstraction layer
-│       ├── provider.ts        #   Interface + prompt builders + response parser
-│       ├── anthropic.ts       #   Anthropic Messages API
-│       ├── openai-compatible.ts # OpenAI Chat Completions (+ any compatible)
-│       └── index.ts           #   Registry: getProvider, executeJudgment
+│   ├── auth-guard.ts          # optionalAuth / requireAuth / requireOwnership
+│   ├── run-launch.ts          # Transaction, then publish — the web tier's half of a run
+│   ├── golden-sets.ts, agreement.ts, labelling-queue.ts, sample-selection.ts, …
+│   ├── llm/                   # Provider abstraction layer
+│   │   ├── provider.ts        #   Interface + prompt builders + response parser
+│   │   ├── anthropic.ts       #   Anthropic Messages API
+│   │   ├── openai-compatible.ts # OpenAI Chat Completions (+ any compatible)
+│   │   └── index.ts           #   Registry: getProvider, executeJudgment
+│   ├── queue/                 # RabbitMQ: connection.ts, topology.ts, publish.ts
+│   ├── realtime/              # SSE bus: redis-bus, in-memory-bus, factory, ownership
+│   └── studio/                # content.ts (spans), delta.ts (word diff), layout.ts
+├── worker/                    # The queue consumer process (`npm run worker`)
+│   ├── main.ts                #   Boot + consumer registration
+│   ├── run-create-consumer.ts #   run.create  → fans out judgment.execute
+│   ├── judgment-consumer.ts   #   judgment.execute → provider call → ModelJudgment
+│   └── claim.ts reaper.ts dispatch-failure.ts
+├── middleware.ts              # Per-request CSP nonce (Task 14)
 └── types/
     └── index.ts               # Shared TypeScript interfaces
 ```
@@ -95,6 +347,7 @@ src/
 | Pages | `page.tsx` (Next.js convention) | `src/app/projects/page.tsx` |
 | API routes | `route.ts` (Next.js convention) | `src/app/api/projects/route.ts` |
 | Components | `kebab-case.tsx` | `model-judgment-card.tsx` |
+| Components — **exception** | `src/components/studio/**` is `PascalCase.tsx` (`Panel.tsx`, `StudioShell.tsx`, `SpanTextView.tsx`, `DeltaTextView.tsx`, `ProgressionRail.tsx`) — landed that way in A1.5 and left alone rather than renamed mid-flight. Verified by `ls src/components/studio/`. New files outside that directory use kebab-case. | `StudioShell.tsx` |
 | Utilities | `kebab-case.ts` | `utils.ts` |
 | Types | `index.ts` in `types/` | `src/types/index.ts` |
 
@@ -301,7 +554,9 @@ MyWidget.displayName = 'MyWidget';
 
 - Simple CRUD: `src/app/api/projects/route.ts` + `[id]/route.ts`
 - Nested resource: `src/app/api/rubrics/[id]/versions/route.ts`
-- Complex workflow: `src/app/api/evaluations/[id]/judge/route.ts` (parallel LLM calls)
+- Complex workflow: `src/app/api/evaluations/[id]/runs/route.ts` → `src/lib/run-launch.ts`
+  (auth + rate limit + one transaction + queue publish). **Not** `[id]/judge/route.ts` — that is a
+  410 Gone stub since 1b Task 9 and does no work at all; this list pointed at it until 2026-08-29.
 
 ### Access control — public reads vs. gated writes (Task 14)
 
@@ -395,14 +650,22 @@ All pages live in `src/app/` and use the Next.js App Router.
 
 ## Extending the Database Schema
 
-> **Superseded recipe below the line, kept for the pre-v2/SQLite `db:push`
-> workflow only.** Since the v2 migration (1a) the project runs Postgres
-> with real, checked-in migrations under `prisma/migrations/` — every
-> environment (dev, `test:db`, CI-to-be per the 1b plan's Task 17) applies
-> `prisma migrate deploy`/`migrate reset`, never `db push`. Use the recipe
-> immediately below for any schema change from 1a onward; the old `db push`
-> steps still work against a scratch SQLite/`dev.db` setup but are not how
-> this repo's real databases are changed.
+> **Superseded recipe below the line, kept as a historical record of the
+> pre-v2 `db:push` workflow.** Since the v2 migration (1a) the project runs
+> Postgres with real, checked-in migrations under `prisma/migrations/` (18
+> of them today) — every environment (dev, `test:db`, and CI, which has run
+> them for real since 2026-08-12) applies `prisma migrate
+> deploy`/`migrate reset`, never `db push`. Use the recipe immediately
+> below for any schema change from 1a onward.
+>
+> **CORRECTION (2026-08-29):** this note used to end *"the old `db push`
+> steps still work against a scratch SQLite/`dev.db` setup"*. There is no
+> SQLite setup left to work against — `schema.prisma`'s provider is
+> `postgresql`, so `db push` today pushes to **Postgres**, and the danger
+> is not that it's obsolete but that it silently works while recording
+> nothing in `_prisma_migrations`. See [Development
+> Setup](#development-setup) for the correction to the SQLite claim that
+> stood at the top of this document.
 
 ### Recipe (v2, Postgres, migrations — current)
 
@@ -426,12 +689,24 @@ All pages live in `src/app/` and use the Next.js App Router.
 4. **Apply it to the dev database**:
 
    ```bash
-   PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION=<approved-plan-id> npx prisma migrate deploy
+   sh -c 'set -a; . ./.env.local; set +a; \
+     PRISMA_USER_CONSENT_FOR_DANGEROUS_AI_ACTION=<approved-plan-id> npx prisma migrate deploy'
    ```
 
    The consent env var is this environment's gate on agent-run schema
    changes against a real database — use the id approved for the plan/task
    doing the work (dev DB is disposable, but the gate still applies).
+   It is Prisma's own check, not a wrapper of ours, and it fires **only when
+   the CLI detects it was invoked by an agent** ("Prisma Migrate detected that
+   it was invoked by …", the `prisma:migrate:ai-safety` path in prisma 6.19.2).
+   That is why the [Development Setup](#development-setup) block shows a bare
+   `migrate deploy`: a human never sees this prompt and an agent always does.
+   The `set -a` wrapper is not optional: a bare `npx prisma migrate deploy`
+   in this tree fails `P1012` because the Prisma CLI loads `.env` and this
+   tree has only `.env.local` — see trap (a) in
+   [Development Setup](#development-setup). And "the dev database" here
+   means the podman container `judge-arena-pg`, never the production pod
+   `judge-arena-pg-1` — trap (b), same section.
 5. **Regenerate the client**: `npx prisma generate`.
 6. **Verify against the test database**: `npm run test:db` runs
    `prisma migrate reset --force --skip-seed` first, replaying the FULL
@@ -513,7 +788,10 @@ output while landing 1b Task 6.
 - Use `onDelete: Cascade` for owned relations (e.g., criteria belong to rubric).
 - JSON payloads use Prisma `Json` (JSONB) columns (criteriaScores et al. migrated in v2); document expected shape in a comment beside the field.
 
-### Recipe (pre-v2, SQLite `db:push` — superseded)
+### Recipe (pre-v2, `db:push` — superseded, do not use)
+
+Preserved because it is what this document said for the whole of v1, and because
+`npm run setup` still ends in `prisma db push`. It is not how a schema change is made here now.
 
 1. **Edit `prisma/schema.prisma`** — add or modify models.
 2. **Push to the dev database**:
@@ -705,32 +983,58 @@ for the header-shape unit tests (nonce present, no `unsafe-inline` in
 
 ## Modifying the Rubric / Evaluation Flow
 
+> **CORRECTION (2026-08-29).** The diagram that stood here was the v1 synchronous pipeline and the
+> 2026-08-29 rewrite of this document missed it. It told you to `POST /api/evaluations/[id]/judge`,
+> which is now an **18-line 410 Gone stub** — `src/app/api/evaluations/[id]/judge/route.ts` says so
+> in its own doc comment ("DEPRECATED — use POST /api/evaluations/[id]/runs instead"), so anyone
+> following the old step [2] got a 410 and no explanation from this guide. It also had the judge
+> route loading "active ModelConfigs" and doing the LLM calls inline, which is the design 1b Task 9
+> replaced with a queue. Redrawn below from `src/lib/run-launch.ts`, `src/lib/queue/topology.ts` and
+> `src/worker/*` at `14d75f7`.
+
 The evaluation pipeline has several linked components. Here's the data flow and where to make changes:
 
 ```
 [1] User creates evaluation (projects/[id]/page.tsx)
      │  POST /api/evaluations { projectId, inputText, rubricId? }
      ▼
-[2] User clicks "Run Models" (evaluate/[id]/page.tsx)
-     │  POST /api/evaluations/[id]/judge
+[2] User launches a run (evaluate/[id]/page.tsx)
+     │  POST /api/evaluations/[id]/runs      ← NOT /judge, which is 410 Gone
      ▼
-[3] Judge route:
-     │  a. Loads evaluation + rubric criteria
-     │  b. Loads active ModelConfigs
-     │  c. For each model → executeJudgment(provider, request, config)
-     │  d. Writes ModelJudgment rows
-     │  e. Updates evaluation.status
+[3] Web tier — src/lib/run-launch.ts (launchSingleRun / launchBulkRunCreates):
+     │  a. requireAuth + requireScope, rate-limited by judgeLimiter (Redis)
+     │  b. requireOwnedActiveEndpoints — the ACTING user must own an active,
+     │     verified ModelEndpoint for every selected JudgeModelVersion. The
+     │     worker re-checks this independently at execution time.
+     │  c. ONE $transaction writes EvaluationRun + RunModelSelections +
+     │     ModelJudgment rows, all `pending`.
+     │  d. The transaction COMMITS, and only THEN does it publish, on
+     │     exchange `judge.direct`: one `judgment.execute` per selected model
+     │     (awaited one at a time, selection capped at 10), or `run.create`
+     │     for a bulk dataset launch. Publishing inside the transaction would
+     │     hold a DB lock across N broker round trips — don't move it back in.
+     │     The first publish failure stops the loop and compensates the run to
+     │     `status: 'error'` rather than leaving it `pending` forever.
      ▼
-[4] Provider (src/lib/llm/provider.ts):
+[4] Worker process — src/worker/main.ts (`npm run worker`, its own container):
+     │  a. run-create-consumer.ts   — `run.create` → fans out judgment.execute
+     │  b. judgment-consumer.ts     — `judgment.execute` → claim → provider call
+     │  c. failures re-queue via `judgment.retry.30s` / `judgment.retry.5m`
+     │     (message TTL + dead-letter back to judgment.execute), then `judge.dlq`
+     │  d. maybeFinalizeRun (src/lib/run-finalizer.ts) closes the run out —
+     │     called from judgment-consumer.ts and from reaper.ts
+     ▼
+[5] Provider (src/lib/llm/provider.ts, called from the WORKER, not the route):
      │  a. buildJudgmentSystemPrompt() — rubric + criteria → system message
      │  b. buildJudgmentUserPrompt()   — input text → user message
      │  c. LLM API call
      │  d. parseJudgmentResponse()     — extract JSON, normalize scores
      ▼
-[5] UI polls GET /api/evaluations/[id] every 2s while status === 'judging'
-     │  Renders ModelJudgmentCard for each completed judgment
+[6] UI catches up two different ways — this is not yet uniform:
+     │  · datasets list/detail subscribe to SSE (`new EventSource('/api/events')`)
+     │  · evaluate/[id]/runs/[runId]/page.tsx still POLLS, setInterval 2500ms
      ▼
-[6] Human evaluator scores (evaluate/[id]/page.tsx → HumanJudgmentForm)
+[7] Human evaluator scores (evaluate/[id]/page.tsx → HumanJudgmentForm)
      │  POST /api/evaluations/[id]/human-judgment
      ▼
 Done.
@@ -808,7 +1112,74 @@ Looking for something to work on? Here are high-impact areas:
 
 ---
 
+## Deployment: production (judgearena.com)
+
+**This section did not exist before 2026-08-29.** Until then the only deployment this guide
+described was the Docker Compose rig below — which is a reference/demo topology and **is not what
+serves `judgearena.com`**. A contributor could read the whole document and come away believing
+`docker compose up -d` was production. It is not.
+
+Production is the homelab Kubernetes cluster. Verified by `kubectl`/`psql` on 2026-08-29:
+
+| | |
+|---|---|
+| URL | `https://judgearena.com` — returns 200 |
+| Namespace | `tenant-public` |
+| Database | CloudNativePG. Pod **`judge-arena-pg-1`**, container `postgres`, database **`judge_arena`** |
+| Migrations applied | 18, 0 unfinished, latest `20260818120000_v2h_human_verification` — the same 18 that `prisma migrate deploy` lays on locally |
+| Image | built by CI as `sha-<12-char commit>` and pushed to Harbor by an ephemeral kaniko `Job` in `tenant-builds` (see `.gitea/workflows/ci.yml`'s `build-push` job) |
+| Deployed at the time of writing | `sha-bee1d121ea7d`, with a promote to the `14d75f7` build in flight |
+| Deployed **now** (re-checked later the same day) | `sha-14d75f7d46de` — the promote landed. `kubectl get deploy -n tenant-public -o jsonpath=…` shows both `judge-arena-web` and `judge-arena-worker` on `harbor.cluster.asethi.com/homelab/judge-arena:sha-14d75f7d46de`, pods ~2m old. The row above is left as the reading it was. |
+
+**Merging to `main` does not deploy.** judge-arena is a **manual-promote** app (`286da59`; it is
+deliberately excluded from the build-lag exporter). A push to `main` builds and publishes an image;
+a deploy is a separate, human tag bump in the homelab repo. Flux being green means Flux is doing
+what it was told — not that production is running your commit.
+
+**Three names that look interchangeable and are not:**
+
+- **`judge-arena-pg`** — the local podman container.
+- **`judge-arena-pg-1`** — the production Kubernetes pod. One character apart from the above. See
+  trap (b) in [Development Setup](#development-setup); never aim a local Prisma command at it.
+- **`judgearena`** — neither of those. It is the user/database name used *only inside*
+  `docker-compose.yml`'s self-contained network. Production's database is `judge_arena`, with the
+  underscore, and so is every local one. Do not copy a connection string from `docker-compose.yml`
+  and expect it to work anywhere outside compose.
+
+### Known open production defect (2026-08-24 →, unfixed)
+
+Worth knowing before you touch the queue layer, because it is a code defect and not a config one:
+**the evaluation pipeline was dead from 2026-08-24T17:55Z until the 2026-08-29 promote rolled the
+worker** — read the dated update at the end of this subsection before acting on the paragraph that
+follows it. At the time it was diagnosed, all five RabbitMQ queues reported
+`consumer_count=0`. A Cozystack v1.6.2 roll recreated `judge-arena-pg-1` at 17:54:57Z; 21 seconds
+later the worker logged `Can't reach database server` / `terminating connection due to administrator
+command` (SQLSTATE `57P01`) and then emitted no log line for five days. The pod was `1/1 Running`
+with 0 restarts throughout, which is exactly why this is easy to miss. Its socket reconnected; **its AMQP consumers
+never re-registered.** A worker rollout restores service, but the underlying defect — the AMQP
+client re-registers consumers only on boot, never on reconnect — is still open in `src/lib/queue/`
+and `src/worker/`. If you fix it, the test for it belongs in `tests/integration/` (real broker), and
+per [Testing Conventions](#testing-conventions) the injection to try is killing the connection out
+from under a live consumer and asserting delivery resumes.
+
+**Update (2026-08-29, later the same day): the outage is over; the defect is not.** Promoting to
+`sha-14d75f7d46de` rolled `judge-arena-worker`, which is exactly the "a worker rollout restores
+service" path above — nobody fixed anything. `kubectl exec -n tenant-public
+rabbitmq-judge-arena-server-0 -c rabbitmq -- rabbitmqctl list_queues name consumers messages` now
+reports `run.create` **1** and `judgment.execute` **1**, both with 0 messages. The other three
+(`judge.dlq`, `judgment.retry.30s`, `judgment.retry.5m`) still read 0 consumers and always should:
+they are the dead-letter and TTL-delay queues from `src/lib/queue/topology.ts`, and nothing
+subscribes to them by design — so "5 queues at zero" was the shape of the outage, but "2 queues at
+one" is the shape of health. **The reconnect defect is still open**, so the next broker or database
+blip reproduces this on a pod that stays `1/1 Running` with 0 restarts.
+
+---
+
 ## Deployment: Docker Compose v2 (Task 16)
+
+> **Scope note (2026-08-29).** This is the self-contained demo/reference topology — it is what
+> `--scale` experiments and the spec's S4 exit gate run on. It is **not** the production
+> deployment; see [Deployment: production](#deployment-production-judgearenacom) above.
 
 `Dockerfile` builds one image with two long-running entrypoints — `server.js`
 (web) and `worker.js` (queue consumer, an esbuild bundle of
@@ -885,17 +1256,52 @@ Two CI files, two different jobs:
 
 | File | Role |
 |---|---|
-| `.gitea/workflows/ci.yml` | **Canonical.** Full pipeline: lint, typecheck, migrations, all 3 test suites (with coverage gates on 2 of them), build, and a stubbed Docker/Harbor stage. Raw shell only (see below). |
-| `.github/workflows/ci.yml` | **Mirror-status only.** Lint + typecheck + unit tests (DB-free) + build. No deploy, no Docker, no DB-backed suites. GitHub is a mirror of this repo, not a release gate — see the repo-shape decision this task's plan documents. |
+| `.gitea/workflows/ci.yml` | **Canonical, and it runs for real.** Self-hosted Gitea (`gitea` remote, `ssh://git@10.10.0.211/trij/judge-arena.git`). Three jobs: `ci`, `db-tests`, `build-push`. |
+| `.github/workflows/ci.yml` | **Demoted mirror.** One job, `mirror-check`: lint + typecheck + unit tests (DB-free) + build. No deploy, no Docker, no DB-backed suites. GitHub is a mirror of this repo, **not a release gate.** |
 
-### Why the Gitea workflow is raw shell, and what "CI green" means today
+### What actually gates a merge
 
-This repo is not hosted on Gitea yet — that migration is Phase 2 of the 1b
-plan. `.gitea/workflows/ci.yml` is authored ahead of that migration, against
-the **real, already-provisioned** homelab Gitea Actions runner
-(`act_runner`, host mode — see `homelab-setup`'s
-`apps/internal/gitea-runner/{deployment.yaml,image/Containerfile}`), which
-has two hard constraints baked into every step of that file:
+`main` lives on the self-hosted Gitea. The three jobs in `.gitea/workflows/ci.yml`, in dependency
+order:
+
+| Job | Runs on | What it does | Can it go red? |
+|---|---|---|---|
+| `ci` | the act_runner host | SSH checkout, install Node 22.23.1, `npm ci`, `npm run db:generate:v1`, `npm run lint`, `npx tsc --noEmit`, the unit suite **with its coverage gate**, `npm run build` | **Yes — this is a real gate.** |
+| `db-tests` | an ephemeral k8s `Job` it spawns in `tenant-builds` | `npm run test:db:coverage && npm run test:integration` (so the DB coverage gate and the 5 seed guards run too) | **Yes — this is a real gate.** |
+| `build-push` | the act_runner host, `needs: [ci, db-tests]` | On a push to `main`: spawns a kaniko `Job` that publishes **both** `sha-<12-char commit>` **and** `:latest` to Harbor (`git rev-parse --short=12`; see the job's "Report the pushed image" step) — which is why the publish guard is re-asserted inside the spawn step rather than trusted from a step `if:`. On a PR: every step no-ops and it reports success in seconds, having published nothing. | Only on a genuine build failure — or if a future edit breaks a publish guard, which it asserts loudly rather than skipping quietly. |
+
+So **`ci` and `db-tests` are the two that fail a change**, and `build-push`'s `needs: [ci,
+db-tests]` is the coupling that keeps a red database layer from ever reaching Harbor as a
+deployable-looking image (judge-arena's deploy is a manual tag bump, so a bad image would just sit
+there looking fine). The GitHub `mirror-check` job gates nothing.
+
+`build-push` deliberately carries **no job-level `if:`** — it used to, and on a PR Gitea never
+transitioned the resulting commit status out of `pending` ("Blocked by required conditions",
+observed on PR #9), which was cosmetic only for as long as no branch protection required these
+checks and would have deadlocked every merge the moment one did. One thing this document cannot
+verify from inside the repo: **whether Gitea branch protection currently marks these checks
+*required*.** There is no Gitea CLI or API token available in this working environment, and the
+workflow's own comment on `build-push` (`.gitea/workflows/ci.yml`, "That was cosmetic only while no
+branch protection required these checks") records that none did when it was written — that is a
+comment on the job, not the file header, and it dates from authoring rather than from today.
+Treat the file's `needs:` chain as the enforced coupling and check the repo settings before assuming
+a red job physically blocks the merge button.
+
+### Why the Gitea workflow is raw shell
+
+> **CORRECTION (2026-08-29).** This subsection used to open *"This repo is not hosted on Gitea yet —
+> that migration is Phase 2 of the 1b plan"*, described the `services:` block as **"authored to spec
+> but not provably executable"**, and concluded that **"`scripts/ci-local.sh` is what 'CI green'
+> means"**. All three statements are now false. The repo IS on Gitea (`git remote -v` lists `gitea`
+> as a real remote and `main` is pushed there — `14d75f7`). The `services:` block was **deleted**,
+> not left decorative, and the DB and integration suites have run for real in CI since 2026-08-12.
+> `scripts/ci-local.sh` is still valuable — it is the fastest local reproduction, and it and the
+> `db-tests` job source the *same* `.env.test` so a failure reproduces identically in both places —
+> but it is no longer the definition of green. The Gitea run is.
+
+The homelab Gitea Actions runner (`act_runner`, host mode — see `homelab-setup`'s
+`apps/internal/gitea-runner/{deployment.yaml,image/Containerfile}`) has two hard constraints baked
+into every step of that file:
 
 1. **No JavaScript actions.** The runner executes workflow steps directly
    on its own Alpine 3.20 host (no per-job container, no Docker socket) —
@@ -912,32 +1318,45 @@ has two hard constraints baked into every step of that file:
    are glibc-only). More importantly, there is **no Docker/Podman/Buildah
    binary on the runner at all** — real OCI builds in this homelab spawn
    ephemeral kaniko `Job`s in the cluster via `kubectl`, never `docker
-   build` inline on the runner. That means the workflow's `services:`
-   block (postgres:16 + redis:7 + rabbitmq:3.13-management) and its
-   `docker compose up --scale` step are **authored to spec but not
-   provably executable on the runner as currently provisioned** — see the
-   long comment at the top of `.gitea/workflows/ci.yml` for the full
-   detail and the two concrete unblockers (Docker-mode runner group, or
-   spawning the 3 services as ephemeral k8s Pods the same way kaniko
-   builds already are).
+   build` inline on the runner.
 
-Because of both of the above, **`scripts/ci-local.sh` is what "CI green"
-means** until this repo actually lands on Gitea and the runner-capability
-gap closes. It runs the exact same shell sequence as the workflow, step
-for step, against already-running local podman services (see
-`docker-compose.yml` / the Development Setup section above for how to
-start postgres/redis/rabbitmq on `localhost`):
+Constraint 2 is why a Docker `services:` block cannot start anything here, and the block that used
+to sit in this file **was deleted rather than left in place** — YAML that cannot execute reads to
+every future maintainer as coverage that exists. What replaced it (Stage 6, 2026-08-12) is the
+`db-tests` job: **one** ephemeral k8s `Job` in `tenant-builds` whose pod carries
+postgres/redis/rabbitmq as **native sidecars** (`initContainers` with `restartPolicy: Always`)
+alongside the Node test container. Containers in a pod share a network namespace, so `localhost:5432`
+works exactly as `services:` intended, and `.env.test` — which already points at `localhost` — is
+the single source of connection strings both locally and in CI. `restartPolicy: Always` is
+load-bearing, not decoration: a `Job` pod only reaches `Complete` once every entry under
+`containers:` terminates, and postgres never exits, so listing the services there would hang every
+run to `activeDeadlineSeconds` and report `DeadlineExceeded` whether or not the tests passed. Native
+sidecars are excluded from that check.
+
+One more piece of history that is baked into the workflow as an assertion: this file spent its whole
+early life failing at `Setup Node` and therefore **ran nothing** — the runner image had no
+`libstdc++`, so the musl Node binary died at exec with relocation errors (fixed 2026-08-11, runner
+image `0.4.1-kubectl-5`, homelab divergence entry 61). The unit-test step now carries an explicit
+"the suite actually ran" assertion, because a red setup step and a red test step look identical in
+the run list and mean opposite things about coverage.
+
+**`scripts/ci-local.sh` is the local reproduction of that pipeline**, and the fastest way to
+exercise the DB and integration suites before pushing:
 
 ```bash
 bash scripts/ci-local.sh
 ```
 
-It fails fast with a clear message if a service isn't reachable, and
-prints `CI-local: ALL GREEN` only if lint, typecheck, `prisma migrate
-deploy`, the v1-scratch-DB seed, all 3 test suites (with their coverage
-gates), and `npm run build` all pass — in that order, matching
-`.gitea/workflows/ci.yml` exactly (minus the Docker/Kaniko stage, which is
-CI-only and stubbed there regardless).
+It runs, in 11 steps against the local podman services from
+[Development Setup](#development-setup), the UNION of what the two Gitea jobs run — the workflow
+splits that sequence across `ci` (host) and `db-tests` (spawned pod), and this script does the whole
+thing in one process, which is why it is a reproduction rather than a literal copy of either job.
+Its own header and its per-step "expect N passed" banners were written at Task 17 and still quote
+361/281/73; the current numbers are in [Running the Tests](#running-the-tests).
+It fails fast with a clear message if a service isn't reachable, and prints `CI-local: ALL GREEN` only if lint, typecheck, `prisma migrate deploy`,
+the v1-scratch-DB push, all 3 test suites (with their two coverage gates) and `npm run build` all
+pass — in that order, minus the kaniko stage, which is CI-only. It is not a substitute for the
+Gitea run; it is how you find out before the Gitea run does.
 
 ### Two non-obvious prerequisites this task's authoring surfaced
 
@@ -958,12 +1377,15 @@ authoring is what surfaced them:
   immediately after `npm ci`, before lint/typecheck.
 
 - **The v1 scratch database needs its own seed step.** `tests/importer/
-  *.db.test.ts` (part of the 281-test `test:db` suite) needs a second
+  *.db.test.ts` (part of the `test:db` suite — 281 tests when this was
+  written at Task 17, 641 at `14d75f7`) needs a second
   database (`V1_DATABASE_URL`, seeded with the frozen v1 schema) — `prisma
   migrate reset` (which `npm run test:db` runs internally) only touches
   `DATABASE_URL`/the v2 schema, per `.env.test`'s own comment. The fix is
-  `npm run db:push:v1` (a new script,
-  `prisma db push --schema prisma/v1/schema.v1.prisma`), run once before
+  `npm run db:push:v1` (a new script — as it stands in `package.json`
+  today, `sh -c 'set -a; . ./.env.test; set +a; npx prisma db push --schema
+  prisma/v1/schema.v1.prisma --skip-generate'`, the same env-sourcing
+  wrapper described in trap (a) above), run once before
   `test:db`. `prisma db push` auto-creates the target database if it
   doesn't exist yet (verified at authoring time by dropping and
   recreating it), and no-ops cleanly (`already in sync`) on repeat runs —
@@ -974,7 +1396,10 @@ authoring is what surfaced them:
 `npm run test:coverage` (`vitest run --coverage`, `vitest.config.ts`) and
 `npm run test:db:coverage` (same, `vitest.db.config.ts`) both gate on
 `coverage.thresholds` — a real regression in either run fails the command
-(and therefore `scripts/ci-local.sh` / the Gitea `ci` job). `test:integration`
+(and therefore `scripts/ci-local.sh`; in Gitea it is the `ci` job that carries
+the unit gate and the `db-tests` job that carries the DB one, not `ci` for
+both — see [What actually gates a merge](#what-actually-gates-a-merge)).
+`test:integration`
 does **not** carry a coverage gate (see "What isn't measured" below).
 
 **Why 3 separate numbers, not one.** The 3 suites (unit/db/integration)
@@ -999,7 +1424,7 @@ providers/llm, auth-guard, importer, realtime):
 |---|---|---|
 | `test:coverage` (unit, DB-free) | `src/lib/**`, `src/worker/**`, `scripts/importer/**` | `src/lib/llm/**` (heavily unit-tested, ~94% stmts/lines), `src/lib/queue/connection.ts` (unit-tested), `src/lib/realtime/ownership.ts` (unit-tested), `src/worker/dispatch-failure.ts` (unit-tested). Everything else in those 3 directories needs a live service and shows near-0% here — expected, not a regression. |
 | `test:db:coverage` (`vitest.db.config.ts`) | same include | `src/lib/auth-guard.ts` (~86%, exercised transitively through real API route handlers under a live DB — `tests/db/access-matrix.test.ts`) and `scripts/importer/**` (~96%, the `*.db.test.ts` files that need both the v1 scratch DB and the v2 test DB). |
-| `test:integration` (no coverage gate) | n/a | `src/worker/{claim,main,reaper,run-create-consumer,judgment-consumer}.ts`, `src/lib/queue/{publish,topology}.ts`, and most of `src/lib/realtime/**` (`bus.ts`, `redis-bus.ts`, `factory.ts`, `in-memory-bus.ts`, `events.ts`) run almost exclusively here (RabbitMQ consumers, SSE over real Redis). Pass/fail-verified by `test:integration`'s 73 tests, but genuinely **not coverage-gated** — see below. |
+| `test:integration` (no coverage gate) | n/a | `src/worker/{claim,main,reaper,run-create-consumer,judgment-consumer}.ts`, `src/lib/queue/{publish,topology}.ts`, and most of `src/lib/realtime/**` (`bus.ts`, `redis-bus.ts`, `factory.ts`, `in-memory-bus.ts`, `events.ts`) run almost exclusively here (RabbitMQ consumers, SSE over real Redis). Pass/fail-verified by `test:integration` (73 tests at Task 17, 80 at `14d75f7`), but genuinely **not coverage-gated** — see below. |
 
 Per-directory thresholds (vitest's glob-keyed `coverage.thresholds` — see
 `vitest.config.ts` / `vitest.db.config.ts`) are set **at or a hair below**
@@ -1014,7 +1439,7 @@ per-directory glob covers) — both checks run independently.
 **What isn't measured, honestly.** `test:integration` has no `coverage`
 block at all. The subsystems that live almost entirely there (worker
 consumers, queue topology/publish, most of the realtime bus) are
-correctness-verified by that suite's 73 tests but have no regression gate
+correctness-verified by that suite (73 tests at Task 17, 80 at `14d75f7`) but have no regression gate
 on *how much* of their code those tests actually exercise. Adding a third
 coverage config was in scope for this task's "pragmatic" framing but
 judged not worth the added CI time/complexity for suites whose
@@ -1039,8 +1464,20 @@ this becomes tedious.
 ## Pull Request Guidelines
 
 1. **One concern per PR.** A new provider, a new page, or a bug fix — not all three.
-2. **Run the build** before pushing: `npm run build`
-3. **Match existing conventions** — if you're unsure, look at a similar file.
-4. **Keep UI components dependency-free** — no new `npm install` for UI primitives.
-5. **Update types** — if you change the schema or API shape, update `src/types/index.ts`.
-6. **Update this guide** — if your change introduces a new pattern that future contributors should follow, document it here.
+2. **Run the gates before pushing**, not just the build. In CI order:
+   `npm run lint` → `npx tsc --noEmit` → `npm run test:coverage` → `npm run test:db:coverage` →
+   `npm run test:integration` → `npm run build`, or `bash scripts/ci-local.sh` to get all of them in
+   one command. The last three need the podman services from
+   [Development Setup](#development-setup) — a connection error there is a missing container, not a
+   broken change.
+3. **Inject against your own new tests** before you call them done, and treat a still-green suite as
+   a finding — see [Testing Conventions](#testing-conventions).
+4. **If you touched a rendering surface, walk the runbook and add rows to it.**
+   `docs/runbooks/studio-manual-verification.md`; nothing that renders is unit-testable here.
+5. **Match existing conventions** — if you're unsure, look at a similar file.
+6. **Keep UI components dependency-free** — no new `npm install` for UI primitives.
+7. **Update types** — if you change the schema or API shape, update `src/types/index.ts`.
+8. **Update this guide** — if your change introduces a new pattern that future contributors should
+   follow, document it here. And if you find a claim in here that is wrong, **say that it was wrong
+   and what it said** rather than silently overwriting it; the `CORRECTION` notes above are this
+   repo's convention, and they are the reason the same mistake isn't made twice.

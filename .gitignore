@@ -28,8 +28,14 @@ yarn-debug.log*
 yarn-error.log*
 
 # Local env files
-.claude
-.github
+#
+# NOTE: `.github` was listed here until 2026-08-29 and did not belong — it is a
+# CI directory, not a local env file. `.github/workflows/ci.yml` was already
+# tracked so it was unaffected, but any NEW file added there was silently
+# unstageable, which is exactly the trap someone restoring the GitHub mirror
+# workflow would have hit. `.claude` is narrowed to its worktrees dir for the
+# same reason: agent worktrees are disposable, agent config is not.
+.claude/worktrees/
 .env
 .env.local
 .env.development.local

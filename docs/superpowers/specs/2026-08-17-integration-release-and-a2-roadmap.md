@@ -1,6 +1,8 @@
 # Integration, release, end-to-end verification, and A2 — roadmap
 
-**Date:** 2026-08-17 · **Status:** roadmap, not a plan. Each numbered item becomes its own plan.
+**Date:** 2026-08-17 · **Last verified against production: 2026-08-30** (the 2026-08-29 pass, plus
+the promote and worker rollout that landed the next morning) · **Status:** roadmap, not a plan.
+Each numbered item becomes its own plan.
 
 > **UPDATE 2026-08-17, later the same day: M1, M2 and M3 are DONE.** The A1/A1.5 PR (#13) merged as
 > `bee1d12`; production was promoted from `sha-70fce84bee11` to **`sha-bee1d121ea7d`**; and all five
@@ -12,6 +14,49 @@
 > **2 datasets and 0 golden sets** — there is still nothing to annotate, so the argument below is
 > unchanged in substance: A2 waits on real labels, and real labels wait on someone doing the work.
 > What changed is that the deploy is no longer in the way.
+
+> **UPDATE 2026-08-29 — a whole branch landed that no document had ever mentioned, and the position
+> on this roadmap moved twice.**
+>
+> **The correction first, because it is the more important half.** Until today, **no document on any
+> ref said that `feat/assignment-ui-and-random-subset` existed.** It was written, tested, pushed and
+> left unmerged, and this roadmap's critical path — both ASCII diagrams, and the "YOU ARE HERE"
+> marker in each of them — was drawn as though it were not there. That is a documentation failure
+> rather than a code one, and it is the reason the "YOU ARE HERE" marker in every version of this
+> file before this one was wrong.
+>
+> `0309a7e` (the feature) and `ded6e1f` (the fixes) merged into `gitea/main` as merge commit
+> **`14d75f7`**. What shipped:
+>
+> - the **assignment panel** on `/golden-sets/<id>` — *Assign to me* / *Revoke*, and a shortcut
+>   straight into the studio;
+> - **`toPublicOwner`** on the assignments API: the annotator projects to `{id, name}`, **never the
+>   email**, and `null` for a deleted account;
+> - **server-side random subset selection** (`randomCount` / `randomPercent`) in
+>   `src/lib/sample-selection.ts` — the client sends the ask, the server draws. **No migration.**
+>   Nothing in this merge touches the schema; production stays at 18.
+>
+> `ded6e1f` additionally fixed `handleRevoke`'s missing `catch`; a `randomPercent` DB test that
+> tombstoned nothing and therefore could not discriminate a live-count implementation from a
+> raw-count one (it would have passed against the bug it existed to catch); and three stale doc
+> blocks. It added `docs/superpowers/pr-assignment-ui-body.md` and studio-runbook rows 13–18.
+>
+> **Gates at the merge point**, all run locally against podman Postgres/Redis/RabbitMQ:
+> **lint 0, tsc 0, 594 unit / 43 files, 641 db / 42 files, 80 integration / 10 files, both coverage
+> gates 0, build 0.** The baseline this table records at `bee1d12` was **578 / 633 / 80** — so the
+> merge added 16 unit and 8 DB tests and moved neither gate.
+>
+> **A browser walk happened**, 2026-08-29: rows 14, 16, 17 and 18 of the studio runbook, in a real
+> browser. Row 14 is the one worth quoting, because it is the only evidence that random is not a
+> prefix — over one 620-row dataset at N=30, **First** gave `0..29`, and **Random** gave
+> `14, 61, 62, 76, 90, 121, 152, 162, 165, 171, 177, 179, 252, 256, 261, 288, 309, 328, 343, 363,
+> 366, 428, 439, 441, 450, 479, 496, 508, 519, 529`. Rows 13 and 15 were **not** walked; the runbook
+> says so rather than implying a full pass.
+>
+> **The two moves on the path.** M4 is **done** (its outcome is recorded below, with a correction to
+> what it was previously reported to have created). E1 is **started and stalled** — two golden sets
+> and two assignments exist, **zero labels do**, and sign-in is being refused for a reason nobody had
+> diagnosed. Read E1 before doing anything else.
 
 **Supersedes nothing.** It sits between `2026-08-10-judge-training-engine-roadmap.md` (which says
 *what* A2 is) and `2026-08-17-a2-calibration-and-reporting-decisions.md` (which says what about A2
@@ -32,13 +77,33 @@ broker safety. A1 is now done. So the natural reading is "one gate left".
 > by its own decisions document — until real label data exists, because the shape of that data is an
 > input to the calibration design rather than an assumption to be made ahead of it.
 
+**UPDATE 2026-08-29 — the headline sentence survives intact; its parenthetical does not.** Two
+golden sets were created in production on **2026-08-19 13:44**: *"JudgeBench pairwise — full"* (620
+items) and *"JudgeBenchSample — 30 random"* (30 items), with **650 `GoldenItem`** and **1300
+`GoldenCandidate`** rows behind them, both self-assigned to the owner within the same minute. So
+"the zero golden sets did not change" was true when written and is not true now, and every
+present-tense repetition of it further down this document has been corrected in place.
+
+**What did not move is the gate.** `GoldenLabel` is still **`0`** — checked directly against
+database `judge_arena` on pod `judge-arena-pg-1` (note the name: it is `judge_arena`, not
+`judgearena`). A1 has still produced no labels, ten days after someone sat down to produce some. A2
+still cannot be specced. What changed is the *diagnosis*, and therefore the next action: see **E1**.
+
 So the chain is longer than it looks:
 
 ```
 merge  →  promote  →  migrate  →  seed  →  annotate for real  →  A2 can be SPECCED
-  ✅         ✅          ✅        ← YOU ARE HERE              ↘
-                                                    T5  →  A2 can be RUN
-                                                    (still open)
+  ✅         ✅          ✅         ✅       ↑                             ↘
+                                       YOU ARE HERE — inside the step,       T5  →  A2 can be RUN
+                                       not before it                        (still open)
+
+   "annotate for real" is E1, and E1 is half-executed:
+      1. sign in via Authentik ....... ⛔ REFUSED NOW — OIDC `sub` mismatch (it passed once, back
+                                          on 2026-08-07; nothing since). THIS is the blocker, see E1.
+      2. create a golden set ......... ✅ 2 sets, 2026-08-19 13:44
+      3. assign it to yourself ....... ✅ 2 whole-set assignments, same minute, never revoked
+      4. label every item ............ ⛔ GoldenLabel = 0, ten days later
+      5. read the agreement panel .... ⛔ the panel has no UI at all (E1 sub-blocker 1)
 ```
 
 The merge and deploy work below is therefore **not preliminary chores before the interesting
@@ -58,36 +123,48 @@ in fact already moved.
 
 | Thing | State | How it was checked |
 |---|---|---|
-| `gitea/main` | **`bee1d12`** — carries A0+L1+L2+R1+R3+A1+A1.5+R4+R5 | PR **#13** merged 2026-08-17 as a merge commit |
+| `gitea/main` | ~~**`bee1d12`**~~ → **`14d75f7`** — `bee1d12` carried A0+L1+L2+R1+R3+A1+A1.5+R4+R5; `14d75f7` adds the assignment UI and random subset selection | PR **#13** merged 2026-08-17 as a merge commit; `0309a7e`+`ded6e1f` merged 2026-08-29 as `14d75f7` |
 | Why a merge commit, not a squash | The docs cite specific SHAs **44 times across 8 files**; a squash or rebase would dangle every one | `grep` before merging |
 | `feat/a0-golden-set-substrate` | `4e7028f`→`8397c4a`, now merged | Safe to delete |
-| Suites at the merge point | 578 unit / 633 db / 80 integration; `tsc` + `lint` exit 0 | full run |
+| Suites at the merge point | ~~578 unit / 633 db / 80 integration~~ → **594 unit / 43 files, 641 db / 42 files, 80 integration / 10 files**; `tsc` + `lint` exit 0, both coverage gates 0, build 0 | full run at `bee1d12` (2026-08-17) and again at the `14d75f7` merge point (2026-08-29), local podman Postgres/Redis/RabbitMQ |
 | Migrations on `main` | **18**, through `20260818120000_v2h_human_verification` | `git ls-tree` |
+| Migrations on `main` after `14d75f7` | **still 18** — the assignment-UI merge carries no migration | `git ls-tree`, 2026-08-29 |
 | CI for `bee1d12` | `ci`, `db-tests`, `build-push` all **success**; kaniko Job `Complete` | Gitea API + `kubectl get jobs -n tenant-builds` |
 
 ### Production
 
 | Thing | State | Consequence |
 |---|---|---|
-| Running image | ~~`sha-70fce84bee11`~~ → **`sha-bee1d121ea7d`** | Promoted 2026-08-17. Was a **preflight**-branch build predating A0 entirely. |
+| Running image | ~~`sha-70fce84bee11`~~ → ~~`sha-bee1d121ea7d`~~ → **`sha-14d75f7d46de`** | Promoted 2026-08-17. Was a **preflight**-branch build predating A0 entirely. **2026-08-29: still `sha-bee1d121ea7d`** — the `14d75f7` build had not been promoted when *that* line was written, so the assignment panel was on `main` but not on the site. **Promoted 2026-08-30 01:47Z**, as homelab `f28be67` (PR #936, `apps/public/judge-arena/helmrelease.yaml` line 195): `kubectl get deploy -n tenant-public judge-arena-web -o jsonpath='{…image}'` now returns `sha-14d75f7d46de`, both pods Ready with 0 restarts. The panel is on the site. |
 | Prod DB migrations | ~~13~~ → **18**, latest `20260818120000_v2h_human_verification` | All five applied, **0 unfinished** (no P3009 wedge). `v2h`'s CHECK and both partial unique indexes verified present in the live DB. |
-| Prod catalog | **2 datasets, 0 golden sets, 2 users** | **STILL TRUE.** The substrate now exists; nothing has been created in it. This is what M4 fixes. |
-| Flux | In sync — `main@sha1:47e0603…`, HelmRelease Ready | Reconciled after the promote. |
-| Promote model | **Manual** — judge-arena is excluded from the build-lag exporter (`286da59`) | No automatic promotion will ever happen. Someone must do it — and did, on 2026-08-17. |
+| Prod catalog | **2 datasets, ~~0 golden sets~~, 2 users** | **True on 2026-08-17; the golden-set half is not true now.** ~~The substrate now exists; nothing has been created in it. This is what M4 fixes.~~ **2026-08-29:** 2 datasets, **620 `DatasetSample`**, **2 `PromptTemplate`**, 2 users, and **2 golden sets / 650 `GoldenItem` / 1300 `GoldenCandidate` / 2 `GoldenAssignment` / 0 `GoldenLabel`**. Also `0` for `GoldenItemRevision`, `CalibrationRun`, `DeveloperApiKey` and `HumanJudgment`. |
+| Flux | ~~In sync — `main@sha1:47e0603…`~~ → **`0.3.1+f28be677baf0`**, HelmRelease Ready | Reconciled after the 2026-08-17 promote, and again after the 2026-08-30 one: `kubectl get helmrelease -n tenant-public judge-arena -o jsonpath='{.status.lastAttemptedRevision}'`. |
+| Promote model | **Manual** — judge-arena is excluded from the build-lag exporter (`286da59`) | No automatic promotion will ever happen. Someone must do it — and did, on 2026-08-17 and again on 2026-08-30. |
+| Site | `judgearena.com` returns **200** | Re-checked 2026-08-29 — ~~serving the *pre-merge* build~~ — and again on 2026-08-30, now serving `sha-14d75f7d46de`. See the running-image row. |
+| Worker pipeline | ~~**DEAD since 2026-08-24T17:55Z**~~ → **rolled 2026-08-30 01:47Z** | For five days all five queues reported `consumer_count=0` while the pod sat `1/1 Running` with **0 restarts**, which is why nothing alerted. The `14d75f7` promote rolled the Deployment and the consumers re-registered. **The code defect that caused it is still open** — see **E0**. |
 
 ### The T5 gate, re-measured rather than quoted
 
+Re-measured 2026-08-29. The 2026-08-17/18 readings are kept as **superseded readings**, not deleted:
+a single measurement is a claim about one moment, and the pair of them is the only evidence anyone
+has that this number is stable rather than drifting.
+
 | Measurement | Value | Verdict |
 |---|---|---|
-| RabbitMQ memory vs watermark | **0.1407 GB / 0.2577 GB = 54.6%** at idle | Unchanged from the 54.5% recorded on 2026-08-17. The gate is real and stable, not a spike. |
-| `VMServiceScrape` covering RabbitMQ | **zero** | Still nothing. |
-| `VMRule` covering RabbitMQ | **zero** | Still nothing. |
-| Free disk vs low watermark | 3.94 GB free / 2.0 GB watermark | Under 2 GB of headroom — thinner than the memory margin, and not currently alerted either. |
-| Queue depths | all `0`, `judge.dlq` `0` | Idle. The 54.6% is the floor, not a backlog. |
+| RabbitMQ memory vs watermark | **0.1197 GB / 0.2577 GB = 46%** at idle (2026-08-29) | The gate is real. It is also **lower than it was**, which matters only as reassurance: the shape holds, the margin is not closing on its own. |
+| ~~RabbitMQ memory vs watermark~~ | ~~**0.1407 GB / 0.2577 GB = 54.6%** at idle~~ (2026-08-17/18) | **SUPERSEDED READING**, kept deliberately. It was correct when taken, and any document still quoting **54.6%** is quoting this row, not a current measurement. |
+| `VMServiceScrape` covering RabbitMQ | **zero** | Still nothing, 2026-08-29. |
+| `VMRule` covering RabbitMQ | **zero** | Still nothing, 2026-08-29. |
+| RabbitMQ samples ever stored | **none** | VictoriaMetrics returns `seriesFetched: "0"` for `{__name__=~"rabbitmq_.*"}`. Not one RabbitMQ sample has *ever* been written in this cluster — this is stronger than "no scrape exists" and it is the number to quote. |
+| Free disk vs low watermark | **3.9393 GB** free / **2.0 GB** watermark (2026-08-29) | Under 2 GB of headroom — thinner than the memory margin, and not alerted either. Was quoted as 3.94 GB on 2026-08-17; the two agree. |
+| Queue depths | all `0`, `judge.dlq` `0`; **no alarms** | Idle. The 46% is the floor, not a backlog. |
+| Queue **consumers** | ~~**`consumer_count=0` on all five queues**~~ (2026-08-24 → 2026-08-30) → **`run.create` 1, `judgment.execute` 1** | Through that window it was not idle-by-design, it was idle because **the worker was dead**: depth `0` meant nothing was being *published*, not that anything was being drained. Restored by the 2026-08-30 promote's rollout (`rabbitmqctl list_queues name messages consumers`). `judge.dlq` and both `judgment.retry.*` queues report `0` consumers **by design** — see E0's exit. |
 
-**Read that table as one sentence:** the broker sits at over half its publisher-blocking watermark
-while completely doing nothing, and no metric, scrape or alert in this cluster would tell anyone if
-that changed.
+**Read that table as one sentence:** the broker sits at nearly half its publisher-blocking watermark
+while completely doing nothing, no metric, scrape or alert in this cluster would tell anyone if that
+changed — and the one thing that *did* change, a worker that had stopped consuming five days
+earlier, was found by hand rather than by an alert and fixed by a rollout nobody scheduled for that
+purpose, which is the entire argument for T5 in a single incident.
 
 ---
 
@@ -170,9 +247,16 @@ them. That is convenient and it is also where this can go wrong, so it gets its 
 - **Take a backup first and prove it restores.** WAL archiving and a rehearsed restore are done
   (rebaseline T2, 6/6 exit gate verified) — so use them rather than trusting they work.
 - **`v2h` drops and recreates a partial unique index** on `GoldenLabel`. Prod's `GoldenLabel` is
-  empty (0 golden sets ⇒ 0 labels), so the CHECK and the index rebuild are free. **Verify that
-  before applying**, not after: `SELECT count(*) FROM "GoldenLabel";` must be 0, or the
-  `score_xor_preference` CHECK will refuse to apply.
+  empty, so the CHECK and the index rebuild are free. **Verify that before applying**, not after:
+  `SELECT count(*) FROM "GoldenLabel";` must be 0, or the `score_xor_preference` CHECK will refuse
+  to apply.
+  **CORRECTION 2026-08-29 — the premise this bullet used to give is now false; the conclusion and
+  the check are not.** It read "*0 golden sets ⇒ 0 labels*". Production has held **2 golden sets and
+  650 golden items since 2026-08-19**, and `GoldenLabel` is nevertheless **still 0**. Golden sets do
+  not imply labels; annotators do. So keep this bullet exactly as it is operationally — but keep it
+  as an *instruction to run the count*, never as an inference from the set count. The day someone
+  finally labels an item, the inference stops holding while the sentence still reads true, which is
+  the worst failure shape a pre-flight check has.
 - **Know the P3009 recovery in advance.** The migrations-job template documents it: a failed
   migration leaves the row unfinished and *every* later run aborts, and the fix is
   `prisma migrate resolve --rolled-back <name>`. Read `kubectl logs job/judge-arena-migrate`
@@ -195,18 +279,70 @@ attaches during `PodInitializing` errors out rather than waiting. Start a follow
 reconcile, not after. The outcome was fully recoverable from `_prisma_migrations` and
 `pg_constraint` — but had a migration failed, there would have been less to work with.
 
-### M4 · Seed the catalog — ⬅ NEXT
+### M4 · Seed the catalog — ✅ DONE 2026-08-18
 
-Prod has 2 datasets and 0 golden sets. Seeding is deliberately manual (`70fce84`'s own commit
-message records the in-cluster invocation and that it is manual on purpose).
+*(As written 2026-08-17: prod had 2 datasets and 0 golden sets.)* Seeding is deliberately manual
+(`70fce84`'s own commit message records the in-cluster invocation and that it is manual on purpose).
 
 **Exit:** at least one dataset with enough samples to build a golden set worth annotating.
+
+**Outcome.** Met. Production carries **2 datasets / 620 `DatasetSample` / 2 `PromptTemplate`**, and
+on 2026-08-19 someone built two golden sets out of them (620 items and 30 items). The exit gate was
+the *seeding*, and the seeding is not what is stuck — see E1.
+
+**CORRECTION 2026-08-29 — this item was previously reported as having created two `PromptTemplate`
+rows "that had never existed in production (`v1-legacy`, `v1-pairwise`)". That is half false.**
+Only **`v1-pairwise`** was new; it was created **2026-08-18 14:07:31.432**, by the seeder, in the
+window this item describes. **`v1-legacy` has existed since 2026-08-12 17:42:35.664** — six days
+earlier, and nothing to do with M4. The proof is in the row's own primary key: Prisma cuids embed
+their creation timestamp in base36 in characters 2–9, and `cmsqdn8un00006p142rkwzuw1` decodes to
+2026-08-12. A row deleted and re-created by the seeder would carry a **new** cuid with an 08-18
+timestamp, so this also rules out the "it was replaced" reading without needing an audit trail.
+
+**The conclusion the claim was made to support survives, on `v1-pairwise` alone:**
+
+> **PROMOTING DOES NOT SEED.** A promote ships an image. It does not run `seed.js`, and a
+> `PromptTemplate` the code has depended on since 2026-08-12 can still be absent from production on
+> 2026-08-18. One genuinely-missing row is enough to establish that; two were never needed.
+
+**The operational rule that was derived from it is FALSE and is replaced, not softened.** It said:
+*"run the seeder and READ ITS OUTPUT — a `Created` line means production was behind."* It does not,
+and cannot:
+
+- `seedPromptTemplates` logs `✓ Created prompt template: …` **unconditionally**, outside any branch,
+  after an `upsert` (`prisma/seed-prompt-templates.ts:120` and `:135`). It prints the same line
+  whether it inserted a row or updated one that was already there.
+- `seed-judgebench.ts:307` likewise opens with `✓ Created dataset: …` unconditionally.
+- **No log line anywhere in the seeder is gated on an actual insert.** The only text carrying a real
+  delta is the parenthetical `${created.count} new samples` on that same judgebench line.
+- And `seed-core.ts` — the file the old rule named — never prints the word `Created` at all.
+
+**Replacement rule: do not read the log, read the table.** Query before and after —
+`select name, version, "createdAt" from "PromptTemplate";` — and compare. Failing that, read *only*
+the fragments that report a measured delta (`N new samples`), and treat every `✓ Created …` line as
+decoration.
+
+**Note for anyone tempted to fix this in code:** `PromptTemplate` has **no `updatedAt` column**, so
+the obvious fix — branch the log on `createdAt === updatedAt` — is not implementable against this
+schema. The implementable options are a `findUnique` before the upsert, a `count()` either side, or
+a `create` with a `P2002` catch.
+
+**Related, and worth fixing while in there:** `prisma/seed.ts:29` claims the seeder "is idempotent,
+so a second run is safe and reports zero new rows." Safe, yes. *Reports* zero new rows — true for
+judgebench, **false for prompt templates**, for exactly the reason above.
 
 ### M5 · Close the loop on the branch topology
 
 `main` (local) is badly stale and `gitea/feat/a1-tombstone-overlay` is behind and finished. Once M1
 lands, delete or retire the dead branches so the next person does not have to work out which of six
 is current.
+
+**UPDATE 2026-08-29 — this item stopped being tidiness and became the cause of a real defect.**
+`feat/assignment-ui-and-random-subset` sat finished, pushed and unmerged for days while **no
+document on any ref recorded that it existed**, which is how this roadmap came to describe a
+critical path that was missing a whole shipped feature. It is now merged as `14d75f7` and is safe to
+delete along with the others. The lesson is the cheap half of this item: a finished branch that no
+document names is indistinguishable from work nobody did.
 
 ---
 
@@ -221,16 +357,172 @@ The A1.5 studio checklist (`docs/runbooks/studio-manual-verification.md`, 12 row
 2026-08-17) is the model to copy: it exists precisely because that layer cannot be unit-tested.
 **These items extend it from "the studio renders" to "the product works".**
 
-### E1 · The first real annotation session
+**UPDATE 2026-08-29:** that checklist is now **18 rows**. `ded6e1f` added rows 13–18 for the
+all-samples / first-N / random-N / random-% selection modes and the assignment panel, and rows
+**14, 16, 17 and 18** were walked in a real browser the same day. Rows **13 and 15 were not walked**,
+and the runbook records that rather than implying a clean sweep.
+
+### E0 · Restart the worker — ✅ ROLLED 2026-08-30 · ⛔ THE CODE DEFECT IS STILL LIVE
+
+**Found 2026-08-29. It is not hypothetical, and until this line it was in no document.**
+judge-arena's evaluation pipeline consumed nothing from **2026-08-24T17:55Z** until **2026-08-30
+01:47Z** — five days and seven hours. Through all of it, all five queues reported
+**`consumer_count=0`**.
+
+What happened, in order:
+
+- The **Cozystack v1.6.2** roll recreated `judge-arena-pg-1` at **17:54:57Z**.
+- **21 seconds later** the worker logged a burst of `Can't reach database server` and
+  `terminating connection due to administrator command` (**SQLSTATE 57P01**).
+- It then emitted **no log line at all** until the 2026-08-30 rollout — five days of silence
+  from a process that was, by every signal anyone had, running.
+
+**Why nothing caught it, which is the part worth carrying forward.** The pod was `1/1 Running` with
+**0 restarts** the whole time — it never crashed, so no restart alert could fire. Its Postgres socket reconnected,
+so no database alert could fire. The one thing that did *not* recover is the AMQP **consumer
+registration**, and a broker with no consumers is exactly what this cluster cannot see: T5 item 1
+does not exist yet, so queue depth `0` with zero consumers is indistinguishable from a healthy idle
+broker. Every signal that was being watched read green through five days of a dead pipeline.
+
+**Restore, operationally:** roll the worker Deployment. Consumers register on boot, so a rollout is
+sufficient and immediate.
+
+> **UPDATE 2026-08-30 01:47Z — the operational half is done, and it was done by accident.** The
+> promote of the `14d75f7` build rolled *both* Deployments; the new worker pod logged
+> `judge worker started` at `01:47:29.450Z` and re-registered on boot.
+> `rabbitmqctl list_queues name messages consumers`, run on `rabbitmq-judge-arena-server-0`, now
+> returns `run.create 0 1` and `judgment.execute 0 1`. Note what it was *not*: the promote commit
+> (`f28be67`) is about an image tag and a drifted pin, not about this incident. The recovery is
+> therefore not evidence that anything is watching. **The code half below is untouched:
+> the next broker or database blip parks the worker in exactly the same state.**
+
+**Fix, in code — not yet written:** the AMQP client re-registers consumers **only on boot, never on
+reconnect**. Any broker or database disruption that outlives the connection parks the worker
+permanently in a Running-but-deaf state, with no crash and no log. Note this is **repo code**, so
+unlike T5 it belongs to the release track rather than the cluster track — it is the one exception to
+"T5 is cluster work and needs no code from this repo" below.
+
+**Exit:** `consumer_count > 0` on **`judgment.execute` and `run.create`** — *and* a reconnect no
+longer needs a human. Fixing only the first half leaves the same defect armed for the next node roll.
+
+**CORRECTION 2026-08-30 — this exit gate first read "`consumer_count > 0` on all five queues",
+which can never pass.** The worker registers exactly two consumers, both at boot
+(`src/worker/main.ts:134` and `:144`); `judge.dlq` and the two `judgment.retry.*` queues are
+dead-letter/TTL queues with **no consumer by design**, as T5 item 2 says of the DLQ further down.
+A gate that cannot be met is worse than no gate: whoever ran it would have read three permanent
+zeroes as an unfixed incident.
+
+### E1 · The first real annotation session — ⬅ **YOU ARE HERE.** Started 2026-08-19, stalled
 
 Not a smoke test — a *use*. One person, one golden set, a real sitting.
 
 1. Sign in through Authentik (not credentials — prod uses OIDC, and the invite-claim path is the
    one that has never been exercised end to end with a golden set attached).
-2. Create a golden set from a seeded dataset.
-3. Assign it to yourself.
-4. Label every item through `/golden-sets/<id>/label`.
-5. Read the agreement panel.
+   → **⛔ REFUSED — now, not always.** Steps 2 and 3 below are the work of a session that was
+   authenticated *as the owning row* on 2026-08-19, so this step has been passed at least once;
+   what is refused is every **fresh** sign-in since. This is the blocker. See below; it is an
+   identity mismatch, not a missing surface, and it is not fixed by anything in this repo.
+2. Create a golden set from a seeded dataset. → **✅ done 2026-08-19 13:44**, twice:
+   *"JudgeBench pairwise — full"* (620 items) and *"JudgeBenchSample — 30 random"* (30 items).
+3. Assign it to yourself. → **✅ done**, both at 13:44:04.995 and 13:44:05.07 — **whole-set**
+   assignments (`goldenItemId` NULL), `completedAt` NULL, `revokedAt` NULL. Still open today.
+4. Label every item through `/golden-sets/<id>/label`. → **⛔ nothing. `GoldenLabel` = 0**, ten days
+   on.
+5. Read the agreement panel. → **⛔ there is no agreement panel.** Sub-blocker 1 below.
+
+**CORRECTION 2026-08-29 — this item has been read, in this document and in the ones that point at
+it, as "nobody has taken it". That diagnosis is wrong, and it points at the wrong next action.**
+E1 is **partially executed**. Somebody sat down on 2026-08-19, got through steps 2 and 3, and
+produced **zero labels**. "Find someone to do the annotation" is therefore not the next action;
+**unblocking sign-in is.** The exit gate below is genuinely unmet — `GoldenLabel` is `0` and A2 is
+still blocked, so the framing of this whole roadmap survives — but the reason it is unmet changed
+completely.
+
+#### The blocker: an OIDC identity mismatch, not a missing feature
+
+The judge-arena `User` row that **owns both golden sets and holds both assignments** is
+`cmsj951c30000881a4l63sx4b` (`trijeet@protonmail.com`, `role=admin`), and its
+`oidcSubject` is **`26f57dc2-77b6-455b-a939-d897dbdad6ee`**.
+
+Authentik has **two accounts sharing that email**:
+
+| Authentik account | uuid | judge-arena sees it as |
+|---|---|---|
+| `akadmin` | `26f57dc2-77b6-455b-a939-d897dbdad6ee` | **the owner** of both sets |
+| `trijeet` | `e8b087cc-b38b-492a-bbb3-b34bdfb50c16` | **nothing at all** |
+
+The judge-arena OAuth2 provider's `sub_mode` is **`user_uuid`**, so the `sub` claim *is* the uuid.
+The 2026-08-07 invite-claim was performed while signed in as **`akadmin`**; every attempt since has
+been as **`trijeet`**, whose `sub` matches no row. `resolveOidcUser` therefore falls through to
+branch 3, and `ALLOW_OIDC_AUTOPROVISION` is **absent from the deployment env**, so the sign-in is
+refused rather than autoprovisioned.
+
+**The evidence is a clean pairwise match across two systems.** Three Authentik
+`authorize_application | trijeet` events — **2026-08-18 21:33:35**, **2026-08-19 13:41:28** and
+**13:41:32** — are each followed **within a second** by a judge_arena `AuditLog` row
+`user.login.failed {"method":"oidc","reason":"no_match_autoprovision_disabled"}`. Note the last two
+timestamps: they sit three minutes before the golden sets were created at 13:44. Note also, because
+it is its own finding: **no successful `user.login` has ever been written to that audit table.**
+
+**One caveat on that sentence, because it is easy to over-read.** It does not mean nobody has ever
+held a session. The table carries exactly one successful authentication of any kind — a
+`user.invite_claimed` at **2026-08-07 19:21:17**, by this same user id — and the two sets and two
+assignments made on 2026-08-19 13:44 belong to that row, so something *was* authenticated as it
+that afternoon. Two properties stop the table from settling how: `audit()` is fire-and-forget and
+swallows its own write failures (`src/lib/audit.ts`), and the session is a 24-hour rolling JWT
+(`src/lib/auth.ts:58`) — so neither "the session was still alive" nor "a sign-in succeeded and its
+audit row was lost" can be excluded. What *is* established is the part that matters: **no sign-in
+can be obtained today as `trijeet`**, and the three refusals above are what happens when it is
+tried.
+
+**Credentials are not a fallback.** That row's `passwordHash` is the sentinel `!oidc-managed`, and
+`findCredentialsUserByEmail` deliberately excludes `!`-prefixed hashes. There is no password to try.
+
+**Fastest path, no mutation of anything:** sign in to Authentik as **`akadmin`** — private window,
+or log out of the `trijeet` SSO session first. That `sub` matches the owning row, and `akadmin` is
+in `users-primary`, which is the single enabled policy binding on the judge-arena application. This
+unblocks step 4 today.
+
+**Durable fix — one row, and it is an admin's decision, not a developer's:**
+
+```sql
+UPDATE "User" SET "oidcSubject" = 'e8b087cc-b38b-492a-bbb3-b34bdfb50c16'
+ WHERE id = 'cmsj951c30000881a4l63sx4b';
+```
+
+or consolidate the two duplicate Authentik accounts so the email has one identity behind it.
+
+> **DO NOT issue a fresh CLI invite, and DO NOT enable `ALLOW_OIDC_AUTOPROVISION`.** Both are the
+> obvious-looking fix and both make it worse: each mints a **second, empty `User` row** that owns
+> nothing and holds no assignment, and that row gets a hard **403** from the queue on both existing
+> sets. The annotator would then be signed in, looking at a working product, and unable to reach the
+> 650 items — a much harder failure to diagnose than the current clean refusal. The email partial
+> unique index (`UNIQUE (email) WHERE passwordHash NOT LIKE '!%'`) does **not** prevent this,
+> because the OIDC-managed row's hash is `!`-prefixed and so is not in the index.
+
+#### Two sub-blockers behind it — E1 *and* E2 both walk straight into these
+
+Neither is fixed by the `14d75f7` merge, and neither is visible until sign-in works, which is why
+they are written down here rather than discovered at 650 items in.
+
+1. **E1 step 5 has no UI. `GET /api/golden-sets/[id]/agreement` exists and works — nothing calls
+   it.** No file under `src/app/**` or `src/components/**` ever fetches that route. The only
+   "Agreement" anywhere in the interface is a hard-coded, permanently-empty stage on the progression
+   rail (`src/app/golden-sets/[id]/label/page.tsx:87`), which is deliberate — the rail shows the
+   stage as empty rather than omitting it — but it is not the panel. **This is a missing surface,
+   not a bug.** Workaround for E1: from the signed-in tab, navigate straight to
+   `/api/golden-sets/<id>/agreement` and read the JSON.
+2. **Every `GoldenCandidate` in production has `label IS NULL` — 1300 of 1300 — and the studio's
+   fallback silently renames the sides.** `toCandidate()` hard-codes `label: null`
+   (`src/lib/golden-sets.ts:180`), so the studio renders
+   `candidate.label ?? 'Option ' + (position + 1)`
+   (`src/app/golden-sets/[id]/label/page.tsx:201`) → **"Option 1" / "Option 2"** — while the verdict
+   control asks for **`A>B` / `tie` / `B>A`**. **Nothing on the screen says that Option 1 is A.**
+   The mapping *is* deterministic in code — `toCandidate(0, responseA)`, `toCandidate(1, responseB)`,
+   and the queue orders by `position asc` — but the annotator cannot see that, and an annotator who
+   guesses the other way round **silently inverts every preference in the session**. There is no
+   error, no warning, and no way to tell afterwards. Whoever does E1 must be told "Option 1 is A"
+   before they start, and the real fix is to populate the label or to relabel the control.
 
 **What to expect and not mistake for a bug:** with one account the inter-annotator number is
 `insufficient-annotators` — null with a reason, never `0`. `testRetest` is the only reliability
@@ -238,6 +530,8 @@ signal that produces a value. This is the single most likely thing to be misread
 is why it is written into three documents and now a fourth.
 
 **Exit:** real `GoldenLabel` rows exist in production, produced through the UI by a human.
+**Unmet as of 2026-08-29** — `SELECT count(*) FROM "GoldenLabel";` returns `0` against `judge_arena`
+on `judge-arena-pg-1`. Steps 2 and 3 being done does not move this gate one row.
 
 ### E2 · The provenance and blinding claims, in production
 
@@ -284,21 +578,52 @@ The hard ordering inside T5 is its own: **observability strictly first.** You ca
 throughput toward a publisher-blocking watermark you cannot observe, and the watermark is computed
 from a chart-injected override that GitOps cannot raise. The app-side cap is the only lever.
 
-1. `VMServiceScrape` on `:15692` for all three brokers. Everything else depends on it.
+**Status, 2026-08-29: T5 is roughly 5% done and item 1 is untouched.** Not "in progress" — nothing
+has been built. The measure is not opinion: VictoriaMetrics returns `seriesFetched: "0"` for
+`{__name__=~"rabbitmq_.*"}`, so **not one RabbitMQ sample has ever been stored in this cluster**, and
+there are zero `VMServiceScrape`s and zero `VMRule`s matching `rabbit` or `judge`.
+
+1. **`VMServiceScrape` on `:15692` for both brokers.** Everything else depends on it.
+   **CORRECTION 2026-08-29 — this item used to say "all three brokers". There are TWO.**
+   `apps/managed/rabbitmq-shared.yaml` was deleted in `6f1a460` and Flux pruned `tenant-root/bus`;
+   scoping this to three will produce one scrape target that does not exist.
+   **The second correction is better news: every prerequisite already works, so this is a
+   config-only change.** `rabbitmq_prometheus 4.2.4` is enabled, both Services publish
+   `prometheus 15692`, and the endpoint answers with **2818 lines** when curled. Cross-namespace
+   scraping is already permitted by the existing `allow-external-communication`
+   `CiliumNetworkPolicy` — **no NetworkPolicy work is needed**, which earlier plans assumed there
+   would be. What is missing is the `VMServiceScrape` object and nothing else.
 2. Alerts, each with a stated self-clearing condition: disk-watermark alarm, memory-watermark alarm,
    publishers blocked, `judgment.execute` backlog sustained. **`judge.dlq` depth ships at `info`,
    not warning** — it has zero consumers by design, so at warning severity it is a ratchet that only
    an operator can clear. Put the purge command in the annotation.
-3. Cap bulk enqueue: samples per run, a request body size limit (**there is none anywhere today**),
-   and `judgeLimiter` on the local-dataset path.
+   **NEW FACT 2026-08-29, and it changes how item 2 must be built: RabbitMQ's default `/metrics`
+   carries no queue label at all.** It is aggregate-only. So the `judgment.execute` **backlog** and
+   `judge.dlq` **depth** alerts named above are **impossible** from the endpoint item 1 scrapes —
+   the series simply do not exist per-queue. They require a **second scrape** of
+   `/metrics/detailed?family=queue_coarse_metrics`, and on that endpoint **only the leader node
+   emits a depth sample**, so the query has to tolerate the other nodes reporting nothing rather
+   than treating their absence as zero. Plan item 1 as *two* scrapes, not one; discovering this
+   after the alert rules are written means rewriting them.
+   **Add a fifth alert: consumers at zero on a queue that should have them.** E0 is the proof that
+   this is not theoretical — a worker sat Running, 0 restarts, consuming nothing for five days, and
+   every existing signal read green. Depth `0` with `consumer_count 0` is not idle, it is deaf.
+3. Cap bulk enqueue: samples per run and `judgeLimiter` on the local-dataset path.
+   **CORRECTION 2026-08-29 — this item used to demand "a request body size limit (there is none
+   anywhere today)". There is one.** The ingress enforces **`50m`**, nginx's 1 MB default having
+   been deliberately raised fifty-fold. So the work here is *reviewing whether 50m is the right
+   number for the bulk-enqueue path*, and adding an application-level cap if it is not — not
+   introducing a first limit. Writing this item as "there is no limit" would send someone to add a
+   second one at a different layer, in ignorance of the first.
 4. `judge.dlq` TTL and max-length; truncate the persist-failure envelopes, which currently carry
    full untruncated LLM responses.
 5. Rubric size caps — unbounded today, and every criterion enters every judgment prompt.
 6. Move the two judgment retry queues from single-node classic to quorum.
 
 **Add one item this measurement surfaced:** the **disk** watermark has under 2 GB of headroom
-(3.94 GB free against a 2.0 GB low watermark) and is as unmonitored as memory. T5's alert list
-already includes a disk-watermark alarm; this is the note that it is not hypothetical.
+(**3.9393 GB** free against a 2.0 GB low watermark, re-measured 2026-08-29) and is as unmonitored as
+memory. T5's alert list already includes a disk-watermark alarm; this is the note that it is not
+hypothetical.
 
 **Exit:** RabbitMQ metrics exist, alerts fire and self-clear, and a burst is capped by the
 application rather than by the broker blocking publishers.
@@ -369,20 +694,35 @@ effect.
 ## The critical path, in one place
 
 ```
-M1 merge ─► M2 promote ─► M3 migrate ─► M4 seed ─┬─► E1 first real session
-   ✅           ✅            ✅          ⬅ NEXT   │      └─► E2 provenance + blinding in prod
-                                                  └─► E3 second annotator ──► real kappa
+M1 merge ─► M2 promote ─► M3 migrate ─► M4 seed ─┬─► E1 first real session ─► E2 provenance+blinding
+   ✅           ✅            ✅           ✅    │      ⬅ YOU ARE HERE — inside E1, not before it
+ (+ 14d75f7 merged 2026-08-29,                   │
+    promoted to prod 2026-08-30)                 └─► E3 second annotator ──► real kappa
                                                                     │
-                                     T5 (observability first) ──────┼──► E4 load shape
-                                          (still open)              │
+   E1, opened up — it is half-executed:                             │
+     1  sign in .......... ⛔ OIDC sub mismatch  ◄── FIX THIS NEXT  │
+     2  create a set ..... ✅ 2026-08-19 13:44   (2 sets, 650 items)│
+     3  self-assign ...... ✅ 2026-08-19 13:44   (2 assignments)    │
+     4  label the items .. ⛔ GoldenLabel = 0    ← the gate         │
+     5  agreement panel .. ⛔ no UI exists at all                   │
+                                                                    │
+   E0  dead 08-24, rolled 08-30 ─► fix AMQP reconnect: STILL OPEN   │
+                                                                    │
+                       T5 (observability first, ~5% done) ──────────┼──► E4 load shape
+                                                                    │
                                                                     └──► A2.0 spec ─► A2.1 ─► A2.2 ─► A2.3
 ```
 
-**Two independent tracks.** T5 is cluster work and needs no code from this repo; M1–M4 is release
-work. They can proceed in parallel, and A2 needs both.
+**Two independent tracks.** T5 is cluster work and needs no code from this repo; M1–M5 is release
+work, and **M1–M4 are now all done** (M5 is branch bookkeeping and is the only one still open).
+They can proceed in parallel, and A2 needs both. **One exception, added 2026-08-29:** E0 presents as a broker problem but its real fix — AMQP consumers that re-register on
+reconnect — is **repo code**, so it lands on the release side of a split that otherwise puts
+everything broker-shaped on the cluster side. Do not let it fall between the two tracks; that is
+exactly how it went five days unnoticed.
 
 **The one ordering that must not be violated:** T5's observability lands before any concurrency
-increase, and before E4. Everything else has slack.
+increase, and before E4. Everything else has slack. **E0 is outside that ordering and outside the
+slack** — a dead pipeline is not a sequencing question, and rolling the worker costs a minute.
 
 ---
 
