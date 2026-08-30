@@ -124,6 +124,38 @@ RUN npx esbuild prisma/seed.ts \
       --tsconfig=tsconfig.json \
       --log-level=warning
 
+# Calibration runner (A2.1). Same treatment and the same reason as the two
+# above: the runner ships no TypeScript toolchain, so scripts/calibration/run.ts
+# cannot execute in-cluster.
+#
+# It needs to run IN the cluster specifically because the only thing that can
+# reach both the production database and a judge endpoint is a pod — a
+# workstation has no route to judge-arena-pg-rw.tenant-public. Bundling it is
+# what makes "score this judge against that golden set" an operation someone
+# can actually perform against production, rather than one that only works
+# against a local copy.
+# Judge registration CLI (A2.1). A leaderboard means many judges, and adding
+# them one browser form at a time does not scale — while the fields that are
+# easiest to mistype (the exact served model id, the backend, the endpoint's
+# /v1 suffix) are the ones that fail LATE, at judgment time.
+RUN npx esbuild scripts/admin/add-judge-entry.ts \
+      --bundle \
+      --platform=node \
+      --target=node22 \
+      --outfile=.next/standalone/add-judge.js \
+      --external:@prisma/client \
+      --tsconfig=tsconfig.json \
+      --log-level=warning
+
+RUN npx esbuild scripts/calibration/run.ts \
+      --bundle \
+      --platform=node \
+      --target=node22 \
+      --outfile=.next/standalone/calibration-run.js \
+      --external:@prisma/client \
+      --tsconfig=tsconfig.json \
+      --log-level=warning
+
 # ─── Stage 2b: Prisma CLI (isolated) ──────────────────────────────────────
 # A clean, self-consistent install of JUST the Prisma CLI, at a prefix that
 # cannot collide with the app's node_modules. The runner needs `migrate
