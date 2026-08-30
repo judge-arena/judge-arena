@@ -127,6 +127,18 @@ export interface ProviderCallOptions {
   jsonSchema?: Record<string, unknown>;
 }
 
+/**
+ * Which wire key a model's thinking actually arrived on — RECORDED, not
+ * inferred at read time, because the four spellings are not interchangeable
+ * and a corpus that flattens them can't tell "this model didn't reason" from
+ * "this model reasons on a key we didn't look at". `'reasoning_content'` is
+ * the vLLM/Qwen/DeepSeek-style sibling of `content`, `'reasoning'` is the
+ * OpenRouter-normalized spelling, `'think_tag'` is an in-band
+ * `<think>...</think>` block inside `content`, and `'anthropic_thinking'` is
+ * a `thinking` CONTENT BLOCK in a Messages API response.
+ */
+export type ReasoningSource = 'reasoning_content' | 'reasoning' | 'think_tag' | 'anthropic_thinking';
+
 /** Raw call metadata, captured before any judge-mode score parsing. */
 export interface ProviderCallResult {
   text: string;
@@ -150,6 +162,50 @@ export interface ProviderCallResult {
    * + a logged warning) when the response didn't conform despite the
    * request-side guidance. */
   structuredOutputRequested?: boolean;
+
+  // ── A2.1 v2i: what the model actually thought ────────────────────────────
+  /**
+   * The model's raw thinking channel, VERBATIM and SEPARATE from `text`.
+   *
+   * Deliberately not folded into `text` (and, downstream, deliberately not
+   * folded into `ModelJudgment.reasoning`): the two carry different content.
+   * Proven live against the target judge — one call returned 762 characters
+   * of deliberation here and the literal string `{"verdict": "A"}` in
+   * `text`. Merging them is unrecoverable once written, and `reasoning` is
+   * already triple-booked (parsed pointwise rationale, parsed pairwise
+   * rationale, and the entire generated answer in respond mode).
+   */
+  reasoningText?: string;
+  /** `usage.completion_tokens_details.reasoning_tokens` — the share of
+   * `outputTokens` the model spent thinking rather than answering. This is
+   * the number that explains an empty `text` at a healthy finish reason. */
+  reasoningTokens?: number;
+  /** Which key `reasoningText` came off — see `ReasoningSource`. */
+  reasoningSource?: ReasoningSource;
+
+  // ── A2.1 v2i: what the model was actually given ──────────────────────────
+  /**
+   * The rendered prompts this call actually sent, captured by
+   * `registry.ts`'s `execute()` (the one chokepoint every backend call
+   * funnels through) so all three persist paths get them identically.
+   *
+   * STORED, NOT RECONSTRUCTED, and that is not redundancy: `PATCH
+   * /api/rubrics/[id]` deleteMany's a rubric's criteria and recreates them
+   * on the SAME rubric id with NO version bump, and the pairwise system
+   * prompt embeds those criteria verbatim — so a single rubric edit
+   * silently rewrites what "re-render from promptTemplateId + the item"
+   * would produce for every historical judgment, with nothing in the row
+   * recording that it moved.
+   */
+  systemPrompt?: string;
+  /** The rendered user prompt, capped at 32 KiB — see `promptTruncated`. */
+  userPrompt?: string;
+  /** sha256 (hex) of the FULL, PRE-truncation user prompt, so a capped copy
+   * still identifies the exact bytes the model was given. */
+  userPromptSha256?: string;
+  /** True when `userPrompt` above is a clipped copy. Never means the
+   * RESPONSE was truncated — that's `finishReason`. */
+  promptTruncated?: boolean;
 }
 
 export function buildRespondSystemPrompt(): string {

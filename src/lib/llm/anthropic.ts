@@ -29,8 +29,22 @@ export async function callAnthropic(opts: ProviderCallOptions): Promise<Provider
 
   const latencyMs = Date.now() - startTime;
 
-  const firstBlock = response.content[0];
-  const text = firstBlock && firstBlock.type === 'text' ? firstBlock.text : '';
+  // THE BUG THIS FIXES: this used to read `response.content[0]` and treat
+  // anything that wasn't a `text` block as "no answer". A Messages response
+  // with extended thinking enabled puts a `thinking` block FIRST, so
+  // content[0] is the deliberation and the real answer sits at [1] — every
+  // judgment would have come back with empty text alongside a perfectly
+  // healthy `stop_reason: 'end_turn'`, i.e. a silent, undiagnosable failure
+  // with nothing in the row explaining it. Latent today only because no
+  // `thinking` param is sent yet; `caps.reasoningToggle` is already true for
+  // this descriptor, so the first caller to flip it would have hit this.
+  const textBlock = response.content.find((block) => block.type === 'text');
+  const text = textBlock ? textBlock.text : '';
+
+  // `redacted_thinking` blocks are deliberately NOT captured: their `data`
+  // is an encrypted blob, not the model's reasoning, and storing it as
+  // `reasoningContent` would put ciphertext in a field a human reads.
+  const thinkingBlock = response.content.find((block) => block.type === 'thinking');
 
   return {
     text,
@@ -38,6 +52,8 @@ export async function callAnthropic(opts: ProviderCallOptions): Promise<Provider
     finishReason: response.stop_reason ?? undefined,
     inputTokens: response.usage?.input_tokens,
     outputTokens: response.usage?.output_tokens,
+    reasoningText: thinkingBlock?.thinking,
+    reasoningSource: thinkingBlock ? 'anthropic_thinking' : undefined,
     latencyMs,
   };
 }

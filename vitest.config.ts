@@ -155,20 +155,49 @@ export default defineConfig({
       // that file is now 94.68 / 98.14 / 94.44 / 94.68, its only uncovered
       // lines being `nextGoldenItemIndex`, which needs a live DB. No file
       // under any per-glob entry was touched by this wave.
+      // ── RE-BASELINE 2026-08-30: THE ARTIFACT BECAME A MEASUREMENT ──────
+      // The three globs below (queue / worker / realtime) moved because A2.1's
+      // unit tests started importing `@/worker/judgment-consumer` for
+      // `commonSuccessUpdateData` and `markJudgmentError`, which transitively
+      // loads the queue publish path and the realtime bus. THIS IS THE EXACT
+      // TRANSITION THE PROSE ABOVE PREDICTED and asked not to be punished:
+      // "the first real unit test that imports src/worker/reaper.ts would
+      // surface its genuine branch coverage ... so the config would punish
+      // exactly the change it exists to encourage."
+      //
+      // So the old functions/branches floors on these three are RETIRED rather
+      // than defended. They were pinned to the not-imported artifact (a file
+      // nothing loaded reported 100/100 over its zero executed functions); the
+      // numbers below are the first ones that mean what they say. Note
+      // STATEMENTS ROSE on all three — worker 3.40 -> 17.49, realtime
+      // 1.55 -> 13.61, queue 47.30 -> 48.07 — which is the actual direction of
+      // travel; only the function ratio fell, because the denominator finally
+      // includes the functions that were always there.
+      //
+      // Measured (stmts / branch / funcs / lines), floors at -3pp per policy:
+      //   all-files          45.26 / 89.84 / 65.32 / 45.26   (aggregate, -2pp)
+      //   src/lib/queue/**   48.07 / 83.87 / 50.00 / 48.07
+      //   src/worker/**      17.49 / 90.38 / 56.25 / 17.49
+      //   src/lib/realtime/**13.61 / 87.50 / 20.00 / 13.61
+      // The aggregate `functions` floor moves 65 -> 63 for the same reason the
+      // policy exists: 65.32 against a floor of 65 is a rounding tripwire, not
+      // a gate, and the predictable response to one is someone editing the
+      // number until it goes green — which is what this block is instead doing
+      // deliberately, once, with the reason written down.
       thresholds: {
-        lines: 35,
-        functions: 65,
-        branches: 82,
-        statements: 35,
+        lines: 43,
+        functions: 63,
+        branches: 87,
+        statements: 43,
         // queue/connection.ts is unit-tested (tests/lib/queue-connection.test.ts);
         // publish.ts/topology.ts are exercised by test:integration/test:db
         // instead. Actual: 47.30/84.37/73.33/47.30.
-        'src/lib/queue/**': { statements: 44, functions: 70, branches: 81, lines: 44 },
+        'src/lib/queue/**': { statements: 45, functions: 47, branches: 80, lines: 45 },
         // Only dispatch-failure.ts is unit-tested; claim/main/reaper/*-consumer
         // are integration-only (tests/integration/**). Actual: 3.40/100/100/3.40
         // — where those two 100s are the not-imported artifact, not coverage,
         // which is why functions/branches are NOT set to actual-minus-3.
-        'src/worker/**': { statements: 0, functions: 80, branches: 80, lines: 0 },
+        'src/worker/**': { statements: 14, functions: 53, branches: 87, lines: 14 },
         // Provider backends + resilience/registry/render are heavily unit-tested.
         // Actual: 94.62/86.72/97.64/94.62 — the GLOB total, backends/** included.
         'src/lib/llm/**': { statements: 91, functions: 94, branches: 83, lines: 91 },
@@ -187,7 +216,7 @@ export default defineConfig({
         // events/types are exercised by tests/integration/{realtime,sse-lifecycle}.test.ts.
         // Actual: 1.55/80/71.42/1.55 — the 80/71.42 are mostly the same
         // not-imported artifact as src/worker/**.
-        'src/lib/realtime/**': { statements: 0, functions: 68, branches: 77, lines: 0 },
+        'src/lib/realtime/**': { statements: 10, functions: 17, branches: 84, lines: 10 },
       },
     },
     setupFiles: ['./tests/setup.ts'],

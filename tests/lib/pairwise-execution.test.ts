@@ -32,9 +32,11 @@ vi.mock('@/lib/llm/breaker-redis', () => ({ getBreaker: getBreakerMock }));
 
 const { execute, getDescriptor, prepareJudgmentCall, executePairwiseCall } = await import('@/lib/llm/registry');
 const { executePairwise } = await import('@/lib/llm');
+const { commonSuccessUpdateData } = await import('@/worker/judgment-consumer');
 const { JUDGMENT_JSON_SCHEMA, JUDGMENT_JSON_SCHEMA_NAME, PAIRWISE_JUDGMENT_JSON_SCHEMA } = await import(
   '@/lib/llm/judgment-schema'
 );
+import { createHash } from 'crypto';
 import type { RunProviderJudgmentInput } from '@/lib/llm';
 
 function okChatResponse(content: string, model = 'served-model') {
@@ -201,6 +203,64 @@ describe('registry: executePairwiseCall', () => {
         submission: { inputText: 'q', candidates: [pairwiseInput.submission.candidates![0]] },
       })
     ).toThrow(/exactly 2 candidates are required/);
+  });
+});
+
+/**
+ * A2.1 v2i: the rendered prompt is not reconstructible after the fact.
+ * `PATCH /api/rubrics/[id]` deleteMany's a rubric's criteria and recreates
+ * them on the SAME id with no version bump, and the pairwise system prompt
+ * embeds those criteria verbatim — so one rubric edit silently rewrites the
+ * "reconstruction" of every historical pairwise judgment, with nothing
+ * recording that it moved. It has to be stored at judgment time or it is
+ * gone.
+ */
+describe('pairwise: the rendered prompt reaches the persist path', () => {
+  it('carries systemPrompt/userPrompt/userPromptSha256 out of executePairwiseCall', async () => {
+    openaiCreateMock.mockResolvedValue(okChatResponse('{"verdict":"A","reasoning":"r"}'));
+
+    const prepared = prepareJudgmentCall(pairwiseInput);
+    const result = await executePairwiseCall(prepared);
+
+    expect(result.systemPrompt).toBe(prepared.systemPrompt);
+    expect(result.userPrompt).toBe(prepared.userPrompt);
+    expect(result.userPromptSha256).toBe(createHash('sha256').update(prepared.userPrompt, 'utf8').digest('hex'));
+    expect(result.promptTruncated).toBe(false);
+    // The criteria the system prompt embeds are exactly what a rubric edit
+    // would silently rewrite underneath a reconstruction.
+    expect(result.systemPrompt).toContain('Accuracy');
+  });
+
+  it('and those fields survive the shared persist mapping into the ModelJudgment row', async () => {
+    openaiCreateMock.mockResolvedValue({
+      model: 'served-model',
+      choices: [
+        {
+          message: { content: '{"verdict":"A","reasoning":"r"}', reasoning_content: 'deliberation' },
+          finish_reason: 'stop',
+        },
+      ],
+      usage: { prompt_tokens: 11, completion_tokens: 7, completion_tokens_details: { reasoning_tokens: 4 } },
+    });
+
+    const prepared = prepareJudgmentCall(pairwiseInput);
+    const result = await executePairwiseCall(prepared);
+
+    // The ONE shared mapping all three persist paths (judge/respond/pairwise)
+    // funnel through — asserted here so a new field can't reach one path and
+    // silently miss the other two.
+    const data = commonSuccessUpdateData(result, { samplingDefaults: null, reasoningMode: 'none' } as never);
+
+    expect(data.systemPrompt).toBe(prepared.systemPrompt);
+    expect(data.userPrompt).toBe(prepared.userPrompt);
+    expect(data.userPromptSha256).toBe(createHash('sha256').update(prepared.userPrompt, 'utf8').digest('hex'));
+    expect(data.promptTruncated).toBe(false);
+    // The thinking channel is persisted SEPARATELY from `reasoning`, which
+    // for a pairwise judgment already holds the parsed rationale.
+    expect(data.reasoningContent).toBe('deliberation');
+    expect(data.reasoningSource).toBe('reasoning_content');
+    expect(data.reasoningTokens).toBe(4);
+    expect(result.reasoning).toBe('r');
   });
 });
 

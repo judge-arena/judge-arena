@@ -45,7 +45,7 @@
  */
 
 import OpenAI from 'openai';
-import type { ProviderCallOptions, ProviderCallResult } from './provider';
+import type { ProviderCallOptions, ProviderCallResult, ReasoningSource } from './provider';
 import { JUDGMENT_JSON_SCHEMA, JUDGMENT_JSON_SCHEMA_NAME } from './judgment-schema';
 
 /** Default structured-output request shape for a descriptor with no
@@ -122,6 +122,70 @@ export function normalizeOpenAIBaseUrl(raw: string | undefined | null): string |
   return SCHEME_AND_AUTHORITY_ONLY.test(withoutSuffix) ? `${withoutSuffix}/v1` : withoutSuffix;
 }
 
+/**
+ * An in-band `<think>...</think>` block. The closing tag is OPTIONAL (`|$`)
+ * on purpose: a model cut off at `max_tokens` mid-thought emits an opening
+ * tag and never closes it, and that half-thought is exactly the evidence
+ * that explains the truncation — requiring `</think>` would discard the
+ * reasoning precisely in the case someone is trying to diagnose.
+ */
+const THINK_TAG = /<think>([\s\S]*?)(?:<\/think>|$)/;
+
+/** A wire value only counts as a reasoning channel if it is a non-blank
+ * STRING. A blank/absent/mistyped key falls through to the next candidate
+ * rather than winning: recording `reasoningSource: 'reasoning_content'`
+ * alongside an empty `reasoningContent` would assert that the model
+ * deliberated on that key when it did not, and would mask a real
+ * `<think>` block sitting in `content`. */
+function nonBlankString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+}
+
+/**
+ * Pull the model's thinking out of a chat-completion message, in ONE place
+ * with a FIXED, documented key order:
+ *
+ *   1. `reasoning_content` — vLLM/SGLang/Qwen/DeepSeek's sibling of
+ *      `content`. Verified live against the target judge: the message keys
+ *      on the wire were exactly `['role', 'content', 'reasoning_content']`.
+ *   2. `reasoning` — the OpenRouter-normalized spelling.
+ *   3. a `<think>...</think>` block inside `content` — models that have no
+ *      separate channel at all and emit their thinking in band.
+ *   4. none.
+ *
+ * WHY A CAST AND NOT `any`: neither key is declared on the SDK's
+ * `ChatCompletionMessage` type, but the object is `JSON.parse`d straight off
+ * the wire, so the keys are really there at runtime. A narrow
+ * `Record<string, unknown>` view keeps every read type-checked (each value
+ * is `unknown` until `nonBlankString` proves it a string); `any` would
+ * silently accept `message.reasoning_content.trim()` on a number and throw
+ * at runtime instead.
+ *
+ * WHY IT DOESN'T STRIP THE `<think>` BLOCK FROM `content`: `text` is
+ * persisted verbatim as `ModelJudgment.rawResponse`, which the schema
+ * documents as "full LLM response, never truncated". Extraction here is
+ * additive and lossless — nothing is moved out of the answer channel.
+ */
+export function extractReasoningChannel(
+  message: unknown
+): { text: string; source: ReasoningSource } | undefined {
+  if (typeof message !== 'object' || message === null) return undefined;
+  const record = message as Record<string, unknown>;
+
+  const reasoningContent = nonBlankString(record.reasoning_content);
+  if (reasoningContent) return { text: reasoningContent, source: 'reasoning_content' };
+
+  const reasoning = nonBlankString(record.reasoning);
+  if (reasoning) return { text: reasoning, source: 'reasoning' };
+
+  const content = nonBlankString(record.content);
+  const tagged = content ? THINK_TAG.exec(content) : null;
+  const thought = tagged ? nonBlankString(tagged[1].trim()) : undefined;
+  if (thought) return { text: thought, source: 'think_tag' };
+
+  return undefined;
+}
+
 export async function callOpenAICompatible(opts: ProviderCallOptions): Promise<ProviderCallResult> {
   // Resolved ONCE and reused for the descriptor's `headers()` hook below, so
   // a hook that ever keys off the endpoint sees the URL this call actually
@@ -186,6 +250,7 @@ export async function callOpenAICompatible(opts: ProviderCallOptions): Promise<P
 
   const choice = response.choices[0];
   const text = choice?.message?.content || '';
+  const reasoning = extractReasoningChannel(choice?.message);
 
   return {
     text,
@@ -193,6 +258,11 @@ export async function callOpenAICompatible(opts: ProviderCallOptions): Promise<P
     finishReason: choice?.finish_reason ?? undefined,
     inputTokens: response.usage?.prompt_tokens,
     outputTokens: response.usage?.completion_tokens,
+    // Already typed by the installed SDK (`CompletionUsage.CompletionTokensDetails`)
+    // — no cast needed, unlike the message keys above.
+    reasoningTokens: response.usage?.completion_tokens_details?.reasoning_tokens,
+    reasoningText: reasoning?.text,
+    reasoningSource: reasoning?.source,
     latencyMs,
     structuredOutputRequested,
   };

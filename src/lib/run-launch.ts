@@ -71,6 +71,19 @@
  * swallow the rest. Returns `{ accepted, failed }` so the route can respond
  * `202` with a per-item status instead of either an all-or-nothing error or
  * a `runsQueued` count that silently under-reports failures.
+ *
+ * ── A2.1: calibration reuses this module, it does not fork it ──────────────
+ * `src/lib/calibration/launch.ts` launches a calibration as N ordinary
+ * pairwise runs through `launchSingleRun` — no second execution path, no
+ * calibration-specific consumer. It needs exactly three things from a run
+ * that an ordinary launch does not set, and all three are plain optional
+ * params here: `goldenItemId` and `calibrationRunId` (the v2i link columns,
+ * NULL on every ordinary run) and `deadlineAt` (a batch-aware override of the
+ * per-run deadline formula — read that param's doc, the default silently
+ * loses the tail of a batch to `src/worker/reaper.ts`). It deliberately does
+ * NOT go through `launchBulkRunCreates`: `src/worker/run-create-consumer.ts`
+ * refuses any protocol but `'pointwise'`, because `RunCreateMsg` carries no
+ * candidate set to expand a pairwise comparison from.
  */
 import type { Prisma, RunProtocol } from '@prisma/client';
 import { prisma } from '@/lib/db';
@@ -79,11 +92,18 @@ import { logger } from '@/lib/logger';
 import { publishJudgmentExecute, publishRunCreate, type JudgmentExecuteMsg, type RunCreateMsg } from '@/lib/queue/publish';
 import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
-const EVALUATION_MODEL_TIMEOUT_MS = Number(process.env.EVALUATION_MODEL_TIMEOUT_MS ?? '120000');
+/** Exported for `src/lib/calibration/launch.ts`, which computes the SAME
+ * deadline formula over a different denominator (see `deadlineAt` on
+ * `LaunchSingleRunParams`). Exported rather than re-declared there so a batch
+ * launcher and the run it launches cannot disagree about the per-model budget
+ * — a third copy of this literal is a third thing to keep in step with
+ * `EVALUATION_MODEL_TIMEOUT_MS`'s env override. */
+export const EVALUATION_MODEL_TIMEOUT_MS = Number(process.env.EVALUATION_MODEL_TIMEOUT_MS ?? '120000');
 /** Same slack literal as src/worker/run-create-consumer.ts's
  * `DEADLINE_SLACK_MS` — covers DB round trips, queue publish latency, and
- * finalization overhead on top of the per-model provider timeout budget. */
-const DEADLINE_SLACK_MS = 60_000;
+ * finalization overhead on top of the per-model provider timeout budget.
+ * Exported for the same reason as `EVALUATION_MODEL_TIMEOUT_MS` above. */
+export const DEADLINE_SLACK_MS = 60_000;
 
 export class RunLaunchError extends Error {
   status: number;
@@ -170,7 +190,7 @@ export const runDetailInclude = {
 
 export type RunDetail = Prisma.EvaluationRunGetPayload<{ include: typeof runDetailInclude }>;
 
-async function resolveCurrentPromptTemplate(protocol: RunProtocol) {
+export async function resolveCurrentPromptTemplate(protocol: RunProtocol) {
   // "Current" = highest version FOR THIS PROTOCOL — same query as
   // src/worker/run-create-consumer.ts's resolveCurrentPromptTemplate (which
   // has taken a protocol argument since Task 9b), kept as a local duplicate
@@ -179,6 +199,11 @@ async function resolveCurrentPromptTemplate(protocol: RunProtocol) {
   // two-line query). A0: the `'pointwise'` literal that used to be hardcoded
   // here is what made the seeded `v1-pairwise` row unreachable from the web
   // tier.
+  //
+  // A2.1: exported (not a third copy) for `src/lib/calibration/launch.ts`,
+  // which PRE-FLIGHTS this before creating a `CalibrationRun` header —
+  // see that module's doc for why a per-item 500 discovered after the
+  // header exists is unacceptable there.
   return prisma.promptTemplate.findFirst({
     where: { protocol },
     orderBy: { version: 'desc' },
@@ -194,8 +219,13 @@ async function resolveCurrentPromptTemplate(protocol: RunProtocol) {
  * (or whose key/endpoint they since deactivated) gets a clear, actionable
  * message instead of a run that publishes fine and then fails per-judgment
  * at execution time.
+ *
+ * A2.1: exported so `src/lib/calibration/launch.ts` can run this ONCE, before
+ * it writes the `CalibrationRun` header that freezes a golden set forever.
+ * Left inside `launchSingleRun` too — a calibration's per-item launches still
+ * go through it, and every other caller depends on it being unskippable.
  */
-async function requireOwnedActiveEndpoints(userId: string, versionIds: string[]): Promise<void> {
+export async function requireOwnedActiveEndpoints(userId: string, versionIds: string[]): Promise<void> {
   if (versionIds.length === 0) return;
   const endpoints = await prisma.modelEndpoint.findMany({
     where: { userId, judgeModelVersionId: { in: versionIds }, isActive: true, verifiedAt: { not: null } },
@@ -246,6 +276,48 @@ export interface LaunchSingleRunParams {
    * evaluation (a pairwise pair has two responses; `Evaluation` has room
    * for one). */
   candidates?: LaunchRunCandidateInput[];
+  /** A2.1: the `GoldenItem` this run measures. NULL on every ordinary run —
+   * only `launchCalibrationRun` sets it. Without it there is no path from a
+   * model verdict back to the `expected` it should be scored against
+   * (`ModelJudgment` -> `EvaluationRun` -> `Evaluation`, and an `Evaluation`
+   * has a `datasetSampleId` but no golden item). */
+  goldenItemId?: string;
+  /** A2.1: which calibration this run belongs to. Paired with `goldenItemId`
+   * under `@@unique([calibrationRunId, goldenItemId])`, so one calibration
+   * cannot measure the same item twice. */
+  calibrationRunId?: string;
+  /**
+   * A2.1 — THE REAPER FIX. Overrides the default deadline below.
+   *
+   * The default is `now + (#models in THIS run) × EVALUATION_MODEL_TIMEOUT_MS
+   * + DEADLINE_SLACK_MS`, which is correct for a run whose judgments start
+   * executing more or less immediately — one model, ~180s. It is WRONG for a
+   * run launched as part of a batch: 30 calibration runs are created within
+   * seconds of each other, all carrying ~the same deadline, but they execute
+   * through one queue against a server with a handful of slots, so the batch
+   * takes minutes. `src/worker/reaper.ts` sweeps `status IN
+   * ('pending','judging') AND deadlineAt < now`, and 3 sweep intervals
+   * (~180s) past the deadline it force-finalizes: every still-`pending`
+   * judgment on the run is stamped `error: 'reaper: abandoned'` and the run is
+   * finalized. The tail of a batch is therefore scored as errors while it is
+   * still sitting in the queue, waiting its turn — silently, because a
+   * force-finalized run looks exactly like a run that genuinely failed.
+   *
+   * A batch launcher passes `now + (#judgments queued ahead of this one) ×
+   * EVALUATION_MODEL_TIMEOUT_MS + DEADLINE_SLACK_MS` — the SAME formula, with
+   * "models in this run" widened to "work that must drain before this run
+   * can finish", which is what the deadline was always trying to express.
+   *
+   * DELIBERATELY NOT ATTEMPTED HERE: stamping `deadlineAt` at FIRST DEQUEUE
+   * (when a worker actually claims the run's first judgment) instead of at
+   * creation. That is the correct long-term fix — it makes the deadline mean
+   * "this run has been executing too long" rather than "this run was created
+   * too long ago", and it is immune to queue depth, worker count and
+   * concurrency entirely. It needs a `startedAt`-driven deadline write in the
+   * claim path plus a reaper that understands never-started runs, which is a
+   * worker-side change out of scope for phase 1.
+   */
+  deadlineAt?: Date;
 }
 
 export interface LaunchSingleRunDeps {
@@ -383,9 +455,13 @@ export async function launchSingleRun(
     promptTemplateId = promptTemplate.id;
   }
 
-  const deadlineAt = new Date(
-    Date.now() + selectedVersionIds.length * EVALUATION_MODEL_TIMEOUT_MS + DEADLINE_SLACK_MS
-  );
+  // The default is unchanged for every existing caller: this run's own model
+  // count is the only thing a single launch knows about. `params.deadlineAt`
+  // is the batch-aware override — see its doc on LaunchSingleRunParams for
+  // what the reaper does to a batch stamped with the default.
+  const deadlineAt =
+    params.deadlineAt ??
+    new Date(Date.now() + selectedVersionIds.length * EVALUATION_MODEL_TIMEOUT_MS + DEADLINE_SLACK_MS);
 
   const createdRun = await prisma.$transaction(async (tx) => {
     return tx.evaluationRun.create({
@@ -396,6 +472,13 @@ export async function launchSingleRun(
         status: 'pending',
         deadlineAt,
         triggeredById: params.triggeredById,
+        // A2.1: both NULL on every ordinary run. Written INSIDE the create, in
+        // the same statement as the run itself, so a calibration run never
+        // exists for even one statement without the item it is measuring —
+        // a second write would leave a window in which the scorer sees a run
+        // it cannot attribute to any `expected`.
+        goldenItemId: params.goldenItemId ?? null,
+        calibrationRunId: params.calibrationRunId ?? null,
         // RunCandidate rows are created in the SAME transaction as the run.
         // A pairwise run whose candidates land in a second write can be
         // observed — and claimed by a worker — with a complete-looking run

@@ -249,3 +249,62 @@ describe('agreement — Fleiss', () => {
     expect(r.value).toBeCloseTo(1 / 3, 4);
   });
 });
+
+/**
+ * A2.1 — THE DEGENERATE COHEN PATH, which is NOT the degenerate Fleiss path
+ * already covered above.
+ *
+ * Both reach `pe = 1`. They reach it by different arithmetic, and only one of
+ * them lands on the number the guard in `chanceCorrect` tests for:
+ *
+ *   - FLEISS builds pe from `categoryTotals[c] / ratingTotal` — two exact
+ *     integers — so a single observed category gives pe === 1 EXACTLY, the
+ *     `1 - pe === 0` guard fires, and the Fleiss test above passes.
+ *   - COHEN builds pe by ACCUMULATING `1/n` into its marginals. Thirty
+ *     additions of 1/30 sum to 0.9999999999999999, not 1. So pe is
+ *     0.9999999999999998, `1 - pe` is 2.22e-16, the guard does NOT fire, and
+ *     the quotient reduces to S/(1 + S) — which is 0.5 for every n whose
+ *     reciprocal does not sum exactly.
+ *
+ * 0.5 IS THE WORST POSSIBLE FAILURE SHAPE. It is not NaN, not null, not out
+ * of range, and nothing downstream can distinguish it from a real 0.5: a
+ * judge that agreed with the answer key on all thirty items would be filed
+ * under "moderate agreement". That is the confidently-wrong number this whole
+ * module exists to refuse.
+ *
+ * n = 30 is the calibration set size, so this is a live path rather than a
+ * hypothetical — and a 3- or 4-item hand fixture would never have found it,
+ * because those n DO sum exactly and return 1.
+ */
+describe('agreement — a single observed category through COHEN', () => {
+  function unanimous(n: number, category: string): Reading[] {
+    const readings: Reading[] = [];
+    for (let i = 0; i < n; i++) {
+      readings.push(
+        { itemId: `i${i}`, raterId: 'ground-truth', category },
+        { itemId: `i${i}`, raterId: 'model', category }
+      );
+    }
+    return readings;
+  }
+
+  it('thirty items, one category, two raters is 1 — not the float artifact 0.5', () => {
+    const r = agreement(unanimous(30, 'A>B'));
+    expect(r.statistic).toBe('cohen');
+    expect(r.annotatorCount).toBe(2);
+    expect(r.itemCount).toBe(30);
+    expect(r.categories).toEqual(['A>B']);
+    expect(r.value).toBe(1);
+  });
+
+  it('and NO set size from 2 to 200 produces a NaN or a kappa above 1', () => {
+    // The failure is a property of whether 1/n sums exactly, which is a
+    // property of n's binary expansion — 3 and 4 are fine, 30 is not. Pinning
+    // one n would leave the next set size unpinned, so this sweeps.
+    for (let n = 2; n <= 200; n++) {
+      const value = agreement(unanimous(n, 'B>A')).value;
+      expect(Number.isNaN(value)).toBe(false);
+      expect(value).toBe(1);
+    }
+  });
+});

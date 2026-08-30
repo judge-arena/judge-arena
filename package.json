@@ -37,7 +37,8 @@
     "db:studio": "npx prisma studio",
     "reset:build": "node scripts/controller.mjs full-reset-build",
     "setup": "npm install && npx prisma generate && npx prisma db push && npx tsx prisma/seed.ts",
-    "postinstall": "npx prisma generate"
+    "postinstall": "npx prisma generate",
+    "calibration:run": "tsx scripts/calibration/run.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

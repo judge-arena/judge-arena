@@ -67,6 +67,7 @@
  *   part that reflects real provider health.
  */
 
+import { createHash } from 'crypto';
 import type { ServingBackend } from '@prisma/client';
 import type { CriteriaScore } from '@/types';
 import { decryptSafe } from '@/lib/crypto';
@@ -76,7 +77,7 @@ import { callAnthropic } from './anthropic';
 import { callOpenAICompatible } from './openai-compatible';
 import { renderJudgmentPrompt, type RenderRubric, type RenderSubmission, type RenderTemplate } from './render';
 import { buildRespondSystemPrompt, buildRespondUserPrompt, parseJudgmentResponse, tryParseStructuredJudgment } from './provider';
-import type { ProviderCallResult, ProviderHeaderConfig } from './provider';
+import type { ProviderCallResult, ProviderHeaderConfig, ReasoningSource } from './provider';
 import { openRouterHeaders } from './backends/openrouter';
 import { vllmStructuredRequestFields } from './backends/vllm';
 import { llamacppStructuredRequestFields } from './backends/llamacpp';
@@ -437,6 +438,172 @@ export interface ExecuteRequest {
    * `'judgment'`-mode call — see provider.ts's `ProviderCallOptions`.
    * Unset means the pointwise `JUDGMENT_JSON_SCHEMA`. */
   jsonSchema?: Record<string, unknown>;
+  /**
+   * A2.1 v2i: whether this call's CONTENT channel is going to be parsed or
+   * persisted, i.e. whether `assertUsableContent` (below) should run.
+   *
+   * Defaults to "yes for a judgment/respond call, no for a call that sets no
+   * mode at all". The only mode-less caller in the tree is `verify.ts`'s
+   * connection test, and it is the one call that MUST NOT be guarded: it
+   * sends `max_tokens: 1` deliberately and reads nothing but
+   * `servedModelId`, so a real provider answers it with `finish_reason:
+   * 'length'` every single time. Guarding it would turn every "test
+   * connection" click on a perfectly healthy endpoint into a truncation
+   * error. Settable explicitly so a future caller can opt in or out without
+   * relying on that default.
+   */
+  expectContent?: boolean;
+}
+
+/** 32 KiB, measured in BYTES (KiB is a byte unit) — the cap on the copy of
+ * the user prompt stored on `ModelJudgment.userPrompt`. */
+const MAX_STORED_USER_PROMPT_BYTES = 32 * 1024;
+
+/** The two spellings of "I hit the token ceiling": `finish_reason: 'length'`
+ * (OpenAI-compatible) and `stop_reason: 'max_tokens'` (Anthropic). Both
+ * arrive on `ProviderCallResult.finishReason`. */
+const TRUNCATED_FINISH_REASONS = new Set(['length', 'max_tokens']);
+
+/**
+ * Capture the rendered prompt pair for persistence: the system prompt
+ * verbatim, the user prompt capped at 32 KiB, and a sha256 of the FULL,
+ * PRE-cap user prompt.
+ *
+ * WHY STORE A PROMPT WE COULD RE-RENDER: we can't. `PATCH
+ * /api/rubrics/[id]` deleteMany's a rubric's criteria and recreates them on
+ * the SAME rubric id with no version bump (verified), and the pairwise
+ * system prompt embeds those criteria verbatim — so re-rendering a
+ * historical judgment from `promptTemplateId` + the item silently produces
+ * TODAY's rubric, with nothing anywhere recording that it changed. The hash
+ * is what keeps that detectable even for a capped copy.
+ */
+function capturePrompts(
+  systemPrompt: string,
+  userPrompt: string
+): Pick<ProviderCallResult, 'systemPrompt' | 'userPrompt' | 'userPromptSha256' | 'promptTruncated'> {
+  const userPromptSha256 = createHash('sha256').update(userPrompt, 'utf8').digest('hex');
+  const bytes = Buffer.from(userPrompt, 'utf8');
+
+  if (bytes.byteLength <= MAX_STORED_USER_PROMPT_BYTES) {
+    return { systemPrompt, userPrompt, userPromptSha256, promptTruncated: false };
+  }
+
+  // Back off the cut to a UTF-8 character boundary. A naive byte slice can
+  // land mid-sequence, and the stored prompt would then end in U+FFFD —
+  // a corrupted last character in the one artifact that exists to be an
+  // exact record of what the model was shown. `0b10xxxxxx` is a
+  // continuation byte, so walk back while the FIRST EXCLUDED byte is one.
+  let end = MAX_STORED_USER_PROMPT_BYTES;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+
+  return {
+    systemPrompt,
+    userPrompt: bytes.subarray(0, end).toString('utf8'),
+    userPromptSha256,
+    promptTruncated: true,
+  };
+}
+
+/**
+ * Refuse to hand a truncated or empty response to a parser.
+ *
+ * ONE CHOKEPOINT, deliberately: called from `execute()` immediately after
+ * the backend call and BEFORE any parse, so pointwise, pairwise and respond
+ * all inherit it without three copies that can drift.
+ *
+ * WHAT EACH PATH DID WITHOUT IT:
+ * - POINTWISE misclassified it as RETRYABLE. Truncated text reached
+ *   `parseJudgmentResponse`, whose JSON.parse guard throws a PLAIN `Error`;
+ *   `classify()` has no structural signal for that (no `.status`, not an
+ *   abort, no node `code`) and falls through to its `retryable` default. A
+ *   deterministic failure therefore burned all 3 attempts, DLQ'd, and
+ *   recorded a breaker failure against a circuit shared with every healthy
+ *   call on the same endpoint+model.
+ * - RESPOND persisted it as a SUCCESS: `executeRespondCall` returns
+ *   `raw.text.trim()` and `persistRespondSuccess` writes `status:
+ *   'completed'`, so a generation chopped in half — or empty outright — was
+ *   indistinguishable in the corpus from a finished one.
+ * - PAIRWISE failed loudly, but only by luck: the truncated text happened to
+ *   carry no parseable verdict.
+ *
+ * `non_retryable` for BOTH cases: the token budget is a property of the
+ * request, not of provider health, so the identical call truncates
+ * identically every time. Classifying it retryable would burn the attempt
+ * budget, DLQ the judgment, and count three failures against a shared
+ * breaker for a problem no amount of waiting fixes.
+ *
+ * FAILS ON 'length' UNCONDITIONALLY, even when the content happens to parse:
+ * a model cut off mid-reasoning is not a completed judgment for a
+ * calibration corpus, however well-formed the prefix it managed to emit.
+ */
+function assertUsableContent(
+  descriptor: ProviderDescriptor,
+  request: ExecuteRequest,
+  result: ProviderCallResult
+): void {
+  if (!(request.expectContent ?? request.mode !== undefined)) return;
+
+  const truncated = result.finishReason !== undefined && TRUNCATED_FINISH_REASONS.has(result.finishReason);
+  const empty = result.text.trim() === '';
+  if (!truncated && !empty) return;
+
+  // Every number an operator needs to size the fix, in the message itself:
+  // the ceiling that was hit, how the spend split between thinking and
+  // answering (an empty answer at a healthy finish reason is almost always
+  // "it thought until the budget ran out"), and how much answer survived.
+  const facts =
+    `max_tokens ${request.samplingParams.max_tokens}, ` +
+    `completion_tokens ${result.outputTokens ?? 'unknown'}, ` +
+    `reasoning_tokens ${result.reasoningTokens ?? 'unknown'}, ` +
+    `content length ${result.text.length} chars`;
+
+  const what = truncated
+    ? `was CUT OFF at the token budget (finish_reason "${result.finishReason}")`
+    : `returned an EMPTY content channel (finish_reason "${result.finishReason ?? 'unset'}")`;
+
+  const why = truncated
+    ? 'A response cut off mid-reasoning is not a completed judgment'
+    : 'The model spent its output budget on the reasoning channel and never emitted an answer';
+
+  throw new ProviderError(
+    `Provider call to "${descriptor.id}" (${request.modelId}) ${what}: ${facts}. ` +
+      `${why} — raise samplingDefaults.max_tokens on the JudgeModelVersion for this judge.`,
+    {
+      kind: 'non_retryable',
+      provider: descriptor.id,
+      // Carries the reasoning channel, the token split and the rendered
+      // prompt onto the failure itself, so `markJudgmentError` can persist
+      // the evidence instead of only the message.
+      callResult: result,
+    }
+  );
+}
+
+/** The A2.1 v2i capture fields, in the DB's own spelling
+ * (`ModelJudgment.reasoningContent`/`systemPrompt`/...), shared by all three
+ * result shapes so a field cannot reach one persist path and miss the other
+ * two. `ProviderCallResult` calls the first one `reasoningText`; the rename
+ * happens once, in `callCaptureFields` below. */
+export interface CallCaptureFields {
+  reasoningContent?: string;
+  reasoningTokens?: number;
+  reasoningSource?: ReasoningSource;
+  systemPrompt?: string;
+  userPrompt?: string;
+  userPromptSha256?: string;
+  promptTruncated?: boolean;
+}
+
+function callCaptureFields(raw: ProviderCallResult): CallCaptureFields {
+  return {
+    reasoningContent: raw.reasoningText,
+    reasoningTokens: raw.reasoningTokens,
+    reasoningSource: raw.reasoningSource,
+    systemPrompt: raw.systemPrompt,
+    userPrompt: raw.userPrompt,
+    userPromptSha256: raw.userPromptSha256,
+    promptTruncated: raw.promptTruncated,
+  };
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -471,6 +638,13 @@ function getTimeoutMs(): number {
  * On timeout: throws a `ProviderError` with `kind: 'retryable'` and
  * `timeout: true` (distinguishable from an ordinary connection abort) —
  * verified by `tests/lib/llm-timeout.test.ts`'s hung-fetch test.
+ *
+ * A2.1 v2i adds two things here, and HERE specifically because this is the
+ * one function every provider call in the tree funnels through (judge,
+ * pairwise, respond, and `verify.ts`'s connection test): the rendered
+ * prompt capture (`capturePrompts`) and the truncation/empty-content guard
+ * (`assertUsableContent`), the latter running before any caller gets a
+ * chance to parse the text.
  */
 export async function execute(descriptor: ProviderDescriptor, request: ExecuteRequest): Promise<ProviderCallResult> {
   const timeoutMs = getTimeoutMs();
@@ -479,8 +653,9 @@ export async function execute(descriptor: ProviderDescriptor, request: ExecuteRe
 
   const call = descriptor.id === 'anthropic' ? callAnthropic : callOpenAICompatible;
 
+  let result: ProviderCallResult;
   try {
-    return await call({
+    const raw = await call({
       apiKey: request.apiKey,
       baseUrl: request.baseUrl ?? descriptor.defaultBaseUrl,
       modelId: request.modelId,
@@ -495,6 +670,7 @@ export async function execute(descriptor: ProviderDescriptor, request: ExecuteRe
       mode: request.mode,
       jsonSchema: request.jsonSchema,
     });
+    result = { ...raw, ...capturePrompts(request.systemPrompt, request.userPrompt) };
   } catch (error) {
     if (controller.signal.aborted) {
       throw new ProviderError(
@@ -506,6 +682,15 @@ export async function execute(descriptor: ProviderDescriptor, request: ExecuteRe
   } finally {
     clearTimeout(timer);
   }
+
+  // Outside the try/catch on purpose. Inside it, a timeout timer that fired
+  // in the window between the response arriving and this check would make
+  // `controller.signal.aborted` true and relabel a deterministic truncation
+  // as a RETRYABLE timeout — sending the same doomed call round the retry
+  // loop again.
+  assertUsableContent(descriptor, request, result);
+
+  return result;
 }
 
 // ─── runProviderJudgment / runProviderResponse ──────────────────────────────
@@ -533,7 +718,7 @@ export interface RunProviderJudgmentInput {
 /** Per the task brief, verbatim field set (plus the pre-existing
  * `tokenCount`-shaped display need handled at the persistence layer in
  * `judgment-consumer.ts`, not here). */
-export interface JudgmentResult {
+export interface JudgmentResult extends CallCaptureFields {
   overallScore: number;
   criteriaScores: CriteriaScore[];
   reasoning: string;
@@ -768,6 +953,7 @@ export async function executeJudgmentCall(prepared: PreparedJudgmentCall): Promi
     latencyMs: raw.latencyMs,
     parseMode: parsed.parseMode,
     samplingParamsUsed: prepared.samplingParamsUsed,
+    ...callCaptureFields(raw),
   };
 }
 
@@ -792,7 +978,7 @@ export async function runProviderJudgment(input: RunProviderJudgmentInput): Prom
  * number that every downstream average would then quietly consume. Same
  * "separate non-scoring result type" shape as `RespondResult` below.
  */
-export interface PairwiseResult {
+export interface PairwiseResult extends CallCaptureFields {
   verdict: 'A' | 'B' | 'tie';
   reasoning: string;
   rawResponse: string;
@@ -854,6 +1040,7 @@ export async function executePairwiseCall(prepared: PreparedJudgmentCall): Promi
     outputTokens: raw.outputTokens,
     latencyMs: raw.latencyMs,
     samplingParamsUsed: prepared.samplingParamsUsed,
+    ...callCaptureFields(raw),
   };
 }
 
@@ -864,7 +1051,7 @@ export interface RunProviderResponseInput {
   samplingOverrides?: Partial<SamplingParams>;
 }
 
-export interface RespondResult {
+export interface RespondResult extends CallCaptureFields {
   responseText: string;
   rawResponse: string;
   servedModelId?: string;
@@ -946,6 +1133,7 @@ export async function executeRespondCall(prepared: PreparedRespondCall): Promise
     outputTokens: raw.outputTokens,
     latencyMs: raw.latencyMs,
     samplingParamsUsed: prepared.samplingParamsUsed,
+    ...callCaptureFields(raw),
   };
 }
 

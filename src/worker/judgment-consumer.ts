@@ -131,6 +131,10 @@ import {
   type JudgmentExecuteMsg,
 } from '@/lib/queue/publish';
 import { classify } from '@/lib/llm/errors';
+// Imported from the module that defines it rather than from '@/lib/llm',
+// whose public re-export list doesn't carry it — same shape as the
+// '@/lib/llm/errors' import directly above.
+import type { ProviderCallResult } from '@/lib/llm/provider';
 import { executeJudgment, executeRespond, executePairwise } from '@/lib/llm';
 import type {
   RunProviderJudgmentInput as RegistryJudgmentInput,
@@ -210,19 +214,11 @@ export interface RunProviderJudgmentInput {
  * this task and don't set them) keeps compiling unchanged — "keep the seam
  * signatures stable" per the task brief.
  */
-export interface JudgmentResult {
+export interface JudgmentResult extends CommonResultFields {
   overallScore: number;
   reasoning: string;
   criteriaScores: CriteriaScore[];
-  rawResponse: string;
-  latencyMs: number;
-  tokenCount?: number;
-  servedModelId?: string;
-  finishReason?: string;
-  inputTokens?: number;
-  outputTokens?: number;
   parseMode?: 'structured' | 'fallback';
-  samplingParamsUsed?: SamplingParams;
 }
 
 export type ProviderFn = (input: RunProviderJudgmentInput) => Promise<JudgmentResult>;
@@ -268,16 +264,8 @@ export interface RunProviderResponseInput {
 
 /** Respond-mode mirror of `JudgmentResult` above — same "looser local type,
  * strict registry type is a subtype" rationale. */
-export interface RespondResult {
+export interface RespondResult extends CommonResultFields {
   responseText: string;
-  rawResponse: string;
-  latencyMs: number;
-  tokenCount?: number;
-  servedModelId?: string;
-  finishReason?: string;
-  inputTokens?: number;
-  outputTokens?: number;
-  samplingParamsUsed?: SamplingParams;
 }
 
 export type RespondProviderFn = (input: RunProviderResponseInput) => Promise<RespondResult>;
@@ -316,17 +304,9 @@ export interface RunProviderPairwiseInput {
  * type, strict registry type is a subtype" rationale. A pairwise judge
  * emits a preference, so there is no `overallScore` and no
  * `criteriaScores`. */
-export interface PairwiseJudgmentResult {
+export interface PairwiseJudgmentResult extends CommonResultFields {
   verdict: 'A' | 'B' | 'tie';
   reasoning: string;
-  rawResponse: string;
-  latencyMs: number;
-  tokenCount?: number;
-  servedModelId?: string;
-  finishReason?: string;
-  inputTokens?: number;
-  outputTokens?: number;
-  samplingParamsUsed?: SamplingParams;
 }
 
 export type PairwiseProviderFn = (input: RunProviderPairwiseInput) => Promise<PairwiseJudgmentResult>;
@@ -397,10 +377,57 @@ async function resolveEndpoint(
 
 // ─── Persistence helpers ─────────────────────────────────────────────────────
 
-async function markJudgmentError(judgmentId: string, message: string): Promise<void> {
+/**
+ * Mark a judgment failed — and, when the failure came WITH a provider
+ * response (`ProviderError.callResult`, set by registry.ts's
+ * `assertUsableContent`), persist that response alongside the message.
+ *
+ * THE FAILURE THIS FIXES: a failed judgment used to store a message string
+ * and nothing else. Everything that explains the failure — the reasoning
+ * channel the model filled instead of answering, the completion/reasoning
+ * token split that shows WHERE the budget went, the rendered prompt that is
+ * no longer reconstructible after a rubric edit — was discarded at exactly
+ * the moment it was most diagnostic. That is the opposite of what a
+ * calibration corpus needs from its failures.
+ *
+ * `callResult` is absent for every configuration/transport failure (there
+ * was no response to carry), and the spread below writes nothing in that
+ * case — an existing column is never overwritten with `undefined`.
+ *
+ * Exported for the same reason `commonSuccessUpdateData` below is, and the
+ * review that found it necessary: deleting this entire evidence spread left
+ * all 726 tests green, because the only other way to observe this write is
+ * a live DB. tests/lib/llm-truncation.test.ts now asserts it directly.
+ */
+export async function markJudgmentError(
+  judgmentId: string,
+  message: string,
+  callResult?: ProviderCallResult
+): Promise<void> {
   await prisma.modelJudgment.update({
     where: { id: judgmentId },
-    data: { status: 'error', error: message },
+    data: {
+      status: 'error',
+      error: message,
+      ...(callResult
+        ? {
+            rawResponse: callResult.text,
+            latencyMs: callResult.latencyMs,
+            servedModelId: callResult.servedModelId,
+            finishReason: callResult.finishReason,
+            inputTokens: callResult.inputTokens,
+            outputTokens: callResult.outputTokens,
+            tokenCount: combinedTokenCount(callResult),
+            reasoningContent: callResult.reasoningText,
+            reasoningTokens: callResult.reasoningTokens,
+            reasoningSource: callResult.reasoningSource,
+            systemPrompt: callResult.systemPrompt,
+            userPrompt: callResult.userPrompt,
+            userPromptSha256: callResult.userPromptSha256,
+            promptTruncated: callResult.promptTruncated ?? false,
+          }
+        : {}),
+    },
   });
 }
 
@@ -424,7 +451,7 @@ function combinedTokenCount(result: { tokenCount?: number; inputTokens?: number;
  * field that doesn't depend on which seam produced the result. Extracted so
  * the persist paths can't silently drift on a shared field (Task 10 review
  * simplification). */
-interface CommonResultFields {
+export interface CommonResultFields {
   rawResponse: string;
   latencyMs: number;
   tokenCount?: number;
@@ -433,9 +460,27 @@ interface CommonResultFields {
   servedModelId?: string;
   finishReason?: string;
   samplingParamsUsed?: SamplingParams;
+  // ── A2.1 v2i: what the model was given, and what it actually thought ──
+  // Added HERE rather than on the three persist functions precisely so all
+  // three get them in one edit and cannot drift. Typed loosely (`string`
+  // for `reasoningSource`) for the same reason the seam result types above
+  // are looser than registry.ts's: the registry's `ReasoningSource` union
+  // is a strict subtype, and every pre-existing fake in the integration
+  // suites keeps compiling.
+  reasoningContent?: string;
+  reasoningTokens?: number;
+  reasoningSource?: string;
+  systemPrompt?: string;
+  userPrompt?: string;
+  userPromptSha256?: string;
+  promptTruncated?: boolean;
 }
 
-function commonSuccessUpdateData(result: CommonResultFields, version: VersionWithJudgeModel) {
+/** Exported ONLY so a unit test can assert that a field added for one
+ * protocol reaches all three persist paths (tests/lib/pairwise-execution.test.ts)
+ * — the anti-drift guarantee this extraction exists for is otherwise
+ * unobservable without a live DB. */
+export function commonSuccessUpdateData(result: CommonResultFields, version: VersionWithJudgeModel) {
   return {
     status: 'completed' as const,
     error: null,
@@ -446,6 +491,18 @@ function commonSuccessUpdateData(result: CommonResultFields, version: VersionWit
     outputTokens: result.outputTokens,
     servedModelId: result.servedModelId,
     finishReason: result.finishReason,
+    // NOT merged into `reasoning`: that column is already triple-booked
+    // (parsed pointwise rationale, parsed pairwise rationale, and — in
+    // persistRespondSuccess below — the ENTIRE generated answer), and the
+    // thinking channel carries different content from all three. Merging is
+    // unrecoverable once written.
+    reasoningContent: result.reasoningContent,
+    reasoningTokens: result.reasoningTokens,
+    reasoningSource: result.reasoningSource,
+    systemPrompt: result.systemPrompt,
+    userPrompt: result.userPrompt,
+    userPromptSha256: result.userPromptSha256,
+    promptTruncated: result.promptTruncated ?? false,
     // Task 10: the EFFECTIVE sampling params a real call used
     // (`result.samplingParamsUsed` — version defaults ?? registry defaults
     // ?? per-call override, see registry.ts's `effectiveSamplingParams`)
@@ -864,7 +921,7 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
       const providerError = classify(rawError, judgeModelVersion.servingBackend);
 
       if (providerError.kind === 'non_retryable') {
-        await markJudgmentError(msg.judgmentId, providerError.message);
+        await markJudgmentError(msg.judgmentId, providerError.message, providerError.callResult);
         await safeFinalizeRun(msg.runId);
         ch.ack(raw);
         return;
@@ -876,7 +933,7 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
       const effectiveAttempt = Math.max(msg.attempt, context.attemptCount);
 
       if (effectiveAttempt >= MAX_ATTEMPTS) {
-        await markJudgmentError(msg.judgmentId, providerError.message);
+        await markJudgmentError(msg.judgmentId, providerError.message, providerError.callResult);
         await publishToDlq({ ...msg, attempt: effectiveAttempt }, providerError.message);
         await safeFinalizeRun(msg.runId);
         ch.ack(raw);

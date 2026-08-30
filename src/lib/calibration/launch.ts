@@ -1,0 +1,382 @@
+/**
+ * ─── Calibration launch (A2.1, phase 1) ────────────────────────────────────
+ *
+ * Turns a golden set into N pairwise `EvaluationRun`s, one per live item, each
+ * carrying the `goldenItemId` + `calibrationRunId` that
+ * `20260830120000_v2i_calibration_item_link` added. That link is the whole
+ * point: before it, a `ModelJudgment` reached an `Evaluation` and stopped —
+ * `Evaluation` has a `datasetSampleId` but no golden item — so there was no
+ * path from a model verdict to the `expected` it should be scored against, and
+ * `CalibrationRun` was a table that only ever got COUNTED (by
+ * `isGoldenSetFrozen`) and never written.
+ *
+ * ── NO PARALLEL EXECUTION PATH ─────────────────────────────────────────────
+ * This module creates rows and calls `launchSingleRun` (src/lib/run-launch.ts)
+ * N times. It publishes nothing itself, renders nothing, and knows nothing
+ * about providers — a calibration run is an ordinary pairwise run with two
+ * extra columns set, executed by the same `judgment.execute` consumer as
+ * everything else. Deliberately NOT `launchBulkRunCreates`: that publishes
+ * `run.create`, and `src/worker/run-create-consumer.ts` REFUSES any protocol
+ * but `'pointwise'` up front (`RunCreateMsg` carries no candidate set, so a
+ * pairwise expansion would produce judgments with nothing to compare). Every
+ * item would come back as a visible errored run.
+ *
+ * ── ITEM-ATOMIC, NOT ONE BIG TRANSACTION ───────────────────────────────────
+ * Each item is created and launched on its own; a failure at item 17 leaves 16
+ * launched items and one reported failure, not a 30-way rollback of work that
+ * was fine. `src/app/api/evaluations/route.ts:574` is the anti-pattern —
+ * a whole dataset mapped into one `$transaction` with no `take`, where one bad
+ * row loses every good one (and holds a connection open for the duration). It
+ * also could not be done here even if it were desirable: `launchSingleRun`
+ * opens its own transaction and then publishes to RabbitMQ, and publishing
+ * inside a DB transaction is exactly what run-launch.ts's module doc forbids.
+ *
+ * ── EVERYTHING KNOWABLE UP FRONT IS CHECKED BEFORE THE FREEZE ──────────────
+ * See `launchCalibrationRun`'s doc. The `CalibrationRun` header is written
+ * LAST, after every refusal that does not require touching an item, because
+ * writing it is irreversible.
+ */
+import type { GoldenCandidate } from '@prisma/client';
+import { prisma } from '@/lib/db';
+import { logger } from '@/lib/logger';
+import { goldenItemLifecycleWhere, isGoldenSetFrozen } from '@/lib/golden-sets';
+import {
+  DEADLINE_SLACK_MS,
+  EVALUATION_MODEL_TIMEOUT_MS,
+  launchSingleRun,
+  requireOwnedActiveEndpoints,
+  resolveCurrentPromptTemplate,
+  RunLaunchError,
+  type LaunchRunCandidateInput,
+  type LaunchSingleRunDeps,
+} from '@/lib/run-launch';
+
+/**
+ * Phase-1 cap on items per calibration. A STATED LIMIT THAT REFUSES, never a
+ * silent `take: 100` — a truncated calibration produces a kappa over a subset
+ * nobody chose, reported as if it measured the whole set, and there is nothing
+ * in the numbers afterwards that says so. 100 items × one judge is already
+ * ~3.5 hours of queue against a 2-slot local server; the way to lift this is
+ * the deadline fix named in `LaunchSingleRunParams.deadlineAt` (stamp at first
+ * dequeue), not a bigger number here.
+ */
+export const MAX_CALIBRATION_ITEMS = 100;
+
+export interface LaunchCalibrationRunParams {
+  goldenSetId: string;
+  judgeModelVersionId: string;
+  rubricId: string;
+  /** Project the per-item `Evaluation` rows are created under. */
+  projectId: string;
+  /** The acting user: owns the endpoint the judge is reached through, and is
+   * recorded as `EvaluationRun.triggeredById` on every run. */
+  triggeredById: string;
+}
+
+export interface CalibrationItemFailure {
+  goldenItemId: string;
+  reason: string;
+}
+
+export interface CalibrationLaunchResult {
+  calibrationRunId: string;
+  /** GoldenItem ids that produced a run — NOT run ids, mirroring
+   * `launchBulkRunCreates`' contract, where `accepted` and `failed[].` carry
+   * the same identifier so the two lists can be read against one input set. */
+  accepted: string[];
+  failed: CalibrationItemFailure[];
+  /**
+   * TRUE when THIS launch is the one that froze the golden set (no
+   * `CalibrationRun` referenced it before). There is no unfreeze, so a caller
+   * that can warn a human should warn on exactly this — after the fact is the
+   * only moment the answer is known for certain, and "it was already frozen"
+   * is not worth a warning.
+   */
+  frozeGoldenSet: boolean;
+}
+
+function reasonOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** A golden item's candidates map onto a run's field for field — `RunCandidate`
+ * and `GoldenCandidate` were defined as the same shape with different parents
+ * precisely so this needs no reshaping. */
+function toRunCandidates(candidates: GoldenCandidate[]): LaunchRunCandidateInput[] {
+  return candidates.map((candidate) => ({
+    position: candidate.position,
+    promptText: candidate.promptText,
+    responseText: candidate.responseText,
+    label: candidate.label,
+  }));
+}
+
+/**
+ * ╔════════════════════════════════════════════════════════════════════════╗
+ * ║  THIS FUNCTION FREEZES THE GOLDEN SET, IRREVERSIBLY, AND THERE IS NO   ║
+ * ║  UNFREEZE ANYWHERE IN THE PRODUCT.                                     ║
+ * ╚════════════════════════════════════════════════════════════════════════╝
+ *
+ * `isGoldenSetFrozen` (src/lib/golden-sets.ts) is defined as
+ * `calibrationRun.count({ where: { goldenSetId } }) > 0`. The moment the
+ * `CalibrationRun` header below is committed, that count is 1 and the set's
+ * items, candidates, `protocol` and `expected` are read-only FOREVER: no
+ * verb un-freezes it, deleting the calibration is not a thing anyone can do
+ * (and `EvaluationRun.calibrationRunId` is `onDelete: Restrict` anyway), and
+ * `retiredAt`/`tombstonedAt` do not release it either. The only way to change
+ * a frozen set's content is `POST /api/golden-sets/[id]/fork`, which makes a
+ * NEW set at version+1. Callers that front a human MUST confirm before calling
+ * this; `result.frozeGoldenSet` says whether this call was the one that did it.
+ *
+ * BECAUSE THAT WRITE IS IRREVERSIBLE, EVERYTHING KNOWABLE WITHOUT TOUCHING AN
+ * ITEM IS CHECKED FIRST — the set exists, is not tombstoned, is pairwise, has
+ * at least one live item and not more than `MAX_CALIBRATION_ITEMS`; the
+ * project and rubric exist; a pairwise `PromptTemplate` exists; and the caller
+ * owns an active, verified `ModelEndpoint` for the judge version. Every one of
+ * those would otherwise surface as a per-item failure DISCOVERED AFTER THE
+ * FREEZE — i.e. a golden set pinned forever by a calibration in which all 30
+ * items failed for one reason that was knowable before any of them ran.
+ * (Per-item failures that genuinely depend on the item — a pair with the wrong
+ * number of candidates, say — stay per-item; those are the ones the
+ * `failed` list is for.)
+ */
+export async function launchCalibrationRun(
+  params: LaunchCalibrationRunParams,
+  deps: LaunchSingleRunDeps = {}
+): Promise<CalibrationLaunchResult> {
+  const { goldenSetId, judgeModelVersionId, rubricId, projectId, triggeredById } = params;
+
+  // ── Pre-flight (see the doc block: all of this precedes the freeze) ──────
+
+  const goldenSet = await prisma.goldenSet.findUnique({
+    where: { id: goldenSetId },
+    select: { id: true, name: true, protocol: true, tombstonedAt: true },
+  });
+  if (!goldenSet) throw new RunLaunchError(404, 'Golden set not found');
+  if (goldenSet.tombstonedAt) {
+    // A tombstoned set is pending purge and hidden from every read path
+    // (`goldenSetLifecycleWhere` pins `tombstonedAt: null` in BOTH arms).
+    // Calibrating one would pin it in place forever and publish numbers for a
+    // set nobody can look at. A RETIRED set is deliberately still calibratable:
+    // A0 defines retirement as "out of circulation, still valid ground truth",
+    // and it is reversible.
+    throw new RunLaunchError(
+      409,
+      `Golden set ${goldenSetId} is tombstoned and pending purge; it cannot be calibrated.`
+    );
+  }
+  if (goldenSet.protocol !== 'pairwise') {
+    // Phase 1 is pairwise only, and this is a refusal rather than a
+    // best-effort: a pointwise import of a preference corpus has NO ground
+    // truth at all (`mapSampleToGoldenItem` sets `expected: null` for every
+    // pointwise item), so a "calibration" over it would score verdicts against
+    // nothing and report an agreement number computed over zero comparisons.
+    throw new RunLaunchError(
+      400,
+      `Calibration runs pairwise golden sets only — golden set ${goldenSetId} is ` +
+        `"${goldenSet.protocol}".`
+    );
+  }
+
+  const items = await prisma.goldenItem.findMany({
+    where: { goldenSetId, ...goldenItemLifecycleWhere(false) },
+    orderBy: { index: 'asc' },
+    include: { candidates: { orderBy: { position: 'asc' } } },
+  });
+
+  if (items.length === 0) {
+    // Without this the header is written, the set is frozen forever, and the
+    // calibration measures nothing. `index` is a high-water mark, not a count,
+    // so "every item tombstoned" is a perfectly reachable state.
+    throw new RunLaunchError(
+      400,
+      `Golden set ${goldenSetId} has no live items to calibrate against.`
+    );
+  }
+  if (items.length > MAX_CALIBRATION_ITEMS) {
+    // LOGGED, not truncated — see MAX_CALIBRATION_ITEMS' own doc.
+    logger.warn('launchCalibrationRun: refused a golden set over the phase-1 item cap', {
+      goldenSetId,
+      liveItems: items.length,
+      cap: MAX_CALIBRATION_ITEMS,
+    });
+    throw new RunLaunchError(
+      400,
+      `Golden set ${goldenSetId} has ${items.length} live items, over the phase-1 cap of ` +
+        `${MAX_CALIBRATION_ITEMS}. Fork a smaller set rather than calibrating part of this one — ` +
+        'a kappa over a silently truncated subset is indistinguishable from one over the whole set.'
+    );
+  }
+
+  const project = await prisma.project.findUnique({ where: { id: projectId }, select: { id: true } });
+  if (!project) throw new RunLaunchError(404, 'Project not found');
+
+  const rubric = await prisma.rubric.findUnique({ where: { id: rubricId }, select: { id: true } });
+  if (!rubric) throw new RunLaunchError(404, 'Rubric not found');
+
+  // `launchSingleRun` resolves this per run and throws a 500 if it is missing;
+  // reaching that 500 thirty times, after the freeze, for a row the seed is
+  // supposed to have created, is the failure this pre-flight exists to avoid.
+  const promptTemplate = await resolveCurrentPromptTemplate('pairwise');
+  if (!promptTemplate) {
+    throw new RunLaunchError(500, 'No PromptTemplate found for protocol "pairwise"');
+  }
+
+  // Throws RunLaunchError(400) naming the version — the one pre-flight that
+  // fails for a reason the caller can actually fix from the Models page.
+  await requireOwnedActiveEndpoints(triggeredById, [judgeModelVersionId]);
+
+  // ── THE REAPER FIX ───────────────────────────────────────────────────────
+  // ONE deadline, computed once, stamped on every run in the batch.
+  //
+  // `launchSingleRun`'s own formula is `now + (#models in this run) ×
+  // EVALUATION_MODEL_TIMEOUT_MS + DEADLINE_SLACK_MS` — for the one judge model
+  // a calibration uses, ~180s. All N runs here are created within seconds of
+  // each other, so under that formula they would all carry ~the same 180s
+  // deadline while the batch itself takes N × (a provider call) to drain
+  // through a queue with a couple of slots. `src/worker/reaper.ts` sweeps
+  // `pending`/`judging` runs whose `deadlineAt` has passed and, three sweep
+  // intervals (~180s) later, FORCE-FINALIZES them: every still-`pending`
+  // judgment is stamped `error: 'reaper: abandoned'`. The tail of the batch
+  // would be scored as errors while it was still queued and healthy — and a
+  // force-finalized run is indistinguishable from one that really failed, so
+  // the resulting kappa would be computed over the head of the set with no
+  // sign that anything went wrong.
+  //
+  // The fix is the SAME formula with the denominator widened from "models in
+  // this run" to "judgments queued ahead of this one" — which is what the
+  // deadline was always trying to express. It is generous for the first item
+  // and exact for the last; a too-late deadline only delays the reaper's
+  // safety net, while a too-early one destroys results.
+  //
+  // NOT ATTEMPTED HERE, AND IT IS THE RIGHT LONG-TERM FIX: stamp `deadlineAt`
+  // at FIRST DEQUEUE, when a worker actually claims the run's first judgment.
+  // That makes the deadline mean "this run has been executing too long"
+  // instead of "this run was created too long ago", and is immune to queue
+  // depth, worker count and concurrency. It is a change to the claim path plus
+  // a reaper that understands never-started runs — worker-side, out of scope
+  // for phase 1. Until then this widened formula is a bound, not a guarantee:
+  // a batch queued behind ANOTHER batch can still outlive it.
+  const deadlineAt = new Date(
+    Date.now() + items.length * EVALUATION_MODEL_TIMEOUT_MS + DEADLINE_SLACK_MS
+  );
+
+  // ── The irreversible write ───────────────────────────────────────────────
+  // The count and the create share one transaction because that is the shape
+  // `isGoldenSetFrozen` requires: it takes a transaction client so a freeze
+  // check and the write it guards can never straddle a commit boundary.
+  //
+  // IT DOES NOT SERIALIZE TWO CONCURRENT LAUNCHES, and nothing here should
+  // claim it does. Prisma runs an interactive transaction at the database
+  // default isolation level, which on Postgres is READ COMMITTED, so two
+  // launches of the same set can both read a count of 0 and both insert a
+  // header — and both then report `frozeGoldenSet: true` for a single freeze.
+  // That is an extra warning, not lost data (the set is frozen either way, and
+  // a second CalibrationRun on one set is legitimate: a different judge), so it
+  // is left as it stands rather than paying for a `SELECT ... FOR UPDATE` on
+  // the set to sharpen a flag whose only consumer is a human-facing prompt.
+  const { calibrationRun, wasAlreadyFrozen } = await prisma.$transaction(async (tx) => {
+    const alreadyFrozen = await isGoldenSetFrozen(tx, goldenSetId);
+    const created = await tx.calibrationRun.create({
+      data: {
+        goldenSetId,
+        judgeModelVersionId,
+        // The pairwise SYSTEM prompt renders this rubric's criteria, so a
+        // kappa produced under rubric X is not comparable to one under
+        // rubric Y. Recorded on the header so the number is interpretable
+        // without joining through a run.
+        rubricId,
+      },
+      select: { id: true },
+    });
+    return { calibrationRun: created, wasAlreadyFrozen: alreadyFrozen };
+  });
+
+  logger.info('launchCalibrationRun: golden set is now frozen (irreversible)', {
+    goldenSetId,
+    calibrationRunId: calibrationRun.id,
+    items: items.length,
+    frozeGoldenSet: !wasAlreadyFrozen,
+  });
+
+  // ── One item, one launch ─────────────────────────────────────────────────
+
+  const accepted: string[] = [];
+  const failed: CalibrationItemFailure[] = [];
+
+  for (const item of items) {
+    try {
+      // A pairwise `Evaluation` carries NO `responseText` by construction: the
+      // two responses are the candidates, and `Evaluation` has room for one.
+      // `launchSingleRun` knows this — it forces judge mode for pairwise
+      // rather than letting `deriveRunMode` read the empty column and classify
+      // the run as respond-mode.
+      // eslint-disable-next-line no-await-in-loop -- item-atomic by design: each item's create+launch must be individually attributable and individually survivable (see module doc)
+      const evaluation = await prisma.evaluation.create({
+        data: {
+          projectId,
+          userId: triggeredById,
+          rubricId,
+          inputText: item.inputText,
+          // Otherwise a calibration's N evaluations are indistinguishable from
+          // each other in every list view that shows a title.
+          title: `Calibration: ${goldenSet.name} #${item.index}`,
+        },
+        select: { id: true },
+      });
+
+      // eslint-disable-next-line no-await-in-loop -- see above
+      const launch = await launchSingleRun(
+        {
+          evaluationId: evaluation.id,
+          triggeredById,
+          rubricId,
+          judgeModelVersionIds: [judgeModelVersionId],
+          protocol: 'pairwise',
+          candidates: toRunCandidates(item.candidates),
+          goldenItemId: item.id,
+          calibrationRunId: calibrationRun.id,
+          deadlineAt,
+        },
+        deps
+      );
+
+      if (launch.publishFailed) {
+        // The run exists and `launchSingleRun` has already compensated it to
+        // `status: 'error'`; nothing will ever execute it. Reported as a
+        // failure rather than silently counted as accepted — a caller that
+        // treated it as launched would wait forever for a verdict.
+        failed.push({
+          goldenItemId: item.id,
+          reason: launch.publishError ?? 'judgment.execute publish failed',
+        });
+        continue;
+      }
+
+      accepted.push(item.id);
+    } catch (error) {
+      // Per-item, never fatal to the batch. The `Evaluation` row may survive
+      // with no run attached when `launchSingleRun` is what threw; that is
+      // deliberate — deleting it here is a second write on an already-failing
+      // path, and an orphan evaluation is inert (no runs, no judgments, no
+      // effect on any calibration number) where a failed cleanup is not.
+      failed.push({ goldenItemId: item.id, reason: reasonOf(error) });
+    }
+  }
+
+  if (failed.length > 0) {
+    logger.warn('launchCalibrationRun: some items did not launch', {
+      goldenSetId,
+      calibrationRunId: calibrationRun.id,
+      accepted: accepted.length,
+      failed: failed.length,
+    });
+  }
+
+  return {
+    calibrationRunId: calibrationRun.id,
+    accepted,
+    failed,
+    frozeGoldenSet: !wasAlreadyFrozen,
+  };
+}

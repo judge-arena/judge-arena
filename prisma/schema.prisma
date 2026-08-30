@@ -191,6 +191,7 @@ model Rubric {
   @@unique([parentId, version])
   @@index([parentId])
   @@index([userId])
+  calibrationRuns CalibrationRun[]
 }
 
 model RubricCriterion {
@@ -412,6 +413,24 @@ model EvaluationRun {
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
 
+  /// A2.1: the golden item this run measured. NULL on every ordinary run.
+  /// `Restrict` mirrors `CalibrationRun.goldenSetId` — a measured item must not
+  /// vanish out from under the number it produced.
+  goldenItemId       String?
+  goldenItem         GoldenItem?         @relation("GoldenItemCalibration", fields: [goldenItemId], references: [id], onDelete: Restrict)
+  /// A2.1: which calibration this run belongs to. `Restrict` because a
+  /// CalibrationRun freezes its golden set irreversibly (`isGoldenSetFrozen`,
+  /// src/lib/golden-sets.ts) and there is no unfreeze.
+  calibrationRunId   String?
+  calibrationRun     CalibrationRun?     @relation(fields: [calibrationRunId], references: [id], onDelete: Restrict)
+
+  /// Idempotency: at most one run per (calibration, item), so a re-launch after
+  /// a partial failure resumes instead of double-counting. Both columns are
+  /// NULL on every non-calibration run, and Postgres' DEFAULT `NULLS DISTINCT`
+  /// lets those coexist freely — so unlike ModelJudgment's index this needs NO
+  /// hand-edited SQL.
+  @@unique([calibrationRunId, goldenItemId])
+  @@index([goldenItemId])
   @@index([evaluationId])
   @@index([rubricId])
   @@index([triggeredById])
@@ -484,6 +503,27 @@ model ModelJudgment {
   servedModelId  String? // model id actually reported by the serving backend
   finishReason   String?
   parseMode      String? // how the raw response was parsed into structured scores
+
+  // ── What the model was ACTUALLY given, and what it ACTUALLY thought ────────
+  // Stored, not reconstructed. "Reconstructible from promptTemplateId + the
+  // item" is false: PATCH /api/rubrics/[id] deleteMany's the criteria and
+  // recreates them on the SAME rubric id with no version bump, and the pairwise
+  // system prompt embeds those criteria verbatim — so one rubric edit silently
+  // rewrites the reconstruction of every historical judgment, with nothing
+  // recording that it moved. GoldenCandidate has no revision trail either.
+  /// The model's raw thinking channel, verbatim. NOT merged into `reasoning`:
+  /// that field is already triple-booked (parsed pointwise rationale, parsed
+  /// pairwise rationale, and the entire generated answer in respond mode), and
+  /// the two carry different content — a live Qwen judge returned 762 chars of
+  /// deliberation here and `{"verdict":"A"}` in `reasoning`'s source.
+  reasoningContent String?
+  reasoningTokens  Int? // usage.completion_tokens_details.reasoning_tokens
+  reasoningSource  String? // 'reasoning_content' | 'reasoning' | 'think_tag' | 'anthropic_thinking'
+  systemPrompt     String? // verbatim; small, and its source is MUTABLE (see above)
+  userPrompt       String? // verbatim, capped — see promptTruncated
+  userPromptSha256 String? // hash of the FULL, pre-truncation user prompt
+  promptTruncated  Boolean        @default(false)
+
   status         JudgmentStatus @default(pending)
   error          String?
   startedAt      DateTime?
@@ -757,6 +797,8 @@ model GoldenItem {
   // GoldenItem_goldenSetId_index_key.
   @@index([goldenSetId, tombstonedAt])
   @@index([sourceDatasetSampleId])
+  /// A2.1: calibration runs that measured this item.
+  calibrationEvaluationRuns EvaluationRun[] @relation("GoldenItemCalibration")
 }
 
 // Discrete candidates (pairwise/listwise) attached to a golden item.
@@ -870,6 +912,13 @@ model CalibrationRun {
   positionBias        Float?
   biasSensitivityRate Float?
   flipRateVsParent    Float?
+  /// The rubric in force for this calibration. The pairwise SYSTEM prompt
+  /// renders the rubric's criteria, so a kappa produced under rubric X is not
+  /// comparable to one under rubric Y — and without this the leaderboard header
+  /// cannot say which it used.
+  rubricId            String?
+  rubric              Rubric?           @relation(fields: [rubricId], references: [id], onDelete: Restrict)
+  evaluationRuns      EvaluationRun[]
   verdictCount        Int               @default(0)
   passed              Boolean?
   // A0 decision #3: `passed` alone is uninterpretable a year later — record

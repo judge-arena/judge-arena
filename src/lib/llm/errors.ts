@@ -31,6 +31,10 @@ import {
   APIConnectionError as OpenAIAPIConnectionError,
   APIUserAbortError as OpenAIAPIUserAbortError,
 } from 'openai';
+// Type-only (erased at compile time), so this does NOT create a runtime
+// import cycle with `./provider`, which imports `ProviderError` from here
+// as a value.
+import type { ProviderCallResult } from './provider';
 
 export type ProviderErrorKind = 'retryable' | 'non_retryable' | 'rate_limited';
 
@@ -58,6 +62,23 @@ export interface ProviderErrorOptions {
    * ordinary connection-level abort/timeout the SDK itself raised.
    */
   timeout?: boolean;
+  /**
+   * A2.1 v2i: the provider response that CAUSED this failure, when there
+   * was one (a truncated or empty-content call — see `registry.ts`'s
+   * `execute()`), so a failure can still carry what came back.
+   *
+   * The failure this exists to prevent: a judgment that failed used to
+   * persist a message and nothing else, discarding the reasoning channel,
+   * the token split and the rendered prompt — precisely the evidence that
+   * explains WHY it failed, and precisely what a calibration corpus needs
+   * most from its failures. `judgment-consumer.ts`'s `markJudgmentError`
+   * reads this.
+   *
+   * Never set for a transport-level failure (there is no response to
+   * carry), and never set by `classify()` — only by the code that had the
+   * response in hand.
+   */
+  callResult?: ProviderCallResult;
   /** The original error, preserved via the standard `Error.cause` chain. */
   cause?: unknown;
 }
@@ -70,6 +91,7 @@ export class ProviderError extends Error {
   readonly retryAfterMs?: number;
   readonly breakerOpen?: boolean;
   readonly timeout?: boolean;
+  readonly callResult?: ProviderCallResult;
 
   constructor(message: string, opts: ProviderErrorOptions) {
     super(message, opts.cause !== undefined ? { cause: opts.cause } : undefined);
@@ -79,6 +101,7 @@ export class ProviderError extends Error {
     this.retryAfterMs = opts.retryAfterMs;
     this.breakerOpen = opts.breakerOpen;
     this.timeout = opts.timeout;
+    this.callResult = opts.callResult;
   }
 }
 

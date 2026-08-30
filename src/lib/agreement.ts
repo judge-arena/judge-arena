@@ -42,6 +42,12 @@
  *    insufficiency case below, so a NaN would reach the UI as
  *    "not measurable" when the truth is "everyone agreed".
  *
+ *    A2.1 CORRECTION: "pe = 1" is true of the FLEISS path only. Cohen reaches
+ *    pe by summing 1/n and lands just short of 1, so an equality guard misses
+ *    it entirely and the number silently becomes 0.5. See
+ *    `PE_DEGENERATE_EPSILON` below for the full account — it is the difference
+ *    between a judge scoring 1.0 and the same judge scoring 0.5.
+ *
  * ── AND ONE THING THAT IS NOT A LIMITATION ─────────────────────────────────
  *
  * Fewer than two annotators returns `value: null` with a `reason`, never 0.
@@ -119,14 +125,41 @@ function weightMatrix(categories: string[], weighting: Weighting, numeric: boole
 }
 
 /**
+ * pe REACHES 1 BY ARITHMETIC THAT DOES NOT LAND ON 1.
+ *
+ * Fleiss builds pe from `categoryTotals[c] / ratingTotal` — two exact
+ * integers — so a single observed category gives pe === 1 on the nose. Cohen
+ * builds it by ACCUMULATING `1/n` into its marginals, and 1/n is not
+ * representable for most n: thirty additions of 1/30 sum to
+ * 0.9999999999999999. So the degenerate Cohen case arrives here with pe =
+ * 1 - 2.2e-16, an `=== 0` test does not fire, and the quotient reduces to
+ * S / (1 + S) — which is 0.5 for EVERY n whose reciprocal does not sum
+ * exactly. 3 and 4 do; 30, the calibration set size, does not.
+ *
+ * 0.5 is the worst shape this failure could take: in range, not NaN, not
+ * null, and indistinguishable downstream from a genuine 0.5. A judge that
+ * matched the answer key on all thirty items would be filed under "moderate
+ * agreement". So the guard is an EPSILON, not an equality — and it also
+ * covers pe drifting a hair ABOVE 1, which flips the sign of the denominator
+ * and produces a confidently negative kappa from unanimous readings.
+ */
+const PE_DEGENERATE_EPSILON = 1e-9;
+
+/**
  * Complete agreement is 1 even when chance correction has nothing to work
  * with. See limitation 4 in the module doc: `(po - pe) / (1 - pe)` is 0/0
  * whenever pe reaches 1, and pe reaches 1 only when a single category was
  * ever used — in which case po is 1 too, and the honest answer is 1.
  */
 function chanceCorrect(po: number, pe: number): number {
-  if (1 - pe === 0) return 1;
-  return (po - pe) / (1 - pe);
+  if (1 - pe <= PE_DEGENERATE_EPSILON) return 1;
+  // Backstop, not arithmetic: po cannot exceed 1 mathematically, but it is
+  // also a float sum, so `po - pe` can overshoot `1 - pe` by an ulp and put
+  // the quotient a hair over 1. Kappa's range is [-1, 1] by definition and a
+  // value outside it is never a measurement, so it is clamped rather than
+  // reported. Anything needing MORE than a rounding nudge of clamping would
+  // be a bug in the caller's readings, not in this line.
+  return Math.min(1, Math.max(-1, (po - pe) / (1 - pe)));
 }
 
 /** Weighted Cohen's kappa over exactly two raters. */
