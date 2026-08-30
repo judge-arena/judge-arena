@@ -18,6 +18,56 @@ import { ModelConfigForm, type CatalogEntry, type ModelConfigFormSubmit } from '
 import { getProviderInfo } from '@/lib/utils';
 import { toast } from 'sonner';
 
+/** A `ZodIssue`, narrowed to the two fields worth showing. Kept structural
+ * and optional rather than importing zod's own type: this is parsed JSON off
+ * the wire, so nothing guarantees the shape at runtime. */
+type ValidationDetail = { path?: unknown; message?: unknown };
+
+/** A toast is one or two lines. Listing every issue on a form this wide
+ * pushes the first — and most likely relevant — one off the visible area. */
+const MAX_VALIDATION_DETAILS_SHOWN = 3;
+
+/**
+ * Collapse an API error body into one readable line.
+ *
+ * THE FAILURE THIS PREVENTS: `/api/models` (POST and PATCH alike) replies
+ * `{ error: 'Validation failed', details: [{ path: ['baseModel'], message:
+ * 'Base model id is required' }] }`, and this page used to render
+ * `responseData.error` alone. So a user who left one field blank saw the
+ * literal words "Validation failed" against a form with a dozen fields and
+ * no indication of WHICH one — the server knew the answer, fetched it, and
+ * threw it away on arrival.
+ *
+ * Deliberately defensive about the shape, since not every non-2xx body is a
+ * zod one (a 500, a 404 "Model not found", the P2003 foreign-key branch —
+ * all `details`-free), and deliberately NOT a JSON dump: an unrecognizable
+ * `details` value is dropped and the plain message stands, which is exactly
+ * the pre-existing behavior.
+ */
+function formatApiError(responseData: unknown, fallback: string): string {
+  const body = (responseData ?? {}) as { error?: unknown; details?: unknown };
+  const message = typeof body.error === 'string' && body.error.length > 0 ? body.error : fallback;
+
+  if (!Array.isArray(body.details)) return message;
+
+  const parts = (body.details as ValidationDetail[])
+    .map((detail) => {
+      if (!detail || typeof detail.message !== 'string' || detail.message.length === 0) return null;
+      // `path` is zod's own array form (`['endpoint']`, or `['a', 0, 'b']`
+      // for a nested one); empty for a whole-object issue, where the message
+      // already stands on its own.
+      const field = Array.isArray(detail.path) ? detail.path.join('.') : '';
+      return field.length > 0 ? `${field}: ${detail.message}` : detail.message;
+    })
+    .filter((part): part is string => part !== null);
+
+  if (parts.length === 0) return message;
+
+  const shown = parts.slice(0, MAX_VALIDATION_DETAILS_SHOWN).join('; ');
+  const overflow = parts.length - MAX_VALIDATION_DETAILS_SHOWN;
+  return `${message}: ${shown}${overflow > 0 ? ` (+${overflow} more)` : ''}`;
+}
+
 export default function ModelsPage() {
   const [models, setModels] = useState<any[]>([]);
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
@@ -70,7 +120,7 @@ export default function ModelsPage() {
         }
       } else {
         const responseData = await res.json();
-        toast.error(responseData.error || 'Failed to add model');
+        toast.error(formatApiError(responseData, 'Failed to add model'));
       }
     } catch {
       toast.error('Failed to add model');
@@ -110,7 +160,9 @@ export default function ModelsPage() {
         await loadModels();
       } else {
         const responseData = await res.json();
-        toast.error(responseData.error || 'Failed to update model');
+        // PATCH /api/models/[id] returns the identical `{ error, details }`
+        // zod shape — same swallowed-detail bug, same fix.
+        toast.error(formatApiError(responseData, 'Failed to update model'));
       }
     } catch {
       toast.error('Failed to update model');

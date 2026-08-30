@@ -47,7 +47,17 @@ const JUDGE_CLASSES = [
   'specialized_factuality',
 ] as const;
 const SCORING_MECHANISMS = ['reward_head_scalar', 'token_probability', 'critique_generative'] as const;
-const SERVING_BACKENDS = ['anthropic', 'openai', 'openrouter', 'vllm', 'ollama'] as const;
+// Must stay in lockstep with prisma's `ServingBackend` enum. It drifted once
+// already: `llamacpp` was added to the enum and given a full provider
+// descriptor (src/lib/llm/registry.ts) but not to this tuple, so the ONLY
+// runtime path that mints catalog entries rejected it with a 400 — the
+// backend the product dogfoods on was unreachable from the product. The
+// failure is silent (a validation error, indistinguishable from a typo) and
+// the type checker cannot catch it, because this tuple is the source of the
+// zod enum rather than derived from Prisma's. Adding a `ServingBackend` value
+// means editing here, tests/db/models-llamacpp.test.ts's guard, the form's
+// SERVING_BACKEND_OPTIONS, getProviderInfo(), and config.ts's modelSchema.
+const SERVING_BACKENDS = ['anthropic', 'openai', 'openrouter', 'vllm', 'llamacpp', 'ollama'] as const;
 
 const catalogSelectionSchema = z.object({
   mode: z.literal('catalog'),

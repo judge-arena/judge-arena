@@ -264,7 +264,16 @@ describe('Structured-output parse seam: parseMode "structured" vs "fallback"', (
 
     openaiCreateMock.mockResolvedValue(
       okChatResponse(
-        '```json\n' + JSON.stringify({ overallScore: 6, reasoning: 'ok', criteriaScores: [] }) + '\n```',
+        // A real criterion score: the rubric has one, and this test is about the
+        // markdown-wrapped response demoting to the lenient parse — not about
+        // what happens when a judge omits its scores.
+        '```json\n' +
+          JSON.stringify({
+            overallScore: 6,
+            reasoning: 'ok',
+            criteriaScores: [{ criterionId: 'c1', criterionName: 'Accuracy', score: 6 }],
+          }) +
+          '\n```',
         'meta-llama/Llama-3-70B'
       )
     );
@@ -293,7 +302,14 @@ describe('Structured-output parse seam: parseMode "structured" vs "fallback"', (
 
   it('1b Task 11 review IMPORTANT fix: a well-formed, unwrapped-JSON response from openrouter (caps "none") descriptor parses as "fallback" — structured output was never requested, so the strict path is never attempted', async () => {
     openaiCreateMock.mockResolvedValue(
-      okChatResponse(JSON.stringify({ overallScore: 7, reasoning: 'ok', criteriaScores: [] }), 'openai/gpt-4o')
+      okChatResponse(
+        JSON.stringify({
+          overallScore: 7,
+          reasoning: 'ok',
+          criteriaScores: [{ criterionId: 'c1', criterionName: 'Accuracy', score: 7 }],
+        }),
+        'openai/gpt-4o'
+      )
     );
 
     const result = await runProviderJudgment({

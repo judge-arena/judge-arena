@@ -143,6 +143,13 @@ export function getProviderInfo(provider: string): {
       return { label: 'OpenRouter', color: 'bg-blue-100 text-blue-800' };
     case 'vllm':
       return { label: 'vLLM', color: 'bg-purple-100 text-purple-800' };
+    // Indigo, not purple: llama.cpp and vLLM are both self-hosted
+    // OpenAI-compatible servers and would otherwise be the same chip, and an
+    // operator debugging a bad run needs to tell which of the two boxes
+    // answered. Also not teal — that is ollama, the one backend refused for
+    // scored runs, so confusing it with llamacpp is the expensive mistake.
+    case 'llamacpp':
+      return { label: 'llama.cpp', color: 'bg-indigo-100 text-indigo-800' };
     case 'ollama':
       return { label: 'Ollama', color: 'bg-teal-100 text-teal-800' };
     default:

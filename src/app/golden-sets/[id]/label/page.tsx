@@ -88,6 +88,79 @@ function stagesFor(queue: QueueResponse | null): Stage[] {
   ];
 }
 
+/**
+ * The candidate's identity, IN THE VOCABULARY THE VERDICT CONTROL USES.
+ *
+ * Until this existed the options panel read "Option 1" / "Option 2" while the
+ * verdict control asked for `A>B` / `tie` / `B>A`, and NOTHING on the screen
+ * said that Option 1 is A. The mapping is deterministic in code — the importer
+ * writes `toCandidate(0, responseA)` / `toCandidate(1, responseB)` and the
+ * queue selects `orderBy: { position: 'asc' }` — but an annotator can only
+ * assume it, and one who assumes the other way round inverts every preference
+ * in the session. That corruption is silent and survives every check we have:
+ * it is inverted CONSISTENTLY, so test-retest kappa comes out HIGH, and the
+ * finished set is indistinguishable from a correct one afterwards.
+ *
+ * The letter therefore comes from `position`, the same expression the
+ * golden-set detail screen already uses (`page.tsx`, "Candidate A").
+ *
+ * ── WHY A LONE CANDIDATE IS NOT LETTERED ───────────────────────────────────
+ *
+ * `lettered` is false exactly when the verdict control does not speak in
+ * letters — a pointwise item, which legitimately carries exactly one candidate
+ * (`mapSampleToGoldenItem` in src/lib/golden-sets.ts) and is answered with a
+ * Score box that never mentions A or B. Calling that text "Candidate A"
+ * invents a comparison and implies a B that does not exist.
+ *
+ * The condition is on the CONTROL, not on `candidates.length`, and the
+ * difference matters for malformed data: a pairwise item that somehow arrived
+ * with one candidate still renders "Candidate A" against an `A>B` control, so
+ * the missing B is visible on the screen instead of being smoothed over into a
+ * plausible-looking "Response". Loud beats silent here.
+ *
+ * The MIRROR of that case has to be loud too, which is why the call site ORs
+ * in `candidates.length > 1`. `POST /api/config/import` accepts any candidate
+ * array against any protocol — `goldenItemSchema` in src/lib/config.ts has no
+ * refinement tying the two together, and every item is stamped with the set's
+ * protocol — so a pointwise item carrying two candidates is reachable. On the
+ * control alone both of its cards would be headed "Response", which is exactly
+ * the silent smoothing-over the paragraph above refuses: two responses under
+ * one Score box, with nothing on the screen saying there are two.
+ *
+ * `label` wins when it is set — it is the candidate's own name — but the
+ * letter is still rendered beside it, because the letter is what the control
+ * is asking about. A label that IS the letter (what a `toCandidate` that
+ * stamps 'A'/'B' would store) would otherwise render as "A — A". Blank and
+ * whitespace-only labels are treated as absent: `''` is not a name, and
+ * `label ?? …` would let one blank the heading and take the mapping with it.
+ */
+function candidateIdentity(
+  candidate: QueueCandidate,
+  lettered: boolean
+): { letter: string | null; name: string } {
+  const letter = lettered ? String.fromCharCode(65 + candidate.position) : null;
+  const label = candidate.label?.trim() ? candidate.label.trim() : null;
+  if (label && label.toUpperCase() !== letter) return { letter, name: label };
+  return { letter, name: letter === null ? 'Response' : `Candidate ${letter}` };
+}
+
+/**
+ * The one badge, rendered in BOTH the options panel and the verdict radios.
+ *
+ * Sharing it is the whole point: two letters styled differently still leave
+ * the reader inferring that they are the same A, and that inference is the one
+ * this component exists to remove. Do not inline a second copy of these
+ * classes — a divergence between the two call sites is invisible in review and
+ * reintroduces the doubt without changing a single word on the screen.
+ */
+function CandidateLetter({ letter }: { letter: string }) {
+  return (
+    <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border border-surface-300 bg-surface-100 font-mono text-xs font-semibold text-surface-700 dark:border-surface-600 dark:bg-surface-700 dark:text-surface-100">
+      {letter}
+    </span>
+  );
+}
+
 export default function LabellingStudioPage() {
   const params = useParams();
   const router = useRouter();
@@ -179,7 +252,12 @@ export default function LabellingStudioPage() {
 
   const emptyReasons: Record<PanelKind, string> = {
     prompt: 'This item has no prompt text.',
-    options: 'This item has no candidate options — pointwise items are scored directly.',
+    // NOT "pointwise items are scored directly", which is what this said and
+    // is false: a pointwise item carries exactly one candidate — the response
+    // being scored — and it renders in this panel, unlettered. This reason is
+    // for the genuinely empty case, which means the item is incomplete.
+    options:
+      'This item carries no candidates. Every item built from a dataset sample gets at least one, so an empty panel here means the item itself is incomplete.',
     reasoning:
       'No model reasoning captured. Chain-of-thought is not stored on model calls yet, so this panel is thin by design rather than broken.',
     output: 'No model output for this item yet — a calibration run has not been executed against this set.',
@@ -192,17 +270,26 @@ export default function LabellingStudioPage() {
         options:
           item.candidates.length > 0 ? (
             <ol className="flex flex-col gap-3">
-              {item.candidates.map((candidate) => (
-                <li
-                  key={candidate.position}
-                  className="rounded-lg border border-surface-200 p-3 dark:border-surface-700"
-                >
-                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-surface-500">
-                    {candidate.label ?? `Option ${candidate.position + 1}`}
-                  </div>
-                  <SpanTextView value={toSpanText(candidate.responseText ?? '')} />
-                </li>
-              ))}
+              {item.candidates.map((candidate) => {
+                // `|| length > 1`: see candidateIdentity's doc. A pointwise
+                // item with two candidates must not head both cards "Response".
+                const { letter, name } = candidateIdentity(
+                  candidate,
+                  !isPointwise || item.candidates.length > 1
+                );
+                return (
+                  <li
+                    key={candidate.position}
+                    className="rounded-lg border border-surface-200 p-3 dark:border-surface-700"
+                  >
+                    <div className="mb-1 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-surface-500">
+                      {letter !== null && <CandidateLetter letter={letter} />}
+                      <span>{name}</span>
+                    </div>
+                    <SpanTextView value={toSpanText(candidate.responseText ?? '')} />
+                  </li>
+                );
+              })}
             </ol>
           ) : undefined,
         // Both empty until A2 exists and until reasoning_content is captured.
@@ -226,7 +313,7 @@ export default function LabellingStudioPage() {
                 <legend className="font-medium text-surface-700 dark:text-surface-200">
                   Preference
                 </legend>
-                <div className="flex gap-3">
+                <div className="flex gap-4">
                   {['A>B', 'tie', 'B>A'].map((value) => (
                     <label key={value} className="flex items-center gap-1.5">
                       <input
@@ -236,10 +323,30 @@ export default function LabellingStudioPage() {
                         checked={preference === value}
                         onChange={() => setPreference(value)}
                       />
-                      {value}
+                      {/* The submitted value is still the literal 'A>B' — only
+                          its A and B are drawn as the SAME badge the options
+                          panel puts on each candidate, so the reader matches
+                          them by sight instead of by assumption. */}
+                      {value === 'tie' ? (
+                        <span>tie</span>
+                      ) : (
+                        <span className="flex items-center gap-1">
+                          <CandidateLetter letter={value[0]} />
+                          <span aria-hidden="true">&gt;</span>
+                          <span className="sr-only">is better than</span>
+                          <CandidateLetter letter={value[2]} />
+                        </span>
+                      )}
                     </label>
                   ))}
                 </div>
+                {/* Panels are independently collapsible and reorderable, so
+                    the verdict panel cannot rely on the options panel being
+                    on screen next to it — it has to name where the letters
+                    come from itself. */}
+                <p className="text-xs font-normal text-surface-500 dark:text-surface-400">
+                  A and B are the lettered candidates in the Options panel, in that order.
+                </p>
               </fieldset>
             )}
             <label className="flex flex-col gap-1 text-sm">

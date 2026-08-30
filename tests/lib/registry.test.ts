@@ -200,7 +200,16 @@ describe('registry: runProviderJudgment', () => {
 
   it('a custom endpoint with no configured key falls back to a harmless placeholder rather than refusing (self-hosted, possibly auth-less servers)', async () => {
     callOpenAICompatibleMock.mockResolvedValue({
-      text: JSON.stringify({ overallScore: 5, reasoning: '', criteriaScores: [] }),
+      // Carries a real criterion score because the rubric above has one. An
+      // empty criteriaScores here used to survive only because the parser
+      // fabricated 0 for every unscored criterion; this test is about
+      // dispatch/key-resolution, so it supplies a valid response rather than
+      // depending on that leniency.
+      text: JSON.stringify({
+        overallScore: 5,
+        reasoning: '',
+        criteriaScores: [{ criterionId: 'c1', criterionName: 'Accuracy', score: 5 }],
+      }),
       latencyMs: 1,
     });
 
@@ -242,7 +251,16 @@ describe('registry: runProviderJudgment', () => {
 
   it('dispatches openrouter/vllm/ollama-shaped backends through callOpenAICompatible, not callAnthropic', async () => {
     callOpenAICompatibleMock.mockResolvedValue({
-      text: JSON.stringify({ overallScore: 5, reasoning: '', criteriaScores: [] }),
+      // Carries a real criterion score because the rubric above has one. An
+      // empty criteriaScores here used to survive only because the parser
+      // fabricated 0 for every unscored criterion; this test is about
+      // dispatch/key-resolution, so it supplies a valid response rather than
+      // depending on that leniency.
+      text: JSON.stringify({
+        overallScore: 5,
+        reasoning: '',
+        criteriaScores: [{ criterionId: 'c1', criterionName: 'Accuracy', score: 5 }],
+      }),
       latencyMs: 1,
     });
 
@@ -279,7 +297,11 @@ describe('registry: runProviderJudgment', () => {
 
   it('prepareJudgmentCall + executeJudgmentCall composition matches runProviderJudgment (the split runProviderJudgment is built from)', async () => {
     callAnthropicMock.mockResolvedValue({
-      text: JSON.stringify({ overallScore: 6, reasoning: 'ok', criteriaScores: [] }),
+      text: JSON.stringify({
+        overallScore: 6,
+        reasoning: 'ok',
+        criteriaScores: [{ criterionId: 'c1', criterionName: 'Accuracy', score: 6 }],
+      }),
       latencyMs: 1,
     });
 

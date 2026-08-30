@@ -64,7 +64,8 @@ You need, on the local database:
 ### Golden-set surfaces (added by `0309a7e`)
 
 Same constraint, same reason: `src/app/golden-sets/**` is outside every coverage `include` and has
-no DOM test environment to render into. Rows 13–18 cover the two surfaces that commit adds.
+no DOM test environment to render into. Rows 13–18 cover the two surfaces that commit adds; row 19
+was added with the candidate-lettering fix and is the only guard on it.
 
 | # | Step | Expected |
 |---|---|---|
@@ -74,6 +75,7 @@ no DOM test environment to render into. Rows 13–18 cover the two surfaces that
 | 16 | On `/golden-sets/<id>` as the owner, with no assignment | The assignment panel says owning the set is not enough to label it, and offers **Assign to me**. |
 | 17 | Click **Assign to me**, then follow the shortcut into the studio | The queue serves an item instead of "Nothing is assigned to you here". The assignment row lists the annotator as a **name**, never a cuid and never an email. |
 | 18 | Click **Revoke**, then reload | The row is gone from the active list. It is revoked, not deleted — the record of what was asked survives in the database. |
+| 19 | On a **pairwise** set's `/golden-sets/<id>/label`, read the Options panel against the Verdict panel, then open `/golden-sets/<id>` in another tab | Options heads each candidate with a lettered badge — **A** then **B**, top to bottom — and the radios render the *same* badges: `A > B` / `tie` / `B > A`. Nothing says "Option 1". The badge on the first candidate must match `Candidate A (position 0)` on the detail page for the **same text**; if the two tabs disagree, every preference recorded in the session is inverted and nothing downstream will say so. On a **pointwise** set the panel shows one card headed **Response**, with no letter — a lone candidate answered with a Score box has no A to be. |
 
 ## The one that is easiest to get wrong
 
@@ -121,6 +123,17 @@ candidates render as "Option 1" / "Option 2" while the verdict control offers `A
 `B>A`, with nothing on screen saying which option is A. Every production `GoldenCandidate` has
 `label IS NULL`. An annotator can answer the question, but only by assuming the ordering. Tracked
 separately — do not read it as a regression from the assignment UI.
+
+> **Since fixed, and the record above is left as walked.** The studio now letters candidates from
+> `position` (`Candidate A` / `Candidate B`, badged) and draws the same badges inside the verdict
+> radios. **Row 19 is the whole guard today, and that is a shape problem rather than a hard
+> limit.** `vitest.config.ts` already globs `src/**/*.test.tsx`, and `react-dom/server`'s
+> `renderToStaticMarkup` needs no jsdom — both verified — so a colocated test IS runnable here.
+> What blocks it is that `candidateIdentity` is unexported and the letter-suppressing condition
+> lives inline in the page's JSX: injecting into the naming function is caught, injecting into the
+> CALL SITE is not (both injections run). Extracting the options list into an exported component
+> would close that, and until someone does, row 19 is the only thing standing between this defect
+> and its return. It was found by walking the checklist.
 
 **What row 7 caught.** On a set in the `retest-not-yet-eligible` state the rail read
 *"Item — not started / Human label — not started"*, directly above a message saying "Label 20 more

@@ -1,4 +1,9 @@
 import { describe, it, expect } from 'vitest';
+// Value import, not `import type`: the ServingBackend coverage test below
+// enumerates the enum at runtime. Same precedent as tests/lib/append-retry
+// .test.ts's `import { Prisma }` — reading the generated client's enum
+// object needs no database, so the DB-free unit run stays DB-free.
+import { ServingBackend } from '@prisma/client';
 import {
   cn,
   formatDate,
@@ -221,6 +226,50 @@ describe('utils', () => {
 
     it('should return raw name for unknown providers', () => {
       expect(getProviderInfo('custom').label).toBe('custom');
+    });
+
+    it('renders llamacpp as llama.cpp with its own colour, not the unknown-provider grey', () => {
+      const info = getProviderInfo('llamacpp');
+      // The default branch returns the raw `provider` string, so an
+      // unhandled ServingBackend does not look broken — it renders as a grey
+      // "llamacpp" chip and reads like a deliberate style. Asserting the
+      // pretty label AND the absence of grey is what distinguishes "handled"
+      // from "fell through"; the label alone would pass on the raw string if
+      // the case were ever removed.
+      expect(info.label).toBe('llama.cpp');
+      expect(info.color).not.toContain('gray');
+    });
+
+    it('gives every ServingBackend its own handled case, and a distinct colour', () => {
+      // The backend list is DERIVED from prisma's enum, never hand-copied.
+      // A copied literal reproduces, inside the test, the exact drift this
+      // change exists to fix: the next `ServingBackend` added to the schema
+      // would be missing from getProviderInfo AND from the list policing
+      // it, and the suite would stay green. Measured — with a literal list
+      // here, deleting `case 'ollama'` from getProviderInfo left all 37
+      // tests passing while a real backend rendered as a grey raw slug.
+      const backends = Object.values(ServingBackend);
+
+      // Falling through to `default` is the silent failure: it returns the
+      // raw enum slug on a grey chip, which reads as a deliberate style
+      // rather than an unhandled case. Both halves are needed — the colour
+      // catches an added case that forgot a colour, the label catches a
+      // case that was never added at all.
+      for (const backend of backends) {
+        const info = getProviderInfo(backend);
+        expect(info.color, `${backend} fell through to the unknown-provider grey`).not.toContain('gray');
+        expect(info.label, `${backend} renders as its raw enum slug`).not.toBe(backend);
+      }
+
+      // getProviderInfo is the only thing separating these in the UI. vllm
+      // and the legacy 'local' deliberately share purple (both mean
+      // self-hosted, and 'local' is the pre-Task-12 spelling of the same
+      // thing), so 'local' is not a ServingBackend and not in this set —
+      // every other pair must differ, or a llamacpp endpoint is visually
+      // indistinguishable from the ollama one it is NOT interchangeable
+      // with (ollama is refused for scored runs).
+      const colors = backends.map((b) => getProviderInfo(b).color);
+      expect(new Set(colors).size).toBe(backends.length);
     });
   });
 

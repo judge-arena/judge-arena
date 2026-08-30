@@ -5,7 +5,10 @@
  * Ollama). `registry.ts`'s `execute()` is the only caller: it resolves the
  * API key, base URL, effective sampling params, and the timeout
  * `AbortSignal` before invoking this; this module owns nothing but the
- * `openai` SDK call shape itself — PLUS (Task 11) the descriptor-hook
+ * `openai` SDK call shape itself — PLUS base-URL normalization
+ * (`normalizeOpenAIBaseUrl` below, which every `openai_compatible` call
+ * funnels through here — see its doc for why this is the right home for it)
+ * and (Task 11) the descriptor-hook
  * consultation seam described below, which is what makes OpenRouter's
  * attribution headers and vLLM's guided-decoding request fields
  * "descriptor-level specialization, not forked call paths" per the task
@@ -58,10 +61,76 @@ function defaultStructuredRequestFields(schema: Record<string, unknown>): Record
   };
 }
 
+/** Matches a URL that is nothing but `scheme://authority` — no path, no
+ * query, no fragment. `[^/?#]` is what keeps `http://h?x=1` out (see the
+ * query-string carve-out in `normalizeOpenAIBaseUrl`). */
+const SCHEME_AND_AUTHORITY_ONLY = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]+$/i;
+
+/**
+ * Normalize a user-supplied OpenAI-compatible base URL into the shape the
+ * SDK actually wants: the root that `/chat/completions` hangs off.
+ *
+ * THE FAILURE THIS PREVENTS. The `openai` SDK appends `/chat/completions` to
+ * `baseURL` verbatim. A local-model server prints `http://192.168.1.164:8001`
+ * on startup and its curl example says `http://192.168.1.164:8001/v1/chat/completions`,
+ * so both are what people paste — and both produce a bare `404 Not Found`
+ * from the far end that names neither the URL nor the missing/extra `/v1`.
+ * It is the most common way a first local-model setup fails, and nothing in
+ * the stack diagnoses it.
+ *
+ * THE RULE, stated exactly, because the conservative half matters more than
+ * the helpful half:
+ *   1. Unset/blank -> `undefined`, so the descriptor's `defaultBaseUrl`
+ *      (or, for real OpenAI, the SDK's own host) still applies.
+ *   2. A `?` or `#` anywhere -> returned untouched. Some gateways carry auth
+ *      in a query param; a rewrite that drops or reorders it is worse than
+ *      the 404.
+ *   3. Trailing slashes stripped; ONE trailing `/chat/completions` stripped.
+ *   4. `/v1` is APPENDED only when what remains is a bare `scheme://authority`
+ *      with no path at all. It is NEVER INJECTED into an existing path.
+ *   5. Anything else is returned as-is (including a string that isn't a URL —
+ *      the SDK raises its own, clearer error for that).
+ *
+ * Rule 4 is the whole design. Real deployments are routinely mounted under a
+ * path prefix — `https://openrouter.ai/api/v1` (this repo's own openrouter
+ * `defaultBaseUrl`), a gateway at `/openai/v1`, a reverse proxy at `/llm/v1`
+ * — and a proxy at `/llm` that serves `/llm/chat/completions` directly is
+ * equally real. Guessing `/llm/v1` for that one would break a WORKING config
+ * to fix a hypothetical one, so a non-empty path is treated as deliberate
+ * and left exactly alone. `tests/lib/openai-base-url.test.ts` pins every
+ * `defaultBaseUrl` this repo ships against that promise.
+ *
+ * WHY IT LIVES HERE, not in `registry.ts` or a shared util: this function is
+ * the single chokepoint every `openai_compatible` call already funnels
+ * through. `registry.ts`'s `execute()` resolves `request.baseUrl ??
+ * descriptor.defaultBaseUrl` and hands the winner straight to this module,
+ * so descriptor defaults, `ModelEndpoint.endpoint` overrides, and
+ * `verify.ts`'s connection test are all covered by this one call site with
+ * no coordination between them. It is deliberately NOT shared with
+ * `anthropic.ts`: the Anthropic SDK appends `/v1/messages` to its own
+ * baseURL, so `/v1` there means something different and appending it would
+ * produce `/v1/v1/messages`.
+ */
+export function normalizeOpenAIBaseUrl(raw: string | undefined | null): string | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+
+  if (/[?#]/.test(trimmed)) return trimmed;
+
+  const withoutSuffix = trimmed.replace(/\/+$/, '').replace(/\/chat\/completions$/, '');
+
+  return SCHEME_AND_AUTHORITY_ONLY.test(withoutSuffix) ? `${withoutSuffix}/v1` : withoutSuffix;
+}
+
 export async function callOpenAICompatible(opts: ProviderCallOptions): Promise<ProviderCallResult> {
+  // Resolved ONCE and reused for the descriptor's `headers()` hook below, so
+  // a hook that ever keys off the endpoint sees the URL this call actually
+  // goes to rather than the raw pasted string.
+  const baseURL = normalizeOpenAIBaseUrl(opts.baseUrl);
+
   const client = new OpenAI({
     apiKey: opts.apiKey,
-    baseURL: opts.baseUrl || undefined,
+    baseURL,
   });
 
   const params: Record<string, unknown> = {
@@ -95,7 +164,7 @@ export async function callOpenAICompatible(opts: ProviderCallOptions): Promise<P
   // call's own request headers via the SDK's per-call `RequestOptions`,
   // never baked into the client instance (so a shared `descriptor` never
   // leaks one call's headers into another's).
-  const extraHeaders = opts.descriptor?.headers?.({ apiKey: opts.apiKey, endpoint: opts.baseUrl });
+  const extraHeaders = opts.descriptor?.headers?.({ apiKey: opts.apiKey, endpoint: baseURL });
 
   const startTime = Date.now();
 

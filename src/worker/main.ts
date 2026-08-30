@@ -20,6 +20,24 @@
  * (Kubernetes, systemd) enforce their own hard kill timeout regardless, this
  * is just about exiting cleanly when possible rather than always racing
  * that hard kill.
+ *
+ * ── /health reports CONSUMER REGISTRATION, not just dependency reachability ──
+ * INCIDENT 2026-08-24T17:55Z -> 2026-08-29. A Postgres roll dropped the AMQP
+ * connection. The socket reconnected (connection.ts hand-rolls that), but
+ * nothing ever re-issued `confirmChannel.consume()`, so this worker sat with
+ * ZERO registered consumers for five days. The pod stayed 1/1 Running with 0
+ * restarts, /health returned 200 healthy the entire time, and the evaluation
+ * pipeline was silently dead — because every check /health made
+ * (rabbitmq/redis/database) was about a dependency being *reachable*, and
+ * none was about this process actually doing its job.
+ *
+ * `checks.consumers` closes that gap: it is the LIVE registration count
+ * (`ConsumerRegistry` below), and it participates in the `healthy`
+ * conjunction, so zero consumers => 503 => the readiness probe fails => the
+ * replica goes unavailable => the existing KubeDeploymentReplicasMismatch
+ * alert fires. Detection only — the actual re-registration-on-reconnect fix
+ * is separate, later work (see the FOLLOW-UP note on
+ * `trackConsumerRegistration`).
  */
 
 import http from 'node:http';
@@ -35,6 +53,13 @@ import { createJudgmentConsumer } from './judgment-consumer';
 import { createRunCreateConsumer } from './run-create-consumer';
 import { startReaper } from './reaper';
 import { handleDispatchFailure } from './dispatch-failure';
+import {
+  EXPECTED_CONSUMER_COUNT,
+  createConsumerRegistry,
+  evaluateWorkerHealth,
+  trackConsumerRegistration,
+  type ConsumerRegistry,
+} from './health';
 
 const MODEL_CONCURRENCY_PER_RUN = Number(process.env.EVALUATION_MODEL_CONCURRENCY_PER_RUN ?? '2');
 const PREFETCH = Math.max(1, MODEL_CONCURRENCY_PER_RUN) * 4;
@@ -59,7 +84,7 @@ async function dbHealthy(): Promise<boolean> {
   }
 }
 
-function startHealthServer(): http.Server {
+function startHealthServer(consumers: ConsumerRegistry): http.Server {
   const server = http.createServer((req, res) => {
     if (req.url !== '/' && req.url !== '/health') {
       res.writeHead(404);
@@ -68,14 +93,14 @@ function startHealthServer(): http.Server {
     }
 
     void (async () => {
-      const [rabbitmq, redis, database] = await Promise.all([rabbitHealthy(), redisHealthy(), dbHealthy()]);
-      const healthy = rabbitmq && redis && database;
-      const body = JSON.stringify({
-        status: healthy ? 'healthy' : 'degraded',
-        checks: { rabbitmq, redis, database },
+      const { statusCode, body } = await evaluateWorkerHealth({
+        rabbitHealthy,
+        redisHealthy,
+        dbHealthy,
+        consumers,
       });
-      res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json' });
-      res.end(body);
+      res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(body));
     })();
   });
 
@@ -87,11 +112,23 @@ function startHealthServer(): http.Server {
 }
 
 async function main(): Promise<void> {
-  const { confirmChannel } = await getRabbit();
+  const { conn, confirmChannel } = await getRabbit();
   await assertTopology(confirmChannel);
   await confirmChannel.prefetch(PREFETCH);
 
-  const healthServer = startHealthServer();
+  const consumers = createConsumerRegistry((reason, remaining) => {
+    logger.error('amqp consumers lost — this worker has stopped consuming', {
+      reason,
+      remaining,
+      expected: EXPECTED_CONSUMER_COUNT,
+    });
+  });
+  trackConsumerRegistration(consumers, { conn, channel: confirmChannel });
+
+  // Started before the consumers are registered, so the window between
+  // listening and consuming reports 503 rather than a premature 200 — that is
+  // exactly what a readiness probe is for.
+  const healthServer = startHealthServer(consumers);
 
   const judgmentConsumer = createJudgmentConsumer();
   const runCreateConsumer = createRunCreateConsumer();
@@ -99,7 +136,6 @@ async function main(): Promise<void> {
 
   let inFlight = 0;
   let draining = false;
-  const consumerTags: string[] = [];
 
   /**
    * Wraps a consumer's `handle()` with the in-flight counter and a
@@ -134,24 +170,39 @@ async function main(): Promise<void> {
   const judgmentTag = await confirmChannel.consume(
     QUEUE_JUDGMENT_EXECUTE,
     (msg) => {
-      if (!msg) return;
+      // A null message is amqplib delivering a broker-initiated
+      // `basic.cancel` (queue deleted, mirrored-queue failover) — the
+      // consumer is GONE, not idle, and the broker will never send another.
+      // Before this fix that was silently returned from, which is a second
+      // route into the same five-day silence.
+      if (!msg) {
+        consumers.unregister(QUEUE_JUDGMENT_EXECUTE, 'broker cancelled the consumer');
+        return;
+      }
       void dispatch(msg, confirmChannel, judgmentConsumer.handle, QUEUE_JUDGMENT_EXECUTE);
     },
     { noAck: false }
   );
-  consumerTags.push(judgmentTag.consumerTag);
+  consumers.register(QUEUE_JUDGMENT_EXECUTE, judgmentTag.consumerTag);
 
   const runCreateTag = await confirmChannel.consume(
     QUEUE_RUN_CREATE,
     (msg) => {
-      if (!msg) return;
+      if (!msg) {
+        consumers.unregister(QUEUE_RUN_CREATE, 'broker cancelled the consumer');
+        return;
+      }
       void dispatch(msg, confirmChannel, runCreateConsumer.handle, QUEUE_RUN_CREATE);
     },
     { noAck: false }
   );
-  consumerTags.push(runCreateTag.consumerTag);
+  consumers.register(QUEUE_RUN_CREATE, runCreateTag.consumerTag);
 
-  logger.info('judge worker started', { prefetch: PREFETCH, healthPort: HEALTH_PORT });
+  logger.info('judge worker started', {
+    prefetch: PREFETCH,
+    healthPort: HEALTH_PORT,
+    consumers: consumers.registered(),
+  });
 
   async function drain(signal: string): Promise<void> {
     if (draining) return;
@@ -159,7 +210,11 @@ async function main(): Promise<void> {
     logger.info(`${signal} received — draining worker`);
 
     reaper.stop();
-    await Promise.all(consumerTags.map((tag) => confirmChannel.cancel(tag)));
+    // Before the cancels, so the losses they cause are attributed to the
+    // drain and /health reports `draining` rather than the incident.
+    consumers.beginDrain();
+    await Promise.all(consumers.tags().map((tag) => confirmChannel.cancel(tag)));
+    consumers.clear('drained');
 
     const drainStart = Date.now();
     while (inFlight > 0 && Date.now() - drainStart < DRAIN_TIMEOUT_MS) {
@@ -194,7 +249,17 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => void drain('SIGINT'));
 }
 
-main().catch((error) => {
-  logger.fatal('worker failed to start', { error: serializeError(error) });
-  process.exit(1);
-});
+// Booting on import would open a real AMQP connection, start consuming, and
+// bind :9090 inside the vitest worker process — tests/lib/worker-health.test.ts
+// imports this module for the exported health unit above. `VITEST` is set to
+// 'true' by the runner in every worker process and by nothing else; an
+// `import.meta.url === argv[1]` direct-run check (the shape
+// scripts/importer/cli.ts uses) would be wrong here, because the deployed
+// entry point is `node worker.js` -> root worker.ts, which IMPORTS this
+// module rather than being it.
+if (!process.env.VITEST) {
+  main().catch((error) => {
+    logger.fatal('worker failed to start', { error: serializeError(error) });
+    process.exit(1);
+  });
+}

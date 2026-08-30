@@ -33,6 +33,7 @@
 
 import type { CriteriaScore, RubricCriterionView } from '@/types';
 import { computeWeightedScore } from '@/lib/utils';
+import { ProviderError } from './errors';
 
 export interface RespondRequest {
   promptText: string;
@@ -198,6 +199,82 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Optional call context for the error raised when a judgment can't be
+ * scored — the pointwise counterpart of the `(model "...")` suffix and the
+ * `provider:` label `registry.ts`'s `executePairwiseCall` puts on its own
+ * `ProviderError`. Optional because `parseJudgmentResponse` is a pure
+ * text-in/scores-out function that has never needed to know which backend
+ * produced the text; `registry.ts`'s `parseJudgmentText` is the only real
+ * caller and already holds both values, so it can pass them through
+ * without any other call site (or test) changing.
+ *
+ * NOT WIRED YET, and don't read the paragraph above as saying it is:
+ * `parseJudgmentText` still calls `parseJudgmentResponse(raw.text,
+ * criteria)`, so TODAY every real production failure here is labelled
+ * `provider: 'unknown'` and its persisted message carries no `(model
+ * "...")` suffix — strictly less diagnosable than the pairwise message it
+ * is modelled on. Only tests exercise this argument. Closing that is a
+ * one-line change in registry.ts (`{ provider: descriptorId, modelId }`),
+ * which is outside this change's file ownership.
+ */
+export interface JudgmentParseContext {
+  provider?: string;
+  modelId?: string;
+}
+
+/**
+ * Refuse to invent a score the judge never gave.
+ *
+ * THE BUG THIS PREVENTS: `finiteNumberOrUndefined(found?.score) ?? 0` used
+ * to turn "this criterion was never scored" (absent from the response,
+ * name/id unmatched, dropped as a non-record element, or emitted as
+ * `null`/`"8"`/`NaN`) into a REAL, persisted 0. `overallScore` was then
+ * recomputed from those zeros and the row was written with status
+ * 'completed', so a fabricated 0/10 was indistinguishable downstream — on
+ * the leaderboard, and in A2's calibration input — from a judge that
+ * genuinely scored the submission at rock bottom. Failing loudly is the
+ * only option that keeps a persisted score meaning what it says.
+ *
+ * PARTIAL PARSES ARE FAILURES, deliberately: 4 of 5 criteria is not a
+ * partial success. `overallScore` is a weighted composite over the WHOLE
+ * rubric, so dropping the 5th criterion silently redistributes its weight
+ * across the other four and scoring it 0 silently deflates the composite —
+ * either way the persisted number stops meaning "this submission scored X
+ * against this rubric" while still claiming status 'completed'. All-or-
+ * nothing matches the pairwise path's stance on an unusable verdict.
+ *
+ * `non_retryable`, and for the same reason `executePairwiseCall` gives
+ * (registry.ts): re-asking the same model the same question is not a
+ * provider-health signal. Classifying it retryable would burn the
+ * 3-attempt budget, DLQ the judgment, and count three failures against a
+ * breaker shared with every other correctly-behaving call on the same
+ * endpoint+model. A `ProviderError` (rather than the plain `Error` the
+ * JSON.parse guard below throws) is also what gets this to the right
+ * disposition at all: `classify()` passes a `ProviderError` through
+ * untouched, while an unrecognized plain `Error` defaults to `retryable`.
+ */
+function assertEveryCriterionScored(
+  criteria: RubricCriterionView[],
+  unscored: string[],
+  context: JudgmentParseContext | undefined
+): void {
+  if (unscored.length === 0) return;
+
+  const named = unscored.map((name) => `"${name}"`).join(', ');
+  const model = context?.modelId ? ` (model "${context.modelId}")` : '';
+  throw new ProviderError(
+    `Pointwise judge response did not contain a usable score for ${unscored.length} of ` +
+      `${criteria.length} rubric criteria: ${named}${model}`,
+    // `'unknown'` is what every production call currently gets — see
+    // `JudgmentParseContext`: `parseJudgmentText` doesn't pass a context
+    // yet. Inert rather than wrong: nothing reads `.provider` off a
+    // judgment failure (the consumer persists `.message`, and `classify()`
+    // returns an existing `ProviderError` untouched, label and all).
+    { kind: 'non_retryable', provider: context?.provider ?? 'unknown' }
+  );
+}
+
+/**
  * Shared normalization: given an already-parsed judgment-shaped object —
  * `parseJudgmentResponse`'s lenient, markdown-stripped `JSON.parse` output,
  * or `tryParseStructuredJudgment`'s strict, direct `JSON.parse` output —
@@ -219,10 +296,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * (src/lib/utils.ts) rather than defaulting to 0 — the same fix Task 11
  * (1a plan) applied to the human-judgment route, ported here for the LLM
  * judge path.
+ *
+ * "Treated as ABSENT" is where that fix stopped and this one starts: an
+ * absent per-criterion score used to become a fabricated 0 anyway, and the
+ * `overallScore` recompute then averaged those fabrications. It is now a
+ * hard failure — see `assertEveryCriterionScored` for the full rationale,
+ * including why a partial (4-of-5) parse is a failure too. The recompute
+ * below is only reached once every criterion is known to carry a real
+ * score, which is what makes it trustworthy.
  */
 function normalizeParsedJudgment(
   parsed: Record<string, unknown>,
-  criteria: RubricCriterionView[]
+  criteria: RubricCriterionView[],
+  context?: JudgmentParseContext
 ): Omit<ParsedJudgment, 'parseMode'> {
   // Validate and normalize criteria scores. Non-record elements (e.g. a
   // stray `null`/string in the array — 1b Task 11 review MINOR fix) are
@@ -231,12 +317,19 @@ function normalizeParsedJudgment(
   // `parseJudgmentResponse` (the lenient fallback) and
   // `tryParseStructuredJudgment` (the strict path) — a malformed element
   // used to crash whichever path reached it first. A dropped element is
-  // treated exactly like an absent/unmatched score for that criterion (same
-  // downstream 0-default as any other criterion nothing in the array
-  // matches).
+  // treated exactly like an absent/unmatched score for that criterion —
+  // which, since this fix, means the whole judgment fails rather than that
+  // criterion silently scoring 0.
   const parsedScores = (Array.isArray(parsed.criteriaScores) ? parsed.criteriaScores : []).filter(
     isRecord
   ) as unknown as CriteriaScore[];
+
+  // Collected across the whole rubric rather than thrown on the first
+  // miss: a judge that scored none of the criteria should say so once,
+  // naming all of them, instead of sending an operator round the loop one
+  // criterion at a time.
+  const unscored: string[] = [];
+
   const criteriaScores: CriteriaScore[] = criteria.map((criterion, index) => {
     // Match by ID, exact name, case-insensitive name, or array position
     const found = parsedScores.find(
@@ -252,17 +345,24 @@ function normalizeParsedJudgment(
       )
     ) ? parsedScores[index] : undefined);
 
-    const rawScore = finiteNumberOrUndefined(found?.score) ?? 0;
+    const rawScore = finiteNumberOrUndefined(found?.score);
+    if (rawScore === undefined) unscored.push(criterion.name);
 
     return {
       criterionId: criterion.id,
       criterionName: criterion.name,
-      score: Math.min(Math.max(0, rawScore), criterion.maxScore),
+      // `?? 0` only so the array stays well-typed while `unscored` is being
+      // collected — `assertEveryCriterionScored` throws below before any of
+      // these placeholder rows can be returned, recomputed from, or
+      // persisted.
+      score: Math.min(Math.max(0, rawScore ?? 0), criterion.maxScore),
       maxScore: criterion.maxScore,
       weight: criterion.weight,
       comment: found?.comment || '',
     };
   });
+
+  assertEveryCriterionScored(criteria, unscored, context);
 
   const rawOverall = finiteNumberOrUndefined(parsed.overallScore);
   const overallScore =
@@ -270,7 +370,12 @@ function normalizeParsedJudgment(
       ? Math.min(Math.max(0, rawOverall), 10)
       : criteriaScores.length > 0
         ? computeWeightedScore(criteriaScores)
-        : 0;
+        : // Only reachable for a rubric with NO criteria at all, which
+          // `config.ts` forbids (`criteria: z.array(criterionSchema).min(1)`).
+          // Left as 0 rather than folded into the failure above on purpose:
+          // the completeness check is about criteria the rubric HAS, and
+          // "every one of zero criteria was scored" is vacuously true.
+          0;
 
   return {
     overallScore,
@@ -286,8 +391,18 @@ function normalizeParsedJudgment(
  * The ordinary, lenient path — always `parseMode: 'fallback'`. See
  * `tryParseStructuredJudgment` below for the strict, guided-decoding
  * counterpart (Task 11).
+ *
+ * Lenient about SHAPE (markdown fences, missing ids, positional matching),
+ * strict about SUBSTANCE: a criterion the response never usably scored
+ * raises a `non_retryable` `ProviderError` rather than resolving to 0 —
+ * see `assertEveryCriterionScored`. `context` is optional and only
+ * enriches that error's `provider` label and `(model "...")` suffix.
  */
-export function parseJudgmentResponse(raw: string, criteria: RubricCriterionView[]): ParsedJudgment {
+export function parseJudgmentResponse(
+  raw: string,
+  criteria: RubricCriterionView[],
+  context?: JudgmentParseContext
+): ParsedJudgment {
   // Extract JSON from markdown code blocks if present
   let jsonStr = raw.trim();
   const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -306,7 +421,7 @@ export function parseJudgmentResponse(raw: string, criteria: RubricCriterionView
     );
   }
 
-  return { ...normalizeParsedJudgment(parsed, criteria), parseMode: 'fallback' };
+  return { ...normalizeParsedJudgment(parsed, criteria, context), parseMode: 'fallback' };
 }
 
 /**
@@ -347,6 +462,16 @@ export function parseJudgmentResponse(raw: string, criteria: RubricCriterionView
  * `parseJudgmentResponse` fallback actually succeed on the identical raw
  * text this function rejected, instead of hitting the same crash one level
  * up.)
+ *
+ * The shared `normalizeParsedJudgment` now also THROWS for a response that
+ * left a rubric criterion unscored. That is another shape this function's
+ * explicit checks can't anticipate (a schema-conforming array can still
+ * omit a criterion, or carry `"score": null`), so it lands in the same
+ * backstop catch and is reported as non-conforming — the caller logs the
+ * demotion warning and re-parses the identical text leniently, where the
+ * failure surfaces properly as a `ProviderError` instead of a fabricated
+ * 0. No `context` is threaded here on purpose: every error raised inside
+ * this function is swallowed, so labelling it would be dead detail.
  */
 export function tryParseStructuredJudgment(raw: string, criteria: RubricCriterionView[]): ParsedJudgment | undefined {
   let parsed: unknown;

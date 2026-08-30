@@ -81,10 +81,25 @@ export async function resolvePlatformUser(client: PrismaClient): Promise<string>
 // same catalog identity — `JudgeModel.slug` is globally unique and a
 // collision mints a NEW model, so per-user scoping would produce N
 // leaderboard identities with no merge path.
+//
+// `baseModel` is NOT decoration. `requireBaseModel`
+// (src/lib/llm/registry.ts:550) reads it off the JudgeModel head —
+// `judgeVersion.judgeModel.baseModel` — and `prepareJudgmentCall` /
+// `prepareRespondCall` hand that string to the provider verbatim, so a wrong
+// id here is a 404 at call time — and
+// because no ModelEndpoint is seeded, these three rows are the ONLY judges a
+// fresh deployment has. All three ids below were previously wrong
+// (`claude-sonnet-4-5-20250514`, `claude-sonnet-4-6-20250627`,
+// `claude-opus-4-5-20250630`), which meant the default catalog could not
+// produce a single judgment. Verify any change against Anthropic's model
+// reference, not against the shape of a neighbouring line: the first of those
+// three was `-20250514`, a *Sonnet 4* snapshot date, which is how the typo was
+// born. Sonnet 4.6 ships no dated snapshot at all — the bare id is complete
+// and appending a date to make it match its siblings re-creates the bug.
 const CATALOG_JUDGES = [
-  { name: 'Claude Sonnet 4.5', slug: 'claude-sonnet-4-5', baseModel: 'claude-sonnet-4-5-20250514' },
-  { name: 'Claude Sonnet 4.6', slug: 'claude-sonnet-4-6', baseModel: 'claude-sonnet-4-6-20250627' },
-  { name: 'Claude Opus 4.5', slug: 'claude-opus-4-5', baseModel: 'claude-opus-4-5-20250630' },
+  { name: 'Claude Sonnet 4.5', slug: 'claude-sonnet-4-5', baseModel: 'claude-sonnet-4-5-20250929' },
+  { name: 'Claude Sonnet 4.6', slug: 'claude-sonnet-4-6', baseModel: 'claude-sonnet-4-6' },
+  { name: 'Claude Opus 4.5', slug: 'claude-opus-4-5', baseModel: 'claude-opus-4-5-20251101' },
 ] as const;
 
 /**
@@ -167,7 +182,32 @@ export async function seedAll(prisma: PrismaClient) {
     // eslint-disable-next-line no-await-in-loop -- sequential seed, N=3; idempotency matters more than parallelism
     const judgeModel = await prisma.judgeModel.upsert({
       where: { slug: judge.slug },
-      update: {},
+      // `baseModel` is re-asserted, the way `visibility` is on the Leaderboard
+      // project below, and for a sharper reason: this was `update: {}`, so the
+      // corrected ids above could ship in the image and change NOTHING in a
+      // database that had already been seeded. A re-seed is the only repair
+      // path that exists — `POST /api/config/import` detects a differing
+      // modelId and explicitly declines to apply it (route.ts:421), and
+      // `PATCH /api/models/[id]` only ever touches the per-user ModelEndpoint.
+      // Without this line the operator's option is hand-written SQL against
+      // production.
+      //
+      // ONLY `baseModel`. `slug` is the identity this upsert matches on;
+      // `name`, `judgeClass` and `scoringMechanism` are excluded because no
+      // defect has ever made one of them wrong, and re-asserting a field turns
+      // every future seed into a silent overwrite of whatever is there —
+      // scope that to the field with a demonstrated failure, not to the row.
+      //
+      // This does not contradict "catalog identity is immutable"
+      // (src/lib/model-catalog.ts:17). That contract governs USER write paths
+      // mutating a shared identity; the seeder is the sole author of these
+      // three curated rows. But be honest about the cost: `registry.ts` reads
+      // the id off the JudgeModel HEAD, not off the version a judgment pinned,
+      // so repointing `baseModel` retroactively changes what every historical
+      // pin resolves to. That is acceptable here only because an id that 404s
+      // cannot have produced a judgment to misattribute. A LEGITIMATE snapshot
+      // bump has no such excuse and belongs in a new catalog entry.
+      update: { baseModel: judge.baseModel },
       create: {
         name: judge.name,
         slug: judge.slug,
@@ -180,6 +220,13 @@ export async function seedAll(prisma: PrismaClient) {
     // eslint-disable-next-line no-await-in-loop
     await prisma.judgeModelVersion.upsert({
       where: { judgeModelId_ordinal: { judgeModelId: judgeModel.id, ordinal: 1 } },
+      // Stays EMPTY, deliberately, and does not follow `baseModel` above. A
+      // version is the immutable provenance pin every `ModelJudgment` FKs
+      // (onDelete: Restrict) — "no update code path may exist" is a stated
+      // program invariant, not a default nobody revisited. Rewriting
+      // `samplingDefaults` or `trustState` under a judgment would change what
+      // that judgment claims to have been produced by. A version that needs
+      // different values is a new ordinal.
       update: {},
       create: {
         judgeModelId: judgeModel.id,

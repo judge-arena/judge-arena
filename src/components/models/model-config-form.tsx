@@ -85,6 +85,15 @@ const SERVING_BACKEND_OPTIONS = [
   { value: 'openai', label: 'OpenAI' },
   { value: 'openrouter', label: 'OpenRouter' },
   { value: 'vllm', label: 'vLLM (self-hosted, guided decoding)' },
+  // "judge-eligible" is stated OUT LOUD here only because the neighbouring
+  // Ollama entry disclaims it: both are self-hosted local servers, so without
+  // this an operator reasonably reads Ollama's caveat as applying to the
+  // whole local-server family and never picks the one backend that can
+  // actually produce scored runs. The claim is the registry descriptor's
+  // (`llamacpp.scoredRunsAllowed: true`, vs ollama's `false`) — llama.cpp
+  // constrains output to a JSON schema, so its verdicts parse; Ollama's are
+  // unparseable-by-construction, which is why it is refused.
+  { value: 'llamacpp', label: 'llama.cpp (self-hosted, JSON-schema output — judge-eligible)' },
   { value: 'ollama', label: 'Ollama (local, respond-only — not judge-eligible)' },
 ];
 
