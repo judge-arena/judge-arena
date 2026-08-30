@@ -53,7 +53,10 @@ describe('golden-set route schemas', () => {
         sampleIndices: [0, 1],
         limit: 5,
       })
-    ).toThrow(/not both/);
+    // Message widened when randomCount/randomPercent joined the mutually
+    // exclusive group: 'not both' became 'at most one of', because four
+    // fields now answer the same question. Matched on the stable half.
+    ).toThrow(/at most one of/);
 
     // Each ALONE still parses. A refusal that rejected both would satisfy the
     // assertion above while deleting the feature.

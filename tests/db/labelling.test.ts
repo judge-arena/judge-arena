@@ -362,6 +362,73 @@ describe('A1 assignment — overlap is designed, not accidental', () => {
     expect(await db.goldenAssignment.count()).toBe(0);
   });
 
+  it('resolves annotator and assignedBy to NAMES, never raw ids — the UI cannot render a cuid', async () => {
+    // The list surface shows a coordinator who was asked to do what. Ids alone
+    // are unusable for that, and making the client fetch users separately is
+    // how an N+1 gets written. Projected through toPublicOwner, so the email
+    // is never on the wire.
+    const owner = await mkUser({ name: 'Ada Lovelace' });
+    const admin = await mkUser({ role: 'admin', name: 'Grace Hopper' });
+    const { set } = await mkGoldenSet(owner.id);
+    sessionFor(admin);
+
+    const created = await (
+      await POST_ASSIGNMENT(jsonRequest({ annotatorId: owner.id }, 'POST'), params(set.id))
+    ).json();
+    expect(created.assignment.annotator).toEqual({ id: owner.id, name: 'Ada Lovelace' });
+    expect(created.assignment.assignedBy).toEqual({ id: admin.id, name: 'Grace Hopper' });
+    expect(JSON.stringify(created)).not.toContain(owner.email);
+
+    const listed = await (
+      await GET_ASSIGNMENTS(
+        new Request(`http://localhost/api/golden-sets/${set.id}/assignments`),
+        params(set.id)
+      )
+    ).json();
+    expect(listed.assignments[0].annotator).toEqual({ id: owner.id, name: 'Ada Lovelace' });
+    expect(JSON.stringify(listed)).not.toContain(owner.email);
+  });
+
+  it('an anonymised annotator resolves to null rather than vanishing from the list', async () => {
+    // Account deletion nulls annotatorId by design. The row survives because
+    // it records what was ASKED; dropping it from the list would erase that.
+    const owner = await mkUser();
+    const { set } = await mkGoldenSet(owner.id);
+    sessionFor(owner);
+    await POST_ASSIGNMENT(jsonRequest({ annotatorId: owner.id }, 'POST'), params(set.id));
+    await db.goldenAssignment.updateMany({ where: { goldenSetId: set.id }, data: { annotatorId: null } });
+
+    const listed = await (
+      await GET_ASSIGNMENTS(
+        new Request(`http://localhost/api/golden-sets/${set.id}/assignments`),
+        params(set.id)
+      )
+    ).json();
+    expect(listed.assignments).toHaveLength(1);
+    expect(listed.assignments[0].annotator).toBeNull();
+  });
+
+  it('SELF-ASSIGN: the owner assigning themselves is what the UI button does', async () => {
+    // The whole reason the assignment UI exists. Being the owner does NOT get
+    // you items from the queue — an assignment row does — so this is the one
+    // path between "I made a set" and "I can label it".
+    const owner = await mkUser();
+    const { set } = await mkGoldenSet(owner.id, { count: 2 });
+    sessionFor(owner);
+
+    const res = await POST_ASSIGNMENT(jsonRequest({ annotatorId: owner.id }, 'POST'), params(set.id));
+    expect(res.status).toBe(201);
+    const { assignment } = await res.json();
+    expect(assignment.goldenItemId).toBeNull();   // whole set
+    expect(assignment.annotator.id).toBe(owner.id);
+    expect(assignment.assignedBy.id).toBe(owner.id);
+
+    // ...and the queue now serves, where before it said no-assignment.
+    const body = await (await queueRequest(set.id)).json();
+    expect(body.reason).toBeNull();
+    expect(body.next).not.toBeNull();
+  });
+
   it('refuses an item that belongs to a DIFFERENT golden set', async () => {
     // Otherwise the id in the URL is decoration and an assignment can point
     // across sets, which every downstream queue query would then mis-scope.

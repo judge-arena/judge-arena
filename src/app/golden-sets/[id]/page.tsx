@@ -24,6 +24,19 @@ interface GoldenCandidateView {
   label: string | null;
 }
 
+/** One row from GET /api/golden-sets/[id]/assignments. The API resolves
+ *  `annotator`/`assignedBy` to { id, name } so this never renders a cuid. */
+interface AssignmentView {
+  id: string;
+  goldenItemId: string | null;
+  round: number;
+  assignedAt: string;
+  completedAt: string | null;
+  revokedAt: string | null;
+  annotator: { id: string; name: string | null } | null;
+  assignedBy: { id: string; name: string | null } | null;
+}
+
 interface GoldenItemView {
   id: string;
   /**
@@ -162,6 +175,74 @@ export default function GoldenSetDetailPage() {
     }
   }, [id]);
 
+  /** Assignments are coordinator-only (owner/admin) at the API, so a 403 here
+   *  is expected for a non-owner and must not raise a toast — the panel simply
+   *  does not render for them. */
+  const loadAssignments = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/golden-sets/${id}/assignments`);
+      if (res.ok) setAssignments((await res.json()).assignments ?? []);
+      else setAssignments([]);
+    } catch {
+      setAssignments([]);
+    }
+  }, [id]);
+
+  const handleAssignToMe = async () => {
+    // Same cast as `viewerId` below: next-auth's default Session type has no
+    // `user.id`, and this app puts one there via its jwt/session callbacks.
+    const meId = (session?.user as { id?: string } | undefined)?.id;
+    if (!meId) return;
+    setAssignBusy(true);
+    try {
+      const res = await fetch(`/api/golden-sets/${id}/assignments`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ annotatorId: meId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        toast.success('Assigned — the labelling queue will now serve you items');
+        await loadAssignments();
+      } else {
+        // 409 means an active assignment already exists; the server's message
+        // says so precisely, and flattening it to "failed" would send someone
+        // looking for a bug instead of at the row they already have.
+        toast.error(data.error || 'Failed to assign');
+      }
+    } catch {
+      toast.error('Failed to assign');
+    } finally {
+      setAssignBusy(false);
+    }
+  };
+
+  const handleRevoke = async (assignmentId: string) => {
+    setAssignBusy(true);
+    try {
+      const res = await fetch(`/api/golden-sets/${id}/assignments`, {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ assignmentId, reason: 'revoked from the golden-set page' }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        toast.success('Revoked — the row is kept as a record of what was asked');
+        await loadAssignments();
+      } else {
+        toast.error(data.error || 'Failed to revoke');
+      }
+    } catch {
+      // Mirrors handleAssignToMe. Without this a rejected fetch (offline, DNS,
+      // an aborted navigation) escapes as an unhandled rejection, and because
+      // `finally` still re-enables the button the screen looks exactly like a
+      // successful revoke — the stale row simply stays put.
+      toast.error('Failed to revoke');
+    } finally {
+      setAssignBusy(false);
+    }
+  };
+
   const loadItems = useCallback(
     async (cursor: string | null) => {
       setLoadingItems(true);
@@ -207,6 +288,13 @@ export default function GoldenSetDetailPage() {
   // proactive, and does not survive a reload.
   const [frozen, setFrozen] = useState(false);
   const [forking, setForking] = useState(false);
+
+  // ─── A1 assignments ───
+  // Being the OWNER does not get you items from the queue — an assignment row
+  // does (see the queue route). Without this panel there was no way to create
+  // one from a browser, so a set could be made and never labelled.
+  const [assignments, setAssignments] = useState<AssignmentView[]>([]);
+  const [assignBusy, setAssignBusy] = useState(false);
   const [retiring, setRetiring] = useState(false);
 
   const startEditing = (item: GoldenItemView) => {
@@ -339,6 +427,10 @@ export default function GoldenSetDetailPage() {
   }, [loadGoldenSet]);
 
   useEffect(() => {
+    loadAssignments();
+  }, [loadAssignments]);
+
+  useEffect(() => {
     loadItems(null);
   }, [loadItems]);
 
@@ -394,6 +486,11 @@ export default function GoldenSetDetailPage() {
    */
   const viewerId = (session?.user as { id?: string } | undefined)?.id;
   const isOwner = !!viewerId && !!goldenSet.owner?.id && goldenSet.owner.id === viewerId;
+
+  // Revoked rows are kept as a record of what was asked, so the panel filters
+  // rather than the query — see the assignments route's DELETE.
+  const activeAssignments = assignments.filter((a) => !a.revokedAt);
+  const assignedToMe = activeAssignments.some((a) => a.annotator?.id === viewerId);
 
   return (
     <div>
@@ -528,6 +625,77 @@ export default function GoldenSetDetailPage() {
               in the set).
             </p>
           </div>
+        )}
+
+        {/* ─── Assignments (A1) ────────────────────────────────────────── */}
+        {isOwner && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">
+                Annotation assignments
+                <span className="ml-2 text-xs font-normal text-surface-500 dark:text-surface-400">
+                  ({activeAssignments.length} active)
+                </span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-xs text-surface-500 dark:text-surface-400">
+                Annotation work is handed out deliberately rather than self-selected, so the
+                overlap between annotators is designed rather than whatever coincides.{' '}
+                <strong>Owning this set is not enough to label it</strong> — the queue serves an
+                active assignment, so assign yourself before opening the studio.
+              </p>
+
+              {activeAssignments.length === 0 ? (
+                <p className="text-sm italic text-surface-500 dark:text-surface-400">
+                  Nobody is assigned to this set yet.
+                </p>
+              ) : (
+                <ul className="divide-y divide-surface-100 dark:divide-surface-700">
+                  {activeAssignments.map((a) => (
+                    <li key={a.id} className="flex items-center gap-3 py-2 text-sm">
+                      <span className="flex-1 text-surface-700 dark:text-surface-200">
+                        {a.annotator?.name ?? (a.annotator ? 'Unnamed user' : 'Deleted account')}
+                        <span className="ml-2 text-xs text-surface-500">
+                          {a.goldenItemId ? 'one item' : 'whole set'} · round {a.round}
+                          {a.completedAt ? ' · complete' : ''}
+                        </span>
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={assignBusy}
+                        onClick={() => handleRevoke(a.id)}
+                      >
+                        Revoke
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <div className="flex items-center gap-2 pt-1">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={assignBusy}
+                  disabled={assignedToMe || !!goldenSet.retiredAt}
+                  onClick={handleAssignToMe}
+                >
+                  {assignedToMe ? 'Assigned to you' : 'Assign to me'}
+                </Button>
+                {assignedToMe && (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={() => router.push(`/golden-sets/${goldenSet.id}/label`)}
+                  >
+                    Open the studio
+                  </Button>
+                )}
+              </div>
+            </CardContent>
+          </Card>
         )}
 
         {/* ─── Items ───────────────────────────────────────────────────── */}

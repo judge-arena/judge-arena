@@ -13,6 +13,7 @@ import {
 import { parsePaginationParams, buildPrismaPageArgs, paginatedJson } from '@/lib/pagination';
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicGoldenSet } from '@/lib/serializers';
+import { buildImportSelection } from '@/lib/sample-selection';
 import { generateSlug } from '@/lib/config';
 import {
   PLATFORM_OWNER_EMAIL,
@@ -140,6 +141,35 @@ export async function POST(request: Request) {
       );
     }
 
+    // ── RANDOM selection, resolved here and nowhere else ──────────────────
+    // Drawn from the indices that ACTUALLY EXIST, which is the whole reason
+    // this is server-side: `DatasetSample.index` is not dense (a tombstoned
+    // row keeps its ordinal), so picking numbers in [0, count) would name
+    // indices that are not there and quietly import fewer items than asked.
+    // Resolved into `sampleIndices` so everything below is the one code path.
+    let resolvedIndices = data.sampleIndices;
+    if (data.randomCount !== undefined || data.randomPercent !== undefined) {
+      const live = await prisma.datasetSample.findMany({
+        where: { datasetId: dataset.id, ...liveSamplesOnly() },
+        select: { index: true },
+        orderBy: { index: 'asc' },
+      });
+      const spec =
+        data.randomPercent !== undefined
+          ? ({ kind: 'random-percent', percent: data.randomPercent } as const)
+          : ({ kind: 'random-count', count: data.randomCount! } as const);
+      resolvedIndices = buildImportSelection(
+        spec,
+        live.map((s) => s.index)
+      ).sampleIndices;
+      if (!resolvedIndices || resolvedIndices.length === 0) {
+        return NextResponse.json(
+          { error: 'That dataset has no live samples to select from' },
+          { status: 400 }
+        );
+      }
+    }
+
     // Samples are read SERVER-SIDE. Never through GET /api/datasets/[id],
     // which takes `samples: { take: 100 }` — that path imports 100 of 620,
     // errors nothing, and looks like it worked.
@@ -153,7 +183,7 @@ export async function POST(request: Request) {
         // `liveSamplesOnly()` contributes only `NOT` and `dataset` keys, so it
         // collides with neither `datasetId` nor the `index` spread below.
         ...liveSamplesOnly(),
-        ...(data.sampleIndices ? { index: { in: data.sampleIndices } } : {}),
+        ...(resolvedIndices ? { index: { in: resolvedIndices } } : {}),
       },
       orderBy: { index: 'asc' },
       select: { id: true, index: true, input: true, expected: true, metadata: true },
@@ -164,18 +194,23 @@ export async function POST(request: Request) {
       ...(data.limit !== undefined ? { take: data.limit } : {}),
     });
 
-    // Present => only the named samples, IN THE ORDER GIVEN.
+    // Present => only the named samples, IN THE ORDER GIVEN. Reads
+    // `resolvedIndices`, not `data.sampleIndices`, so a RANDOM selection
+    // travels the identical path — same missing-index guard, same ordering.
+    // A random pick can never be "missing" (it was drawn from the live rows
+    // moments earlier), but routing it through the same check means there is
+    // one code path here rather than two that could drift.
     let ordered = samples;
-    if (data.sampleIndices) {
+    if (resolvedIndices) {
       const byIndex = new Map(samples.map((s) => [s.index, s]));
-      const missing = data.sampleIndices.filter((i) => !byIndex.has(i));
+      const missing = resolvedIndices.filter((i) => !byIndex.has(i));
       if (missing.length > 0) {
         return NextResponse.json(
           { error: `sampleIndices not present in this dataset: ${missing.join(', ')}` },
           { status: 400 }
         );
       }
-      ordered = data.sampleIndices.map((i) => byIndex.get(i)!);
+      ordered = resolvedIndices.map((i) => byIndex.get(i)!);
     }
 
     if (ordered.length === 0) {
