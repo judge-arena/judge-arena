@@ -51,7 +51,7 @@ cp .env.example .env.local    # .env.example's own header says .env.local — se
 npm install                   # `postinstall` runs `prisma generate` (v2 client) for you
 npm run db:generate:v1        # the SECOND Prisma client, for the importer — tsc fails without it
 # start the three podman services first — see below
-sh -c 'set -a; . ./.env.local; set +a; npx prisma migrate deploy'   # 18 migrations
+sh -c 'set -a; . ./.env.local; set +a; npx prisma migrate deploy'   # 19 migrations
 sh -c 'set -a; . ./.env.local; set +a; npm run db:seed'             # same wrapper — see below
 npm run dev                   # http://localhost:3000  (Next.js loads .env.local itself)
 ```
@@ -139,7 +139,7 @@ must start with the protocol `postgresql://`"). **That error reads like schema d
 CLI auto-loads `.env` and never `.env.local`, and this tree has no `.env`. Source the file instead:
 
 ```bash
-sh -c 'set -a; . ./.env.local; set +a; npx prisma migrate status'   # 18 migrations, up to date
+sh -c 'set -a; . ./.env.local; set +a; npx prisma migrate status'   # 19 migrations, up to date
 ```
 
 That `set -a` / dot-source / `set +a` wrapper is not an invention for this note — it is exactly what
@@ -311,6 +311,7 @@ src/
 │   ├── auth-guard.ts          # optionalAuth / requireAuth / requireOwnership
 │   ├── run-launch.ts          # Transaction, then publish — the web tier's half of a run
 │   ├── golden-sets.ts, agreement.ts, labelling-queue.ts, sample-selection.ts, …
+│   ├── calibration/           # A2.1: launch.ts (FREEZES the set), score.ts, readings.ts
 │   ├── llm/                   # Provider abstraction layer
 │   │   ├── provider.ts        #   Interface + prompt builders + response parser
 │   │   ├── anthropic.ts       #   Anthropic Messages API
@@ -323,11 +324,25 @@ src/
 │   ├── main.ts                #   Boot + consumer registration
 │   ├── run-create-consumer.ts #   run.create  → fans out judgment.execute
 │   ├── judgment-consumer.ts   #   judgment.execute → provider call → ModelJudgment
-│   └── claim.ts reaper.ts dispatch-failure.ts
+│   ├── concurrency.ts         #   the hard cap of 1 — read its header before raising it
+│   └── claim.ts reaper.ts dispatch-failure.ts health.ts
 ├── middleware.ts              # Per-request CSP nonce (Task 14)
 └── types/
     └── index.ts               # Shared TypeScript interfaces
+
+scripts/                       # NOT under src/ — bundled into the image by esbuild
+├── admin/create-user.ts       # invite CLI          → /app/create-user.js
+├── admin/add-judge.ts         # judge registration  → /app/add-judge.js         [A2.1]
+└── calibration/run.ts         # calibration runner  → /app/calibration-run.js   [A2.1]
+                               #   and `npm run calibration:run` locally
 ```
+
+> **ADDED 2026-08-31 (A2.1).** `src/lib/calibration/`, `src/worker/concurrency.ts` and the two new
+> `scripts/` entrypoints are the only structural additions since the `14d75f7` correction above.
+> `scripts/` is a real deployment surface, not developer scratch: `.dockerignore` excluded
+> `scripts/calibration/` when the runner first landed, so `e4b9948`'s image built **successfully**
+> and shipped without the script it existed to ship (fixed in `c641786`). If you add an entrypoint
+> there, check `.dockerignore` and then check the built image — the build log will not tell you.
 
 ### Key principles
 
@@ -737,6 +752,16 @@ gate would pass clean today. Currently eight cases (the count was stale at
 incremented again by L1's CHECK below, and by the three v2h adds; keep this
 number in step with the rows):
 
+> **Still eight after v2i (2026-08-31), and that is a fact worth stating rather than a row worth
+> adding.** `20260830120000_v2i_calibration_item_link` was written with **zero hand edits** — the
+> whole migration is what Prisma generated. Its `@@unique([calibrationRunId, goldenItemId])` needs
+> no `NULLS NOT DISTINCT` edit (the way `ModelJudgment`'s did) precisely because Postgres' **default
+> `NULLS DISTINCT` is what that index wants**: every ordinary run has both columns NULL and they
+> must all coexist, while at most one calibration run may exist per (calibration, item). Adding
+> `NULLS NOT DISTINCT` there would have made the *first* ordinary run block every subsequent one.
+> If you find yourself reaching for a hand edit on a unique index, check first whether the default
+> is already the semantics you need.
+
 | Migration | What's really there | Why `schema.prisma` can't say it |
 |---|---|---|
 | `20260728215410_v2b_idempotency_tighten` | `ModelJudgment_runId_judgeModelVersionId_pairOrder_key` recreated `NULLS NOT DISTINCT` (real pointwise idempotency, 1b Task 6) | `@@unique([runId, judgeModelVersionId, pairOrder])` has no Prisma DSL syntax for `NULLS NOT DISTINCT` (PG15+) |
@@ -1126,10 +1151,12 @@ Production is the homelab Kubernetes cluster. Verified by `kubectl`/`psql` on 20
 | URL | `https://judgearena.com` — returns 200 |
 | Namespace | `tenant-public` |
 | Database | CloudNativePG. Pod **`judge-arena-pg-1`**, container `postgres`, database **`judge_arena`** |
-| Migrations applied | 18, 0 unfinished, latest `20260818120000_v2h_human_verification` — the same 18 that `prisma migrate deploy` lays on locally |
+| Migrations applied | **19**, 0 unfinished, latest `20260830120000_v2i_calibration_item_link` — the same 19 that `prisma migrate deploy` lays on locally. (Was 18 / `v2h` when this table was written on 2026-08-29; re-verified 2026-08-31.) |
 | Image | built by CI as `sha-<12-char commit>` and pushed to Harbor by an ephemeral kaniko `Job` in `tenant-builds` (see `.gitea/workflows/ci.yml`'s `build-push` job) |
 | Deployed at the time of writing | `sha-bee1d121ea7d`, with a promote to the `14d75f7` build in flight |
 | Deployed **now** (re-checked later the same day) | `sha-14d75f7d46de` — the promote landed. `kubectl get deploy -n tenant-public -o jsonpath=…` shows both `judge-arena-web` and `judge-arena-worker` on `harbor.cluster.asethi.com/homelab/judge-arena:sha-14d75f7d46de`, pods ~2m old. The row above is left as the reading it was. |
+| Deployed on **2026-08-31, 21:23Z** | `sha-c6417860027a` — commit `c641786`, **two commits behind `main`**, so the concurrency cap was not yet in production. **SUPERSEDED 6 minutes later**; kept because a reading is a claim about a moment, and this is the pair that shows how fast that claim decays. |
+| Deployed on **2026-08-31, 21:29Z** | `sha-1e7a427d2c48` — commit `1e7a427`, both Deployments, pods rolled. The cap is live, and the worker's own boot log is the proof: `{"msg":"EVALUATION_MODEL_CONCURRENCY_PER_RUN clamped to the hard cap","requested":2,"effective":1}` followed by `{"msg":"judge worker started","prefetch":1,"concurrency":1}`. **The Deployment still sets `EVALUATION_MODEL_CONCURRENCY_PER_RUN=2` and the worker runs at 1 anyway** — that env var is now a statement of intent, not a control. Read the boot log, not the manifest. |
 
 **Merging to `main` does not deploy.** judge-arena is a **manual-promote** app (`286da59`; it is
 deliberately excluded from the build-lag exporter). A push to `main` builds and publishes an image;
@@ -1145,6 +1172,51 @@ what it was told — not that production is running your commit.
   `docker-compose.yml`'s self-contained network. Production's database is `judge_arena`, with the
   underscore, and so is every local one. Do not copy a connection string from `docker-compose.yml`
   and expect it to work anywhere outside compose.
+
+### Running a calibration against production (A2.1, 2026-08-31)
+
+Two entrypoints are bundled into the image (`Dockerfile`, esbuild — the runner ships no TypeScript
+toolchain). They must run **inside the cluster**, because that is the only place that can reach both
+`judge-arena-pg-rw.tenant-public` and a judge endpoint; a workstation has no route to either.
+
+```sh
+# Register a judge. Reuses createCustomJudgeModel — the same chokepoint POST /api/models goes
+# through — so the judge gets a `model.create` audit row instead of being invisible to the trail.
+kubectl -n tenant-public exec deploy/judge-arena-web -- node /app/add-judge.js \
+  --name="<display name>" --backend=llamacpp \
+  --base-model="<the id the server actually serves>" \
+  --endpoint="http://<host>:8001/v1" [--max-tokens=8192] [--protocol=pairwise] [--dry-run]
+
+# Launch + score. Prints accuracy WITH its denominator, kappa with its method, the raw verdict
+# distribution, and every disagreement with the model's own reasoning.
+kubectl -n tenant-public exec deploy/judge-arena-web -- node /app/calibration-run.js \
+  --golden-set=<goldenSetId> --judge-version=<judgeModelVersionId>
+
+# Re-score without launching (idempotent — full overwrite, nothing increments):
+kubectl -n tenant-public exec deploy/judge-arena-web -- node /app/calibration-run.js \
+  --score-only=<calibrationRunId>
+```
+
+> **THE FIRST COMMAND THAT LAUNCHES FREEZES THE GOLDEN SET, IRREVERSIBLY.** `isGoldenSetFrozen` is
+> `calibrationRun.count({ where: { goldenSetId } }) > 0` (`src/lib/golden-sets.ts:266-272`) — there
+> is no `frozenAt` column and no unfreeze verb anywhere in the product. Once the `CalibrationRun`
+> header commits, that set's items, candidates, `protocol` and `expected` are read-only forever;
+> deleting the calibration is not possible (`EvaluationRun.calibrationRunId` is `onDelete: Restrict`)
+> and retiring or tombstoning the set does not release it. The only way to change a frozen set's
+> content is `POST /api/golden-sets/[id]/fork`, which makes a new set at version+1.
+> `launchCalibrationRun` therefore checks **everything knowable without touching an item** before
+> writing that header — otherwise the failure shape is a set pinned forever by a calibration in
+> which all 30 items failed for one reason that was knowable before any of them ran.
+
+Use `--dry-run` on `add-judge.js` when you are unsure of the served model id, the backend or the
+endpoint's `/v1` suffix: those are the fields that are easiest to mistype and they fail **late**, at
+judgment time, after a run has already been launched.
+
+Note also what a calibration is **not**: it is not a parallel execution path. `launchCalibrationRun`
+creates rows and calls `launchSingleRun` N times; it publishes nothing itself and knows nothing about
+providers. A calibration run is an ordinary pairwise run with two extra columns set, drained by the
+same `judgment.execute` consumer as everything else. If you are debugging one, debug the normal
+pipeline.
 
 ### Known open production defect (2026-08-24 →, unfixed)
 
@@ -1224,8 +1296,30 @@ Three things worth knowing if you're touching either file:
    | Service | `connection_limit` | Why |
    |---|---|---|
    | `app` | `10` | Fixed — the web tier's per-request Prisma usage is short-lived (single query/transaction per API route handler), 10 concurrent connections comfortably covers request bursts without either starving other services or holding connections idle. |
-   | `worker` | `EVALUATION_MODEL_CONCURRENCY_PER_RUN × 2` (default `2 × 2 = 4`, via compose's `WORKER_DB_POOL_LIMIT`) | Sized to the worker's own concurrency knob — one connection per in-flight judgment's claim update, one headroom slot so the persist-result write doesn't serialize behind another in-flight claim on the same pool. Raise `EVALUATION_MODEL_CONCURRENCY_PER_RUN` → raise `WORKER_DB_POOL_LIMIT` to match. |
+   | `worker` | `EVALUATION_MODEL_CONCURRENCY_PER_RUN × 2` (default `2 × 2 = 4`, via compose's `WORKER_DB_POOL_LIMIT`) | Sized to the worker's own concurrency knob — one connection per in-flight judgment's claim update, one headroom slot so the persist-result write doesn't serialize behind another in-flight claim on the same pool. ~~Raise `EVALUATION_MODEL_CONCURRENCY_PER_RUN` → raise `WORKER_DB_POOL_LIMIT` to match.~~ **See the note below: since 2026-08-31 raising that env var raises nothing.** |
    | `migrate` | `5` | One-shot, transient — Prisma's migration engine doesn't need much, and it never runs concurrently with itself. |
+
+   > **CORRECTION 2026-08-31 — the `worker` row's sizing rule no longer has a knob to follow.**
+   > `EVALUATION_MODEL_CONCURRENCY_PER_RUN` is now **clamped to a hard cap of 1**
+   > (`src/worker/concurrency.ts`, `HARD_CONCURRENCY_CAP`), so setting it to 8 changes the *pool
+   > budget* in this table and changes **nothing** about how many judgments actually run at once.
+   > Two things follow: (a) the pool row overshoots harmlessly rather than under-provisioning, so
+   > there is nothing urgent to fix here; and (b) **do not treat this row as evidence that the
+   > concurrency knob is live.** It is not, and the clamp is logged at `warn` on boot.
+   >
+   > The cap exists because prefetch is not a buffer in this worker: `dispatch` starts a handler for
+   > every message the broker delivers, so `prefetch = concurrency × 4` issued **eight** concurrent
+   > provider calls at concurrency 2. Against a llama.cpp server advertising `total_slots: 2`, six of
+   > those queued *inside the inference server* while their 300s client timeout ran, and 4 of 30
+   > items of the first production calibration dead-lettered at `timed out after 300000ms` — while
+   > the 26 that completed had a stored `latencyMs` averaging **233s** — median 265s, max 299,063 ms
+   > against the 300,000 ms timeout, i.e. 26 of 30 finished within a second of the wall. (`latencyMs`
+   > is measured around the HTTP call in `src/lib/llm/openai-compatible.ts:249`, so it *includes*
+   > time queued inside the inference server, which is precisely why it is inflated here.) When this
+   > eventually grows, the fix is
+   > **per-endpoint** concurrency (a value beside the endpoint that constrains it, with a scheduler
+   > that respects it per endpoint), not a bigger global number. Read that module's header before
+   > touching either value.
 
    **The formula to check before scaling further** (also in
    `docker-compose.yml`'s `app` service comment):

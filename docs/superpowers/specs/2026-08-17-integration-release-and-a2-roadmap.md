@@ -58,6 +58,43 @@ Each numbered item becomes its own plan.
 > and two assignments exist, **zero labels do**, and sign-in is being refused for a reason nobody had
 > diagnosed. Read E1 before doing anything else.
 
+> **UPDATE 2026-08-31 — A2.1 SHIPPED, AND THE GATE THIS DOCUMENT IS BUILT ON WAS TOO BROAD.**
+>
+> This roadmap's organising claim is that **A2 waits on real labels**. That is correct for the
+> human-vs-model half and **wrong for the model-vs-ground-truth half**, which needs no `GoldenLabel`
+> at all — `GoldenItem.expected` arrives with the dataset and has been sitting in production since
+> 2026-08-19. A2.1 has now shipped and produced a number **while `GoldenLabel` is still `0`**.
+>
+> Every present-tense sentence below that says "A2 cannot start" has been left as written and
+> annotated where it is now scoped wrongly, rather than rewritten — the claim was load-bearing for
+> months and quietly correcting it would hide that it was ever made.
+>
+> **What shipped**, all on `main`: `ae0d4a7` (migration `v2i`, `src/lib/calibration/*`, prompt and
+> reasoning capture, the truncation guard), `e4b9948` (the runner + judge-registration CLI in the
+> image), `c641786` (`.dockerignore` had excluded `scripts/calibration/`, so `e4b9948`'s image built
+> successfully and shipped without the script it existed to ship), `cb2fc37` (`missingVerdicts`
+> reported `0` while four items had dead-lettered) and `1e7a427` (in-flight judgments hard-capped
+> at 1).
+>
+> **The number:** Qwen3.6-35B-A3B, calibration `cmtgib0xr00016k2r8nlyj1py`, **accuracy 0.8462 over
+> 22 of 26 items**, kappa **0.6950** (cohen/none). Four of thirty items dead-lettered on a
+> **configuration** fault — prefetch 8 against a 2-slot server — not on the model.
+>
+> **The re-run is in flight, not finished.** `CalibrationRun` `cmthr58r100013s0sykuvn41x` started
+> `2026-08-31 21:30:17.101` (30 launched / 9 completed / 1 running / 20 pending at `21:37Z`). **No
+> second result exists yet; do not record one.**
+>
+> **What did NOT move: E1.** `GoldenLabel` is still `0`, the OIDC mismatch is untouched, and the
+> agreement panel still has no UI. See the plan doc §7 for the full account.
+>
+> **Deployment, two readings six minutes apart** — kept as a pair because the first is the basis of
+> anything below that calls the cap un-deployed: `21:23Z` → `sha-c6417860027a` (`c641786`, two
+> commits behind `main`, cap NOT in production); **`21:29Z` → `sha-1e7a427d2c48` (`1e7a427`) on both
+> Deployments — promoted, pods rolled, cap live.** The worker's boot log is the proof:
+> `clamped to the hard cap {requested:2, effective:1}` then
+> `judge worker started {prefetch:1, concurrency:1}`. Note that the Deployment still sets
+> `EVALUATION_MODEL_CONCURRENCY_PER_RUN=2` — **that env var is now intent, not control.**
+
 **Supersedes nothing.** It sits between `2026-08-10-judge-training-engine-roadmap.md` (which says
 *what* A2 is) and `2026-08-17-a2-calibration-and-reporting-decisions.md` (which says what about A2
 is already settled). This says **what has to happen first, and why the order is not negotiable.**
@@ -76,6 +113,13 @@ broker safety. A1 is now done. So the natural reading is "one gate left".
 > migrations landed 2026-08-17; the **zero golden sets** did not change.)* A2 cannot be *specced* —
 > by its own decisions document — until real label data exists, because the shape of that data is an
 > input to the calibration design rather than an assumption to be made ahead of it.
+>
+> **CORRECTION 2026-08-31 — the first sentence is still true; the second was scoped too widely.**
+> "A2" is two things. The **human-vs-model** half genuinely takes A1's label distribution as a design
+> input and still cannot be specced. The **model-vs-ground-truth** half takes `GoldenItem.expected`,
+> which is not produced by annotation at all — and it was specced, built, shipped and run (A2.1,
+> 2026-08-31) with `GoldenLabel` at `0` throughout. The cost of the over-broad reading was months of
+> treating a buildable thing as blocked.
 
 **UPDATE 2026-08-29 — the headline sentence survives intact; its parenthetical does not.** Two
 golden sets were created in production on **2026-08-19 13:44**: *"JudgeBench pairwise — full"* (620
@@ -88,6 +132,12 @@ present-tense repetition of it further down this document has been corrected in 
 database `judge_arena` on pod `judge-arena-pg-1` (note the name: it is `judge_arena`, not
 `judgearena`). A1 has still produced no labels, ten days after someone sat down to produce some. A2
 still cannot be specced. What changed is the *diagnosis*, and therefore the next action: see **E1**.
+
+**RE-CHECKED 2026-08-31: `GoldenLabel` is `0`, twelve days on.** ~~A2 still cannot be specced.~~ —
+the model-vs-ground-truth half was specced and shipped; see the correction above and the update at
+the top. The E1 gate itself is entirely unmoved, and **A2.1 shipping must not be read as E1 being
+finished**: no human has labelled an item, the OIDC refusal in E1 is unchanged, and the agreement
+panel still has no UI.
 
 So the chain is longer than it looks:
 
@@ -136,8 +186,8 @@ in fact already moved.
 | Thing | State | Consequence |
 |---|---|---|
 | Running image | ~~`sha-70fce84bee11`~~ → ~~`sha-bee1d121ea7d`~~ → **`sha-14d75f7d46de`** | Promoted 2026-08-17. Was a **preflight**-branch build predating A0 entirely. **2026-08-29: still `sha-bee1d121ea7d`** — the `14d75f7` build had not been promoted when *that* line was written, so the assignment panel was on `main` but not on the site. **Promoted 2026-08-30 01:47Z**, as homelab `f28be67` (PR #936, `apps/public/judge-arena/helmrelease.yaml` line 195): `kubectl get deploy -n tenant-public judge-arena-web -o jsonpath='{…image}'` now returns `sha-14d75f7d46de`, both pods Ready with 0 restarts. The panel is on the site. |
-| Prod DB migrations | ~~13~~ → **18**, latest `20260818120000_v2h_human_verification` | All five applied, **0 unfinished** (no P3009 wedge). `v2h`'s CHECK and both partial unique indexes verified present in the live DB. |
-| Prod catalog | **2 datasets, ~~0 golden sets~~, 2 users** | **True on 2026-08-17; the golden-set half is not true now.** ~~The substrate now exists; nothing has been created in it. This is what M4 fixes.~~ **2026-08-29:** 2 datasets, **620 `DatasetSample`**, **2 `PromptTemplate`**, 2 users, and **2 golden sets / 650 `GoldenItem` / 1300 `GoldenCandidate` / 2 `GoldenAssignment` / 0 `GoldenLabel`**. Also `0` for `GoldenItemRevision`, `CalibrationRun`, `DeveloperApiKey` and `HumanJudgment`. |
+| Prod DB migrations | ~~13~~ → ~~**18**~~ → **19**, latest ~~`20260818120000_v2h_human_verification`~~ `20260830120000_v2i_calibration_item_link` (2026-08-31: 19 applied, 0 unfinished) | All five applied, **0 unfinished** (no P3009 wedge). `v2h`'s CHECK and both partial unique indexes verified present in the live DB. |
+| Prod catalog | **2 datasets, ~~0 golden sets~~, 2 users** | **True on 2026-08-17; the golden-set half is not true now.** ~~The substrate now exists; nothing has been created in it. This is what M4 fixes.~~ **2026-08-29:** 2 datasets, **620 `DatasetSample`**, **2 `PromptTemplate`**, 2 users, and **2 golden sets / 650 `GoldenItem` / 1300 `GoldenCandidate` / 2 `GoldenAssignment` / 0 `GoldenLabel`**. Also `0` for `GoldenItemRevision`, `CalibrationRun`, `DeveloperApiKey` and `HumanJudgment`. **2026-08-31:** `GoldenLabel` **still 0** and `HumanJudgment` **still 0** — but `CalibrationRun` is now **1**, with **30 `EvaluationRun`** and **30 `ModelJudgment`** rows behind it. Production has executed judgments for the first time. |
 | Flux | ~~In sync — `main@sha1:47e0603…`~~ → **`0.3.1+f28be677baf0`**, HelmRelease Ready | Reconciled after the 2026-08-17 promote, and again after the 2026-08-30 one: `kubectl get helmrelease -n tenant-public judge-arena -o jsonpath='{.status.lastAttemptedRevision}'`. |
 | Promote model | **Manual** — judge-arena is excluded from the build-lag exporter (`286da59`) | No automatic promotion will ever happen. Someone must do it — and did, on 2026-08-17 and again on 2026-08-30. |
 | Site | `judgearena.com` returns **200** | Re-checked 2026-08-29 — ~~serving the *pre-merge* build~~ — and again on 2026-08-30, now serving `sha-14d75f7d46de`. See the running-image row. |
@@ -645,39 +695,105 @@ way they were not before A1 shipped:
 
 | # | Question | What A1 changed |
 |---|---|---|
-| 5 | Is `agreement()` reused for human-vs-model? | **Very likely yes, and it should be confirmed cheaply.** `agreement()` takes `Reading[] = {itemId, raterId, category}[]`; a model is just another `raterId`. If it holds, **A2 writes no statistics code at all** — which is a large scope difference and should be settled first, not last. |
+| 5 | Is `agreement()` reused for human-vs-model? | **CLOSED 2026-08-31 — yes, and it is reused UNCHANGED.** `raterId` is opaque to it, so `'ground-truth'` is just another rater — the same trick `label-readings.ts` already uses for `'round-1'`/`'round-2'`. **A2 wrote no statistics code.** One defect *inside* `agreement.ts` was found while proving it: Fleiss builds `pe` from two exact integers so `pe === 1` on the nose, but Cohen accumulates `1/n`, and thirty additions of `1/30` sum to `0.9999999999999999` — so the `1 - pe === 0` guard missed the degenerate case and kappa silently collapsed to **0.5** for every n whose reciprocal does not sum exactly (3 and 4 do; **30, the calibration set size, does not**). A judge matching the key on all thirty items would have been filed under "moderate agreement": in range, not NaN, not null, indistinguishable from a real 0.5. Now an epsilon guard plus a clamp to kappa's defined `[-1, 1]`. |
 | 1 | The `biasSensitivityRate` perturbation set | Unchanged, still open. Version it from the first run or the metric is not comparable across runs. |
 | 2 | PPI configuration | Needs a gold sample size — which E1–E3 will make concrete rather than notional. |
 | 3 | Confusion matrix: computed on read, or stamped at freeze? | A1 set the precedent: agreement is **computed on read, recorded at freeze**. Follow it unless there is a reason not to. |
 | 4 | What "state of the art" compares against | Roadmap B's territory; A2's header carries it. |
 | 6 | Drain rate and seconds | `EvaluationRun` still lacks run-grain `startedAt` (roadmap item 4), without which elapsed time conflates queue wait with execution. |
 
-### A2.1 · The per-item join row
+### A2.1 · The per-item join row — ✅ SHIPPED 2026-08-31, and NOT as a join row
 
-The substrate that does not exist. `CalibrationRun` is a header with aggregate metrics and no
-per-item rows; `ModelJudgment` reaches a `DatasetSample` only through `Evaluation`. **Nothing pairs
-a `GoldenItem` with a model's verdict**, and without that there is no confusion matrix, no per-run
-disagreement list and no human-vs-model kappa.
+*Original text, kept because the shape it proposed is the thing that changed:*
 
-It carries the run, the item, the model's label **in `GoldenLabel`'s score-or-preference shape**
-(reuse it, or human and model verdicts stop comparing directly, which is the entire point of the
-row), a link to the `ModelJudgment` for reasoning, and the presentation order — because
-`positionBias` is measured by re-presenting the same pair both ways.
+> The substrate that does not exist. `CalibrationRun` is a header with aggregate metrics and no
+> per-item rows; `ModelJudgment` reaches a `DatasetSample` only through `Evaluation`. **Nothing pairs
+> a `GoldenItem` with a model's verdict**, and without that there is no confusion matrix, no per-run
+> disagreement list and no human-vs-model kappa.
+>
+> It carries the run, the item, the model's label **in `GoldenLabel`'s score-or-preference shape**
+> (reuse it, or human and model verdicts stop comparing directly, which is the entire point of the
+> row), a link to the `ModelJudgment` for reasoning, and the presentation order — because
+> `positionBias` is measured by re-presenting the same pair both ways.
 
-### A2.2 · The run itself
+**The diagnosis was exactly right and the prescription was wrong.** There is no new table.
+`20260830120000_v2i_calibration_item_link` adds **two nullable columns on `EvaluationRun`** —
+`goldenItemId` and `calibrationRunId` — plus `@@unique([calibrationRunId, goldenItemId])`,
+`CalibrationRun.rubricId`, and seven capture columns on `ModelJudgment`.
+
+Two reasons, both of which the original text would have violated:
+
+1. **An `EvaluationRun` is already 1:1 with a golden item by construction.** A pairwise run holds
+   exactly one candidate pair (`RunCandidate @@unique([runId, position])`, and
+   `buildPairwiseUserPrompt` requires exactly two). A join table would model a relationship the
+   schema already enforces — and every per-item field the original text lists is already reachable
+   from the run.
+2. **"The model's label in `GoldenLabel`'s score-or-preference shape" is a stored `preference`, and
+   A0 decision #4 forbids it.** Which sample was preferred is **derived** from `(verdict, pairOrder)`
+   at read time. Storing it makes the B/A position-bias sweep a **backfill** instead of an insert —
+   which is the precise failure the derive-never-encode rule exists to prevent, and it would have
+   been introduced by following this item as written.
+
+The unique index deliberately keeps Postgres' default `NULLS DISTINCT`: every ordinary run has both
+columns NULL and they must all coexist, while at most one calibration run may exist per (calibration,
+item). That is why v2i required **zero hand edits** and CONTRIBUTING's pseudo-drift table stays at
+eight rows.
+
+`CalibrationRun` was **read-only dead schema** until this — it existed, and the only code that
+touched it was `isGoldenSetFrozen`'s `count()`. It is now written, and writing it is what **freezes
+the golden set irreversibly**.
+
+**Exit:** met. `CalibrationRun` = 1, `EvaluationRun` = 30, `ModelJudgment` = 30 in production.
+
+### A2.2 · The run itself — ◐ PARTLY SHIPPED 2026-08-31
 
 Reuse `src/lib/llm/*` rather than a parallel path, so calibration inherits retry, circuit-breaker
 and BYOK behaviour instead of re-implementing it. Populate `kappa`, `rawAgreement`, `verdictCount`,
 `passed`; drive `TrustState` `untrusted → calibrating → trusted|rejected` from thresholds **recorded
 as data**, so a judge that passed under one threshold is re-derivable under a later one.
 
-### A2.3 · The report as a projection
+**Done:** the reuse, exactly as written and more strictly than required —
+`launchCalibrationRun` creates rows and calls `launchSingleRun` N times. It publishes nothing itself
+and knows nothing about providers; **a calibration run is an ordinary pairwise run with two extra
+columns set**, drained by the same `judgment.execute` consumer. (Deliberately *not*
+`launchBulkRunCreates`: `run-create-consumer.ts` refuses any protocol but `'pointwise'` up front, so
+every item would have come back as a visible errored run.) `kappa`, `rawAgreement` and `verdictCount`
+are populated, with `kappaVariant`/`kappaWeighting`/`thresholdMetric` recorded beside them.
+
+**Not done:** `passed`, `passThreshold` and the `TrustState` transition. Both threshold columns are
+**NULL** on the only run that exists — nothing has passed or failed, because no threshold has been
+set. The "thresholds recorded as data" requirement is the reason `thresholdMetric` is a stored column
+rather than an assumption, so the remaining work is choosing a number, not changing a shape.
+
+**One correction to the metric ordering this item implies.** It lists `kappa` first and
+`rawAgreement` second. **Accuracy is the primary number and kappa is a labelled secondary** —
+`rawAgreement` *is* accuracy (the column predates the phase and its name was not changed), and
+`thresholdMetric` is written as `'accuracy'`. Ground truth is an answer key, not a peer rater:
+chance-correcting on its marginal is a category error, and kappa is not comparable across sets, which
+is the one thing a leaderboard exists to do. Kappa is stored anyway because accuracy alone cannot
+separate a judge that learned something from one that answers `A>B` every time — on this set that
+degenerate judge scores 0.5667 accuracy and 0.0000 kappa.
+
+### A2.3 · The report as a projection — ⛔ NOT STARTED
 
 `EvaluationReport` is **computed from the per-item rows, not stored**. Each answer is stored exactly
 once, so no second copy can drift from the first, and internal data stays recalculable without
 duplicating the heaviest text in the product.
 
-### The accepted risk to re-examine before A2.1, not after
+**2026-08-31: the principle is honoured; the surface does not exist.** `scoreCalibrationRun`
+recomputes every field from the source rows and writes a **full overwrite** — nothing increments,
+which matters because `verdictCount` is an `Int @default(0)` that an implementation reaching for
+`{ increment }` would read perfectly and return 60 from on the second pass. Re-scoring after a
+partial failure therefore resumes rather than accumulates, and `--score-only=<id>` exists to exercise
+exactly that.
+
+What does not exist is a **route or a screen**. The report is printed by
+`scripts/calibration/run.ts` and nowhere else — deliberately, because the number was the deliverable
+and the surface was not, and a CLI reaches the same `launchCalibrationRun`/`scoreCalibrationRun` a
+route would, so adding the route later adds a *caller* rather than a second implementation. That is
+the remaining A2.3 work.
+
+### The accepted risk to re-examine before A2.1, not after — ⚠ A2.1 HAS LANDED AND THIS IS NOW LIVE
 
 **Retention is uncapped, and that was a decision.** Nothing caps `rawResponse` or `reasoning`. The
 per-item rows are the heaviest data this product will hold — items × judges × every re-run, each
@@ -688,6 +804,93 @@ The failure mode is a **full storage pool on a single-instance database**, whose
 stop being small**, so the cheap mitigation — a documented byte cap with truncation recorded —
 should be priced in there rather than discovered later. It closes a rebaseline item as a side
 effect.
+
+**STATUS 2026-08-31 — half priced in, half still open, and the open half got heavier.**
+
+*Priced in:* `userPrompt` is capped at **32 KiB**, backed off to a UTF-8 character boundary, with
+`promptTruncated` recording that it was capped and `userPromptSha256` taken over the **full, pre-cap**
+text so a capped copy still identifies the exact bytes the model saw. That is the "documented byte
+cap with truncation recorded" this item asked for, on the one field it was applied to.
+
+*Still open, and now larger:* `rawResponse`, `reasoning` and the **new** `reasoningContent` are all
+uncapped. A2.1 did not merely fail to cap the heaviest text — it **added a channel**, because
+`reasoning_content` was being discarded entirely before. Not capping it was correct (it is the
+evidence that explains a wrong verdict, which is the point of capturing it) but it means the per-row
+cost is strictly higher than this item was written against.
+
+> **NO FOOTPRINT NUMBERS ARE RECORDED HERE.** The measurement — per-row cost, and what N models × M
+> items actually costs to store before it stops being viable — is a separate, dedicated exercise. Its
+> results belong in a follow-up, with the spread and the assumptions stated, not a mean extrapolated
+> from one 26-row run. **Do not fill this in from an average.**
+
+### A2.4 · What running it for real added to the roadmap — NEW 2026-08-31
+
+Three of these are not features. They are constraints the first real run discovered, and each one
+names a failure that had already happened.
+
+**1. Two entrypoints, because a leaderboard is many judges.** `/app/add-judge.js` and
+`/app/calibration-run.js`, esbuild-bundled into the image, plus `npm run calibration:run` locally.
+They must run **in the cluster**: only a pod can reach both `judge-arena-pg-rw.tenant-public` and a
+judge endpoint. `add-judge.ts` reuses `createCustomJudgeModel` — the same chokepoint `POST
+/api/models` goes through — so a CLI-registered judge gets its `model.create` audit row rather than
+being invisible to the trail. **Note the failure that shipping them exposed:** `.dockerignore`
+excluded `scripts/calibration/`, so `e4b9948`'s image built *successfully* and shipped without the
+script it existed to ship. Check the built image, not the build log.
+
+**2. The golden set is FROZEN IRREVERSIBLY by the first calibration.** `isGoldenSetFrozen` is
+`calibrationRun.count({ where: { goldenSetId } }) > 0` — there is no `frozenAt` column and no
+unfreeze verb anywhere in the product. Deleting the calibration is impossible
+(`EvaluationRun.calibrationRunId` is `onDelete: Restrict`); retiring or tombstoning does not release
+it; the only escape is `POST /api/golden-sets/[id]/fork` at version+1. This is why
+`launchCalibrationRun` checks **everything knowable without touching an item** before writing the
+header. The failure it prevents is specific: a golden set pinned forever by a calibration in which
+all 30 items failed for one reason that was knowable before any of them ran.
+
+**3. Truncation is now a HARD FAILURE, and the bug it closes was a silent one.**
+`finish_reason: 'length'` / `stop_reason: 'max_tokens'`, or an empty content channel, throws
+`non_retryable` in `registry.ts`'s `execute()` — **one chokepoint, before any parse**, so pointwise,
+pairwise and respond all inherit it. **Respond mode previously persisted a truncated answer as
+`status: 'completed'`**, making a generation chopped in half indistinguishable in the corpus from a
+finished one; pointwise misclassified it as *retryable* and burned three attempts plus a shared
+breaker on a deterministic failure. Non-retryable is correct because the token budget is a property
+of the request, not of provider health. It fails on `'length'` even when the content parses — a model
+cut off mid-reasoning is not a completed judgment for a calibration corpus.
+
+**4. Concurrency is hard-capped at 1, and this is the item that changes T5's arithmetic.**
+`src/worker/concurrency.ts` clamps `EVALUATION_MODEL_CONCURRENCY_PER_RUN` (1–16) to
+`HARD_CONCURRENCY_CAP = 1`; the request is not an error, does not fail the boot, and the clamp is
+logged at `warn`. `prefetch = concurrency × 4` was wrong twice: prefetch is not a buffer here
+(`dispatch` starts a handler per delivered message, so prefetch **is** the concurrency), and even
+un-multiplied it was one global number for a fleet of heterogeneous endpoints. **It cost four
+dead-lettered items** — eight concurrent requests to a server advertising `total_slots: 2`, six
+queueing *inside the server* while a 300s client timeout ran. **Measured, and worse than the headline:
+the 26 judgments that completed have a stored `latencyMs` averaging 233s, median 265s, max 299,063 ms
+against a 300,000 ms timeout** — 26 of 30 finished within a second of the wall, so this was much
+nearer total loss than "4 of 30" reads. (Note that `src/worker/concurrency.ts:12-13` says those
+judgments "averaged 94s"; that is **not** what the rows say, and `latencyMs` includes in-server queue
+time by construction — see the plan doc §7.2. Do not quote 94s as a baseline.)
+Over-subscribing an inference server converts a queue you can see (RabbitMQ: depth, retries, a DLQ)
+into one you cannot, and then times out against it.
+
+> **This interacts with T5 and with E4, and the interaction is favourable — do not undo it.** T5's
+> hard ordering is *observability strictly first, before any concurrency increase*. The cap makes
+> that ordering cheap to honour: throughput cannot rise until someone deliberately replaces the cap.
+> **The eventual fix is per-endpoint concurrency, not a bigger global number** — the value belongs
+> beside the endpoint that constrains it (a column on `ModelEndpoint`, or a probe of the server's
+> advertised slots) with a scheduler that respects it per endpoint. **Add that as an A2 work item**;
+> it is the lever E4 will want, and raising the cap instead is the wrong one.
+
+**5. The cap ~~is NOT DEPLOYED~~ was promoted at 21:29Z on 2026-08-31 and is live.** Both Deployments
+run `sha-1e7a427d2c48`; the worker logs `clamped to the hard cap {requested:2, effective:1}` and then
+`judge worker started {prefetch:1, concurrency:1}` on boot. The struck clause was true at `21:23Z`
+and false six minutes later — kept, because it is the reading the rest of this item was written
+against.
+
+**The durable point survives the promote, and it is a documentation hazard rather than a bug:** the
+Deployment, the compose file and CONTRIBUTING's pool-sizing table all still say
+`EVALUATION_MODEL_CONCURRENCY_PER_RUN=2`, and the worker runs at **1**. Anyone sizing capacity from a
+manifest will be wrong by a factor of two. **The effective value is only observable in the boot
+log** — which is exactly why the clamp is logged at `warn` rather than being silently applied.
 
 ---
 
@@ -713,6 +916,27 @@ M1 merge ─► M2 promote ─► M3 migrate ─► M4 seed ─┬─► E1 firs
                                                                     └──► A2.0 spec ─► A2.1 ─► A2.2 ─► A2.3
 ```
 
+**UPDATE 2026-08-31 — the diagram above draws A2 hanging off E3, and that edge only exists for half
+of A2.** The model-vs-ground-truth track does not touch E1–E3 at all, and it has already run:
+
+```
+   GROUND-TRUTH TRACK  (needs NO human label — GoldenLabel is still 0)
+     A2.1 substrate ......... ✅ v2i, two nullable columns, shipped 2026-08-31
+     A2.2 the run ........... ◐  reuse + accuracy/kappa done; passed/passThreshold/TrustState open
+     A2.3 report projection .. ⛔ not started — no route, no screen; the CLI prints the report
+        │
+        └─► ✅ UNBLOCKED 2026-08-31 21:29Z: sha-1e7a427d2c48 promoted, cap live (prefetch 1).
+               Re-run cmthr58r1... launched 21:30:17, in flight. Score it, then record the
+               number WITH its denominator — and the first latency spread that is not
+               inflated by in-server queueing.
+
+   HUMAN-VS-MODEL TRACK  (genuinely gated on E1 → E3, unchanged)
+     inter-annotator agreement, test-retest, human-vs-model kappa ... ⛔ GoldenLabel = 0
+```
+
+**Do not read "A2.1 shipped" as "the A2 gate cleared".** One track moved; the other has not moved
+since 2026-08-19.
+
 **Two independent tracks.** T5 is cluster work and needs no code from this repo; M1–M5 is release
 work, and **M1–M4 are now all done** (M5 is branch bookkeeping and is the only one still open).
 They can proceed in parallel, and A2 needs both. **One exception, added 2026-08-29:** E0 presents as a broker problem but its real fix — AMQP consumers that re-register on
@@ -732,7 +956,15 @@ slack** — a dead pipeline is not a sequencing question, and rolling the worker
   the loop-closing surface and is worth reading before A2 is specced, because A2's per-item row is
   what A3 aggregates.
 - **Roadmap B**, the public leaderboard half. Not started.
-- **`reasoning_content` capture** (preflight Stage 5). Still backlogged; the studio's reasoning panel
-  is correct and thin until it lands, and says so.
+- ~~**`reasoning_content` capture** (preflight Stage 5). Still backlogged; the studio's reasoning panel
+  is correct and thin until it lands, and says so.~~ **LANDED 2026-08-31 in A2.1** (`ae0d4a7`).
+  `ModelJudgment` now stores `reasoningContent`, `reasoningSource` and `reasoningTokens`, extracted
+  in a fixed, documented key order (`reasoning_content` first, then an in-band `<think>` block whose
+  closing tag is optional so a truncated thought is still captured). It is deliberately **not** merged
+  into `reasoning`, which is already triple-booked. Two honest gaps, both measured on all 30 rows:
+  `reasoningTokens` is **NULL** because llama.cpp emits no `completion_tokens_details` in its usage
+  payload, and `parseMode` is **NULL** because the pairwise path has one fence-tolerant parse path and
+  therefore no strict→lenient demotion to record. **The studio's reasoning panel has not been updated
+  to show any of this** — the capture landed, the surface did not.
 - **Preflight Stage 5** more broadly — the only open preflight stage.
 - **Rebaseline T6/T7** — versioning and obligations. Neither gates A2.

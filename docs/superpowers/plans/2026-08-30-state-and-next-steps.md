@@ -10,12 +10,55 @@ turned out to be false, and they are called out as corrections rather than quiet
 
 ---
 
+## UPDATE 2026-08-31 — A2.1 SHIPPED, AND THIS PRODUCT PRODUCED ITS FIRST NUMBER
+
+**Everything in §§0–6 below was true on 2026-08-30 and is left as written.** This section is the
+delta, and it contains one correction to the *ordering* this document recommends, which is more
+important than the news.
+
+**The news.** A judge model was scored against a golden set in production for the first time. Five
+commits, all on `main`, and **all five promoted to production at 21:29Z on 2026-08-31**, part-way
+through the writing of this section (see §7.7 — the earlier reading is kept):
+
+| | |
+|---|---|
+| `ae0d4a7` | the calibration substrate: migration `v2i`, `src/lib/calibration/{launch,score,readings}.ts`, prompt + reasoning capture, the truncation guard |
+| `e4b9948` | the runner and the judge-registration CLI, bundled into the image |
+| `c641786` | `.dockerignore` excluded `scripts/calibration/` — `e4b9948`'s image built **successfully** and shipped without the script it existed to ship |
+| `cb2fc37` | `missingVerdicts` reported `0` while four items had dead-lettered |
+| `1e7a427` | in-flight judgments hard-capped at 1 |
+
+**THE CORRECTION, and it is to this document's own §5.** §5 ends *"Only then — A2 … do not write
+the A2 spec until E1–E3 have produced real labels."* That was carried forward from the roadmap and
+it is **half wrong**, in a way that cost real time: it treated "A2" as one thing.
+
+> **Scoring a model against GROUND TRUTH needs no human labels.** `GoldenItem.expected` arrives with
+> the dataset — 17 `A>B` / 13 `B>A` on the 30-item set — and has been sitting in production since
+> 2026-08-19. The half of A2 that compares a model to a **human** still waits on E1. The half that
+> compares a model to the **answer key** never did, and it has now shipped and run while
+> `GoldenLabel` is still `0`.
+
+The gate was real for the wrong scope. Anyone re-reading §5 should read it as: *do not write the
+human-vs-model calibration spec until E1–E3 have produced labels* — which is still true, and which
+is a much smaller claim than the one that was made.
+
+**E1 IS STILL NOT DONE.** `SELECT count(*) FROM "GoldenLabel";` against `judge_arena` on
+`judge-arena-pg-1` returned **`0`** on 2026-08-31, exactly as it did on 2026-08-29 and 2026-08-19.
+Nothing in A2.1 touches the OIDC identity mismatch in §2, nothing in it produces a human label, and
+nothing in it makes the agreement panel exist. **Do not let "calibration shipped" be read as "E1 is
+finished".** The two are independent, and only one of them moved.
+
+---
+
 ## 0. If you read one thing
 
 > **E1 was never blocked by missing code. It is blocked by an identity mismatch, and has been since
 > 2026-08-18.** Two golden sets, 650 items and two assignments have existed since 2026-08-19. Zero
 > labels have. Every document written before today said the blocker was "a person, in a browser,
 > ~20 minutes". A person tried, three times, and was refused at the door.
+>
+> **Still true on 2026-08-31.** `GoldenLabel` = 0. A2.1 shipping does not change this line; see the
+> update above for why it did not have to.
 
 ---
 
@@ -192,11 +235,21 @@ are impossible from it — they need `/metrics/detailed?family=queue_coarse_metr
 Interim thresholds, until T5 lands: `homelab-setup:docs/runbooks/backpressure-watchlist.md`.
 
 ### Only then — A2
-Unchanged: **do not write the A2 spec until E1–E3 have produced real labels.** One question is worth
-settling cheaply first — whether `agreement()` is reusable for human-vs-model. It takes
+~~Unchanged: **do not write the A2 spec until E1–E3 have produced real labels.**~~ One question is
+worth settling cheaply first — whether `agreement()` is reusable for human-vs-model. It takes
 `Reading[] = {itemId, raterId, category}[]`, and a model is just another `raterId`. If that holds,
 **A2 writes no statistics code at all**, which is a large enough scope difference to settle before
 planning rather than after.
+
+> **CORRECTION 2026-08-31 — the struck sentence was too broad, and A2.1 shipped past it.** It is
+> true of the human-vs-model half and false of the model-vs-ground-truth half, which needs no
+> `GoldenLabel` at all. See the update at the top of this document and §7 below.
+>
+> **The open question in this paragraph is now CLOSED, and the answer was yes.** `agreement()` is
+> reused **unchanged**: `raterId` is opaque to it, so passing `'ground-truth'` as a rater is the same
+> trick `label-readings.ts` already uses for `'round-1'`/`'round-2'`. **A2 wrote no statistics code.**
+> One bug was fixed *inside* `agreement.ts` while proving it — see §7 — but no new statistic was
+> implemented, and that is exactly the scope difference this bullet existed to settle early.
 
 ---
 
@@ -214,3 +267,261 @@ planning rather than after.
   any **new** workflow file was silently unstageable — precisely the trap someone restoring the
   GitHub mirror would have hit. The mirror has been frozen since 2026-08-07 and has no push
   automation in either workflow file; that is still open.
+
+---
+
+## 7. A2.1 in detail — what shipped, what it measured, and what it did not
+
+### 7.1 The link: two nullable columns, not a join table
+
+`prisma/migrations/20260830120000_v2i_calibration_item_link/migration.sql` adds
+`EvaluationRun.goldenItemId`, `EvaluationRun.calibrationRunId`, `CalibrationRun.rubricId`, and seven
+capture columns on `ModelJudgment`. Production is at **19 migrations, 0 unfinished** (re-checked
+2026-08-31 against `_prisma_migrations` on `judge-arena-pg-1`).
+
+**What did not exist before it.** Nothing paired a `GoldenItem` with a model verdict.
+`ModelJudgment` hangs off `EvaluationRun` → `Evaluation`, and `Evaluation` carries a
+`datasetSampleId` but no golden item — so there was no path from a verdict to the `expected` it
+should be scored against. `CalibrationRun` was **read-only dead schema**: it existed, and the only
+code that touched it was `isGoldenSetFrozen`'s `count()`. It is now written.
+
+**Two nullable columns, deliberately, and the reasoning is worth keeping:**
+
+- An `EvaluationRun` is **already 1:1 with a golden item by construction** — a pairwise run holds
+  exactly one candidate pair (`RunCandidate @@unique([runId, position])`, and
+  `buildPairwiseUserPrompt` requires exactly two). A join table would model a relationship the schema
+  already enforces.
+- A join table would have carried a stored `preference`, and **A0 decision #4 forbids exactly that**.
+  Which sample was preferred is *derived* from `(verdict, pairOrder)` at read time; encoding it turns
+  the B/A position-bias sweep into a **backfill** instead of an insert.
+
+`@@unique([calibrationRunId, goldenItemId])` keeps Postgres' default `NULLS DISTINCT` — every
+ordinary run has both columns NULL and they must all coexist. That is why v2i needed **zero hand
+edits** and CONTRIBUTING's pseudo-drift table stays at **eight** rows.
+
+### 7.2 The first real number, with its caveat attached
+
+Verified read-only against production on 2026-08-31:
+
+```
+kubectl exec -n tenant-public judge-arena-pg-1 -c postgres -- psql -U postgres -d judge_arena -tAc \
+  'SELECT id, kappa, "rawAgreement", "verdictCount", "thresholdMetric", passed FROM "CalibrationRun";'
+→ cmtgib0xr00016k2r8nlyj1py|0.6950146627565981|0.8461538461538461|26|accuracy|
+```
+
+| | |
+|---|---|
+| Judge | **Qwen3.6-35B-A3B** (`Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf`, `llamacpp`, local) |
+| Golden set | `cmt057hd001g17y01lhjzgfuj` — *JudgeBenchSample — 30 random*; ground truth **17 `A>B` / 13 `B>A`**, no ties |
+| **Accuracy** | **0.8462** — **22 of 26**, stored on the legacy `rawAgreement` column |
+| Kappa | **0.6950**, `cohen`, weighting `none` |
+| Window | started `2026-08-31 00:35:04`, finished `01:47:46` |
+| `passed` / `passThreshold` | **NULL.** No threshold is set, so nothing has passed or failed |
+| Still NULL | `testRetest`, `positionBias`, `biasSensitivityRate`, `flipRateVsParent` — later phases, not lost writes |
+
+> **THE CAVEAT IS NOT OPTIONAL: this is a 26-item number and the four missing items were OUR fault.**
+> Four items dead-lettered with
+> `Provider call to "llamacpp" (Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf) timed out after 300000ms`, four
+> attempts each. The cause was **configuration, not the model**: prefetch was `concurrency(2) × 4 = 8`
+> against a server advertising `total_slots: 2`, so six requests queued *inside the inference server*
+> while their client timeout ran. Quoting 0.8462 without "22/26, four items never judged" is the
+> failure `cb2fc37` was written to stop — that commit exists because the report printed
+> `missingVerdicts 0` directly underneath a denominator that said 26.
+
+**A LATENCY NUMBER IN OUR OWN SOURCE DOES NOT SURVIVE CHECKING, AND IT IS THE ONE EVERYONE WILL
+QUOTE.** `src/worker/concurrency.ts:12-13` and `1e7a427`'s commit message both say *"judgments that
+completed averaged 94s, well inside the 300s ceiling."* Measured against the rows:
+
+```
+SELECT count(*), round(avg(mj."latencyMs")), min(mj."latencyMs"), max(mj."latencyMs"),
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY mj."latencyMs")::numeric)
+  FROM "ModelJudgment" mj JOIN "EvaluationRun" er ON er.id = mj."runId"
+ WHERE er."calibrationRunId" = 'cmtgib0xr00016k2r8nlyj1py' AND mj.status = 'completed';
+→ n=26   avg=232917   min=65774   max=299063   median=265372      (milliseconds)
+```
+
+**233s average, 265s median, and a maximum of 299,063 ms — 937 milliseconds under the 300,000 ms
+timeout.** The picture is not "four unlucky items timed out while the rest were comfortable"; it is
+**26 of 30 finishing within a second of the wall.** The incident was closer to total loss than the
+"4 of 30" headline suggests, and the same configuration on a slightly slower day loses most of the
+set.
+
+The two numbers are not necessarily in conflict, and the difference *is* the incident:
+`latencyMs` is wall time around the HTTP call (`src/lib/llm/openai-compatible.ts:249`,
+`Date.now() - startTime` spanning the SDK request), so it **includes time queued inside the inference
+server**. 94s may be generation time from some other observation. **It is not derivable from this
+database** — nothing in these rows separates generation from queue wait.
+
+> **Treat 94s as UNVERIFIED. Do not quote it as a latency baseline, and consider correcting the
+> comment in `src/worker/concurrency.ts`** — it is currently the most quotable sentence in the
+> module, it is the evidence the cap's argument rests on, and it does not match the data. The
+> argument for the cap survives either way (the cause was in-server queueing, which is exactly why
+> `latencyMs` is inflated), but the supporting number should be one someone can re-derive.
+> **The sequential re-run is what produces a real baseline:** at concurrency 1 there is no in-server
+> queue for `latencyMs` to absorb, so its stored value becomes generation time.
+
+> **PLACEHOLDER — the clean sequential re-run is IN FLIGHT and has NOT produced a result.**
+> `CalibrationRun` **`cmthr58r100013s0sykuvn41x`**, started `2026-08-31 21:30:17.101`; at `21:37Z`
+> it stood at 30 launched / 9 completed / 1 running / 20 pending, with `rawAgreement`, `kappa` and
+> `finishedAt` all NULL. See §7.7.
+> **Do not guess this number and do not assume it will be 0.8462 over 30 items.** The four unseen
+> items are not a random sample — they are the four that happened to queue behind others — and a
+> sequential run also changes the latency distribution the first was measured under.
+>
+> ```
+> RE-RUN cmthr58r100013s0sykuvn41x: result not yet recorded.
+>   When it lands, record accuracy WITH its denominator, kappa with variant +
+>   weighting, and the fresh latency spread (the first one not inflated by
+>   in-server queueing).
+> ```
+
+**A discrepancy anyone re-querying this will hit.** Five `EvaluationRun` rows carry `status='error'`
+but only **four** `ModelJudgment` rows do. Run `a0983c08-4548-4663-a40d-0cd56b82f765` is stamped
+`error` at run grain while its judgment **completed** on attempt 6 (`verdict=B`,
+`latencyMs=108646`). Scoring reads the *judgment*, so that item is inside the 26. **Count judgments,
+not runs** — and the stale run-grain status is worth its own small work item.
+
+### 7.3 Accuracy is primary; kappa is a labelled secondary
+
+`thresholdMetric` is written as `'accuracy'`, and the ordering is an argument rather than a taste:
+
+1. **Ground truth is an answer key, not a peer rater.** Cohen's kappa chance-corrects on *both*
+   raters' marginals, presuming two annotators who could each have been wrong. The key's marginal is
+   a property of the **set** — 17/13, fixed the moment it froze — so discounting a judge's hits
+   against it treats a constant as a source of chance. That is a category error.
+2. **Kappa is not comparable across sets, and cross-set ranking is the one thing a leaderboard does.**
+   `pe` depends on the key's class balance, so the same judge with the same hit rate scores
+   differently on a 17/13 set than on a 15/15 one.
+
+**Both are stored anyway**, because accuracy alone cannot separate a judge that learned something
+from one that answers `A>B` every time: on this set the degenerate judge scores **0.5667** accuracy
+and **0.0000** kappa. They fail in opposite directions. `kappaVariant`/`kappaWeighting` record the
+method, because a kappa with no stated method is uncheckable a year later.
+
+**One real bug was found inside `agreement()` while proving the reuse**, and it is the kind worth
+remembering: Fleiss builds `pe` from two exact integers, so a single observed category gives
+`pe === 1` exactly — but **Cohen accumulates `1/n`**, and thirty additions of `1/30` sum to
+`0.9999999999999999`. The old `if (1 - pe === 0) return 1` guard therefore missed the degenerate
+case and the quotient collapsed to **0.5 for every n whose reciprocal does not sum exactly** (3 and 4
+do; 30 does not). A judge that matched the answer key on all thirty items would have been filed
+under "moderate agreement" — in range, not NaN, not null, indistinguishable from a real 0.5. The
+guard is now an epsilon (`PE_DEGENERATE_EPSILON = 1e-9`) with a clamp to kappa's defined `[-1, 1]`.
+
+### 7.4 Capture, and two honest gaps
+
+`ModelJudgment` now stores `systemPrompt`, `userPrompt`, `userPromptSha256`, `promptTruncated`,
+`rawResponse`, `reasoning`, `reasoningContent`, `reasoningSource`, `reasoningTokens`.
+
+**The prompt is STORED, not reconstructed, and the reason is a live defect elsewhere.** `PATCH
+/api/rubrics/[id]` `deleteMany`s a rubric's criteria and recreates them on the **same rubric id with
+no version bump** (verified), and the pairwise system prompt embeds those criteria verbatim — so
+re-rendering a historical judgment from `promptTemplateId` + the item silently yields **today's**
+rubric with nothing recording that it moved. `userPrompt` is capped at 32 KiB (backed off to a UTF-8
+boundary so the stored copy cannot end in `U+FFFD`); `userPromptSha256` is over the **full, pre-cap**
+text, so a capped copy still identifies the exact bytes.
+
+| Gap | Measured | Why |
+|---|---|---|
+| `reasoningTokens` | **NULL on 30/30** | Read from `usage.completion_tokens_details.reasoning_tokens`. llama.cpp does not emit `completion_tokens_details` at all — nothing was dropped, nothing was sent |
+| `parseMode` | **NULL on 30/30** | The pairwise path has one parse path (`tryParsePairwiseJudgment` is fence-tolerant), so there is no strict→lenient demotion and no mode to persist. The column is meaningful only pointwise |
+
+`reasoningSource` is `reasoning_content` on all 30; `systemPrompt` is non-null on **26** of 30,
+because the four timeouts are transport failures with no response to capture.
+
+> **STORAGE FOOTPRINT: deliberately not stated here.** N judges × M items × every re-run of uncapped
+> model text against a single-instance Postgres is the accepted risk the roadmap deferred, and A2.1
+> is the moment volumes stop being small. The measurement is a separate, dedicated exercise and its
+> numbers belong in a follow-up. **Nothing in this section may be filled in from a per-row average
+> read off one run.**
+
+### 7.5 Truncation is a hard failure; concurrency is hard-capped at 1
+
+**Truncation.** `finish_reason: 'length'` / `stop_reason: 'max_tokens'`, or an empty content channel,
+now throws `non_retryable` in `registry.ts`'s `execute()` — **one chokepoint, before any parse**, so
+pointwise, pairwise and respond all inherit it. Non-retryable because the token budget is a property
+of the *request*, not of provider health: the identical call truncates identically every time, so
+retrying burns the attempt budget, DLQs the judgment and charges three failures to a breaker shared
+with healthy calls. **The failure it prevents: respond mode previously persisted a truncated answer
+as `status: 'completed'`**, making a generation chopped in half indistinguishable in the corpus from
+a finished one. It fails on `'length'` even when the content parses. `verify.ts`'s connection test is
+exempt by design — it sends `max_tokens: 1` and would otherwise report truncation on every healthy
+endpoint.
+
+**Concurrency.** `src/worker/concurrency.ts` clamps `EVALUATION_MODEL_CONCURRENCY_PER_RUN` (1–16) to
+`HARD_CONCURRENCY_CAP = 1`. Asking for more is not an error and does not fail the boot; the clamp is
+**logged at `warn`** with requested and effective values, because it must be silent to the
+configuration and never to an operator. The old `prefetch = concurrency × 4` was wrong twice: prefetch
+is not a buffer here (`dispatch` starts a handler per delivered message, so prefetch **is** the
+concurrency), and even un-multiplied it was one global number applied to a fleet of heterogeneous
+endpoints. **Why 1 and not "match the slots":** the worker cannot know the slot count — it is a
+property of whichever endpoint each `JudgeModelVersion` points at, invisible from here and free to
+change when someone restarts a server with different flags. It also makes a calibration run
+**sequentially**, which is what makes a latency baseline reproducible. **Raising the cap is not the
+eventual fix; per-endpoint concurrency is.**
+
+### 7.6 Two new entrypoints
+
+`/app/add-judge.js` and `/app/calibration-run.js`, both esbuild-bundled into the image (the runner
+ships no TypeScript toolchain), plus `npm run calibration:run` locally. They must run **in the
+cluster**: only a pod can reach both `judge-arena-pg-rw.tenant-public` and a judge endpoint.
+`add-judge.ts` reuses `createCustomJudgeModel` — the same chokepoint `POST /api/models` uses — so a
+CLI-registered judge gets its `model.create` audit row instead of being invisible to the trail.
+
+> **LAUNCHING FREEZES THE GOLDEN SET, IRREVERSIBLY.** `isGoldenSetFrozen` is
+> `calibrationRun.count({ where: { goldenSetId } }) > 0` — there is no `frozenAt` column and no
+> unfreeze verb. Deleting the calibration is impossible (`onDelete: Restrict`); retiring or
+> tombstoning does not release it; the only escape is `POST /api/golden-sets/[id]/fork`. This is why
+> `launchCalibrationRun` checks everything knowable without touching an item **before** writing the
+> header — the failure it prevents is a set pinned forever by a calibration in which all 30 items
+> failed for one reason knowable before any of them ran.
+
+Full commands: README's **Calibration** section, and CONTRIBUTING's *Running a calibration against
+production*.
+
+### 7.7 The promote, and a reading that decayed inside one session
+
+**Two readings, six minutes apart.** Both are kept, because the pair is more instructive than either
+one: this repo's own convention is that a fact about a remote decays faster than a fact about the
+tree, and here it decayed *while the paragraph describing it was being typed*.
+
+```
+2026-08-31 21:23Z   both Deployments → sha-c6417860027a   (commit c641786, TWO BEHIND main)
+                    git log --oneline c641786..1e7a427
+                      cb2fc37  missingVerdicts reported 0 while four items had dead-lettered
+                      1e7a427  cap in-flight judgments at 1
+                    ⇒ the hard cap was NOT in production
+
+2026-08-31 21:29Z   both Deployments → sha-1e7a427d2c48   (commit 1e7a427)  ← CURRENT
+                    ⇒ promoted; pods rolled; the cap is live
+```
+
+**The proof is the worker's own boot log, not the image tag** — a tag says what was deployed, the log
+says what the process decided:
+
+```
+{"level":"warn","msg":"EVALUATION_MODEL_CONCURRENCY_PER_RUN clamped to the hard cap",
+ "timestamp":"2026-08-31T21:29:24.604Z","requested":2,"effective":1,
+ "reason":"concurrent provider calls queue INSIDE the inference server while their client timeout runs"}
+{"level":"info","msg":"judge worker started","timestamp":"2026-08-31T21:29:24.605Z",
+ "prefetch":1,"concurrency":1,"healthPort":9090,"consumers":2}
+```
+
+> **THE ENV VAR IS NO LONGER A CONTROL, AND THE MANIFEST STILL LOOKS LIKE IT IS.** The Deployment
+> sets `EVALUATION_MODEL_CONCURRENCY_PER_RUN=2` and the worker runs at **1**. Anyone reading the
+> HelmRelease, the compose file, or CONTRIBUTING's pool-sizing table will infer 2 and be wrong.
+> **Read `judge worker started`'s `concurrency` field.** This is precisely why the clamp is logged at
+> `warn` — the design note in `concurrency.ts` says it must be silent to the configuration and never
+> to an operator, and this is the situation it was anticipating.
+
+**The re-run is in flight and is genuinely sequential.** `CalibrationRun`
+**`cmthr58r100013s0sykuvn41x`** — same golden set (`cmt057hd001g17y01lhjzgfuj`), same judge version
+(`cmtgia5sx00026k1prl6a8tyf`) — started `2026-08-31 21:30:17.101`, **53 seconds after** the capped
+worker booted. At `21:37Z`: **30 launched, 9 completed, 1 running, 20 pending**, with
+`rawAgreement`/`kappa`/`finishedAt` NULL and `verdictCount` 0 because scoring runs at the end.
+**One judgment in flight is the cap doing its job**, observed rather than assumed.
+
+**Next action:** when it finishes, score it and fill in §7.2's placeholder — accuracy **with its
+denominator**, kappa with variant and weighting, and the `calibrationRunId`. Then re-read the
+latencies: this is the first run whose `latencyMs` is not inflated by in-server queueing, so it is
+the first one that can honestly be called a speed baseline. **Do not carry either 94s or 233s
+forward into that sentence.**

@@ -12,6 +12,7 @@ vi.mock('@/lib/llm/openai-compatible', () => ({ callOpenAICompatible: callOpenAI
 
 const {
   getDescriptor,
+  assertScoredRunsAllowed,
   legacyProviderToBackend,
   resolveApiKey,
   effectiveSamplingParams,
@@ -43,11 +44,33 @@ describe('registry: getDescriptor', () => {
     expect(getDescriptor('ollama').kind).toBe('openai_compatible');
   });
 
-  it('ollama has scoredRunsAllowed: false — every other backend allows scored runs', () => {
-    expect(getDescriptor('ollama').scoredRunsAllowed).toBe(false);
-    for (const backend of ALL_BACKENDS.filter((b) => b !== 'ollama')) {
+  it('EVERY backend now allows scored runs — ollama was corrected 2026-08-31', () => {
+    // This asserted `ollama === false` until the claim behind it was measured
+    // and found wrong: Ollama honours `response_format: {type: 'json_schema'}`
+    // (verified live, 0.32.15 — see backends/ollama.ts). The refusal MECHANISM
+    // is still tested, against a synthetic descriptor, further down.
+    for (const backend of ALL_BACKENDS) {
       expect(getDescriptor(backend).scoredRunsAllowed).toBe(true);
     }
+  });
+
+  it('structuredOutput is NOT what gates scored runs — openai and openrouter prove it', () => {
+    // Written after asserting the opposite and being wrong, which is the point
+    // of recording it. `ollama` was excluded from scored runs on the stated
+    // grounds that it "cannot constrain output, so its verdicts are
+    // unparseable-by-construction" — while `openai` and `openrouter` declared
+    // the SAME `structuredOutput: 'none'` and were allowed the entire time.
+    // The rationale never differentiated anything; it was inconsistent from the
+    // start, not merely outdated.
+    //
+    // What actually happens for a 'none' backend is the lenient parse path
+    // (parseMode 'fallback'), which is a real, tested design — not a defect.
+    // This test pins the inconsistency so nobody re-derives the false invariant
+    // "allowed implies constrainable" from the descriptor table.
+    expect(getDescriptor('openai').caps.structuredOutput).toBe('none');
+    expect(getDescriptor('openai').scoredRunsAllowed).toBe(true);
+    expect(getDescriptor('openrouter').caps.structuredOutput).toBe('none');
+    expect(getDescriptor('openrouter').scoredRunsAllowed).toBe(true);
   });
 
   it('throws for an unrecognized backend', () => {
@@ -165,16 +188,45 @@ describe('registry: runProviderJudgment', () => {
     callOpenAICompatibleMock.mockReset();
   });
 
-  it('CRITICAL: refuses a scored judge run against a backend with scoredRunsAllowed: false (ollama)', async () => {
-    await expect(
-      runProviderJudgment({
-        ...baseInput,
-        judgeVersion: { ...baseInput.judgeVersion, servingBackend: 'ollama' },
-      })
-    ).rejects.toMatchObject({ name: 'ProviderError', kind: 'non_retryable' });
+  it('CRITICAL: still refuses a scored judge run for a scoredRunsAllowed: false descriptor', () => {
+    // NO SHIPPED BACKEND SETS THIS FALSE any more (ollama was the only one, and
+    // the claim behind it was wrong — see backends/ollama.ts). The guard is
+    // kept, and kept TESTED, because the concept remains the right shape for a
+    // backend that genuinely cannot constrain output. Deleting this test along
+    // with the last backend that tripped it would leave the refusal path live
+    // and unexercised, so it is driven against a synthetic descriptor via the
+    // extracted `assertScoredRunsAllowed` — ESM live bindings make stubbing
+    // `getDescriptor` from outside the module impossible.
+    const refused = { ...getDescriptor('ollama'), scoredRunsAllowed: false };
+    expect(() => assertScoredRunsAllowed(refused)).toThrow(/does not allow scored judge runs/);
+    try {
+      assertScoredRunsAllowed(refused);
+    } catch (e) {
+      expect(e).toMatchObject({ name: 'ProviderError', kind: 'non_retryable' });
+    }
+    // And the happy path stays silent for every backend that ships.
+    for (const backend of ALL_BACKENDS) {
+      expect(() => assertScoredRunsAllowed(getDescriptor(backend))).not.toThrow();
+    }
+  });
 
+  it('ollama now DISPATCHES a scored judge run instead of refusing it', async () => {
+    // The behaviour change, pinned directly: what used to throw must now reach
+    // the provider, and through the openai-compatible path.
+    callOpenAICompatibleMock.mockResolvedValue({
+      text: JSON.stringify({
+        overallScore: 7,
+        reasoning: 'ok',
+        criteriaScores: [{ criterionId: 'c1', criterionName: 'Accuracy', score: 7 }],
+      }),
+      latencyMs: 5,
+    });
+    await runProviderJudgment({
+      ...baseInput,
+      judgeVersion: { ...baseInput.judgeVersion, servingBackend: 'ollama' },
+    });
+    expect(callOpenAICompatibleMock).toHaveBeenCalled();
     expect(callAnthropicMock).not.toHaveBeenCalled();
-    expect(callOpenAICompatibleMock).not.toHaveBeenCalled();
   });
 
   it('throws non_retryable when JudgeModel.baseModel is unset', async () => {

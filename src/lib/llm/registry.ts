@@ -81,6 +81,7 @@ import type { ProviderCallResult, ProviderHeaderConfig, ReasoningSource } from '
 import { openRouterHeaders } from './backends/openrouter';
 import { vllmStructuredRequestFields } from './backends/vllm';
 import { llamacppStructuredRequestFields } from './backends/llamacpp';
+import { ollamaStructuredRequestFields } from './backends/ollama';
 import { PAIRWISE_JUDGMENT_JSON_SCHEMA, tryParsePairwiseJudgment } from './judgment-schema';
 
 // Re-exported so existing importers of `ProviderHeaderConfig` FROM
@@ -133,12 +134,15 @@ export interface ProviderDescriptor {
  * own key. See `resolveApiKey()`'s doc for exactly how this gates env
  * fallback.
  *
- * `ollama`'s `scoredRunsAllowed: false` (per the task brief, verbatim):
- * local/dev Ollama models are not eligible to produce trusted, scored judge
- * runs — `runProviderJudgment()` refuses immediately (`non_retryable`) for
- * any `JudgeModelVersion` whose `servingBackend` resolves to this
- * descriptor. Respond-mode generation (`runProviderResponse()`) has no such
- * restriction — there is no "trust" concept for plain text generation.
+ * `ollama` CARRIED `scoredRunsAllowed: false` until 2026-08-31, on the stated
+ * grounds that it could not constrain output. That was measured against a live
+ * Ollama 0.32.15 server and found false — it honours standard
+ * `response_format: {type: 'json_schema'}` — so the flag is now `true` and the
+ * descriptor below records the correction. `backends/ollama.ts` holds the
+ * evidence. Every backend now allows scored runs; `scoredRunsAllowed` remains
+ * on the descriptor because the concept is still the right shape for a backend
+ * that genuinely cannot constrain output, and `runProviderJudgment()` still
+ * refuses (`non_retryable`) any descriptor that sets it false.
  */
 const DESCRIPTORS: Record<ServingBackend, ProviderDescriptor> = {
   anthropic: {
@@ -223,10 +227,11 @@ const DESCRIPTORS: Record<ServingBackend, ProviderDescriptor> = {
     // in getDescriptor() below, for the same reason as vllm: a self-hosted
     // server has no well-known host.
     //
-    // scoredRunsAllowed: TRUE, and the contrast with `ollama` directly below
-    // is the point. Ollama is refused for scored runs because it cannot
-    // constrain output, so its verdicts are unparseable-by-construction.
-    // llama.cpp CAN constrain output (verified above), and it is
+    // scoredRunsAllowed: TRUE. This comment previously drew a contrast with
+    // `ollama` below, which was refused "because it cannot constrain output".
+    // That claim about Ollama was wrong and is corrected there; the contrast
+    // is gone, not the reasoning. llama.cpp CAN constrain output (verified
+    // above), and it is
     // admin-configured only (endpoint writes are admin-gated), so a scored
     // run against it is as trustworthy as the operator who pointed at it.
     // This is the descriptor that makes first-party dogfooding produce real
@@ -238,16 +243,43 @@ const DESCRIPTORS: Record<ServingBackend, ProviderDescriptor> = {
     kind: 'openai_compatible',
     defaultBaseUrl: 'http://localhost:11434/v1',
     auth: 'bearer',
-    // `structuredOutput: 'none'` here is a SCORED-RUN restriction, not a
-    // technical one — Ollama's own `/api/chat` `format` parameter CAN
-    // constrain output to a JSON schema for the dev/interactive
-    // (`scoredRunsAllowed: false` already refuses judge runs against this
-    // descriptor entirely — see this const's module doc) respond-mode
-    // path. Deliberately left unwired (doc note only, per the task brief)
-    // — there is no trusted-scoring use case that would consume it, and
-    // wiring a capability nothing calls is pure speculative surface.
-    caps: { structuredOutput: 'none', samplingParams: true, reasoningToggle: false },
-    scoredRunsAllowed: false,
+    // ── CORRECTED 2026-08-31 ────────────────────────────────────────────
+    // This previously read `structuredOutput: 'none'` / `scoredRunsAllowed:
+    // false`, on the stated grounds that Ollama "cannot constrain output, so
+    // its verdicts are unparseable-by-construction". That was measured and
+    // found FALSE: Ollama 0.32.15 honours standard `response_format:
+    // {type: 'json_schema'}`, verified on a live server (granite4.1:3b
+    // returned schema-conformant JSON three times consecutively with
+    // finish_reason 'stop'; gemma4:26b likewise).
+    //
+    // The file already contradicted itself — the comment here conceded the
+    // restriction was "not a technical one" while the module doc above
+    // asserted the technical claim, and the wrong half was the half doing the
+    // gating. A capability the code denies a backend HAS is worse than one it
+    // merely does not use: it makes an entire class of judge unreachable and
+    // reports the refusal as if it were a property of the server.
+    //
+    // The trust argument that also appeared ("local/dev models are not
+    // eligible for trusted scored runs") does not survive the comparison
+    // either: llamacpp is equally local and equally dev, is allowed, and the
+    // registry gives output-constraint capability as the SOLE differentiator.
+    //
+    // AND THAT DIFFERENTIATOR NEVER DIFFERENTIATED. `openai` and `openrouter`
+    // BOTH declare `structuredOutput: 'none'` and have had
+    // `scoredRunsAllowed: true` the whole time — they simply take the lenient
+    // parse path (parseMode 'fallback'), which is a tested, deliberate design.
+    // So the stated rule ("cannot constrain output therefore cannot be scored")
+    // was already contradicted by two shipped backends before Ollama's
+    // capability was even measured. The exclusion was inconsistent from the
+    // start, not just out of date.
+    //
+    // What remains true, and is now the honest framing: constraining output
+    // buys a PARSEABLE verdict, not a correct one. Whether a 3B quantised
+    // model deserves trust as a judge is what a CalibrationRun measures — the
+    // machinery that was unreachable while this backend was refused outright.
+    caps: { structuredOutput: 'json_schema', samplingParams: true, reasoningToggle: false },
+    structuredRequestFields: ollamaStructuredRequestFields,
+    scoredRunsAllowed: true,
   },
 };
 
@@ -840,6 +872,29 @@ export interface PreparedJudgmentCall {
 }
 
 /**
+ * The `scoredRunsAllowed` refusal, as its own function so it stays TESTABLE.
+ *
+ * No shipped backend sets the flag false as of 2026-08-31 — `ollama` was the
+ * only one, and the claim behind it (that Ollama cannot constrain output) was
+ * measured and found wrong; see `backends/ollama.ts`. The guard is kept
+ * anyway, because the concept is still the right shape for a backend that
+ * genuinely cannot constrain generation, and a judgment from such a backend is
+ * unparseable by construction rather than merely unreliable.
+ *
+ * Extracted because the alternative was worse: with no backend tripping it,
+ * the only way to exercise this path through `prepareJudgmentCall` would be to
+ * stub `getDescriptor`, which ESM's live bindings make impossible from outside
+ * the module. A guard nothing can reach is a guard nothing can test.
+ */
+export function assertScoredRunsAllowed(descriptor: ProviderDescriptor): void {
+  if (descriptor.scoredRunsAllowed) return;
+  throw new ProviderError(
+    `Backend "${descriptor.id}" does not allow scored judge runs (ProviderDescriptor.scoredRunsAllowed is false)`,
+    { kind: 'non_retryable', provider: descriptor.id }
+  );
+}
+
+/**
  * Validate + prepare a judge call: descriptor lookup, the
  * `scoredRunsAllowed` refusal, `baseModel`/API-key resolution, and
  * DB-templated prompt rendering. Deliberately synchronous (no network I/O)
@@ -864,12 +919,7 @@ export interface PreparedJudgmentCall {
 export function prepareJudgmentCall(input: RunProviderJudgmentInput): PreparedJudgmentCall {
   const descriptor = getDescriptor(input.judgeVersion.servingBackend);
 
-  if (!descriptor.scoredRunsAllowed) {
-    throw new ProviderError(
-      `Backend "${descriptor.id}" does not allow scored judge runs (ProviderDescriptor.scoredRunsAllowed is false)`,
-      { kind: 'non_retryable', provider: descriptor.id }
-    );
-  }
+  assertScoredRunsAllowed(descriptor);
 
   const modelId = requireBaseModel(input.judgeVersion, descriptor.id);
   const apiKey = requireApiKey(descriptor, input.endpoint);

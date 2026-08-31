@@ -85,16 +85,20 @@ const SERVING_BACKEND_OPTIONS = [
   { value: 'openai', label: 'OpenAI' },
   { value: 'openrouter', label: 'OpenRouter' },
   { value: 'vllm', label: 'vLLM (self-hosted, guided decoding)' },
-  // "judge-eligible" is stated OUT LOUD here only because the neighbouring
-  // Ollama entry disclaims it: both are self-hosted local servers, so without
-  // this an operator reasonably reads Ollama's caveat as applying to the
-  // whole local-server family and never picks the one backend that can
-  // actually produce scored runs. The claim is the registry descriptor's
-  // (`llamacpp.scoredRunsAllowed: true`, vs ollama's `false`) — llama.cpp
-  // constrains output to a JSON schema, so its verdicts parse; Ollama's are
-  // unparseable-by-construction, which is why it is refused.
+  // CORRECTED 2026-08-31. This block used to explain why Ollama was the one
+  // local backend that could NOT produce scored runs, and told operators so in
+  // the dropdown. That was wrong twice over: Ollama honours
+  // `response_format: {type: 'json_schema'}` (verified live against 0.32.15 —
+  // see src/lib/llm/backends/ollama.ts), and the rule it was justified by
+  // never held anyway, since `openai` and `openrouter` both declare
+  // `structuredOutput: 'none'` and have always been judge-eligible.
+  //
+  // The label is worth keeping on both entries for the original reason: these
+  // are the two self-hosted local backends, and an operator scanning the list
+  // should not have to open the registry to learn whether a local server can
+  // be scored against. Both can.
   { value: 'llamacpp', label: 'llama.cpp (self-hosted, JSON-schema output — judge-eligible)' },
-  { value: 'ollama', label: 'Ollama (local, respond-only — not judge-eligible)' },
+  { value: 'ollama', label: 'Ollama (local, JSON-schema output — judge-eligible)' },
 ];
 
 export function ModelConfigForm({

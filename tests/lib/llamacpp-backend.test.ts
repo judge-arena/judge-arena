@@ -39,12 +39,16 @@ describe('llamacpp backend descriptor', () => {
     expect(d.kind).toBe('openai_compatible');
   });
 
-  it('is allowed for scored runs, unlike ollama', () => {
-    // This is the whole point of the descriptor: first-party dogfooding has to
-    // produce real evaluation data, not dev-only scratch runs. Ollama is
-    // refused because it cannot constrain output; llama.cpp can.
+  it('is allowed for scored runs, and constrains output to a JSON schema', () => {
+    // The "unlike ollama" half of this test was DELETED on 2026-08-31, not
+    // updated: it asserted ollama was refused "because it cannot constrain
+    // output", which was measured against a live server and found false (see
+    // src/lib/llm/backends/ollama.ts). Keeping the assertion about llama.cpp
+    // and dropping the comparison is deliberate — this file should describe
+    // llama.cpp, and hanging its meaning on a neighbouring backend's
+    // restriction is what let one wrong claim propagate into three files.
     expect(getDescriptor('llamacpp').scoredRunsAllowed).toBe(true);
-    expect(getDescriptor('ollama').scoredRunsAllowed).toBe(false);
+    expect(getDescriptor('llamacpp').caps.structuredOutput).toBe('json_schema');
   });
 
   it('reads its base URL from LLAMACPP_BASE_URL fresh on every call', () => {

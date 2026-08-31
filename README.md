@@ -1,8 +1,16 @@
 # Judge Arena
 
 A **meta-evaluation studio for LLM judges**. Register judge models in a catalog, run them over
-datasets through a queue-backed worker, build human-labelled *golden sets*, and calibrate judges
-against those labels — inter-annotator agreement, test-retest, position bias.
+datasets through a queue-backed worker, build *golden sets*, and calibrate judges against them —
+accuracy against the set's ground truth first, with agreement statistics beside it.
+
+> **Correction, 2026-08-31.** This paragraph used to say "build **human-labelled** golden sets, and
+> calibrate judges against **those labels**". That described one of the two calibration paths as if
+> it were the only one, and it was the path that has never run: `GoldenLabel` is still **0** in
+> production. What shipped in A2.1 scores a judge against `GoldenItem.expected` — the answer key
+> that arrives with the dataset — and needs no human label at all. The human-vs-model half (E1–E3,
+> inter-annotator agreement, test-retest) is still unbuilt data, not just unbuilt code. See
+> [Calibration](#calibration).
 
 It is a Next.js 15 application on PostgreSQL with a separate Node worker process, RabbitMQ and
 Redis. It runs in production on Kubernetes at <https://judgearena.com>. **If you are here to change
@@ -44,7 +52,7 @@ relic — it now has a `runs/[runId]/` child.
 | **Queue-backed runs** | Judgment execution is a RabbitMQ job, not a request handler. Quorum work queues + TTL retry queues + a DLQ; a Redis-backed circuit breaker keyed `backend:endpoint:model`. |
 | **Golden sets** | Versioned, forkable, retirable human-labelled sets built from dataset samples. Assignment rows record *who was asked to annotate what*; revoking keeps the row. |
 | **Annotation studio** | `/golden-sets/[id]/label` — a served queue, span/delta text views, a progression rail, and a revision log for every edit. |
-| **Calibration** | `CalibrationRun` stores kappa (Cohen/Fleiss, linear/quadratic), raw agreement, test-retest, position bias, flip-rate vs. the parent set, and a pass/threshold decision. |
+| **Calibration** | `CalibrationRun` scores a judge against a golden set's ground truth: **accuracy** (stored on the legacy `rawAgreement` column) as the primary number, Cohen/Fleiss kappa beside it with its variant and weighting recorded, and `verdictCount`. **Written for the first time on 2026-08-31** — until A2.1 this table was schema that was only ever *counted*, never inserted into. `testRetest`, `positionBias`, `biasSensitivityRate`, `flipRateVsParent`, `passThreshold` and `passed` are still **NULL** on the only row that exists; they are later phases, not fields that failed to populate. See [Calibration](#calibration). |
 | **Tombstones, not deletes** | Samples, items and labels tombstone. Ownership FKs are `SetNull`, so a deleted account anonymises its work instead of destroying it. |
 | **Rubric versioning** | Every rubric edit creates a new version pinned by `parentId`. Version creation is transactional with a P2002 retry (`src/lib/rubric-versions.ts`) — two concurrent editors cannot mint the same version number. |
 | **Audit log** | `AuditLog` rows for auth and mutation events. Login failures record a machine-readable `reason`, which is how OIDC identity mismatches get diagnosed. |
@@ -109,6 +117,24 @@ Deployed tag, and the reason to read this line as dated rather than as a constan
   `kubectl -n tenant-public get deploy judge-arena-web judge-arena-worker -o jsonpath='{.items[*].spec.template.spec.containers[0].image}'`
   → `harbor.cluster.asethi.com/homelab/judge-arena:sha-14d75f7d46de` on both, matching
   `spec.values.image.tag` in the HelmRelease. Both pods 1/1 Running.
+- **2026-08-31 21:23Z: `sha-c6417860027a`** on both Deployments — commit `c641786`, **two commits
+  behind `main`**. **SUPERSEDED READING, kept deliberately**: it was correct when taken, and it is
+  the reason anything below describes the cap as un-deployed.
+- **2026-08-31 21:29Z: `sha-1e7a427d2c48`** on both Deployments — commit `1e7a427`. **The promote
+  landed while this section was being written.** Both pods rolled; the worker logged the clamp on
+  boot, which is the only proof that matters:
+
+  ```
+  {"level":"warn","msg":"EVALUATION_MODEL_CONCURRENCY_PER_RUN clamped to the hard cap",
+   "timestamp":"2026-08-31T21:29:24.604Z","requested":2,"effective":1,
+   "reason":"concurrent provider calls queue INSIDE the inference server while their client timeout runs"}
+  {"level":"info","msg":"judge worker started","timestamp":"2026-08-31T21:29:24.605Z",
+   "prefetch":1,"concurrency":1,"healthPort":9090,"consumers":2}
+  ```
+
+  Note what that pair shows: the Deployment still sets `EVALUATION_MODEL_CONCURRENCY_PER_RUN=2` and
+  the worker runs at **1** anyway, with `prefetch: 1`. **The env var is now documentation of an
+  intent, not a control.** Do not read it as the effective concurrency — read the boot log.
 
 Do not treat either sha as current without re-running that command; manual promote means the number
 in this file goes stale the moment someone edits the HelmRelease.
@@ -147,8 +173,11 @@ Because of `before-hook-creation`, **a failed migration Job survives only until 
 and `install.remediation.retries: -1` guarantees there is a next attempt. Grab
 `kubectl logs job/judge-arena-migrate` promptly.
 
-18 migrations, latest `20260818120000_v2h_human_verification` (verified against production
-`_prisma_migrations` on 2026-08-29: 18 applied, 0 unfinished).
+~~18 migrations, latest `20260818120000_v2h_human_verification`~~ → **19 migrations**, latest
+`20260830120000_v2i_calibration_item_link` (re-verified against production `_prisma_migrations` on
+**2026-08-31**: **19 applied, 0 unfinished**). v2i is entirely additive — no `DROP`, no `DELETE`, no
+column type change, and its one `NOT NULL` addition (`ModelJudgment.promptTruncated`) carries
+`DEFAULT false`.
 
 ### Seeding is deliberately NOT a hook — promoting does not seed
 
@@ -264,11 +293,41 @@ short-lived holding pens with no consumer, so replication belongs on the queues 
 actually consumed from. See `src/lib/queue/topology.ts`.
 
 - **Worker** — `worker.ts` at the repo root is a thin re-export of `src/worker/main.ts`, kept at the
-  top level as a stable build/deploy target. It asserts topology, sets prefetch
-  (`EVALUATION_MODEL_CONCURRENCY_PER_RUN * 4`), starts the `judgment.execute` and `run.create`
-  consumers on the shared confirm channel, runs the reaper, and serves health on
-  `WORKER_HEALTH_PORT` (default 9090). SIGTERM cancels consumers, drains in-flight handlers with a
-  30s bound, then closes cleanly. Local: `npm run worker`.
+  top level as a stable build/deploy target. It asserts topology, sets prefetch, starts the
+  `judgment.execute` and `run.create` consumers on the shared confirm channel, runs the reaper, and
+  serves health on `WORKER_HEALTH_PORT` (default 9090). SIGTERM cancels consumers, drains in-flight
+  handlers with a 30s bound, then closes cleanly. Local: `npm run worker`.
+- **Concurrency is hard-capped at 1** (`src/worker/concurrency.ts`, `HARD_CONCURRENCY_CAP`).
+  `EVALUATION_MODEL_CONCURRENCY_PER_RUN` may ask for anything the env schema allows (1–16); the
+  request is **clamped**, the boot does not fail, and the clamp is logged at `warn` with both the
+  requested and effective values (`src/worker/main.ts:207-215`) — silent to the configuration,
+  never to an operator who sets 8 and sees no change.
+
+  > **CORRECTION 2026-08-31 — this bullet used to read "sets prefetch
+  > (`EVALUATION_MODEL_CONCURRENCY_PER_RUN * 4`)". That was accurate, and the behaviour it
+  > described was a defect.** Prefetch is not a buffer here: `dispatch` starts a handler for
+  > *every* message the broker delivers, so a prefetch of N runs N judgments at once and the `* 4`
+  > quadrupled a concurrency nobody had asked for. At concurrency 2 the worker issued **eight**
+  > concurrent HTTP requests to a llama.cpp server advertising `total_slots: 2`; requests three
+  > through eight queued *inside the inference server* while their 300s client timeout ran, and
+  > **4 of 30 items of the first production calibration dead-lettered** with
+  > `timed out after 300000ms`. Over-subscribing an inference server does not make it faster; it
+  > converts a queue you can see (RabbitMQ, with depth, retries and a DLQ) into one you cannot, and
+  > then times out against it — and the ones that *did* finish came in at a median of **265s**
+  > against that same 300s ceiling. See [Calibration](#calibration) for the measured latencies and a
+  > discrepancy in the numbers currently written into `src/worker/concurrency.ts`.
+  >
+  > **Why 1 and not "match the server's slots":** the worker cannot know the slot count. It is a
+  > property of whichever endpoint each `JudgeModelVersion` points at — different per judge,
+  > invisible from here, and free to change when someone restarts a server with different flags.
+  > One in flight is the only value safe against every endpoint without asking any of them, and it
+  > makes a calibration run **sequentially**, which is what makes a latency baseline reproducible.
+  >
+  > **Raising the cap is not the eventual fix; per-endpoint concurrency is** — the value belongs
+  > beside the endpoint that constrains it (a column on `ModelEndpoint`, or a probe of the server's
+  > advertised slots) with a scheduler that respects it per endpoint. A single global number cannot
+  > be right for a fleet of heterogeneous endpoints, and being wrong costs dead-lettered items that
+  > look like model failures. Read `src/worker/concurrency.ts` before changing it.
 - **Redis** — backs the Lua sliding-window rate limiter (one budget shared across replicas, enforced
   at the `requireAuth()` chokepoint in `src/lib/auth-guard.ts`, *not* in middleware — edge middleware
   cannot hold a Redis connection), the circuit breaker, the reaper lock, and the SSE realtime bus.
@@ -295,15 +354,285 @@ actually consumed from. See `src/lib/queue/topology.ts`.
 
 ---
 
+## Calibration
+
+**New on 2026-08-31 (A2.1).** This is the path from "a judge model and a golden set" to a number,
+and the evidence trail underneath it. Before it, nothing in the product paired a `GoldenItem` with a
+model's verdict: `ModelJudgment` hangs off `EvaluationRun` → `Evaluation`, and `Evaluation` carries
+a `datasetSampleId` but no golden item — so there was no path from a verdict to the `expected` it
+should be scored against. `CalibrationRun` existed in the schema and was only ever **counted** (by
+`isGoldenSetFrozen`), never written.
+
+### The link is two nullable columns, not a join table
+
+`prisma/migrations/20260830120000_v2i_calibration_item_link/migration.sql` adds
+`EvaluationRun.goldenItemId` and `EvaluationRun.calibrationRunId`, plus
+`@@unique(calibrationRunId, goldenItemId)`. There is no join table, deliberately:
+
+- **An `EvaluationRun` is already 1:1 with a golden item by construction** — a pairwise run holds
+  exactly one candidate pair (`RunCandidate @@unique([runId, position])`, and
+  `buildPairwiseUserPrompt` requires exactly two). A join table would model a relationship that the
+  schema already enforces.
+- **A join table would have carried a stored `preference`, and A0 decision #4 forbids that.** Which
+  sample was preferred is **derived** from `(verdict, pairOrder)` at read time. Encoding it turns
+  the B/A position-bias sweep into a backfill instead of an insert — the failure the derive-never-
+  encode rule exists to prevent.
+
+The unique index deliberately keeps Postgres' default `NULLS DISTINCT`: every ordinary (non-
+calibration) run has both columns NULL and they must all coexist, while at most one calibration run
+may exist per (calibration, item). That is why this migration needed **zero hand edits**, unlike
+`ModelJudgment`'s `NULLS NOT DISTINCT` index — see CONTRIBUTING's *Known migrate-diff pseudo-drift*.
+
+### Accuracy is the primary number; kappa is a labelled secondary
+
+`src/lib/calibration/score.ts` writes accuracy to the legacy `rawAgreement` column and records
+`thresholdMetric: 'accuracy'`. The ordering is not a preference:
+
+1. **Ground truth is an answer key, not a peer rater.** Cohen's kappa chance-corrects on *both*
+   raters' marginals, which presumes two annotators who could each have been wrong. The corpus is
+   not one of those — its marginal is a property of the **set** (17 `A>B` / 13 `B>A` for the target
+   set, fixed forever the moment it froze), so discounting a judge's hits against it treats a
+   constant as a source of chance.
+2. **Kappa is not comparable across sets, and cross-set is the whole point of a leaderboard.**
+   Because `pe` depends on the key's class balance, the same judge with the same hit rate scores a
+   different kappa on a 17/13 set than on a 15/15 one.
+
+**So why compute it at all?** Because accuracy alone cannot distinguish a judge that learned
+something from a judge that answers `A>B` every time. On the target set that degenerate judge scores
+**0.5667** accuracy — "better than chance" to the naked eye — and kappa scores it **0.0000**, which
+is exactly right. The two fail in opposite directions, so both are stored, and
+`kappaVariant`/`kappaWeighting` record what produced the second one. A kappa with no stated method
+is a number nobody can check a year from now.
+
+**A2 writes no statistics code.** `src/lib/agreement.ts` is reused unchanged: `raterId` is opaque to
+it, so `'ground-truth'` is just another rater — the same trick the human `label-readings` path
+already uses for `'round-1'`/`'round-2'`. A `'tie'` counts as a **miss** (the corpus has no ties, so
+there is no item a tie could be right about, and crediting it would let a judge raise its score by
+refusing to answer), and a judgment that never completed is **not** a wrong answer — only
+`status: 'completed'` judgments are loaded, so an in-flight calibration scores what it has rather
+than improving as the queue drains.
+
+### THE FIRST REAL NUMBER — and its caveat
+
+Verified directly against production, read-only, on 2026-08-31:
+
+```
+kubectl exec -n tenant-public judge-arena-pg-1 -c postgres -- psql -U postgres -d judge_arena -tAc \
+  'SELECT id, kappa, "rawAgreement", "verdictCount", "thresholdMetric" FROM "CalibrationRun";'
+```
+
+| | |
+|---|---|
+| Judge | **Qwen3.6-35B-A3B** (`Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf`, `llamacpp` backend, local) |
+| Golden set | `cmt057hd001g17y01lhjzgfuj` — *JudgeBenchSample — 30 random*, 30 pairwise items, ground truth **17 `A>B` / 13 `B>A`**, no ties |
+| `CalibrationRun` | `cmtgib0xr00016k2r8nlyj1py`, started `2026-08-31 00:35:04`, finished `01:47:46` |
+| **Accuracy** | **0.8462** (`rawAgreement = 0.8461538461538461`) — **22 of 26**, not 22 of 30 |
+| Kappa | **0.6950** (`cohen`, weighting `none`) |
+| `verdictCount` | **26** |
+| `passed` / `passThreshold` | **NULL** — no threshold has been set, so nothing has passed or failed |
+
+> **⚠ READ THE DENOMINATOR. This is a 26-item number, not a 30-item one, and the four missing items
+> were OUR fault, not the model's.** All four dead-lettered with
+> `Provider call to "llamacpp" (Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf) timed out after 300000ms` after 4
+> attempts each. The cause was **configuration**: prefetch was `concurrency(2) × 4 = 8`, so eight
+> concurrent requests hit a server with `total_slots: 2` and six queued *inside the server* while
+> their client timeout ran. Do not read 0.8462 as "the judge failed 4 items"; it never saw them. The
+> cap described under [Queue, worker and realtime](#queue-worker-and-realtime) is the fix.
+
+**The measured latencies, and a discrepancy worth resolving before anyone quotes the round number.**
+
+```
+kubectl exec -n tenant-public judge-arena-pg-1 -c postgres -- psql -U postgres -d judge_arena -tAc \
+ 'SELECT count(*), round(avg(mj."latencyMs")), min(mj."latencyMs"), max(mj."latencyMs"),
+         round(percentile_cont(0.5) WITHIN GROUP (ORDER BY mj."latencyMs")::numeric)
+    FROM "ModelJudgment" mj JOIN "EvaluationRun" er ON er.id = mj."runId"
+   WHERE er."calibrationRunId" = 'cmtgib0xr00016k2r8nlyj1py' AND mj.status = 'completed';'
+→ n=26  avg=232917  min=65774  max=299063  median=265372     (milliseconds)
+```
+
+> **⚠ `src/worker/concurrency.ts:12-13` and `1e7a427`'s commit message both state that "judgments
+> that completed averaged 94s, well inside the 300s ceiling". The stored `latencyMs` does not say
+> that.** The 26 completed judgments average **233s**, with a median of **265s** and a maximum of
+> **299,063 ms — 937 milliseconds under the 300,000 ms timeout**. So it is not that four unlucky
+> items timed out while the rest were comfortable; **26 of 30 finished within a second of the wall.**
+>
+> The two figures are not necessarily contradictory, and the difference is the whole point of the
+> incident: `latencyMs` is measured around the HTTP call
+> (`src/lib/llm/openai-compatible.ts:249` — `Date.now() - startTime` spanning the SDK request), so it
+> **includes time the request spent queued inside the inference server**. 94s may well be the
+> model's generation time from another source. **It is not recoverable from this database**, and
+> nothing in these rows separates generation from queue wait.
+>
+> **Treat 94s as unverified, and do not quote it as a latency baseline.** The clean sequential re-run
+> is what produces a real one: at concurrency 1 there is no in-server queue for `latencyMs` to
+> absorb, so its stored value becomes generation time. That run is now in flight (below) — **read
+> its latencies before characterising this judge's speed, and do not carry 233s forward either.**
+
+> **IN FLIGHT — the clean sequential re-run, and it is genuinely sequential this time.**
+> `CalibrationRun` **`cmthr58r100013s0sykuvn41x`** — same golden set, same judge version — started
+> `2026-08-31 21:30:17.101`, **53 seconds after** the capped worker booted at `21:29:24.605Z`.
+> Progress at `21:37Z`: **30 runs launched, 9 completed, 1 running, 20 pending**;
+> `rawAgreement`, `kappa` and `finishedAt` are all still NULL and `verdictCount` is `0`, because
+> scoring happens at the end. **Exactly one judgment in flight is the cap working.**
+>
+> **This block is a deliberate placeholder. Do not fill it in by guessing, and do not assume the
+> re-run will simply reproduce 0.8462 over 30 items.** The four items the first run never saw are
+> not a random sample — they are the four that happened to queue behind others — and the sequential
+> run also changes the latency distribution the first was measured under. That second change is the
+> point: with no in-server queue, `latencyMs` finally means generation time.
+>
+> ```
+> ┌─────────────────────────────────────────────────────────────────┐
+> │  RE-RUN RESULT: not yet recorded.                               │
+> │  When it lands, record accuracy WITH its denominator, kappa      │
+> │  with its variant + weighting, and the calibrationRunId.         │
+> └─────────────────────────────────────────────────────────────────┘
+> ```
+
+**One inconsistency worth knowing before you query this yourself.** Five `EvaluationRun` rows carry
+`status = 'error'` while only **four** `ModelJudgment` rows do. Run
+`a0983c08-4548-4663-a40d-0cd56b82f765` is stamped `error` at run grain, but its judgment
+**completed** on attempt 6 with `verdict = B` and `latencyMs = 108646`. Scoring reads the *judgment*
+status, so that item is inside the 26 — the run-grain status is what is stale. Count judgments, not
+runs.
+
+### Running one, end to end
+
+**In the cluster** — the only place that can reach both the production database and a judge
+endpoint (a workstation has no route to `judge-arena-pg-rw.tenant-public`). Both entrypoints are
+bundled into the image by `Dockerfile` (esbuild, because the runner ships no TypeScript toolchain):
+
+```sh
+# 1. Register the judge (creates JudgeModel + JudgeModelVersion + ModelEndpoint through the
+#    same createCustomJudgeModel chokepoint POST /api/models uses, so it gets an audit row).
+node /app/add-judge.js --name="Qwen3.6-35B-A3B" --backend=llamacpp \
+  --base-model="Qwen3.6-35B-A3B-UD-Q3_K_XL.gguf" \
+  --endpoint="http://<host>:8001/v1" \
+  [--max-tokens=8192] [--temperature=0.3] [--protocol=pairwise] [--dry-run]
+
+# 2. Run and score the calibration. THIS FREEZES THE GOLDEN SET — see below.
+node /app/calibration-run.js --golden-set=<goldenSetId> --judge-version=<judgeModelVersionId>
+
+# Re-score an existing run without launching anything (idempotent — every field is a full
+# overwrite recomputed from the source rows, nothing increments):
+node /app/calibration-run.js --score-only=<calibrationRunId>
+```
+
+**Locally**, the same script is `npm run calibration:run -- --golden-set=<id> --judge-version=<id>`.
+`--poll-timeout=<seconds>` (default 3600) bounds the wait while the worker drains the queue.
+
+Use `--dry-run` on `add-judge.js` first if you are unsure of the served model id or the `/v1` suffix:
+those are the fields that are easiest to mistype and they fail **late**, at judgment time, after a
+run has already been launched.
+
+### THE GOLDEN SET IS FROZEN IRREVERSIBLY BY THE FIRST CALIBRATION
+
+There is no `frozenAt` column and there is no unfreeze verb anywhere in the product.
+`isGoldenSetFrozen` is defined as `calibrationRun.count({ where: { goldenSetId } }) > 0`
+(`src/lib/golden-sets.ts:266-272`), so **the moment the `CalibrationRun` header is committed**, that
+set's items, candidates, `protocol` and `expected` are read-only forever. Deleting the calibration
+is not a thing anyone can do (`EvaluationRun.calibrationRunId` is `onDelete: Restrict`), and
+`retiredAt`/`tombstonedAt` do not release it either. The only way to change a frozen set's content
+is `POST /api/golden-sets/[id]/fork`, which makes a new set at version+1.
+
+Because that write is irreversible, `launchCalibrationRun` checks **everything knowable without
+touching an item** before writing the header — the set exists, is not tombstoned, is pairwise, has
+at least one live item and no more than `MAX_CALIBRATION_ITEMS`; the project and rubric exist; a
+pairwise `PromptTemplate` exists; and the caller owns an active, verified `ModelEndpoint` for the
+judge version. Each of those would otherwise surface as a per-item failure discovered *after* the
+freeze: a golden set pinned forever by a calibration in which all 30 items failed for one reason
+that was knowable before any of them ran. `result.frozeGoldenSet` tells a caller whether **this**
+call was the one that froze it.
+
+### What is captured, and two honest gaps
+
+`ModelJudgment` now stores what the model was given and what it thought:
+`systemPrompt`, `userPrompt`, `userPromptSha256`, `promptTruncated`, `rawResponse`, `reasoning`,
+`reasoningContent`, `reasoningSource`, `reasoningTokens`.
+
+**The rendered prompt is STORED, not reconstructed, and that is not redundancy.** `PATCH
+/api/rubrics/[id]` `deleteMany`s a rubric's criteria and recreates them on the **same rubric id with
+no version bump** (verified), and the pairwise system prompt embeds those criteria verbatim — so
+re-rendering a historical judgment from `promptTemplateId` + the item silently produces **today's**
+rubric, with nothing anywhere recording that it moved. `userPrompt` is capped at 32 KiB, backed off
+to a UTF-8 character boundary so the stored copy cannot end in a `U+FFFD`; `userPromptSha256` is
+taken over the **full, pre-cap** text, so a capped copy still identifies the exact bytes the model
+saw, and `promptTruncated` says which it is. `reasoningContent` is deliberately **not** merged into
+`reasoning`, which is already triple-booked (parsed pointwise rationale, parsed pairwise rationale,
+and the entire generated answer in respond mode); merging two channels that carry different content
+is unrecoverable once written.
+
+Two fields are null on this data, and both are gaps rather than bugs:
+
+| Field | State on all 30 judgments | Why |
+|---|---|---|
+| `reasoningTokens` | **NULL, 30/30** | Read from `usage.completion_tokens_details.reasoning_tokens` (`src/lib/llm/openai-compatible.ts:263`). llama.cpp does not emit `completion_tokens_details` in its usage payload at all, so there is nothing to read. It is not dropped on the floor — it was never sent. |
+| `parseMode` | **NULL, 30/30** | The pairwise path has **one** parse path. `tryParsePairwiseJudgment` is already fence-tolerant, so there is no strict-then-lenient demotion and therefore no `parseMode` to persist (`src/lib/llm/registry.ts:1005-1007`). The column is meaningful only on the pointwise path. |
+
+`reasoningSource` is `reasoning_content` on all 30 — the extraction order is fixed and recorded
+rather than guessed, so a future judge that answers on a different key is distinguishable in the
+data instead of silently equivalent. Note also that `systemPrompt` is non-null on **26** of 30: the
+four timeouts are transport-level failures with no provider response to carry, so there was nothing
+to capture.
+
+> **Storage footprint — deliberately not stated here.** N judges × M items × every re-run, each
+> carrying uncapped model text, is the heaviest data this product will hold, and Postgres here is
+> `instances: 1` on a single node. The measured per-row cost and the extrapolation to "hundreds of
+> models" are being produced as a separate, dedicated measurement; **no figures are recorded in this
+> README until they have been verified.** Do not fill this in from memory or from a per-row average
+> read off one run.
+
+### Truncation is now a HARD FAILURE
+
+`registry.ts`'s `execute()` refuses to hand a truncated or empty response to a parser at all. One
+chokepoint, called immediately after the backend call and **before any parse**, so pointwise,
+pairwise and respond all inherit it (`assertUsableContent`, `src/lib/llm/registry.ts:507-580`).
+`finish_reason: 'length'` (OpenAI-compatible) or `stop_reason: 'max_tokens'` (Anthropic), or an
+empty content channel, throws `ProviderError` with `kind: 'non_retryable'`.
+
+**Non-retryable, both cases**, because the token budget is a property of the *request*, not of
+provider health: the identical call truncates identically every time, so classifying it retryable
+would burn the 3-attempt budget, DLQ the judgment, and count three failures against a circuit
+breaker shared with every healthy call on the same endpoint+model.
+
+**What each path did before this, which is why it is worth a section:**
+
+- **Respond mode persisted a truncated answer as `status: 'completed'`.** A generation chopped in
+  half — or empty outright — was indistinguishable in the corpus from a finished one. That is the
+  failure this rule exists to prevent.
+- **Pointwise misclassified it as retryable.** Truncated text reached the parser, whose `JSON.parse`
+  guard throws a plain `Error`, and `classify()` has no structural signal for that (no `.status`,
+  not an abort, no node `code`), so it fell through to the `retryable` default.
+- **Pairwise failed loudly, but only by luck** — the truncated text happened to carry no parseable
+  verdict.
+
+It **fails on `'length'` unconditionally, even when the content happens to parse**: a model cut off
+mid-reasoning is not a completed judgment for a calibration corpus, however well-formed the prefix
+it managed to emit. The error message carries every number needed to size the fix (`max_tokens`,
+`completion_tokens`, `reasoning_tokens`, surviving content length) and names the lever —
+`samplingDefaults.max_tokens` on the `JudgeModelVersion`.
+
+**The one deliberate exemption** is `verify.ts`'s connection test, which sets no `mode`: it sends
+`max_tokens: 1` on purpose and reads nothing but `servedModelId`, so a healthy provider answers it
+with `finish_reason: 'length'` every single time. Guarding it would turn every "test connection"
+click on a working endpoint into a truncation error.
+
+A failure now also carries the response that caused it. `ProviderError.callResult` hands the
+reasoning channel, the token split and the rendered prompt to `markJudgmentError`, so a judgment
+that failed persists the evidence explaining **why** rather than only a message.
+
+---
+
 ## Architecture
 
-Regenerated from the actual tree at `14d75f7`, not from memory.
+Regenerated from the actual tree at `14d75f7`, not from memory. **Counts re-verified at `1e7a427`
+(2026-08-31)** and the rows A2.1 moved are marked; everything unmarked is unchanged since `14d75f7`.
 
 ```
 judge-arena/
 ├── prisma/
 │   ├── schema.prisma            # 29 models — see Data model below
-│   ├── migrations/              # 18 migrations, latest 20260818120000_v2h_human_verification
+│   ├── migrations/              # 19 migrations, latest 20260830120000_v2i_calibration_item_link
 │   ├── seed.ts                  # thin entry: client lifecycle + exit code only
 │   ├── seed-core.ts             # seedAll(client) — takes a client so DB tests can drive it
 │   ├── seed-prompt-templates.ts # judge system-prompt templates
@@ -337,9 +666,10 @@ judge-arena/
 │   │   ├── rubric/              # rubric-builder
 │   │   ├── studio/              # StudioShell, Panel, ProgressionRail, SpanTextView, DeltaTextView
 │   │   └── ui/                  # 14 primitives — button, card, dialog, tooltip, brand-icon, …
-│   ├── lib/                     # ~68 modules; the ones you will actually open:
+│   ├── lib/                     # 71 modules; the ones you will actually open:
 │   │   ├── db.ts env.ts config.ts logger.ts crypto.ts audit.ts
 │   │   ├── auth.ts auth-guard.ts oidc-user.ts permissions.ts account-deletion.ts
+│   │   ├── calibration/         # launch.ts (freezes the set), score.ts, readings.ts  [A2.1]
 │   │   ├── llm/                 # provider system — see below
 │   │   ├── queue/               # connection.ts, publish.ts, topology.ts
 │   │   ├── realtime/            # SSE bus: redis-bus, in-memory-bus, factory, ownership
@@ -350,21 +680,25 @@ judge-arena/
 │   │   ├── tombstones.ts sample-revisions.ts dataset-versions.ts
 │   │   └── run-launch.ts run-finalizer.ts run-mode.ts rubric-versions.ts
 │   ├── worker/                  # main.ts, judgment-consumer, run-create-consumer,
-│   │   │                        # claim, reaper, dispatch-failure
+│   │   │                        # claim, reaper, dispatch-failure, health
+│   │   └── concurrency.ts       # the hard cap of 1 — read it before raising it  [A2.1]
 │   └── types/
 ├── scripts/
 │   ├── admin/create-user.ts     # invite CLI (+ create-user-entry.ts, the bundle entry)
+│   ├── admin/add-judge.ts       # judge-registration CLI -> /app/add-judge.js  [A2.1]
+│   ├── calibration/run.ts       # npm run calibration:run -> /app/calibration-run.js  [A2.1]
 │   ├── importer/                # one-shot v1 -> v2 migration (cli, judges, runs, owners, …)
 │   ├── datasets/fetch-judgebench.mjs
 │   ├── controller.mjs           # npm run ctrl:* task runner
 │   └── ci-local.sh              # runs the full CI gate locally
-├── tests/                       # 95 test files: lib/, db/, integration/, importer/, admin/
+├── tests/                       # 106 test files: lib/, db/, integration/, importer/, admin/
 ├── docs/
 │   ├── runbooks/                # authentik-oidc-setup, studio-manual-verification
 │   ├── specs/ plans/            # under docs/superpowers/
 │   └── research/
 ├── deploy/                      # nginx.conf, nginx-lb.conf, pg-init-test-db.sh (compose only)
-├── Dockerfile                   # deps -> builder -> prisma-cli -> runner; server.js + worker.js
+├── Dockerfile                   # deps -> builder -> prisma-cli -> runner; bundles server.js,
+│                                # worker.js, seed.js, add-judge.js, calibration-run.js
 ├── docker-compose.yml           # full local stack incl. nginx LB and a migrate service
 ├── worker.ts                    # root worker entry (re-export of src/worker/main.ts)
 ├── vitest.config.ts vitest.db.config.ts vitest.integration.config.ts
@@ -446,9 +780,23 @@ Evaluation ─┬── EvaluationModelSelection   which JudgeModelVersions this
                                ├── ModelJudgment ──── PromptTemplate  (pinned by (name, version))
                                └── HumanJudgment      one per run — `runId` is @unique
 
-CalibrationRun    JudgeModelVersion x GoldenSet -> kappa, rawAgreement, testRetest,
-                  positionBias, biasSensitivityRate, flipRateVsParent, passed/passThreshold
+                    EvaluationRun.goldenItemId ────────► GoldenItem       ] v2i, both NULLABLE
+                    EvaluationRun.calibrationRunId ────► CalibrationRun   ] and both NULL on an
+                                                                          ] ordinary run
+                    @@unique(calibrationRunId, goldenItemId)   NULLS DISTINCT, deliberately
+
+CalibrationRun    JudgeModelVersion x GoldenSet (+ rubricId) -> accuracy (in `rawAgreement`),
+                  kappa + kappaVariant/kappaWeighting, verdictCount, thresholdMetric.
+                  testRetest, positionBias, biasSensitivityRate, flipRateVsParent and
+                  passed/passThreshold exist and are NULL — later phases, not lost writes.
 ```
+
+> **UPDATE 2026-08-31 (v2i).** `CalibrationRun` used to sit in this diagram unattached to anything,
+> which was an accurate drawing of a table nothing wrote. The two nullable columns above are the
+> link, and **not a join table** — an `EvaluationRun` is already 1:1 with a golden item because a
+> pairwise run holds exactly one candidate pair, and a join row would have carried a stored
+> `preference`, which A0 decision #4 forbids (preference is *derived* from `(verdict, pairOrder)` at
+> read time). See [Calibration](#calibration).
 
 `EvaluationModelSelection` and `RunModelSelection` carry `judgeModelVersionId` **directly** now. The
 `modelConfigId` column on both is legacy and is unconditionally `null` for anything the current write
@@ -741,7 +1089,7 @@ cp .env.example .env
 # REDIS_URL and RABBITMQ_URL default to localhost outside production, but the
 # rate limiter, the queue and /api/health all need them actually running.
 
-npx prisma migrate deploy     # apply the 18 migrations
+npx prisma migrate deploy     # apply the 19 migrations
 npx prisma generate
 npx tsx prisma/seed.ts        # prompt templates, rubric, judge catalog, leaderboard project,
                               # LiveCodeBench (metadata) + JudgeBench (620 samples)
@@ -786,6 +1134,7 @@ it.
 | `npm run db:seed` / `db:reseed` | Seed / force-reset + seed |
 | `npm run db:studio` | Prisma Studio |
 | `npm run admin:create-user` | The invite CLI |
+| `npm run calibration:run` | Score a judge against a golden set — `-- --golden-set=<id> --judge-version=<id>`, or `-- --score-only=<calibrationRunId>` to re-score without launching. **Launching freezes the golden set irreversibly.** See [Calibration](#calibration) |
 | `npm run import:v1` | One-shot v1 → v2 importer (`db:generate:v1`, `db:push:v1` support it) |
 | `npm run ctrl:*` | `scripts/controller.mjs` task runner — `generate`, `seed`, `db`, `full-reset-build` |
 
