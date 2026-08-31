@@ -486,3 +486,51 @@ describe('scoreCalibrationRun — the disagreement list is the debugging surface
     });
   });
 });
+
+describe('scoreCalibrationRun — items that produced NOTHING', () => {
+  // Regression for the first production calibration (2026-08-31), which
+  // reported `missingVerdicts 0` while four of thirty items had dead-lettered.
+  // The query selects only completed judgments, so an errored run arrives with
+  // an empty modelJudgments array and contributes no row at all — invisible to
+  // groundTruthReadings, which can only report a missing verdict for a row it
+  // was handed.
+  const goldenItem = (id: string, index: number, expected: string) => ({ id, index, expected });
+
+  function clientWith(runs: unknown[]): CalibrationScoreClient {
+    return {
+      evaluationRun: { findMany: async () => runs },
+      calibrationRun: { update: async () => ({}) },
+    } as unknown as CalibrationScoreClient;
+  }
+
+  it('counts a run whose judgment errored as a MISSING verdict, not as absent', async () => {
+    const client = clientWith([
+      {
+        id: 'r1',
+        goldenItem: goldenItem('i1', 0, 'A>B'),
+        modelJudgments: [{ verdict: 'A', pairOrder: 'AB', judgeModelVersionId: 'v1' }],
+      },
+      // Errored/DLQ'd/in-flight: the completed-only filter leaves this empty.
+      { id: 'r2', goldenItem: goldenItem('i2', 1, 'B>A'), modelJudgments: [] },
+      { id: 'r3', goldenItem: goldenItem('i3', 2, 'A>B'), modelJudgments: [] },
+    ]);
+
+    const score = await scoreCalibrationRun('cal-1', client);
+
+    expect(score.verdictCount).toBe(1);
+    expect(score.missingVerdicts).toBe(2);
+    // The denominator and the missing count must describe the same 3 items.
+    expect(score.verdictCount + score.missingVerdicts).toBe(3);
+    expect(score.accuracy).toBe(1);
+  });
+
+  it('reports 0 missing when every launched item produced a verdict', async () => {
+    const client = clientWith([
+      { id: 'r1', goldenItem: goldenItem('i1', 0, 'A>B'), modelJudgments: [{ verdict: 'A', pairOrder: 'AB', judgeModelVersionId: 'v1' }] },
+      { id: 'r2', goldenItem: goldenItem('i2', 1, 'B>A'), modelJudgments: [{ verdict: 'B', pairOrder: 'AB', judgeModelVersionId: 'v1' }] },
+    ]);
+    const score = await scoreCalibrationRun('cal-2', client);
+    expect(score.missingVerdicts).toBe(0);
+    expect(score.verdictCount).toBe(2);
+  });
+});

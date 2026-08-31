@@ -168,6 +168,20 @@ export async function scoreCalibrationRun(
   // SAME narrowing groundTruthReadings does rather than a second copy of it.
   const context: Array<{ runId: string; itemIndex: number }> = [];
 
+  // Items that were LAUNCHED but produced nothing — the judgment errored,
+  // DLQ'd, or is still in flight. They must be counted here and nowhere else:
+  // the query above selects only `status: 'completed'` judgments, so such a run
+  // arrives with an EMPTY `modelJudgments` array, contributes no row below, and
+  // is therefore invisible to `groundTruthReadings` — which can only report a
+  // missing verdict for a row it was actually handed.
+  //
+  // Getting this wrong is not cosmetic. The first production calibration
+  // (2026-08-31) reported `missingVerdicts 0` while FOUR of thirty items had
+  // dead-lettered, directly under an accuracy line whose own denominator said
+  // 26. A reader is entitled to trust the field named "how many are missing"
+  // over arithmetic they have to do themselves, and that reading was wrong.
+  let unjudgedItems = 0;
+
   for (const run of runs) {
     // A calibration EvaluationRun without a goldenItem cannot be scored
     // against anything. The @@unique([calibrationRunId, goldenItemId]) makes
@@ -175,6 +189,10 @@ export async function scoreCalibrationRun(
     // skipping beats crashing a whole calibration over it, and it cannot go
     // unnoticed because the run contributes to no count.
     if (run.goldenItem === null) continue;
+    if (run.modelJudgments.length === 0) {
+      unjudgedItems += 1;
+      continue;
+    }
     // One judgment per run in phase 1 (pairOrder 'AB' only). If phase 2's BA
     // sweep lands and this is still flattening both orders into one pile,
     // groundTruthReadings throws on the duplicate (item, rater) rather than
@@ -247,7 +265,10 @@ export async function scoreCalibrationRun(
     kappa: result.value,
     verdictCount,
     itemCount: projection.itemCount,
-    missingVerdicts: projection.missingVerdicts,
+    // Both shapes of "this item produced no answer": a row whose verdict is
+    // null (judged, but the judge said nothing usable) and a run with no
+    // completed judgment at all (errored, dead-lettered, or still running).
+    missingVerdicts: projection.missingVerdicts + unjudgedItems,
     correctCount,
     verdictDistribution,
     confusion,
