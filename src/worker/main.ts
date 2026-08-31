@@ -53,6 +53,7 @@ import { createJudgmentConsumer } from './judgment-consumer';
 import { createRunCreateConsumer } from './run-create-consumer';
 import { startReaper } from './reaper';
 import { handleDispatchFailure } from './dispatch-failure';
+import { resolveWorkerConcurrency } from './concurrency';
 import {
   EXPECTED_CONSUMER_COUNT,
   createConsumerRegistry,
@@ -61,8 +62,13 @@ import {
   type ConsumerRegistry,
 } from './health';
 
-const MODEL_CONCURRENCY_PER_RUN = Number(process.env.EVALUATION_MODEL_CONCURRENCY_PER_RUN ?? '2');
-const PREFETCH = Math.max(1, MODEL_CONCURRENCY_PER_RUN) * 4;
+// Prefetch IS the concurrency limit here, not a buffer: `dispatch` starts a
+// handler for every message the broker delivers, so a prefetch of N runs N
+// judgments at once. The previous `concurrency * 4` therefore issued eight
+// concurrent provider calls, which is what dead-lettered four items of the
+// first production calibration. See ./concurrency.ts for the full account.
+const CONCURRENCY = resolveWorkerConcurrency(process.env.EVALUATION_MODEL_CONCURRENCY_PER_RUN);
+const PREFETCH = CONCURRENCY.prefetch;
 const HEALTH_PORT = Number(process.env.WORKER_HEALTH_PORT ?? '9090');
 const DRAIN_TIMEOUT_MS = 30_000;
 
@@ -198,8 +204,20 @@ async function main(): Promise<void> {
   );
   consumers.register(QUEUE_RUN_CREATE, runCreateTag.consumerTag);
 
+  if (CONCURRENCY.capped) {
+    // Not silent to an OPERATOR, only to the configuration: someone who sets 8
+    // and sees no change deserves to be told the value was clamped, and why.
+    logger.warn('EVALUATION_MODEL_CONCURRENCY_PER_RUN clamped to the hard cap', {
+      requested: CONCURRENCY.requested,
+      effective: CONCURRENCY.effective,
+      reason:
+        'concurrent provider calls queue INSIDE the inference server while their client timeout runs — see src/worker/concurrency.ts',
+    });
+  }
+
   logger.info('judge worker started', {
     prefetch: PREFETCH,
+    concurrency: CONCURRENCY.effective,
     healthPort: HEALTH_PORT,
     consumers: consumers.registered(),
   });
