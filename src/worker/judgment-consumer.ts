@@ -1,7 +1,9 @@
 /**
  * ─── judgment.execute Consumer ─────────────────────────────────────────────
  *
- * Pipeline per message: claim (idempotent — see ./claim.ts) -> load full
+ * Pipeline per message: read the judge id and acquire that judge's permit
+ * (./concurrency.ts — BEFORE the claim, see below) -> claim (idempotent —
+ * see ./claim.ts) -> load full
  * judgment context (run/evaluation/rubric/judge version/judge model, plus
  * A0's `RunCandidate` comparison set) -> resolve a `ModelEndpoint` to call
  * through -> run the provider call (via whichever of the three seams the
@@ -10,6 +12,28 @@
  * -> persist the result -> publish `judgment.completed` on `run:{runId}`
  * (best-effort, never fails the message) -> finalization pass
  * (`maybeFinalizeRun`, src/lib/run-finalizer.ts) -> ack.
+ *
+ * ── One provider call PER JUDGE, not one per worker ─────────────────────────
+ * `handle()` takes a permit keyed on `judgeModelVersionId` before it does
+ * anything else, and holds it until the message is disposed of. Judges on
+ * different servers run in parallel; two deliveries for the SAME judge
+ * serialise, because concurrent calls to one inference server queue INSIDE it
+ * while their client timeout runs (that dead-lettered 4 of 30 items — see
+ * ./concurrency.ts for the whole account, including why the prefetch and the
+ * per-judge cap are two different numbers).
+ *
+ * THE ORDERING IS THE DESIGN. The permit is taken BEFORE `claimJudgment`,
+ * which is why `resolveJudgeGateKey` exists as a separate one-column read
+ * rather than reusing the post-claim context load: a delivery parked on a busy
+ * gate while holding a claim would let its `LEASE_MS` (330s in production)
+ * expire underneath it, the reaper would reset the row to `pending` and
+ * republish, and the judgment would execute twice. Waiting before claiming
+ * costs one indexed SELECT; waiting after claiming costs correctness.
+ *
+ * The wait is bounded (`GATE_WAIT_TIMEOUT_MS`) and times out into a
+ * nack-REQUEUE, because an unacked delivery that outlives RabbitMQ's
+ * 30-minute `consumer_timeout` gets the shared confirm channel closed under
+ * it — which stops this worker consuming at all.
  *
  * ── The provider seam ───────────────────────────────────────────────────────
  * `runProviderJudgment` is intentionally narrow: `{ judgment, run, rubric,
@@ -147,6 +171,14 @@ import type {
 import { maybeFinalizeRun } from '@/lib/run-finalizer';
 import { deriveRunMode } from '@/lib/run-mode';
 import { claimJudgment } from './claim';
+import {
+  GATE_WAIT_TIMEOUT_MS,
+  JudgeGateTimeoutError,
+  judgeGate,
+  judgeGateKey,
+  logGateTimeout,
+  type KeyedGate,
+} from './concurrency';
 
 /** Attempt budget: 1st delivery (attempt=1) plus up to 2 retries. On the
  * 3rd failed attempt the judgment goes to the DLQ instead of a further
@@ -192,6 +224,42 @@ type JudgmentContext = NonNullable<Awaited<ReturnType<typeof judgmentContextQuer
 type RunWithEvaluation = JudgmentContext['run'];
 type RubricWithCriteria = NonNullable<RunWithEvaluation['rubric']>;
 type VersionWithJudgeModel = NonNullable<JudgmentContext['judgeModelVersion']>;
+
+/**
+ * The one extra read this design costs: which judge is this message for,
+ * BEFORE anything is claimed.
+ *
+ * ── WHY IT CANNOT REUSE `judgmentContextQuery` ──────────────────────────────
+ * That query runs AFTER `claimJudgment`, and the gate must be acquired
+ * BEFORE it. The full context load is also a five-table `include`; this is a
+ * primary-key lookup projecting one column.
+ *
+ * ── WHY THE GATE MUST PRECEDE THE CLAIM (the trap this design is built around)
+ * `claim.ts`'s `LEASE_MS` = `EVALUATION_MODEL_TIMEOUT_MS + 30_000` — 330s in
+ * production. A message that WAITS on a busy gate while HOLDING a claim has
+ * its `ModelJudgment` row sitting in `running` with a frozen `updatedAt` the
+ * whole time. Past the lease, `src/worker/reaper.ts`'s stale sweep resets it
+ * to `pending` and republishes it, and `claim.ts`'s own `'stale_running'`
+ * reclaim path will hand it to another delivery — while the original delivery
+ * is still parked, about to wake up and execute. That is DUPLICATE EXECUTION
+ * of a provider call, a correctness bug, not a slowdown. Acquiring the gate
+ * first makes a parked message hold nothing at all: no claim, no lease, no DB
+ * connection.
+ *
+ * Cost: one indexed SELECT per delivery. `id` is the primary key
+ * (`ModelJudgment_pkey`), and `judgeModelVersionId` carries its own btree
+ * index (`ModelJudgment_judgeModelVersionId_idx`, created in
+ * prisma/migrations/20260725004838_v2_judgment_run_provenance/migration.sql:74
+ * and verified present on the live schema) — though this lookup is served by
+ * the PK alone.
+ */
+async function resolveJudgeGateKey(judgmentId: string): Promise<string> {
+  const row = await prisma.modelJudgment.findUnique({
+    where: { id: judgmentId },
+    select: { judgeModelVersionId: true },
+  });
+  return judgeGateKey(judgmentId, row?.judgeModelVersionId);
+}
 
 // ─── The provider seam ──────────────────────────────────────────────────────
 
@@ -735,6 +803,14 @@ export interface JudgmentConsumerOptions {
   /** Constructor-injected pairwise persist seam (A0) — defaults to
    * `persistPairwiseSuccess`. Same rationale as `persist`. */
   persistPairwise?: PersistPairwiseFn;
+  /** Constructor-injected per-judge gate — defaults to the process-wide
+   * `judgeGate` singleton (src/worker/concurrency.ts). Injectable so a test
+   * can hand in a fresh `createKeyedGate()` and not inherit permits from
+   * another test file's consumer. */
+  gate?: KeyedGate;
+  /** Bounded wait for that gate — defaults to `GATE_WAIT_TIMEOUT_MS`. A test
+   * lowers it to assert the requeue disposition without waiting ten minutes. */
+  gateWaitMs?: number;
 }
 
 export interface JudgmentConsumer {
@@ -748,10 +824,50 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
   const persistRespond = options.persistRespond ?? persistRespondSuccess;
   const providerPairwise = options.providerPairwise ?? defaultRunProviderPairwise;
   const persistPairwise = options.persistPairwise ?? persistPairwiseSuccess;
+  const gate = options.gate ?? judgeGate;
+  const gateWaitMs = options.gateWaitMs ?? GATE_WAIT_TIMEOUT_MS;
 
+  /**
+   * Gate first, then everything else.
+   *
+   * The permit is held across the ENTIRE claim+execute span — claim, context
+   * load, provider call, persist, finalize, ack — because the thing being
+   * protected is "at most one in-flight provider call per judge", and the
+   * claim is what makes this delivery the one that will make that call.
+   * Releasing any earlier would let a second delivery for the same judge claim
+   * and dial out while this one is still talking to the server.
+   *
+   * `runExclusive` owns the `finally` (see concurrency.ts): a throw escaping
+   * `executeClaimed` — a DB outage mid-persist, a bug in context loading —
+   * must not leak the permit, or that judge is wedged for the life of the
+   * process while its server sits idle.
+   */
   async function handle(raw: ConsumeMessage, ch: Channel): Promise<void> {
     const msg = JSON.parse(raw.content.toString()) as JudgmentExecuteMsg;
+    const gateKey = await resolveJudgeGateKey(msg.judgmentId);
 
+    try {
+      await gate.runExclusive(gateKey, () => executeClaimed(raw, ch, msg), gateWaitMs);
+    } catch (error) {
+      if (!(error instanceof JudgeGateTimeoutError)) throw error;
+      // NACK-REQUEUE, never ack and never drop: this delivery has done
+      // nothing — it holds no claim, wrote nothing, and called no provider —
+      // so putting it back on `judgment.execute` unchanged is exactly right,
+      // and `attempt` deliberately does not advance (waiting for a busy judge
+      // is not a failed attempt and must not burn the 3-attempt budget).
+      // The alternative — keep waiting — walks into RabbitMQ's 30-minute
+      // `consumer_timeout`, which closes the shared confirm channel and stops
+      // this worker consuming entirely.
+      logGateTimeout(error, msg.judgmentId, msg.runId);
+      ch.nack(raw, false, true);
+    }
+  }
+
+  async function executeClaimed(
+    raw: ConsumeMessage,
+    ch: Channel,
+    msg: JudgmentExecuteMsg
+  ): Promise<void> {
     let claim = await claimJudgment(msg.judgmentId);
     if (claim === 'retry_claim') {
       // Inspection-race artifact (see claim.ts's docstring) — retry the

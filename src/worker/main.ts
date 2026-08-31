@@ -53,7 +53,11 @@ import { createJudgmentConsumer } from './judgment-consumer';
 import { createRunCreateConsumer } from './run-create-consumer';
 import { startReaper } from './reaper';
 import { handleDispatchFailure } from './dispatch-failure';
-import { resolveWorkerConcurrency } from './concurrency';
+import {
+  HARD_CONCURRENCY_CAP,
+  MAX_IN_FLIGHT_MESSAGES,
+  resolveWorkerConcurrency,
+} from './concurrency';
 import {
   EXPECTED_CONSUMER_COUNT,
   createConsumerRegistry,
@@ -62,13 +66,24 @@ import {
   type ConsumerRegistry,
 } from './health';
 
-// Prefetch IS the concurrency limit here, not a buffer: `dispatch` starts a
-// handler for every message the broker delivers, so a prefetch of N runs N
-// judgments at once. The previous `concurrency * 4` therefore issued eight
-// concurrent provider calls, which is what dead-lettered four items of the
-// first production calibration. See ./concurrency.ts for the full account.
+// TWO DIFFERENT NUMBERS — do not collapse them back into one.
+//
+// PREFETCH is the TOTAL in-flight ceiling: `dispatch` starts a handler for
+// every message the broker delivers, so a prefetch of N parks or runs N
+// judgments at once. It bounds how many DISTINCT JUDGES can be executing
+// simultaneously — that is the point of raising it above 1, and it is the
+// whole reason a 30-item run against one server no longer blocks every other
+// model for 22 minutes.
+//
+// CONCURRENCY.effective is the PER-JUDGE limit, and it is still 1. Prefetch
+// does not buy it: judgment-consumer.ts holds a per-`judgeModelVersionId`
+// permit across its claim+execute span, so N in flight means N different
+// judges, never N calls to one server. The original incident was eight
+// concurrent calls to a two-slot llama.cpp box (`concurrency * 4`), which
+// dead-lettered four items of the first production calibration.
+// See ./concurrency.ts for the full account.
 const CONCURRENCY = resolveWorkerConcurrency(process.env.EVALUATION_MODEL_CONCURRENCY_PER_RUN);
-const PREFETCH = CONCURRENCY.prefetch;
+const PREFETCH = MAX_IN_FLIGHT_MESSAGES;
 const HEALTH_PORT = Number(process.env.WORKER_HEALTH_PORT ?? '9090');
 const DRAIN_TIMEOUT_MS = 30_000;
 
@@ -207,17 +222,23 @@ async function main(): Promise<void> {
   if (CONCURRENCY.capped) {
     // Not silent to an OPERATOR, only to the configuration: someone who sets 8
     // and sees no change deserves to be told the value was clamped, and why.
-    logger.warn('EVALUATION_MODEL_CONCURRENCY_PER_RUN clamped to the hard cap', {
+    logger.warn('EVALUATION_MODEL_CONCURRENCY_PER_RUN clamped to the per-judge hard cap', {
       requested: CONCURRENCY.requested,
       effective: CONCURRENCY.effective,
+      maxJudgesInFlight: PREFETCH,
       reason:
-        'concurrent provider calls queue INSIDE the inference server while their client timeout runs — see src/worker/concurrency.ts',
+        'this knob is PER JUDGE, and concurrent calls to one judge queue INSIDE its inference server while their client timeout runs. Parallelism across DIFFERENT judges is governed by MAX_IN_FLIGHT_MESSAGES, not by this value — see src/worker/concurrency.ts',
     });
   }
 
+  // Both numbers, both named for what they actually bound. A boot log that
+  // said only `concurrency: 1` next to `prefetch: 4` would read as a
+  // contradiction and invite someone to "fix" one of them.
   logger.info('judge worker started', {
     prefetch: PREFETCH,
-    concurrency: CONCURRENCY.effective,
+    maxJudgesInFlight: PREFETCH,
+    perJudgeConcurrency: CONCURRENCY.effective,
+    perJudgeCap: HARD_CONCURRENCY_CAP,
     healthPort: HEALTH_PORT,
     consumers: consumers.registered(),
   });

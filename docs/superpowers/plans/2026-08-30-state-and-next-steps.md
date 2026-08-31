@@ -28,6 +28,22 @@ through the writing of this section (see §7.7 — the earlier reading is kept):
 | `cb2fc37` | `missingVerdicts` reported `0` while four items had dead-lettered |
 | `1e7a427` | in-flight judgments hard-capped at 1 |
 
+**THE BASELINE LANDED, AND IT IS 0.8333 — 25 OF 30.** `CalibrationRun`
+**`cmthr58r100013s0sykuvn41x`**, sequential, **all thirty items completed**, zero errors, zero
+dead-letters; kappa **0.6575** (`cohen`/`none`); **21m53s** wall clock; latency **avg 42.6s / min
+16.1s / max 95.1s**. §7.2's placeholder is filled in below. **The durable record — both runs side by
+side, the storage footprint, the concurrency lesson and the Ollama finding — is
+`docs/superpowers/specs/2026-08-31-calibration-baseline-and-footprint.md`**; the operational path for
+someone who has never run one is `docs/runbooks/scoring-a-judge-against-a-golden-set.md`.
+
+**A SIXTH COMMIT LANDED AFTER THE PROMOTE AND IS NOT IN IT.** `b42972e` (*Ollama is judge-eligible —
+the reason it was refused was never true*) was committed at **21:45:59Z**, sixteen minutes after the
+21:29Z promote of `1e7a427`, and the table above stops at five for that reason. On the last reading
+recorded in §7.7 production ran `sha-1e7a427d2c48`. **Ollama is judge-eligible on `main`, not
+necessarily in production** — read the running image before planning a run against the Ollama server
+at `192.168.1.9:11434`. What the commit found, and why the rule it removed was never coherent, is in
+the spec's §6.
+
 **THE CORRECTION, and it is to this document's own §5.** §5 ends *"Only then — A2 … do not write
 the A2 spec until E1–E3 have produced real labels."* That was carried forward from the roadmap and
 it is **half wrong**, in a way that cost real time: it treated "A2" as one thing.
@@ -196,7 +212,33 @@ that changes, **any** roll of a broker node reproduces this silently. That matte
 
 ## 5. What to do next, in order
 
+> **STATUS REWRITE — 2026-08-31, evening. This ordering is now partly done and partly wrong, and
+> those are two different problems.** The four subsections below are left exactly as written on
+> 2026-08-30, each with a status banner; the table is the summary, and §5.5 is new.
+>
+> | Was | Status on 2026-08-31 |
+> |---|---|
+> | Immediate — unblock E1 | **STILL OPEN. `GoldenLabel` = 0.** Nothing in A2.1 moved it, and nothing in A2.1 needed it to move |
+> | Next — AMQP consumers re-register on reconnect | **STILL OPEN** |
+> | Next — `toCandidate` stamps `A`/`B` (+ 1300-row backfill) | **STILL OPEN**, and it now collides with the freeze — §5.4 |
+> | Then — T5 RabbitMQ metrics | **STILL OPEN, ~5%**, and A2.1 handed it a concrete consumer — §5.5 |
+> | Only then — A2 | **HALF DONE, and the gate was half wrong.** A2.1 (model vs **ground truth**) shipped and produced **0.8333, 25/30**. A2.2 (model vs **human**) is still gated on E1, correctly |
+> | — | **NEW: five follow-ups discovered en route — §5.5** |
+>
+> **A2.1 needed no human labels, which is why it shipped past a gate that named it.** It scores
+> against `GoldenItem.expected`, which arrives with the dataset and has been in production since
+> 2026-08-19. **Do not read "calibration shipped" as "E1 is finished".** The two are independent;
+> the one that moved is the one that was never blocked.
+
 ### Immediate — unblock E1 (minutes)
+
+> **STILL OPEN on 2026-08-31, unchanged.** `SELECT count(*) FROM "GoldenLabel";` still returns **0**.
+> A2.1 does not touch OIDC, does not produce a human label, and does not make the agreement panel
+> exist. The freeze described in §5.4 does **not** block this work — labels are deliberately not
+> freeze-guarded (`src/app/api/golden-sets/[id]/items/[itemId]/labels/route.ts:36-43`: item *content*
+> freezes because that is what a calibration measured; agreement is computed on read, which presumes
+> labels keep arriving). **The 30-item set being frozen is not a reason to postpone E1.**
+
 Sign in as `akadmin` per §2, or make the one-row `oidcSubject` fix. Then walk E1 against the
 **30-item** set (`JudgeBenchSample — 30 random`), not the 620-item one: `retestIntervalItems`
 defaults to 20 and eligibility is intervening-items-only, so 30 clears K and makes blind re-reads
@@ -215,12 +257,24 @@ reliability number the product can produce.
   or have the studio letter them.
 
 ### Next — the two defects this session found but did not fix
+
+> **BOTH STILL OPEN on 2026-08-31, and the first one is now more expensive.** A calibration that
+> loses its consumers mid-drain leaves an **already-frozen** set with a partial denominator and no
+> way to repair the run — only to launch a new one. `--score-only` re-scores; it cannot resurrect a
+> judgment that was never executed.
+
 1. **AMQP consumers must re-register on reconnect** (§3). Highest value: it is a silent
    total-loss-of-function that no probe sees.
 2. **`toCandidate` should stamp `A`/`B`** for pairwise/listwise, plus a backfill for the 1300
    existing rows.
 
 ### Then — T5, which gates A2 and is ~5% done
+
+> **STILL OPEN, and A2.1 handed it its first concrete consumer.** `judge.dlq` now holds **four parked
+> messages that nothing will ever retry** (§5.5). Depth on that queue is exactly the alert the
+> default `/metrics` cannot express — it carries no queue label — so this is no longer a hypothetical
+> requirement for `/metrics/detailed?family=queue_coarse_metrics`.
+
 Not one RabbitMQ sample has **ever** been stored in this cluster — VictoriaMetrics returns
 `seriesFetched: "0"` for `{__name__=~"rabbitmq_.*"}`, with zero `VMServiceScrape`s and zero
 `VMRule`s. Everything the scrape needs already works: `rabbitmq_prometheus 4.2.4` is enabled, both
@@ -235,6 +289,11 @@ are impossible from it — they need `/metrics/detailed?family=queue_coarse_metr
 Interim thresholds, until T5 lands: `homelab-setup:docs/runbooks/backpressure-watchlist.md`.
 
 ### Only then — A2
+
+> **STATUS 2026-08-31: A2.1 is DONE and produced 0.8333 (25/30) against ground truth. A2.2
+> (model vs human) is not started and remains correctly gated on E1.** The durable record is
+> `docs/superpowers/specs/2026-08-31-calibration-baseline-and-footprint.md`.
+
 ~~Unchanged: **do not write the A2 spec until E1–E3 have produced real labels.**~~ One question is
 worth settling cheaply first — whether `agreement()` is reusable for human-vs-model. It takes
 `Reading[] = {itemId, raterId, category}[]`, and a model is just another `raterId`. If that holds,
@@ -250,6 +309,63 @@ planning rather than after.
 > trick `label-readings.ts` already uses for `'round-1'`/`'round-2'`. **A2 wrote no statistics code.**
 > One bug was fixed *inside* `agreement.ts` while proving it — see §7 — but no new statistic was
 > implemented, and that is exactly the scope difference this bullet existed to settle early.
+
+### 5.4 THE 30-ITEM GOLDEN SET IS NOW FROZEN, IRREVERSIBLY — what that forecloses
+
+`cmt057hd001g17y01lhjzgfuj` (*JudgeBenchSample — 30 random*) has two `CalibrationRun`s against it, so
+`isGoldenSetFrozen` (`src/lib/golden-sets.ts:266-272`) answers **true** and will answer true forever.
+There is no `frozenAt` column and no unfreeze verb.
+
+**What is foreclosed:**
+
+- **Item and candidate content, `protocol`, and `expected` are read-only.** The item write verbs are
+  freeze-guarded (`src/app/api/golden-sets/[id]/items/route.ts:168, :314`) and `PATCH
+  /api/golden-sets/[id]` refuses a `protocol` change (`route.ts:154`). A wrong `expected` on this set
+  is now permanent — and 0.8333 is measured against it, whatever it says.
+- **Deleting the calibrations to release it is impossible** — `EvaluationRun.calibrationRunId` is
+  `onDelete: Restrict`. Retiring or tombstoning the set does not release it either.
+- **The `toCandidate` A/B stamping backfill collides with this.** All 1300 `GoldenCandidate` rows
+  still have `label IS NULL`, and candidates are content — so the fix listed under *Next* above
+  cannot be applied to this set through the API. Doing it directly in SQL would edit rows two
+  calibrations measured. **Decide that deliberately; do not discover it during a backfill.**
+- **The only escape is `POST /api/golden-sets/[id]/fork`**, which makes a new set at version+1 — and
+  **a number measured on the fork is not comparable to one measured on the parent**, so forking to
+  fix a typo silently costs the baseline.
+
+**What is NOT foreclosed, and this is the part most likely to be misread:**
+
+- **Labelling.** `POST .../items/[itemId]/labels` is deliberately not freeze-guarded. E1 can proceed
+  on this set today.
+- **More calibrations.** Freezing is idempotent, and a second judge against the same frozen set is
+  the normal way to build a comparison — that is what the owner's next ask (Ollama's `granite4.1:3b`
+  and `gemma4:26b`) does.
+
+### 5.5 Open follow-ups discovered en route (NEW — none of these existed on 2026-08-30)
+
+1. **`parseMode` is NULL on the pairwise path.** One parse path (`tryParsePairwiseJudgment`,
+   fence-tolerant) means no strict→lenient demotion and no mode to persist; the column is meaningful
+   only pointwise. **It is not a capture bug, but the gap is real:** on pairwise a leniently-parsed
+   verdict and a strictly-parsed one are indistinguishable afterwards. Decide whether to write a
+   pairwise-meaningful value or to document the column as pointwise-only.
+2. **`reasoningTokens` is unavailable from llama.cpp.** 0/30 on the baseline run, because its `usage`
+   payload has no `completion_tokens_details`. **Do not "fix" this by defaulting to 0** — a real zero
+   and an absent measurement are different facts, and the field will populate on backends that emit
+   it. Worth confirming what Ollama sends before the next run reads the same column.
+3. **`judge.dlq` holds four dead-lettered judgments from run 1, and NOTHING WILL RETRY THEM.** There
+   is no consumer on `judge.dlq` and no retry-from-DLQ verb anywhere. Those four items are parked
+   permanently; run 2 re-judged them only because it was a *new* run over the whole set. Two work
+   items hide here: a way to see the depth (T5, above) and a decision about whether a
+   replay/inspect path should exist at all.
+4. **Per-endpoint concurrency — IN FLIGHT, not done.** The hard cap of 1 is a blunt instrument: it is
+   correct for a 2-slot llama.cpp server and needlessly slow for anything larger, and it is global,
+   so one slow endpoint sets the pace for every other. The real fix is a limit that knows which
+   endpoint it is talking to — which is what makes the owner's ask (two servers queried in parallel,
+   sequential *per server*) expressible at all. **Being implemented now; do not record it as
+   shipped, and do not raise `HARD_CONCURRENCY_CAP` as an interim measure** — that is the exact
+   configuration that dead-lettered four items.
+5. **Run-grain `status` can be stale.** Five `EvaluationRun` rows read `error` on run 1 while only
+   four `ModelJudgment` rows did (§7.2). Scoring reads the judgment and is right; any ad-hoc SQL that
+   counts runs will disagree by one. Small, and it will mislead someone.
 
 ---
 
@@ -360,20 +476,38 @@ database** — nothing in these rows separates generation from queue wait.
 > **The sequential re-run is what produces a real baseline:** at concurrency 1 there is no in-server
 > queue for `latencyMs` to absorb, so its stored value becomes generation time.
 
-> **PLACEHOLDER — the clean sequential re-run is IN FLIGHT and has NOT produced a result.**
-> `CalibrationRun` **`cmthr58r100013s0sykuvn41x`**, started `2026-08-31 21:30:17.101`; at `21:37Z`
-> it stood at 30 launched / 9 completed / 1 running / 20 pending, with `rawAgreement`, `kappa` and
-> `finishedAt` all NULL. See §7.7.
-> **Do not guess this number and do not assume it will be 0.8462 over 30 items.** The four unseen
-> items are not a random sample — they are the four that happened to queue behind others — and a
-> sequential run also changes the latency distribution the first was measured under.
+> **RESOLVED — 2026-08-31. The placeholder that stood here is filled in; the re-run finished.**
+> `CalibrationRun` **`cmthr58r100013s0sykuvn41x`** — same golden set, same judge version, sequential.
 >
 > ```
-> RE-RUN cmthr58r100013s0sykuvn41x: result not yet recorded.
->   When it lands, record accuracy WITH its denominator, kappa with variant +
->   weighting, and the fresh latency spread (the first one not inflated by
->   in-server queueing).
+> ACCURACY   0.8333   (25/30 items with a verdict)     ← THE BASELINE. Quote this one, with its denominator.
+> kappa      0.6575   cohen / weighting none
+> itemCount  30       missingVerdicts 0     errors 0     dead-lettered 0
+> verdicts   A=18   B=12   tie=0
+> confusion  A>B -> A>B:15  B>A:2   ·   B>A -> A>B:3  B>A:10
+> wall clock 21m53s        latency avg 42.6s / min 16.1s / max 95.1s
 > ```
+>
+> **The warning that stood here was right on both counts, and worth keeping for that reason.** It is
+> NOT 0.8462 over 30: accuracy fell **1.3 points** once the four unseen items were included, which is
+> what a self-selected subset looks like from the other side. And the latency distribution is
+> unrecognisable — **42.6s average against the first run's stored 233s**, same judge, same set, same
+> prompts. That gap is the in-server queueing, measured.
+>
+> **42.6s is now the latency baseline. Both 94.4s and 233s are retired** — the first never had a
+> re-runnable measurement attached, the second is an artefact of the over-subscription it was
+> describing.
+>
+> **Capture on this run:** 30/30 on `systemPrompt`, `userPrompt`, `userPromptSha256`, `rawResponse`,
+> `reasoning`, `reasoningContent` (avg **8,342 chars**), `inputTokens`, `outputTokens`,
+> `servedModelId`, `finishReason`. `reasoningTokens` **0/30** — llama.cpp sends no
+> `completion_tokens_details`, so nothing was dropped.
+>
+> Derived, and it is the proof the cap worked: 30 × 42.6s = 1,278s of in-model time against 1,313s of
+> wall clock, **~97%**. Nothing overlapped, so nothing queued.
+>
+> Full side-by-side of the two runs, the storage footprint measured off these rows, and the
+> concurrency lesson: `docs/superpowers/specs/2026-08-31-calibration-baseline-and-footprint.md`.
 
 **A discrepancy anyone re-querying this will hit.** Five `EvaluationRun` rows carry `status='error'`
 but only **four** `ModelJudgment` rows do. Run `a0983c08-4548-4663-a40d-0cd56b82f765` is stamped
@@ -520,8 +654,16 @@ worker booted. At `21:37Z`: **30 launched, 9 completed, 1 running, 20 pending**,
 `rawAgreement`/`kappa`/`finishedAt` NULL and `verdictCount` 0 because scoring runs at the end.
 **One judgment in flight is the cap doing its job**, observed rather than assumed.
 
-**Next action:** when it finishes, score it and fill in §7.2's placeholder — accuracy **with its
-denominator**, kappa with variant and weighting, and the `calibrationRunId`. Then re-read the
-latencies: this is the first run whose `latencyMs` is not inflated by in-server queueing, so it is
-the first one that can honestly be called a speed baseline. **Do not carry either 94s or 233s
-forward into that sentence.**
+**DONE — the re-run finished and §7.2's placeholder is filled in.** `0.8333` accuracy over
+**25/30**, kappa `0.6575` (`cohen`/`none`), `missingVerdicts 0`, zero errors, zero dead-letters,
+21m53s wall clock, latency **avg 42.6s / min 16.1s / max 95.1s**. Neither 94s nor 233s was carried
+forward; **42.6s is the speed baseline**, and it is the first one measured with no in-server queue
+for `latencyMs` to absorb.
+
+**Next action is no longer this.** The durable record of both runs, the storage footprint measured
+off their rows, the concurrency lesson and the Ollama finding now live in
+`docs/superpowers/specs/2026-08-31-calibration-baseline-and-footprint.md`, and the end-to-end
+operating procedure in `docs/runbooks/scoring-a-judge-against-a-golden-set.md`. What is actually open
+is §5.5 — five follow-ups — and the owner's ask: the same 30-item set against the Ollama server's two
+models, sequential **per server** but with the two servers in parallel, which is what §5.5 item 4
+(per-endpoint concurrency, in flight) exists to make expressible.
