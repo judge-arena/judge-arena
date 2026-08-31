@@ -63,9 +63,19 @@ docker-compose*.yml
 # is the only way to ship it, and there is currently nothing for it to
 # import.
 #
+# `scripts/calibration/` is included for the same reason as `scripts/admin/`:
+# `run.ts` scores a judge against a golden set, and the only thing that can
+# reach BOTH the production database and a judge endpoint is a pod — a
+# workstation has no route to judge-arena-pg-rw.tenant-public. Excluded, the
+# esbuild step for it fails the whole image build with `Could not resolve
+# "scripts/calibration/run.ts"`, which is exactly what happened on e4b9948.
+# It pulls in `src/lib/calibration/**` and `@/lib/db` only — no second Prisma
+# client, so it does not hit the `scripts/importer/` problem above.
+#
 # The `**` form matters: Docker applies every pattern and takes the last
 # match, so the negation has to be able to match the nested paths.
 scripts/**
 !scripts/admin/**
+!scripts/calibration/**
 .eslintrc*
 .prettierrc*
