@@ -22,6 +22,10 @@ Second: **`JudgeModelVersion.samplingDefaults` is mutable and is not snapshotted
 `CalibrationRun`.** The obvious join — run → version → config — reports *today's* config for a
 year-old run. §4.1 has the query that doesn't lie.
 
+Third: **`finish_reason: length` does not mean "needed more room".** On run 9 it meant a degenerate
+repetition loop on 17% of the set, and the error message's advice — raise `max_tokens` — would have
+made it worse. §5.4.2 has the compression-ratio test that tells the two apart in one query.
+
 ---
 
 ## 1. THE SCOREBOARD
@@ -42,7 +46,7 @@ from the version row, for the reason in §4.1.
 | 6 | `cmtimssel` | Qwen3.6-35B-A3B | llamacpp | 8192 | 0.7931 | 0.6000 | 29/30 | 1 | ⚠ one item truncated |
 | 7 | `cmtiplr3x` | granite4.2:3b | ollama | 4096 | 0.6667 | 0.3182 | **15/30** | **15** | ⛔ **VOID** — half the set truncated |
 | 8 | `cmtipm1nb` | Qwen3.6-35B-A3B | llamacpp | **12288** | **0.8667** | **0.7285** | 30/30 | 0 | ✅ **best recorded** |
-| 9 | `cmtircx0x` | granite4.2:3b | ollama | **12288** | *pending* | | | 0 | in flight — see §5 |
+| 9 | `cmtircx0x` | granite4.2:3b | ollama | **12288** | 0.6000 | 0.2355 | **15/25** | **5** | ⛔ 5 items lost to a REPETITION LOOP — §5.4.2 |
 
 **Reference lines for reading that column:**
 
@@ -54,6 +58,12 @@ from the version row, for the reason in §4.1.
 
 `granite4.1:3b` scoring **0.5000 is worse than a constant stamp**, and its κ of 0.1296 says it is
 not *quite* degenerate — it has a faint signal and spends it badly. §3.2 shows exactly how.
+
+**The floor moves with the denominator, so a partial run needs its own.** Run 9 scored 25 of 30
+items, and that subset's key is 14 `A>B` / 11 `B>A` — a constant-`A>B` baseline of **0.5600**, not
+0.5667. granite4.2 scored 0.6000 against it: **+0.04 over a constant stamp, for 82 minutes of
+compute.** Comparing a partial run against the whole set's floor would have flattered it, which is
+the second reason (after §4.1) that a leaderboard cannot compute this number once and cache it.
 
 ### 1.1 What changed between the two Qwen configurations
 
@@ -395,20 +405,89 @@ before the context is exhausted. With a max observed prompt of 3,074 tokens on t
 
 | setting | value | why |
 |---|---|---|
-| `num_ctx` | **24576** | 3,074 prompt + ~16,000 output + headroom. 20480 would also fit; 32768 is wasted. |
-| `max_tokens` | **~16384** | the most that can finish inside the 900 s hard cap. |
+| `num_ctx` | 24576 | 3,074 prompt + ~16,000 output + headroom. |
+| `max_tokens` | ~16384 | the most that can finish inside the 900 s hard cap. |
 
-**Raising `num_ctx` beyond ~20k buys nothing on this hardware** — the clock binds first. That is the
-useful form of this finding: it converts "make the context bigger" from an open-ended knob into a
-number with a reason attached, and it says when to stop turning it.
+**Raising `num_ctx` beyond ~20k buys nothing on this hardware** — the clock binds first.
 
-If ~16k of reasoning still is not enough for the hardest items, the honest conclusion is that
-**granite4.2:3b is not a viable judge for this set on this hardware** — not that the configuration
-needs another round. Faster silicon, not a bigger window, is what would change that.
+> ### ⛔ THE TABLE ABOVE IS SUPERSEDED FOR granite4.2:3b. DO NOT ACT ON IT.
+>
+> It was written while the run was still draining, on the assumption that the failures were ordinary
+> truncation — a model that wanted more room than it had. **§5.4.2 shows they are not.** The five
+> failed items were in a degenerate repetition loop, and a larger budget buys a longer loop at more
+> wall-clock, not a verdict. The arithmetic in this section is still correct *as arithmetic*; the
+> recommendation it produces is answering the wrong question.
+>
+> It is kept rather than deleted because the reasoning error is the instructive part: a token budget
+> is the obvious lever when `finish_reason` is `length`, and the error message says so in as many
+> words. Reaching for it without checking **why** the output was long is how you spend an hour making
+> a loop longer.
 
 ---
 
-### 5.4.2 Are the truncated items HARDER? Measured, and the obvious answer is wrong
+### 5.4.2 IT WAS NOT TRUNCATION. IT WAS A REPETITION LOOP — and the error message gives the wrong fix
+
+The final report closed the question the two sections above were circling. All five failures:
+
+```
+finishReason=length  out=12288  content length 0 chars  reasoning 26,549–56,004 chars
+```
+
+**Zero content, and up to 56,000 characters of reasoning** — against a mean of 13,138 for the
+judgments that finished. Reading into one of them at offset 40,000:
+
+```
+"the person who likes chess" refers to the person whose hobby is chess; "the person who likes
+rock-climbing" refers to the person whose hobby is rock-climbing; "the person who likes collecting"
+refers to the person whose hobby is collecting; "the person who likes traveling" refers to …
+```
+
+It is cycling one clause verbatim, forever.
+
+**Measured rather than eyeballed, across all five.** Repetitive text compresses far better than
+prose, and `pg_column_size()` already reports the pglz-compressed on-disk size — the same tool §4.2
+of the baseline spec used for the storage footprint:
+
+| | n | mean chars | mean stored | **compression ratio** |
+|---|---|---|---|---|
+| completed | 25 | 13,138 | 4,676 | **2.63×** — ordinary prose |
+| failed | 5 | 44,287 | 8,040 | **8.23×** — 3.1× more compressible |
+
+8.23× is not a long answer. It is a loop, and it is all five of them, not the one that was sampled.
+
+#### Why this matters more than the score
+
+**The error message's advice is wrong for this case, and it is stated with total confidence:**
+
+```
+A response cut off mid-reasoning is not a completed judgment — raise samplingDefaults.max_tokens
+on the JudgeModelVersion for this judge.
+```
+
+That is correct when a model *needed more room*. Here it would buy a longer loop at more wall-clock:
+these five already consumed **41 of the run's 82 minutes** — half the total compute for zero
+verdicts — and a 16k budget would push that toward an hour for the same nothing. `finish_reason:
+length` is genuinely ambiguous between "ran out of room" and "never going to stop", and the guard
+currently assumes the first.
+
+**The distinguishing signal is cheap and already computed.** A compression ratio above ~5×, or
+`content length 0` after tens of thousands of reasoning characters, separates the two cases without
+a second model call. The message could then say *"this looks like degenerate repetition; raising
+max_tokens will make it worse — try a repetition penalty or a different judge"* — which is
+actionable, where the current text is actively misleading.
+
+Recorded as a follow-up rather than fixed here: it is a guard change on the `execute()` chokepoint
+and wants its own test, not a drive-by edit during a calibration.
+
+#### What it says about the judge
+
+`granite4.2:3b` enters degenerate repetition on **17% of this set** (5 of 30). That is a property of
+the model at these sampling settings (`temperature: 0.3`, no repetition penalty), not of the budget.
+The remedies are a repetition/presence penalty or a different judge — **not** a bigger context.
+
+---
+
+### 5.4.3 Are the truncated items HARDER? Measured, and the obvious answer is wrong
 
 Truncation is not random — it hits the items that make the judge reason longest. The tempting next
 step is to conclude that the surviving accuracy is **inflated by survivorship**, because the dropped
