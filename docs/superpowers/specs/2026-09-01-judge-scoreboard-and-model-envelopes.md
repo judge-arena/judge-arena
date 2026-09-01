@@ -306,6 +306,75 @@ is one edit away from disaster on any older image, it forfeits the 5-minute aler
 two-attempt policy, and it silently arms the reaper against anyone who later tunes the two numbers
 independently.
 
+### 5.3 The fix shipped into ONE of three seams, and the alert it produced is what caught it
+
+Within minutes of the promote the 5-minute warning fired on the live run, exactly on time:
+
+```
+"5 minutes elapsed with no response from judge \"granite4.2:3b\". This is the first judgment
+ for this judge, so there is no latency baseline to compare it against. CONFIRM MODEL ACCESS —
+ waiting 10 minutes more before aborting at the 15 minutes hard cap."
+ elapsedMs 300000  hardCapMs 900000  remainingMs 600000  baselineKind no_baseline
+```
+
+**It was wrong.** granite4.2:3b had **26 completed judgments** in the same database. The alert stated
+the opposite of the truth in the one sentence whose entire job is to tell an operator whether to
+worry.
+
+`judgment-consumer.ts` has **three** provider seams — pointwise, pairwise, respond — and
+`sha-414e826a3ba3` wired the escalation into pointwise only. **Calibration is pairwise**, so the path
+the feature was requested for was the one path it never reached.
+
+**Why nothing caught it.** `execute()` arms its own timers from `resolveTimeoutBudgets()`
+unconditionally, so the hard cap still aborted and the 5-minute alert still fired. Nothing threw,
+nothing logged a warning, and the feature looked live in production logs. What was silently dropped
+was the *context*, and each omission degrades differently:
+
+| dropped | consequence |
+|---|---|
+| `attempt` → defaults to 1 | `hardCapAbortKind(1)` returns `retryable` **forever**. "Two 15-minute attempts, then give up" was **not enforced** on the calibration path. |
+| `latencyBaseline` | the alert claims "first judgment for this judge" against 26 of them. |
+| `onInitialBudgetElapsed` | the alert never reaches the running process — the half of the request that was actually novel. |
+
+Only the first is a behaviour defect; the other two are honesty defects. All three were invisible
+without reading the alert's own claim against the database.
+
+**Fixed in `60be6f6`:** one `buildTimeoutEscalation(judgment, version)` that every seam calls, and
+`TimeoutEscalationContext` re-exported from the `@/lib/llm` barrel — a type reachable only by deep
+import is a type a seam will quietly omit. `tests/lib/judgment-consumer-escalation.test.ts` asserts
+the invariant **per seam, named per seam**, because a test exercising only the pointwise path would
+have passed against the bug. Verified by re-injection: removing the pairwise wiring turns four tests
+red and leaves pointwise green.
+
+> **The generalisable part.** A feature spread across N sibling call sites, where the shared machinery
+> downstream still half-works without it, produces exactly this: a partial rollout that looks
+> complete. The seam count is the thing to check, and `grep -c` on the constructor is the check.
+
+### 5.4 12288 IS STILL NOT ENOUGH — the constraint moved again
+
+With the escalation live, the first long item ran **528.6 s** — 1.76× past the old 300 s wall, so the
+new policy demonstrably worked — and then failed anyway:
+
+```
+Provider call to "ollama" (granite4.2:3b) was CUT OFF at the token budget
+(finish_reason "length"): max_tokens 12288, completion_tokens 12288
+```
+
+**granite4.2:3b exhausts a 12288-token budget on this set.** Two things follow, and the second is the
+harder one:
+
+1. Its effective rate on long generations is ~23 tok/s, not the ~35 tok/s the shorter completions
+   suggested — generation slows as context grows, so §2.1's linear model is optimistic at the tail
+   and should be read as a lower bound on duration.
+2. **The Ollama server's context is 16384 total**, and the prompt is ~2,072 tokens. So the largest
+   budget that fits is ~14,000, which at 23 tok/s is ~609 s — inside the 900 s cap, but only just,
+   and it may still not be enough for the worst items.
+
+So the ceiling here is no longer time and no longer the token budget in isolation: it is **the
+server's context window**. A judge that wants more reasoning than its own context can hold is not
+mis-configured, it is unsuitable at that context size. That is a legitimate finding about the model,
+not a defect to engineer around, and it is the first time the fleet has produced one.
+
 ---
 
 ## 6. Adding the next model — the short version
