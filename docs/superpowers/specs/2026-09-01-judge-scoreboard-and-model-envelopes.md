@@ -375,6 +375,37 @@ server's context window**. A judge that wants more reasoning than its own contex
 mis-configured, it is unsuitable at that context size. That is a legitimate finding about the model,
 not a defect to engineer around, and it is the first time the fleet has produced one.
 
+#### 5.4.1 tok/s is NOT constant — it decays with output length, and that sets the real ceiling
+
+§2.1's `max_tokens / tok_per_s` treats throughput as flat. Measured on this run, it is not:
+
+| output tokens | 4567 | 5062 | 6808 | 7305 | 8205 | 12288 |
+|---|---|---|---|---|---|---|
+| **tok/s** | 35.9 | 35.2 | 32.8 | 29.2 | 31.1 | **23.2** |
+| latency | 127 s | 144 s | 208 s | 250 s | 264 s | 529 s |
+
+Attention cost grows with sequence length, so a longer generation is slower *per token* as well as
+longer. **The consequence is that duration grows super-linearly in the budget**, and the naive
+`budget / mean_rate` estimate understates the tail badly: at 12288 tokens the flat 35 tok/s model
+predicts 351 s and the real answer was 529 s — off by 51%.
+
+**So the binding constraint is the HARD CAP, not the context window.** Extrapolating the decay, a
+900 s cap at ~19–20 tok/s buys roughly **16,000 output tokens**; beyond that the call is aborted
+before the context is exhausted. With a max observed prompt of 3,074 tokens on this set:
+
+| setting | value | why |
+|---|---|---|
+| `num_ctx` | **24576** | 3,074 prompt + ~16,000 output + headroom. 20480 would also fit; 32768 is wasted. |
+| `max_tokens` | **~16384** | the most that can finish inside the 900 s hard cap. |
+
+**Raising `num_ctx` beyond ~20k buys nothing on this hardware** — the clock binds first. That is the
+useful form of this finding: it converts "make the context bigger" from an open-ended knob into a
+number with a reason attached, and it says when to stop turning it.
+
+If ~16k of reasoning still is not enough for the hardest items, the honest conclusion is that
+**granite4.2:3b is not a viable judge for this set on this hardware** — not that the configuration
+needs another round. Faster silicon, not a bigger window, is what would change that.
+
 ---
 
 ## 6. Adding the next model — the short version
