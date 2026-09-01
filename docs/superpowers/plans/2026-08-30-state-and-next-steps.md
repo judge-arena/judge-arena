@@ -439,6 +439,18 @@ Full record: [`docs/superpowers/specs/2026-09-01-judge-scoreboard-and-model-enve
    The depth grew during ordinary operation, which is the argument item 3 was missing — this is not a
    one-off residue from run 1, it is an accumulating sink.
 
+11. **CI REPORTS SUCCESS ON A FAILED BUILD.** `next build` was OOM-killed against the Gitea runner's
+   `limits.memory: 4Gi` and the job still printed `🏁 Job succeeded`; no image reached Harbor. A green
+   run is therefore **not** evidence that an image exists. Nothing else covers the gap either —
+   `BuildPromoteLag` is excluded for judge-arena (`helmrelease.yaml:152`) and watches
+   *built-not-promoted*, whereas this is *pushed-not-built*. Marginal rather than systematic (the
+   same build passed 70 minutes earlier and again on retry), which is what makes it dangerous: it
+   reads as flaky CI. **Two fixes, and the first is the real one** — make the job fail when a step
+   fails; then raise the runner limit or bound Next's static-generation workers. Third instance of
+   this family after `e4b9948`'s `.dockerignore` and homelab's chart-version no-op; the mechanical
+   invariant that closes all three is one `skopeo inspect` asserting a tag for the pushed SHA.
+   Detail: scoreboard spec §5.5.
+
 ---
 
 ## 6. Repo state

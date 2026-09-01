@@ -408,6 +408,61 @@ needs another round. Faster silicon, not a bigger window, is what would change t
 
 ---
 
+## 5.5 CI reported SUCCESS on a build that was OOM-killed, and nothing else would have caught it
+
+Observed 2026-09-01 while trying to promote the §5.3 fix. The runner log, verbatim:
+
+```
+✅ Success - Main Lint
+✅ Success - Main Type check
+✅ Success - Main Unit tests (+ coverage gate)
+⭐ Run Main Build
+   ✓ Compiled successfully in 16.3s
+   ⚠ Using edge runtime on a page currently disables static generation for that page
+   ❌  Failure - Main Build
+   this step has been cancelled: signal: killed
+🏁  Job succeeded
+```
+
+`next build` was killed during **static generation** — the memory-heavy phase — against the Gitea
+runner's `limits.memory: 4Gi`. **The job then reported success.** No image reached Harbor.
+
+**Which safeguard should have caught this, and why didn't it?** Two, and they fail in opposite
+directions:
+
+1. **CI's own job status.** It is the safeguard, and it reported green on a step it had itself
+   marked `❌ Failure`. A green run that produced no artifact is worse than a red one, because the
+   next reader concludes "built, just waiting on Harbor" — which is precisely what happened here for
+   twenty minutes.
+2. **`BuildPromoteLag`** would have flagged an image that built and was never promoted — but
+   judge-arena carries `homelab.asethi.com/build-lag-exclude: "manual-promote-until-phase-2"` in
+   `helmrelease.yaml:152`, so it is outside that coverage entirely. And it is the wrong shape anyway:
+   it watches *built-not-promoted*, and this failure is *pushed-not-built*. **Nothing watches the gap
+   between a commit on `main` and an image in Harbor.**
+
+**It is marginal, not systematic**, which is what makes it dangerous. The identical build passed 70
+minutes earlier for `414e826` and passed again on retry as `sha-d21f31d47c35`. `gitea-runner-0` had
+been recreated onto `w-gharial` (16 cores) at 15:27; Next.js forks static-generation workers in
+proportion to CPU count, so peak build memory is a function of **which node the runner lands on** —
+not of the diff. A build that fails on one scheduling outcome and passes on the next will be
+diagnosed as "flaky CI" and retried until green, and the false-green means it may not even be
+noticed.
+
+**This is the third instance of the same family in this repo.** `e4b9948`'s image never built
+because `.dockerignore` excluded `scripts/**`, and Harbor silently stayed on the previous tag; the
+chart-version no-op in homelab's CLAUDE.md is the same shape one layer up. The invariant worth
+enforcing is small and mechanical: **after any push to `main`, assert that a tag matching the commit
+SHA exists in Harbor.** One `skopeo inspect`, and it closes all three.
+
+Two fixes are available and they are not alternatives — the first is the real one:
+
+| fix | what it addresses |
+|---|---|
+| make the job fail when a step fails | the false-green. Until this lands, a green CI run is not evidence that an image exists. |
+| raise the runner limit, or bound Next's build workers | the OOM itself. 4 Gi is marginal on a 16-core node. |
+
+---
+
 ## 6. Adding the next model — the short version
 
 1. **Point at the endpoint and register.** `--max-tokens=` is the field to think about; the rest is
