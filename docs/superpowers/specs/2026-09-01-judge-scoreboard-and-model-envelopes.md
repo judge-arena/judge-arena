@@ -408,6 +408,43 @@ needs another round. Faster silicon, not a bigger window, is what would change t
 
 ---
 
+### 5.4.2 Are the truncated items HARDER? Measured, and the obvious answer is wrong
+
+Truncation is not random — it hits the items that make the judge reason longest. The tempting next
+step is to conclude that the surviving accuracy is **inflated by survivorship**, because the dropped
+items were the hard ones. That conclusion is available, plausible, and **not supported by the data**.
+
+The test: take the items granite4.2 truncated, and look at how the *other* judge did on those same
+items. Qwen scored all 30, so it is a clean control.
+
+| granite4.2 outcome | items | Qwen accuracy on the same items | Qwen mean output tokens |
+|---|---|---|---|
+| completed | 25 | 0.8400 | 2,610 |
+| **truncated** | 4 | **1.0000** | **4,564** (+75%) |
+
+Two different readings, and only one survives scrutiny:
+
+1. **These items genuinely demand more reasoning — supported.** Qwen spent 75% more output tokens on
+   exactly the items granite4.2 could not finish. That signal reproduces across two unrelated models
+   on the same inputs, which is what makes it credible rather than a property of one judge.
+2. **These items are harder to get RIGHT — not supported, and not refuted.** Qwen went 4-for-4. It is
+   tempting to read that as "they were easy", but with n = 4 and Qwen's base rate of 0.84,
+   P(4 of 4 correct) = 0.84⁴ ≈ 0.50. **A coin flip.** The observation carries essentially no
+   information about difficulty.
+
+**So do not adjust granite4.2's score for survivorship in either direction.** What can be said is
+narrow and useful: the dropped items are *verbosity-demanding*, which is a statement about token
+budget, and nothing at this sample size is a statement about difficulty. "Length of reasoning" and
+"hardness of item" are separate axes, and this set does not yet have the power to relate them.
+
+> Worth generalising, because a leaderboard over hundreds of models will meet this constantly: a
+> partial run's denominator is not a random sample of the set, so *some* bias is a live possibility
+> every time. The move is to check it against a judge that completed the set — not to assume its
+> direction from the mechanism. Here the mechanism suggested inflation and the measurement declined
+> to confirm it.
+
+---
+
 ## 5.5 CI reported SUCCESS on a build that was OOM-killed, and nothing else would have caught it
 
 Observed 2026-09-01 while trying to promote the §5.3 fix. The runner log, verbatim:
