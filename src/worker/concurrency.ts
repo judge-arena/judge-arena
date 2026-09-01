@@ -1,26 +1,31 @@
 /**
- * ─── Two different numbers. Do not conflate them. ───────────────────────────
+ * ─── Three different numbers. Do not conflate them. ─────────────────────────
  *
  *   HARD_CONCURRENCY_CAP    = 1   in-flight provider calls PER JUDGE
- *   MAX_IN_FLIGHT_MESSAGES  = 4   unacked deliveries per consumer (the prefetch)
+ *   LANE_PREFETCH           = 1   unacked deliveries per LANE consumer
+ *   MAX_IN_FLIGHT_MESSAGES  = 4   unacked deliveries per NON-LANE consumer
  *
- * Conflating those two is the entire bug this file was created to fix, and
+ * Conflating the first two is the entire bug this file was created to fix, and
  * the previous version of this file re-committed it in the other direction:
- * it set `prefetch = effective concurrency = 1`, which is safe but says
- * "one judgment anywhere in the fleet at a time". A 30-item run against one
- * llama.cpp box then blocks every other model for ~22 minutes (measured:
- * run cmthr58r100013s0sykuvn41x, 21m53s wall clock for 30 items), including
- * models on a completely different machine that was sitting idle.
+ * it set `prefetch = effective concurrency = 1` ON ONE SHARED QUEUE, which is
+ * safe but says "one judgment anywhere in the fleet at a time". A 30-item run
+ * against one llama.cpp box then blocks every other model for ~22 minutes
+ * (measured: run cmthr58r100013s0sykuvn41x, 21m53s wall clock for 30 items),
+ * including models on a completely different machine that was sitting idle.
+ *
+ * `LANE_PREFETCH` is 1 for the opposite reason and it does NOT reintroduce
+ * that: there are `LANE_COUNT` lane queues, one per inference server, so a
+ * prefetch of 1 per lane still allows `LANE_COUNT` judgments in flight — it
+ * just guarantees they are on `LANE_COUNT` DIFFERENT servers.
  *
  * The safety property was never "one judgment at a time". It is:
  *
- *   AT MOST ONE IN-FLIGHT PROVIDER CALL PER JUDGE.
+ *   AT MOST ONE IN-FLIGHT PROVIDER CALL PER INFERENCE SERVER.
  *
- * Different judges on different servers may proceed concurrently — they
- * contend for nothing. `HARD_CONCURRENCY_CAP` is that per-judge number and
- * stays at 1. `MAX_IN_FLIGHT_MESSAGES` is a different quantity entirely: how
- * many deliveries this worker holds unacked at once, and therefore the most
- * DISTINCT judges that can be executing simultaneously. Raising the prefetch
+ * Judgments against different servers may proceed concurrently — they contend
+ * for nothing. `HARD_CONCURRENCY_CAP` is that per-judge number and stays at 1.
+ * `MAX_IN_FLIGHT_MESSAGES` is a different quantity entirely: how many
+ * deliveries a NON-LANE consumer holds unacked at once. Raising a prefetch
  * does NOT raise the per-judge cap — `createKeyedGate()` below enforces that
  * independently, and it is the thing that keeps an inference server from
  * being over-subscribed.
@@ -48,35 +53,75 @@
  * ── WHY THE GATE KEY IS THE JUDGE VERSION ───────────────────────────────────
  *
  * `ModelJudgment.judgeModelVersionId`. One `JudgeModelVersion` resolves to one
- * `ModelEndpoint` in practice (`resolveEndpoint`, judgment-consumer.ts), so
- * the version id is a proxy for "which server am I about to hit" that costs
- * one indexed read and no queue-message change — `JudgmentExecuteMsg` carries
- * only `{judgmentId, runId, attempt}` (src/lib/queue/publish.ts).
+ * `ModelEndpoint` in practice (`resolveEndpointFor`,
+ * src/lib/endpoint-resolution.ts), so the version id is a proxy for "which
+ * server am I about to hit" that costs one indexed read and no queue-message
+ * change — `JudgmentExecuteMsg` carries only `{judgmentId, runId, attempt}`
+ * (src/lib/queue/publish.ts).
  *
- * KNOWN RESIDUAL, stated rather than hidden: two versions served by the SAME
- * host get two separate permits and will run concurrently against it — e.g.
- * `granite4.1:3b` and `gemma4:26b`, both on the Ollama box at
- * 192.168.1.9:11434. That is a smaller over-subscription than the 8-way one
- * above (2 concurrent, not 8) and Ollama serialises internally rather than
- * timing out, but it is real. If it ever bites, the fix is one line: key the
- * gate on the resolved `ModelEndpoint.id`/base URL instead of the version id.
- * That was not done now because the endpoint is resolved AFTER the claim, and
- * moving the claim is the thing this design is specifically avoiding (see the
- * gate-ordering section below).
+ * KNOWN RESIDUAL OF THAT PROXY, stated rather than hidden: two versions served
+ * by the SAME host get two separate permits and will run concurrently against
+ * it — e.g. `granite4.1:3b` and `gemma4:26b`, both on the Ollama box at
+ * 192.168.1.9:11434. The LANE topology (src/lib/queue/lanes.ts) is what
+ * actually fixes that, because a lane is keyed on the normalized ORIGIN: both
+ * models land on one lane queue, and a lane queue is serial at the broker
+ * (prefetch 1 + `x-single-active-consumer`). The gate does not need to be
+ * re-keyed to close the residual; it only needs to keep holding for the
+ * traffic lanes do not cover. Which is the next section.
  *
- * ── WHY THE PREFETCH IS 4, AND WHY IT IS SMALL ──────────────────────────────
+ * ── THE GATE IS NOW REDUNDANT FOR LANED TRAFFIC, AND IT STAYS ANYWAY ────────
+ *
+ * DECISION (v2j phase 1b): every delivery takes a permit, whichever queue it
+ * arrived on. Not "gate the fallback only". See `gateKeyForDelivery` below;
+ * this is the reasoning.
+ *
+ * A lane queue at prefetch 1 with `x-single-active-consumer` is already serial
+ * per server, so on laned traffic the gate is uncontended and grants
+ * immediately. The tempting saving is to skip it for lane deliveries. That
+ * saving is not just small — taking it would make the gate stop working:
+ *
+ *   1. LANE AND FALLBACK ARE NOT DISJOINT IN SERVER SPACE. `judgment.execute`
+ *      is kept and consumed FOREVER (lanes.ts) and carries judgments for ANY
+ *      server: messages published before lanes shipped, publishes whose lane
+ *      lookup failed, and any future path that cannot resolve an endpoint. A
+ *      fallback delivery and a lane delivery for the SAME server are handled
+ *      by two different consumers at the same time. A mutex only excludes if
+ *      BOTH sides take the permit — gate the fallback alone and the one case
+ *      it exists for is exactly the case it cannot see.
+ *   2. LANE ASSIGNMENT CAN DISAGREE WITH REALITY. The lane is computed by the
+ *      PUBLISHER from the endpoint it resolved; the provider call is made by
+ *      the CONSUMER against the endpoint IT resolves. Those two agree only for
+ *      as long as `resolveEndpointFor` is genuinely shared and
+ *      `ModelEndpoint` rows do not change under a queued message. When they
+ *      disagree, two judgments for one server sit on two different lanes and
+ *      the broker happily runs them in parallel. The in-process gate is the
+ *      only thing left.
+ *
+ * The cost of keeping it is a Map insert and delete on an uncontended key: on
+ * a lane it never parks, so it cannot consume the wait budget below. The cost
+ * of removing it is a silent return of the over-subscription that dead-lettered
+ * 4 of 30 items. `tests/lib/worker-concurrency.test.ts` pins the decision with
+ * a test that fails under the fallback-only variant.
+ *
+ * ── WHY THE LANE PREFETCH IS 1 AND THE NON-LANE PREFETCH IS 4 ───────────────
  *
  * The cluster runs `worker.replicas: 1`
- * (docs/superpowers/specs/2026-08-07-public-users-roadmap.md:282), so this
- * number is the whole fleet's in-flight ceiling, not a per-replica share.
+ * (docs/superpowers/specs/2026-08-07-public-users-roadmap.md:282), so these
+ * numbers are the whole fleet's in-flight ceiling, not a per-replica share.
  *
- * The fleet today is three judge versions across two servers (llama.cpp at
- * 192.168.1.164:8001; `granite4.1:3b` + `gemma4:26b` at 192.168.1.9:11434).
- * 4 covers all three with one slot of headroom, so registering a fourth judge
- * does not need a redeploy to get any parallelism at all.
+ * LANE_PREFETCH = 1 is the mechanism, not a throttle: prefetch 1 is what makes
+ * a lane serial, and `LANE_COUNT` lanes therefore allow `LANE_COUNT`
+ * simultaneous judgments on `LANE_COUNT` different servers. It also means a
+ * lane delivery NEVER parks on the gate (one delivery per server at a time,
+ * and the gate key is a proxy for the server), so a lane consumer's unacked
+ * window is just claim + provider + persist.
  *
- * It is deliberately not larger, and the reason is NOT modesty — it is the
- * bound on how long a message can sit parked on a busy gate:
+ * MAX_IN_FLIGHT_MESSAGES = 4 governs the queues that are not lanes — the
+ * fallback `judgment.execute` and `run.create`. It is unchanged, deliberately:
+ * the fallback is the pre-lane path and this change must not alter how legacy
+ * traffic behaves. It is deliberately not larger, and the reason is NOT modesty
+ * — it is the bound on how long a fallback message can sit parked on a busy
+ * gate:
  *
  *   worst-case gate wait  ≈  (MAX_IN_FLIGHT_MESSAGES - 1) x per-item latency
  *
@@ -85,30 +130,33 @@
  * 300s provider timeout it is ~900s. Both are inside `GATE_WAIT_TIMEOUT_MS`'s
  * budget below. A prefetch of, say, 16 would make the worst-case park 15 x
  * 300s = 75 minutes — past RabbitMQ's 30-minute `consumer_timeout`, which
- * closes the CHANNEL and takes both consumers with it. Prefetch and the gate
- * timeout are one design, not two knobs.
+ * closes the CHANNEL and takes every consumer on it with it. Prefetch and the
+ * gate timeout are one design, not two knobs.
  *
  * ── COMPANION CONFIG THIS CHANGE NEEDS (docker-compose.yml, not this file) ──
  * `WORKER_DB_POOL_LIMIT` defaults to 4 and its comment derives that from
  * `EVALUATION_MODEL_CONCURRENCY_PER_RUN x 2`. The quantity it actually wants
- * is "concurrent handlers x 2", which is now `MAX_IN_FLIGHT_MESSAGES x 2` = 8
- * (and the prefetch is per-consumer, so the true handler ceiling across both
- * consumers is 8, not 4). Left at 4, four genuinely-parallel judges contend
- * for four Prisma connections against `pool_timeout=20`. Parked handlers hold
- * no connection (the gate wait happens before the claim and after the key
- * read), so this is a margin question rather than a deadlock — but it is a
- * real one, and it is the one config change this commit cannot make itself.
+ * is "concurrent handlers x 2". With lanes that is
+ * `(LANE_COUNT + MAX_IN_FLIGHT_MESSAGES x 2) x 2` = 32 in the worst case
+ * (8 lanes + 4 fallback + 4 run.create), up from 8. Left at 4, genuinely
+ * parallel judges contend for four Prisma connections against
+ * `pool_timeout=20`. Parked handlers hold no connection (the gate wait happens
+ * before the claim and after the key read) and a provider call holds none
+ * either, so this is a margin question rather than a deadlock — but lanes
+ * raise the ceiling four-fold, and it is the one config change this file
+ * cannot make itself.
  *
- * ── HEAD-OF-LINE BLOCKING IS NOT SOLVED HERE ────────────────────────────────
- * `judgment.execute` is one queue delivered in FIFO order. If the first N
- * messages all belong to judge X, judge Y's message is not delivered until one
- * of them acks, however idle Y's server is. Parallelism therefore depends on
- * publishers interleaving judges in the queue. The real fix is per-judge
- * queues or a consumer-side reorder; both are out of scope for a change that
- * must not touch the message shape.
+ * ── HEAD-OF-LINE BLOCKING: SOLVED FOR LANED TRAFFIC, NOT FOR THE FALLBACK ───
+ * The fallback `judgment.execute` is still one FIFO queue: if the first N
+ * messages on it all belong to judge X, judge Y's message is not delivered
+ * until one of them acks, however idle Y's server is. That is why the lane
+ * queues exist — a laned judgment for Y is on Y's own queue and is never
+ * behind X. Fallback traffic keeps the old behaviour on purpose; the answer
+ * for it is to resolve a lane at publish time, not to widen this prefetch.
  */
 
 import { logger } from '@/lib/logger';
+import { LANE_FALLBACK_QUEUE, LANE_QUEUES } from '@/lib/queue/lanes';
 
 /** The most in-flight provider calls this worker will have open AGAINST ONE
  *  JUDGE, whatever the configuration asks for. Not the total — see
@@ -116,16 +164,15 @@ import { logger } from '@/lib/logger';
 export const HARD_CONCURRENCY_CAP = 1;
 
 /**
- * The AMQP prefetch: the most unacked deliveries this worker holds at once,
- * and so the most DISTINCT judges that can be executing simultaneously.
+ * The AMQP prefetch for the queues that are NOT lanes: the fallback
+ * `judgment.execute` and `run.create`.
  *
  * PER CONSUMER, not per channel. `amqplib`'s `prefetch(count, global)`
  * defaults `global` to false (node_modules/amqplib/lib/api_args.js:284), and
  * RabbitMQ >= 3.3 applies a non-global `basic.qos` separately to each consumer
- * on the channel. `main.ts` registers two consumers, so the channel can hold
- * up to 4 `judgment.execute` deliveries AND up to 4 `run.create` deliveries.
- * Only the first four matter for over-subscription — `run.create` handlers do
- * DB work and publish, they never call a provider.
+ * created on the channel AFTER the qos call. That "after" is why `main.ts`
+ * gives the lane consumers their own channel rather than interleaving two
+ * `prefetch()` calls with the `consume()` calls on one — see main.ts.
  *
  * NOT the per-judge concurrency (that is `HARD_CONCURRENCY_CAP`, and it is
  * enforced by the keyed gate below, not by this number). NOT derived from
@@ -134,6 +181,22 @@ export const HARD_CONCURRENCY_CAP = 1;
  * 8-concurrent-call incident happened. See the module doc for why 4.
  */
 export const MAX_IN_FLIGHT_MESSAGES = 4;
+
+/**
+ * The AMQP prefetch for a LANE consumer, and the reason a lane is serial.
+ *
+ * `x-single-active-consumer` (topology.ts) guarantees only ONE CONSUMER per
+ * lane — it says nothing about how many messages that consumer may hold
+ * unacked. Without this, one consumer would happily take N lane deliveries and
+ * run N concurrent provider calls against the one server the lane exists to
+ * protect, which is the original over-subscription with extra queues. The two
+ * settings are one mechanism: single-active-consumer makes the lane
+ * single-writer, prefetch 1 makes that writer sequential.
+ *
+ * Fixed at 1 rather than configurable: any value above 1 silently converts a
+ * lane back into the shared queue this design replaced.
+ */
+export const LANE_PREFETCH = 1;
 
 /**
  * How long a delivery may wait for its judge's permit before giving up and
@@ -229,6 +292,73 @@ export function judgeGateKey(
   return judgeModelVersionId ? `judge:${judgeModelVersionId}` : `judgment:${judgmentId}`;
 }
 
+/**
+ * The gate key for a delivery, given the queue it arrived on.
+ *
+ * `queueName` IS DELIBERATELY IGNORED, and that is the decision this function
+ * exists to make explicit and to make testable. The alternative implementation
+ * — `return queueName === LANE_FALLBACK_QUEUE ? judgeGateKey(...) : null`, i.e.
+ * "lanes are already serial at the broker, skip the gate" — is the one the
+ * module doc's "THE GATE IS NOW REDUNDANT FOR LANED TRAFFIC" section argues
+ * against at length. The one-line version of that argument:
+ *
+ *   a fallback delivery and a lane delivery for the SAME server run on two
+ *   different consumers at the same time, so a gate only the fallback side
+ *   takes excludes nothing at all.
+ *
+ * Taking `queueName` as a parameter it does not read is not an oversight; it
+ * is how the call sites in judgment-consumer.ts stay honest about the fact
+ * that they HAVE the queue and are choosing not to branch on it, and how
+ * `tests/lib/worker-concurrency.test.ts` can pin the choice — that test fails
+ * if this ever starts returning a lane-dependent key.
+ */
+export function gateKeyForDelivery(
+  queueName: string | undefined,
+  judgmentId: string,
+  judgeModelVersionId: string | null | undefined
+): string {
+  return judgeGateKey(judgmentId, judgeModelVersionId);
+}
+
+/**
+ * The lane a delivery arrived on, or `null` when it did not arrive on one.
+ *
+ * Callers pass `raw.fields.routingKey`. Every queue in topology.ts is bound
+ * with `routingKey == its own name`, and the v2 retry queues omit
+ * `x-dead-letter-routing-key` so a retry keeps the routing key it was
+ * published with — so the routing key on a delivery IS the lane it belongs to,
+ * with no DB read and no recomputation.
+ *
+ * MEMBERSHIP IS CHECKED, NOT ASSUMED, and that check is load-bearing rather
+ * than defensive. A retry is republished to a fanout with this value as the
+ * routing key, and when the TTL expires the message dead-letters into
+ * `judge.direct` under it. `judge.direct` is a plain direct exchange with no
+ * alternate-exchange: a routing key nothing is bound to is silently DROPPED.
+ * So echoing an unrecognised routing key would turn one failed judgment into
+ * one lost judgment. Anything not in `LANE_QUEUES` — `undefined` (a
+ * hand-constructed test message, or amqplib before this field existed), the
+ * fallback queue, a key left over from a shovel or an operator republish —
+ * returns null and takes the legacy retry path, which is bound and consumed.
+ */
+export function laneOfDelivery(routingKey: string | undefined | null): string | null {
+  if (!routingKey) return null;
+  return LANE_QUEUES.includes(routingKey) ? routingKey : null;
+}
+
+/**
+ * Whether `queueName` is a queue that carries `JudgmentExecuteMsg` — a lane or
+ * the fallback.
+ *
+ * Replaces the `queueName === QUEUE_JUDGMENT_EXECUTE` equality test that
+ * dispatch-failure.ts used to make. With eight lane queues that equality is
+ * false for essentially all judgment traffic, which would have quietly
+ * downgraded every repeatedly-failing laned judgment from "hold it for 30s and
+ * try again" to "nack-requeue at full speed", spinning on whatever is broken.
+ */
+export function isJudgmentQueue(queueName: string): boolean {
+  return queueName === LANE_FALLBACK_QUEUE || LANE_QUEUES.includes(queueName);
+}
+
 /** Thrown by `acquire`/`runExclusive` when the bounded wait elapses. The
  *  caller's contract on seeing this is nack-REQUEUE — see judgment-consumer.ts.
  *  A distinct class (not a bare Error) so that disposition can never be
@@ -302,10 +432,13 @@ interface Waiter {
  */
 export function createKeyedGate(): KeyedGate {
   // Key present => permit held. The array is that key's FIFO waiter queue.
-  const lanes = new Map<string, Waiter[]>();
+  // NOT called `lanes`: a lane is now a QUEUE (src/lib/queue/lanes.ts), and
+  // reusing the word for the gate's per-key permit table made two unrelated
+  // serialization mechanisms read as one.
+  const permits = new Map<string, Waiter[]>();
 
   function handOff(key: string): void {
-    const queue = lanes.get(key);
+    const queue = permits.get(key);
     if (!queue) return;
 
     while (queue.length > 0) {
@@ -318,13 +451,13 @@ export function createKeyedGate(): KeyedGate {
       next.settled = true;
       if (next.timer) clearTimeout(next.timer);
       next.grant();
-      return; // lane stays held, now by `next`
+      return; // permit stays held, now by `next`
     }
 
-    // Nobody waiting — free the lane. Deleting rather than leaving an empty
+    // Nobody waiting — free the permit. Deleting rather than leaving an empty
     // array is what keeps this Map bounded by concurrent judges rather than
     // by every judge ever seen.
-    lanes.delete(key);
+    permits.delete(key);
   }
 
   function makeRelease(key: string): () => void {
@@ -340,9 +473,9 @@ export function createKeyedGate(): KeyedGate {
   }
 
   async function acquire(key: string, timeoutMs: number = GATE_WAIT_TIMEOUT_MS): Promise<() => void> {
-    const queue = lanes.get(key);
+    const queue = permits.get(key);
     if (!queue) {
-      lanes.set(key, []);
+      permits.set(key, []);
       return makeRelease(key);
     }
 
@@ -389,8 +522,8 @@ export function createKeyedGate(): KeyedGate {
   return {
     acquire,
     runExclusive,
-    heldKeys: () => lanes.size,
-    waiting: (key: string) => (lanes.get(key) ?? []).filter((w) => !w.settled).length,
+    heldKeys: () => permits.size,
+    waiting: (key: string) => (permits.get(key) ?? []).filter((w) => !w.settled).length,
   };
 }
 

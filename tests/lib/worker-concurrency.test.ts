@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
+import { LANE_COUNT, LANE_FALLBACK_QUEUE, LANE_QUEUES } from '@/lib/queue/lanes';
+import { QUEUE_DLQ, QUEUE_JUDGMENT_RETRY_30S, QUEUE_RUN_CREATE } from '@/lib/queue/topology';
 import {
   GATE_WAIT_TIMEOUT_MS,
   HARD_CONCURRENCY_CAP,
   JudgeGateTimeoutError,
+  LANE_PREFETCH,
   MAX_IN_FLIGHT_MESSAGES,
   createKeyedGate,
+  gateKeyForDelivery,
+  isJudgmentQueue,
   judgeGateKey,
+  laneOfDelivery,
   resolveWorkerConcurrency,
 } from '@/worker/concurrency';
 
@@ -96,14 +102,14 @@ describe('prefetch is a DIFFERENT quantity from the per-judge cap', () => {
 });
 
 describe('judgeGateKey — what a NULL judgeModelVersionId means', () => {
-  it('keys on the judge version when there is one, so every judgment for it shares a lane', () => {
+  it('keys on the judge version when there is one, so every judgment for it shares a permit', () => {
     expect(judgeGateKey('j1', 'v1')).toBe(judgeGateKey('j2', 'v1'));
     expect(judgeGateKey('j1', 'v1')).not.toBe(judgeGateKey('j1', 'v2'));
   });
 
-  it('gives a NULL version its own per-judgment lane — not one shared null lane', () => {
+  it('gives a NULL version its own per-judgment permit — not one shared null permit', () => {
     // A shared `judge:null` key would collapse every null-version judgment in
-    // the system into one global serial queue: fleet-wide serialization
+    // the system into one global serial permit: fleet-wide serialization
     // reintroduced through the back door on a subset of rows.
     expect(judgeGateKey('j1', null)).not.toBe(judgeGateKey('j2', null));
     expect(judgeGateKey('j1', undefined)).not.toBe(judgeGateKey('j2', undefined));
@@ -347,6 +353,166 @@ describe('keyed gate — the bounded wait', () => {
     expect(gate.heldKeys()).toBe(2);
     busy();
     other();
+    expect(gate.heldKeys()).toBe(0);
+  });
+});
+
+// ─── Lanes: the prefetch that IS the serialization ──────────────────────────
+
+describe('LANE_PREFETCH is the mechanism, not a throttle', () => {
+  it('is exactly 1 — any higher value turns a lane back into the shared queue', () => {
+    // `x-single-active-consumer` (topology.ts) guarantees ONE CONSUMER per
+    // lane. It says nothing about how many deliveries that consumer may hold
+    // unacked, so without this the one consumer would run N concurrent calls
+    // against the one server the lane exists to protect — the original
+    // over-subscription with extra queues in front of it.
+    expect(LANE_PREFETCH).toBe(1);
+  });
+
+  it('is a DIFFERENT number from the non-lane prefetch, and both still exceed the per-judge cap in aggregate', () => {
+    // Collapsing these two back into one is how this file's history reads:
+    // one number for "how many at once anywhere" is what serialized the whole
+    // fleet behind the slowest server.
+    expect(LANE_PREFETCH).not.toBe(MAX_IN_FLIGHT_MESSAGES);
+    expect(LANE_QUEUES.length * LANE_PREFETCH).toBe(LANE_COUNT);
+    expect(LANE_QUEUES.length * LANE_PREFETCH).toBeGreaterThan(HARD_CONCURRENCY_CAP);
+  });
+});
+
+describe('laneOfDelivery — echo the routing key, and only if it is a real lane', () => {
+  it('returns the lane for a delivery that arrived on one', () => {
+    for (const lane of LANE_QUEUES) {
+      expect(laneOfDelivery(lane)).toBe(lane);
+    }
+  });
+
+  it('returns null for the fallback queue, so legacy traffic keeps the legacy retry path', () => {
+    expect(laneOfDelivery(LANE_FALLBACK_QUEUE)).toBeNull();
+  });
+
+  it('returns null for a missing routing key rather than inventing one', () => {
+    // Hand-constructed test messages (`fields: {}`) and any delivery from
+    // before this field mattered land here.
+    expect(laneOfDelivery(undefined)).toBeNull();
+    expect(laneOfDelivery(null)).toBeNull();
+    expect(laneOfDelivery('')).toBeNull();
+  });
+
+  it('REFUSES an unrecognised routing key — echoing one would lose the judgment', () => {
+    // This is the load-bearing case, not a defensive nicety. A lane returned
+    // here is republished to a delay fanout as the routing key, and when the
+    // TTL expires the message dead-letters into `judge.direct` — a plain
+    // direct exchange with no alternate-exchange, which silently DROPS a
+    // routing key nothing is bound to. Echoing an unknown key would turn one
+    // failed judgment into one lost judgment.
+    expect(laneOfDelivery(`judgment.execute.lane.${LANE_COUNT}`)).toBeNull(); // off the end
+    expect(laneOfDelivery('judgment.execute.lane.-1')).toBeNull();
+    expect(laneOfDelivery('judgment.execute.lane.0 ')).toBeNull(); // trailing space
+    expect(laneOfDelivery(QUEUE_JUDGMENT_RETRY_30S)).toBeNull();
+    expect(laneOfDelivery('shovelled.from.somewhere')).toBeNull();
+  });
+});
+
+describe('isJudgmentQueue — the equality test that eight lanes broke', () => {
+  it('is true for every lane AND the fallback', () => {
+    // `queueName === QUEUE_JUDGMENT_EXECUTE` was false for all eight of these,
+    // which would have silently downgraded every repeatedly-failing laned
+    // judgment from "hold 30s, then retry" to "nack-requeue at full speed".
+    for (const lane of LANE_QUEUES) {
+      expect(isJudgmentQueue(lane)).toBe(true);
+    }
+    expect(isJudgmentQueue(LANE_FALLBACK_QUEUE)).toBe(true);
+  });
+
+  it('is false for queues that carry something other than a judgment', () => {
+    expect(isJudgmentQueue(QUEUE_RUN_CREATE)).toBe(false);
+    expect(isJudgmentQueue(QUEUE_DLQ)).toBe(false);
+    expect(isJudgmentQueue(QUEUE_JUDGMENT_RETRY_30S)).toBe(false);
+  });
+});
+
+// ─── The decision: the gate covers laned traffic too ────────────────────────
+
+describe('gateKeyForDelivery — every delivery takes a permit, lane or not', () => {
+  // THE PIN for the v2j-1b decision recorded in concurrency.ts's "THE GATE IS
+  // NOW REDUNDANT FOR LANED TRAFFIC, AND IT STAYS ANYWAY" section. Every test
+  // in this block fails under the rejected alternative — "a lane is already
+  // serial at the broker, so skip the gate for lane deliveries" — whether that
+  // alternative is expressed as returning null for a lane or as keying a lane
+  // delivery on its lane.
+
+  it('gives a LANE delivery and a FALLBACK delivery for the same judge THE SAME key', () => {
+    // This is the whole argument in one assertion. `judgment.execute` is kept
+    // and consumed forever, so a judgment for a server can arrive on a lane
+    // AND on the fallback at the same time, handled by two different
+    // consumers. A mutex only excludes when both sides take the permit.
+    const fromLane = gateKeyForDelivery(LANE_QUEUES[3], 'judgment-a', 'version-shared');
+    const fromFallback = gateKeyForDelivery(LANE_FALLBACK_QUEUE, 'judgment-b', 'version-shared');
+
+    expect(fromLane).toBe(fromFallback);
+    expect(fromLane).toBe(judgeGateKey('judgment-a', 'version-shared'));
+  });
+
+  it('never lets the queue change the key — all eight lanes agree with each other and with no queue at all', () => {
+    const keys = new Set(LANE_QUEUES.map((lane) => gateKeyForDelivery(lane, 'j1', 'v1')));
+
+    expect(keys.size).toBe(1);
+    expect([...keys][0]).toBe(gateKeyForDelivery(undefined, 'j1', 'v1'));
+    expect([...keys][0]).toBe(gateKeyForDelivery(QUEUE_RUN_CREATE, 'j1', 'v1'));
+  });
+
+  it('actually SERIALIZES a fallback delivery behind a lane delivery for the same judge', async () => {
+    // The behavioural half: two deliveries for one server, one laned and one
+    // not, both routed through the same code path the consumer uses. Under a
+    // fallback-only gate the lane delivery holds nothing, the fallback
+    // delivery acquires immediately, and both call the server at once — which
+    // is the over-subscription that dead-lettered 4 of 30 items.
+    const gate = createKeyedGate();
+    const order: string[] = [];
+
+    const laneKey = gateKeyForDelivery(LANE_QUEUES[0], 'judgment-lane', 'version-shared');
+    const fallbackKey = gateKeyForDelivery(LANE_FALLBACK_QUEUE, 'judgment-fallback', 'version-shared');
+
+    const releaseLane = await gate.acquire(laneKey, 1_000);
+    order.push('lane:acquired');
+
+    let fallbackStarted = false;
+    const fallback = gate.runExclusive(
+      fallbackKey,
+      async () => {
+        fallbackStarted = true;
+        order.push('fallback:started');
+      },
+      1_000
+    );
+
+    await settle();
+    expect(fallbackStarted).toBe(false);
+    expect(gate.waiting(laneKey)).toBe(1);
+
+    releaseLane();
+    order.push('lane:released');
+    await fallback;
+
+    // The fallback body runs only AFTER the release — that ordering is the
+    // assertion, and it is the one a fallback-only gate cannot produce.
+    expect(order).toEqual(['lane:acquired', 'lane:released', 'fallback:started']);
+    expect(fallbackStarted).toBe(true);
+  });
+
+  it('still lets deliveries for DIFFERENT judges run concurrently, whichever queues they came from', async () => {
+    // The gate staying universal must not re-serialize the fleet: that is the
+    // 22-minute block, and it is the other way this decision could go wrong.
+    const gate = createKeyedGate();
+
+    const a = await gate.acquire(gateKeyForDelivery(LANE_QUEUES[0], 'j1', 'version-a'), 1_000);
+    const b = await gate.acquire(gateKeyForDelivery(LANE_QUEUES[1], 'j2', 'version-b'), 1_000);
+    const c = await gate.acquire(gateKeyForDelivery(LANE_FALLBACK_QUEUE, 'j3', 'version-c'), 1_000);
+
+    expect(gate.heldKeys()).toBe(3);
+    a();
+    b();
+    c();
     expect(gate.heldKeys()).toBe(0);
   });
 });

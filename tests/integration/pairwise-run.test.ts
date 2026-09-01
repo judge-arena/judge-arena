@@ -2,7 +2,8 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Channel, ConsumeMessage } from 'amqplib';
 import { prisma } from '@/lib/db';
 import { closeRabbit, getRabbit } from '@/lib/queue/connection';
-import { assertTopology, QUEUE_JUDGMENT_EXECUTE } from '@/lib/queue/topology';
+import { assertTopology } from '@/lib/queue/topology';
+import { LANE_FALLBACK_QUEUE, LANE_QUEUES } from '@/lib/queue/lanes';
 import type { JudgmentExecuteMsg } from '@/lib/queue/publish';
 import { launchSingleRun } from '@/lib/run-launch';
 import {
@@ -62,6 +63,29 @@ async function drainQueue(ch: Channel, queue: string, quietMs = 400): Promise<Co
   });
 
   return messages;
+}
+
+/** ── v2j lane routing ───────────────────────────────────────────────────────
+ * A `judgment.execute` message is no longer published to one known queue:
+ * `publishJudgmentExecute` routes it to the LANE for the judge's endpoint
+ * origin (src/lib/queue/lanes.ts), and which lane that is depends on
+ * `QueueLane` assignment order — not something a test can name as a constant.
+ *
+ * These assertions were never about the queue NAME; they are about "was this
+ * judgment enqueued for execution at all". So they drain every queue a
+ * judgment can legally land on: the 8 lanes plus `LANE_FALLBACK_QUEUE`, which
+ * is the original `judgment.execute` and is kept and consumed forever. The
+ * lane CHOICE is asserted where it belongs, in
+ * tests/db/lane-publishing.test.ts. */
+const EXECUTE_QUEUES = [...LANE_QUEUES, LANE_FALLBACK_QUEUE];
+
+async function purgeExecuteQueues(ch: Channel): Promise<void> {
+  await Promise.all(EXECUTE_QUEUES.map((queue) => ch.purgeQueue(queue)));
+}
+
+async function drainExecuteQueues(ch: Channel, quietMs = 400): Promise<ConsumeMessage[]> {
+  const drained = await Promise.all(EXECUTE_QUEUES.map((queue) => drainQueue(ch, queue, quietMs)));
+  return drained.flat();
 }
 
 function fakeMessage(payload: unknown): ConsumeMessage {
@@ -224,7 +248,7 @@ describe('a0 pairwise: launchSingleRun + judgment-consumer end to end', () => {
 
     const { confirmChannel } = await getRabbit();
     await assertTopology(confirmChannel);
-    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_EXECUTE);
+    await purgeExecuteQueues(confirmChannel);
 
     // Passed in DESCENDING position order on purpose. `position`, not array
     // index, is what defines which candidate is A and which is B — so every
@@ -264,7 +288,7 @@ describe('a0 pairwise: launchSingleRun + judgment-consumer end to end', () => {
     expect(created.promptTemplateId).toBe(pairwiseTemplate.id);
     expect(created.verdict).toBeNull();
 
-    const published = await drainQueue(confirmChannel, QUEUE_JUDGMENT_EXECUTE);
+    const published = await drainExecuteQueues(confirmChannel);
     expect(published).toHaveLength(1);
 
     // `provider`/`providerResponse` deliberately NOT injected — if protocol

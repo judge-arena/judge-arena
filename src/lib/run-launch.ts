@@ -44,6 +44,16 @@
  * a run launched validly could still hit a missing endpoint later if the
  * user deletes their key between launch and execution).
  *
+ * ── v2j: this module also decides which LANE each judgment goes to ──────────
+ * `requireOwnedActiveEndpoints` returns the endpoint URL it validated for each
+ * version, and `judgment.execute` is published with the lane queue for that
+ * URL's origin as its routing key (`src/lib/queue/lanes.ts`). Both halves come
+ * out of the query that was already running, so routing costs nothing extra —
+ * and, crucially, the two tiers now select the SAME `ModelEndpoint` row via
+ * `src/lib/endpoint-resolution.ts`, so the lane always names the server the
+ * worker will actually call. Failing to resolve a lane never fails a publish:
+ * see `resolveDestinationQueue`.
+ *
  * ── launchSingleRun ──────────────────────────────────────────────────────
  * Used by both `POST /api/evaluations` (single-text `create_and_run`) and
  * `POST /api/evaluations/[id]/runs`. One `$transaction` creates the
@@ -89,7 +99,15 @@ import type { Prisma, RunProtocol } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { deriveRunMode } from '@/lib/run-mode';
 import { logger } from '@/lib/logger';
-import { publishJudgmentExecute, publishRunCreate, type JudgmentExecuteMsg, type RunCreateMsg } from '@/lib/queue/publish';
+import {
+  publishJudgmentExecute,
+  publishRunCreate,
+  resolveDestinationQueue,
+  type JudgmentExecuteMsg,
+  type RunCreateMsg,
+} from '@/lib/queue/publish';
+import { LANE_FALLBACK_QUEUE } from '@/lib/queue/lanes';
+import { resolveEndpointsForVersions } from '@/lib/endpoint-resolution';
 import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
 /** Exported for `src/lib/calibration/launch.ts`, which computes the SAME
@@ -224,15 +242,45 @@ export async function resolveCurrentPromptTemplate(protocol: RunProtocol) {
  * it writes the `CalibrationRun` header that freezes a golden set forever.
  * Left inside `launchSingleRun` too — a calibration's per-item launches still
  * go through it, and every other caller depends on it being unskippable.
+ *
+ * ── v2j: it also RETURNS the endpoint URLs, at zero extra cost ──────────────
+ * `Map<judgeModelVersionId, endpoint URL | null>` (`null` = the judge has no
+ * self-hosted server; a hosted API resolves its own base URL later). This
+ * function already runs before every publish and already reads exactly the rows
+ * a lane needs, so the lane comes out of the query that was happening anyway —
+ * no second round trip, and no window in which the row that authorised the
+ * launch differs from the row the lane was derived from. Every existing caller
+ * ignores the return value and is unaffected.
  */
-export async function requireOwnedActiveEndpoints(userId: string, versionIds: string[]): Promise<void> {
-  if (versionIds.length === 0) return;
-  const endpoints = await prisma.modelEndpoint.findMany({
-    where: { userId, judgeModelVersionId: { in: versionIds }, isActive: true, verifiedAt: { not: null } },
-    select: { judgeModelVersionId: true },
-  });
-  const covered = new Set(endpoints.map((e) => e.judgeModelVersionId));
-  const missing = versionIds.filter((id) => !covered.has(id));
+export async function requireOwnedActiveEndpoints(
+  userId: string,
+  versionIds: string[]
+): Promise<Map<string, string | null>> {
+  const endpointUrls = new Map<string, string | null>();
+  if (versionIds.length === 0) return endpointUrls;
+
+  // Same single query as before, through the shared resolver — see
+  // `src/lib/endpoint-resolution.ts` for why the publisher and the consumer
+  // must select the same ROW and not merely agree that some row exists.
+  const resolved = await resolveEndpointsForVersions(userId, versionIds);
+
+  const missing: string[] = [];
+  for (const id of versionIds) {
+    const endpoint = resolved.get(id) ?? null;
+    // ADMISSION CONTROL IS UNCHANGED AND STILL STRICT. The resolver ranks
+    // every verified row above every unverified one, so "the winner is
+    // unverified" is exactly equivalent to "this user owns no verified active
+    // endpoint for this version" — the condition the old
+    // `verifiedAt: { not: null }` where-clause tested. The difference is that
+    // we now also hold the row the WORKER will call, so the lane derived below
+    // describes the server the judgment actually hits.
+    if (!endpoint || endpoint.verifiedAt === null) {
+      missing.push(id);
+      continue;
+    }
+    endpointUrls.set(id, endpoint.endpoint);
+  }
+
   if (missing.length > 0) {
     throw new RunLaunchError(
       400,
@@ -240,6 +288,8 @@ export async function requireOwnedActiveEndpoints(userId: string, versionIds: st
         'Configure your own endpoint for each selected judge on the Models page.'
     );
   }
+
+  return endpointUrls;
 }
 
 // ─── launchSingleRun ────────────────────────────────────────────────────────
@@ -324,8 +374,15 @@ export interface LaunchSingleRunDeps {
   /** Injectable publish seam — defaults to the real `publishJudgmentExecute`.
    * Tests inject a throwing fake to exercise the publish-failure /
    * compensating-update path deterministically without needing to break a
-   * live broker connection. */
-  publish?: (msg: JudgmentExecuteMsg) => Promise<void>;
+   * live broker connection.
+   *
+   * v2j: `destinationQueue` is the LANE this judgment belongs to (see
+   * `src/lib/queue/lanes.ts`). It is a required parameter on the seam even
+   * though it is optional on `publishJudgmentExecute` itself, so that a fake
+   * which wants to observe routing can — TypeScript still accepts a
+   * one-parameter fake, so this does NOT force existing fakes to change, and
+   * a fake that ignores the argument keeps behaving exactly as before. */
+  publish?: (msg: JudgmentExecuteMsg, destinationQueue: string) => Promise<void>;
 }
 
 export interface LaunchSingleRunResult {
@@ -441,7 +498,10 @@ export async function launchSingleRun(
     );
   }
 
-  await requireOwnedActiveEndpoints(params.triggeredById, selectedVersionIds);
+  // Also the source of this run's lane routing — see the function's own doc
+  // for why the endpoint URLs come back from the check that was already
+  // running rather than from a second query.
+  const endpointUrls = await requireOwnedActiveEndpoints(params.triggeredById, selectedVersionIds);
 
   // promptTemplateId is null on respond judgments (no rubric template to
   // render against — the model generates a response, it isn't judging
@@ -515,16 +575,46 @@ export async function launchSingleRun(
           })),
         },
       } satisfies Prisma.EvaluationRunUncheckedCreateInput,
-      include: { modelJudgments: { select: { id: true } } },
+      // judgeModelVersionId comes back too (v2j): it is the key the lane is
+      // resolved per, and reading it here costs nothing — the rows are being
+      // returned either way.
+      include: { modelJudgments: { select: { id: true, judgeModelVersionId: true } } },
     });
   });
+
+  // Lanes are resolved BEFORE the publish loop, one per distinct judge version
+  // rather than one per judgment, and concurrently — `laneIndexFor`'s
+  // INSERT .. ON CONFLICT DO NOTHING is built for exactly this race, and doing
+  // it up front keeps the publish loop's "one confirmed publish at a time, stop
+  // on first failure" shape intact instead of interleaving a DB round trip into
+  // it. `resolveDestinationQueue` cannot throw, so a lane lookup can never be
+  // the reason a run fails to publish.
+  // Keyed `string | null` because `ModelJudgment.judgeModelVersionId` is
+  // nullable in the schema — a null-version judgment simply misses every key
+  // and takes the fallback queue below, rather than needing a sentinel.
+  const laneByVersion = new Map<string | null, string>(
+    await Promise.all(
+      selectedVersionIds.map(
+        async (versionId) =>
+          [versionId, await resolveDestinationQueue(endpointUrls.get(versionId), versionId)] as const
+      )
+    )
+  );
 
   let publishFailed = false;
   let publishError: string | undefined;
   for (const judgment of createdRun.modelJudgments) {
     try {
       // eslint-disable-next-line no-await-in-loop -- sequential confirmed publishes, one row at a time so a mid-loop broker failure is attributable and stops further doomed publishes; capped at 10 models per run
-      await publish({ judgmentId: judgment.id, runId: createdRun.id, attempt: 1 });
+      await publish(
+        { judgmentId: judgment.id, runId: createdRun.id, attempt: 1 },
+        // `?? LANE_FALLBACK_QUEUE` is unreachable in practice (every judgment
+        // is created from `selectedVersionIds`), and it is here because the
+        // alternative to an unreachable fallback is an unhandled `undefined`
+        // routing key, i.e. a message published to the empty routing key and
+        // silently dropped by the direct exchange.
+        laneByVersion.get(judgment.judgeModelVersionId) ?? LANE_FALLBACK_QUEUE
+      );
     } catch (error) {
       publishFailed = true;
       publishError = error instanceof Error ? error.message : String(error);

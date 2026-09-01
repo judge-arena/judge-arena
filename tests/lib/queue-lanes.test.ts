@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   LANE_COUNT,
   LANE_FALLBACK_QUEUE,
@@ -95,5 +95,28 @@ describe('lane queue names', () => {
     for (let id = 1; id <= 8; id++) {
       expect((id - 1) % 8).toBe((id - 1) % 32);
     }
+  });
+});
+
+describe('laneQueueFor — degrades, never throws', () => {
+  // The contract this pins was FALSE when first written: the docstring said
+  // "never throws" while laneIndexFor awaited two Prisma calls with no guard.
+  // The worst call site is launchSingleRun, where a throw aborts the publish
+  // loop and compensates the whole run to status 'error' — a lost run caused
+  // by nothing worse than failing to decide which queue to name.
+  it('returns the fallback queue when lane resolution fails', async () => {
+    vi.resetModules();
+    vi.doMock('@/lib/db', () => ({
+      prisma: {
+        $executeRaw: () => Promise.reject(new Error('pool exhausted')),
+        queueLane: { findUnique: () => Promise.reject(new Error('pool exhausted')) },
+      },
+    }));
+    const lanes = await import('@/lib/queue/lanes');
+    await expect(
+      lanes.laneQueueFor('http://192.168.1.9:11434/v1', 'v-any')
+    ).resolves.toBe(lanes.LANE_FALLBACK_QUEUE);
+    vi.doUnmock('@/lib/db');
+    vi.resetModules();
   });
 });

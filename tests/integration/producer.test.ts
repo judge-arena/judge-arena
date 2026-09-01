@@ -4,7 +4,8 @@ import type { Channel, ConsumeMessage } from 'amqplib';
 import type { ServingBackend } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { closeRabbit, getRabbit } from '@/lib/queue/connection';
-import { assertTopology, QUEUE_JUDGMENT_EXECUTE, QUEUE_RUN_CREATE } from '@/lib/queue/topology';
+import { assertTopology, QUEUE_RUN_CREATE } from '@/lib/queue/topology';
+import { LANE_FALLBACK_QUEUE, LANE_QUEUES } from '@/lib/queue/lanes';
 import type { JudgmentExecuteMsg, RunCreateMsg } from '@/lib/queue/publish';
 import { launchSingleRun, launchBulkRunCreates } from '@/lib/run-launch';
 import { createRunCreateConsumer } from '@/worker/run-create-consumer';
@@ -77,6 +78,29 @@ async function drainQueue(ch: Channel, queue: string, quietMs = 400): Promise<Co
   });
 
   return messages;
+}
+
+/** ── v2j lane routing ───────────────────────────────────────────────────────
+ * A `judgment.execute` message is no longer published to one known queue:
+ * `publishJudgmentExecute` routes it to the LANE for the judge's endpoint
+ * origin (src/lib/queue/lanes.ts), and which lane that is depends on
+ * `QueueLane` assignment order — not something a test can name as a constant.
+ *
+ * These assertions were never about the queue NAME; they are about "was this
+ * judgment enqueued for execution at all". So they drain every queue a
+ * judgment can legally land on: the 8 lanes plus `LANE_FALLBACK_QUEUE`, which
+ * is the original `judgment.execute` and is kept and consumed forever. The
+ * lane CHOICE is asserted where it belongs, in
+ * tests/db/lane-publishing.test.ts. */
+const EXECUTE_QUEUES = [...LANE_QUEUES, LANE_FALLBACK_QUEUE];
+
+async function purgeExecuteQueues(ch: Channel): Promise<void> {
+  await Promise.all(EXECUTE_QUEUES.map((queue) => ch.purgeQueue(queue)));
+}
+
+async function drainExecuteQueues(ch: Channel, quietMs = 400): Promise<ConsumeMessage[]> {
+  const drained = await Promise.all(EXECUTE_QUEUES.map((queue) => drainQueue(ch, queue, quietMs)));
+  return drained.flat();
 }
 
 /** Fabricates a `ConsumeMessage`-shaped object carrying `payload` as its
@@ -254,7 +278,7 @@ describe('launchSingleRun (src/lib/run-launch.ts)', () => {
 
     const { confirmChannel } = await getRabbit();
     await assertTopology(confirmChannel);
-    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_EXECUTE);
+    await purgeExecuteQueues(confirmChannel);
 
     const result = await launchSingleRun({ evaluationId: evaluation.id, triggeredById: user.id });
     createdRunIds.push(result.run.id);
@@ -272,7 +296,7 @@ describe('launchSingleRun (src/lib/run-launch.ts)', () => {
       new Set([modelA.version.id, modelB.version.id])
     );
 
-    const published = await drainQueue(confirmChannel, QUEUE_JUDGMENT_EXECUTE);
+    const published = await drainExecuteQueues(confirmChannel);
     expect(published).toHaveLength(2);
     const publishedIds = published
       .map((m) => (JSON.parse(m.content.toString()) as JudgmentExecuteMsg).judgmentId)
@@ -689,7 +713,7 @@ describe('launchBulkRunCreates (src/lib/run-launch.ts)', () => {
 
     const { confirmChannel } = await getRabbit();
     await assertTopology(confirmChannel);
-    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_EXECUTE);
+    await purgeExecuteQueues(confirmChannel);
 
     const msg: RunCreateMsg = {
       evaluationId: evaluation.id,
@@ -722,7 +746,7 @@ describe('launchBulkRunCreates (src/lib/run-launch.ts)', () => {
 
     // And no downstream work enqueued — the unguarded path publishes one
     // judgment.execute per created judgment before this point is reached.
-    expect(await drainQueue(confirmChannel, QUEUE_JUDGMENT_EXECUTE)).toHaveLength(0);
+    expect(await drainExecuteQueues(confirmChannel)).toHaveLength(0);
   });
 });
 

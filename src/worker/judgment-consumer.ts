@@ -15,7 +15,11 @@
  *
  * ── One provider call PER JUDGE, not one per worker ─────────────────────────
  * `handle()` takes a permit keyed on `judgeModelVersionId` before it does
- * anything else, and holds it until the message is disposed of. Judges on
+ * anything else, and holds it until the message is disposed of — on EVERY
+ * delivery, including one that arrived on a lane queue that is already serial
+ * at the broker. Skipping the permit for lane deliveries would leave the
+ * fallback queue's deliveries excluding nobody; see `gateKeyForDelivery` in
+ * ./concurrency.ts. Judges on
  * different servers run in parallel; two deliveries for the SAME judge
  * serialise, because concurrent calls to one inference server queue INSIDE it
  * while their client timeout runs (that dead-lettered 4 of 30 items — see
@@ -121,11 +125,14 @@
  *   `running` would break the retry — the redelivered message would look
  *   like a duplicate of a still-live claim and get ack-skipped instead of
  *   retried) and publish the message (with `attempt: effectiveAttempt + 1`)
- *   onto `judgment.retry.30s` (1 -> 2) or `judgment.retry.5m` (2 -> 3);
- *   breaker-open failures always prefer the 5m queue regardless of attempt,
- *   since a breaker that's open needs longer than 30s to plausibly recover.
- *   Original message acked either way — the retry queue holds the next
- *   attempt, not a requeue of this one.
+ *   onto a 30s delay (1 -> 2) or a 5m one (2 -> 3); breaker-open failures
+ *   always prefer 5m regardless of attempt, since a breaker that's open needs
+ *   longer than 30s to plausibly recover. Original message acked either way —
+ *   the retry queue holds the next attempt, not a requeue of this one.
+ *   WHICH delay queue depends on the delay; which LANE the attempt comes back
+ *   to is `raw.fields.routingKey`, echoed rather than recomputed
+ *   (`publishJudgmentRetryPreservingLane` below). A retry that changed lanes
+ *   would stop being serialized against the server that just failed it.
  * - Attempt budget exhausted (`effectiveAttempt >= 3`) -> judgment `error`
  *   + `publishToDlq` + ack.
  *
@@ -154,6 +161,9 @@ import {
   publishToDlq,
   type JudgmentExecuteMsg,
 } from '@/lib/queue/publish';
+import { getRabbit } from '@/lib/queue/connection';
+import { EXCHANGE_DELAY_30S, EXCHANGE_DELAY_5M } from '@/lib/queue/topology';
+import { resolveEndpointFor } from '@/lib/endpoint-resolution';
 import { classify } from '@/lib/llm/errors';
 // Imported from the module that defines it rather than from '@/lib/llm',
 // whose public re-export list doesn't carry it — same shape as the
@@ -174,8 +184,9 @@ import { claimJudgment } from './claim';
 import {
   GATE_WAIT_TIMEOUT_MS,
   JudgeGateTimeoutError,
+  gateKeyForDelivery,
   judgeGate,
-  judgeGateKey,
+  laneOfDelivery,
   logGateTimeout,
   type KeyedGate,
 } from './concurrency';
@@ -253,12 +264,15 @@ type VersionWithJudgeModel = NonNullable<JudgmentContext['judgeModelVersion']>;
  * and verified present on the live schema) — though this lookup is served by
  * the PK alone.
  */
-async function resolveJudgeGateKey(judgmentId: string): Promise<string> {
+async function resolveJudgeGateKey(judgmentId: string, queueName: string | undefined): Promise<string> {
   const row = await prisma.modelJudgment.findUnique({
     where: { id: judgmentId },
     select: { judgeModelVersionId: true },
   });
-  return judgeGateKey(judgmentId, row?.judgeModelVersionId);
+  // `queueName` is passed and deliberately not branched on — see
+  // `gateKeyForDelivery` (concurrency.ts) for why a lane delivery must take the
+  // same permit a fallback delivery would.
+  return gateKeyForDelivery(queueName, judgmentId, row?.judgeModelVersionId);
 }
 
 // ─── The provider seam ──────────────────────────────────────────────────────
@@ -412,34 +426,77 @@ export const defaultRunProviderPairwise: PairwiseProviderFn = async (input) => {
 };
 
 // ─── Endpoint resolution ─────────────────────────────────────────────────────
+//
+// This module used to own a private `resolveEndpoint` here. It is gone, and it
+// had to go: the web tier's `requireOwnedActiveEndpoints` (run-launch.ts) and
+// this consumer selected from the SAME set of legal `ModelEndpoint` rows with
+// different rules — the publisher required `verifiedAt`, this one did not and
+// took the OLDEST row — so a launch could be validated against one endpoint and
+// executed against another. Under lanes that stops being latent: the publisher
+// derives the lane from the row IT resolved, so a consumer that calls a
+// different server is serialized against the wrong box while the queue depth
+// says everything is fine. `resolveEndpointFor` (src/lib/endpoint-resolution.ts)
+// is the single answer both sides now ask for. Nothing else belongs here.
+
+// ─── Lane-preserving retries ─────────────────────────────────────────────────
 
 /**
- * Resolve the `ModelEndpoint` to call through for `judgeModelVersionId` —
- * ALWAYS the run's `triggeredBy` user's own active endpoint for that
- * version, never anyone else's.
+ * Publish a retry so that it comes back to the lane it left.
  *
- * Task 12 removes the pre-Task-12 cross-user fallback ("any active endpoint
- * for the version, regardless of owner") that lived here from Task 7
- * through Task 11 as a documented, disclosed gap. `src/lib/run-launch.ts`
- * (web tier) now validates the SAME ownership rule at launch time
- * (`requireOwnedActiveEndpoints`) before a run is even created, so in
- * practice this should already always find a row — this function's `null`
- * return remains the defense-in-depth path for the case a user deactivates
- * or deletes their endpoint between launch and execution (or a run created
- * before Task 12 has no owner-scoped endpoint at all). `triggeredById` is
- * nullable on `EvaluationRun` (no owner) — with none, there is by
- * definition no "their own" endpoint to resolve, so this returns `null`
- * immediately rather than guessing.
+ * ── WHY THIS CANNOT JUST CALL `publishJudgmentRetry30s` ─────────────────────
+ * The original retry queues pin `x-dead-letter-routing-key` to
+ * `judgment.execute` (topology.ts), so everything they release lands on the
+ * FALLBACK queue no matter where it came from. A judgment that failed once
+ * would silently stop being serialized against its own server — the failure
+ * mode lanes exist to prevent, entered through the retry path.
+ *
+ * ── WHY A FANOUT AND NOT THE DIRECT EXCHANGE ────────────────────────────────
+ * RabbitMQ preserves a message's routing key when dead-lettering only if
+ * `x-dead-letter-routing-key` is absent, which is why the `.v2` retry queues
+ * omit it. But publishing INTO a retry queue through `judge.direct` (whose
+ * invariant is routing key == destination queue name) would make the retry
+ * queue its own routing key, and the dead-letter would then deliver it straight
+ * back to itself — an infinite TTL loop. A fanout ignores the routing key for
+ * ROUTING while still carrying it on the message, so the lane survives the hop.
+ * See topology.ts's `EXCHANGE_DELAY_30S` doc; proven on a live broker.
+ *
+ * `lane === null` means the delivery did not arrive on a lane (the fallback
+ * queue, or a message with no usable routing key). Those take the original
+ * path, unchanged — the legacy retry queues are still declared, still bound,
+ * and still dead-letter onto the fallback, which is still consumed.
+ *
+ * LIVES HERE, NOT IN `src/lib/queue/publish.ts`, only because of how this
+ * change was split across two concurrent workstreams. It is a producer and it
+ * belongs with the other producers; moving it is a mechanical follow-up.
  */
-async function resolveEndpoint(
-  judgeModelVersionId: string,
-  triggeredById: string | null
-): Promise<ModelEndpoint | null> {
-  if (!triggeredById) return null;
+export async function publishJudgmentRetryPreservingLane(
+  msg: JudgmentExecuteMsg,
+  delay: '30s' | '5m',
+  lane: string | null
+): Promise<void> {
+  if (!lane) {
+    await (delay === '5m' ? publishJudgmentRetry5m(msg) : publishJudgmentRetry30s(msg));
+    return;
+  }
 
-  return prisma.modelEndpoint.findFirst({
-    where: { judgeModelVersionId, userId: triggeredById, isActive: true },
-    orderBy: { createdAt: 'asc' },
+  const { confirmChannel } = await getRabbit();
+  const exchange = delay === '5m' ? EXCHANGE_DELAY_5M : EXCHANGE_DELAY_30S;
+  const content = Buffer.from(JSON.stringify(msg));
+
+  // Publisher-confirmed, like every other publish in this codebase: a retry
+  // that is written to a socket buffer and lost leaves its judgment `pending`
+  // with nothing scheduled to pick it up until the reaper's stale sweep.
+  await new Promise<void>((resolve, reject) => {
+    confirmChannel.publish(
+      exchange,
+      lane,
+      content,
+      { persistent: true, contentType: 'application/json' },
+      (err) => {
+        if (err) reject(err instanceof Error ? err : new Error(String(err)));
+        else resolve();
+      }
+    );
   });
 }
 
@@ -844,7 +901,7 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
    */
   async function handle(raw: ConsumeMessage, ch: Channel): Promise<void> {
     const msg = JSON.parse(raw.content.toString()) as JudgmentExecuteMsg;
-    const gateKey = await resolveJudgeGateKey(msg.judgmentId);
+    const gateKey = await resolveJudgeGateKey(msg.judgmentId, raw.fields.routingKey);
 
     try {
       await gate.runExclusive(gateKey, () => executeClaimed(raw, ch, msg), gateWaitMs);
@@ -868,6 +925,25 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
     ch: Channel,
     msg: JudgmentExecuteMsg
   ): Promise<void> {
+    /**
+     * The lane this delivery arrived on, ECHOED rather than recomputed.
+     *
+     * Every retry below republishes to `lane`, and reading it off the delivery
+     * is not merely cheaper than resolving the endpoint and calling
+     * `laneQueueFor` again — it is more correct. A recomputed lane is a fresh
+     * answer to "where should this go", and it can differ from the old one: the
+     * user may have edited or deactivated the endpoint since the publish, and
+     * `laneQueueFor` falls back to `judgment.execute` whenever it cannot
+     * resolve. Either way the retry would leave the lane its predecessor is
+     * still being serialized on, and the two attempts would then be free to hit
+     * the same server at once — a retry storm against a box that is already
+     * failing. The routing key is what the broker actually used, so echoing it
+     * pins the retry to the lane the work is really on.
+     *
+     * `null` for a fallback/legacy delivery, which keeps today's behaviour.
+     */
+    const lane = laneOfDelivery(raw.fields.routingKey);
+
     let claim = await claimJudgment(msg.judgmentId);
     if (claim === 'retry_claim') {
       // Inspection-race artifact (see claim.ts's docstring) — retry the
@@ -889,7 +965,11 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
       // lands back on judgment.execute and this same decision runs again.
       // Bounded: LEASE_MS (~150s) / 30s cycles => ~5 cycles before the
       // lease itself expires and claim.ts's stale-reclaim path takes over.
-      await publishJudgmentRetry30s(msg);
+      // Back onto its OWN lane: the delivery this one is waiting behind is
+      // being processed by that lane's single active consumer, so a re-check
+      // that landed on the fallback would race it against exactly the claim it
+      // is waiting for.
+      await publishJudgmentRetryPreservingLane(msg, '30s', lane);
       ch.ack(raw);
       return;
     }
@@ -982,7 +1062,10 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
       return;
     }
 
-    const endpoint = await resolveEndpoint(judgeModelVersion.id, context.run.triggeredById);
+    // The SAME resolver the publisher used to pick the endpoint it derived this
+    // judgment's lane from (src/lib/endpoint-resolution.ts). When the two
+    // disagree, the judgment is serialized against a server it never calls.
+    const endpoint = await resolveEndpointFor(context.run.triggeredById, judgeModelVersion.id);
     if (!endpoint) {
       await markJudgmentError(
         msg.judgmentId,
@@ -1066,11 +1149,11 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
       });
 
       const nextMsg: JudgmentExecuteMsg = { ...msg, attempt: effectiveAttempt + 1 };
-      if (providerError.breakerOpen || effectiveAttempt >= 2) {
-        await publishJudgmentRetry5m(nextMsg);
-      } else {
-        await publishJudgmentRetry30s(nextMsg);
-      }
+      await publishJudgmentRetryPreservingLane(
+        nextMsg,
+        providerError.breakerOpen || effectiveAttempt >= 2 ? '5m' : '30s',
+        lane
+      );
       ch.ack(raw);
       return;
     }

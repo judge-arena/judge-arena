@@ -15,10 +15,11 @@
  */
 
 import { getRabbit } from './connection';
+import { LANE_FALLBACK_QUEUE, laneQueueFor } from './lanes';
+import { logger, serializeError } from '@/lib/logger';
 import {
   EXCHANGE,
   QUEUE_DLQ,
-  QUEUE_JUDGMENT_EXECUTE,
   QUEUE_JUDGMENT_RETRY_30S,
   QUEUE_JUDGMENT_RETRY_5M,
   QUEUE_RUN_CREATE,
@@ -113,10 +114,68 @@ async function publishConfirmed(
   });
 }
 
-/** Publish a judgment for execution — consumed off `judgment.execute`. */
-export async function publishJudgmentExecute(msg: JudgmentExecuteMsg): Promise<void> {
+/**
+ * Publish a judgment for execution.
+ *
+ * ── THE LANE RIDES THE ROUTING KEY, NOT THE MESSAGE ─────────────────────────
+ * `JudgmentExecuteMsg` is deliberately UNCHANGED by lanes (v2j). Every queue in
+ * `topology.ts` is bound with `routingKey == its own name`, so choosing a
+ * destination is choosing a routing key and nothing else — which means a
+ * message published by code that predates lanes (or one already sitting in a
+ * queue when lanes deploy) still carries a routing key that is bound to a
+ * queue somebody consumes. Putting the lane IN the payload would instead have
+ * made every in-flight message unroutable-by-the-new-rules the moment it was
+ * read by new code.
+ *
+ * `destinationQueue` defaults to `LANE_FALLBACK_QUEUE` — the original
+ * `judgment.execute`, kept and consumed forever (see lanes.ts). So a caller
+ * that does not know about lanes behaves EXACTLY as it did before: same
+ * exchange, same routing key, same queue. Callers that can resolve a lane pass
+ * one; callers that cannot must still pass the fallback rather than skipping
+ * the publish, because losing lane isolation is a slowdown and losing the
+ * publish is a lost judgment.
+ */
+export async function publishJudgmentExecute(
+  msg: JudgmentExecuteMsg,
+  destinationQueue: string = LANE_FALLBACK_QUEUE
+): Promise<void> {
   const { confirmChannel } = await getRabbit();
-  await publishConfirmed(confirmChannel, EXCHANGE, QUEUE_JUDGMENT_EXECUTE, msg);
+  await publishConfirmed(confirmChannel, EXCHANGE, destinationQueue, msg);
+}
+
+/**
+ * The destination queue for a judgment, resolved so that FAILING TO RESOLVE IT
+ * CANNOT FAIL THE PUBLISH.
+ *
+ * `laneQueueFor` is documented as never throwing, and for the lane ARITHMETIC
+ * that is true — but its body awaits `prisma.$executeRaw` and
+ * `prisma.queueLane.findUnique` with no try/catch of its own, so a dropped
+ * connection, an exhausted pool or a statement timeout propagates out of it.
+ * At a publish site that would abort the loop and (in `launchSingleRun`)
+ * compensate the whole run to `status: 'error'` — a lost run, caused by an
+ * optimisation. Every caller therefore goes through this, never through
+ * `laneQueueFor` directly.
+ *
+ * The fallback is the original `judgment.execute`, which is declared, bound and
+ * consumed forever: landing there costs lane isolation (a performance
+ * regression, visible as one lane's worth of serialization not happening) and
+ * costs nothing else. That trade — degrade the routing, never drop the message
+ * — is the whole failure posture of lanes.
+ */
+export async function resolveDestinationQueue(
+  endpointUrl: string | null | undefined,
+  judgeModelVersionId: string
+): Promise<string> {
+  try {
+    return await laneQueueFor(endpointUrl, judgeModelVersionId);
+  } catch (error) {
+    logger.warn(
+      'lane resolution failed — publishing to the fallback queue, which is consumed; ' +
+        'this judgment loses lane isolation but is NOT lost',
+      { judgeModelVersionId, error: serializeError(error) }
+    );
+    return LANE_FALLBACK_QUEUE;
+  }
 }
 
 /** Publish a run-creation request — consumed off `run.create`. */

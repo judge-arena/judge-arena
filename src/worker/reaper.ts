@@ -61,13 +61,29 @@
  * Every per-item failure (a single republish, a single force-finalize) is
  * caught and logged individually so ONE bad row can't abort the rest of the
  * sweep — this is best-effort infrastructure healing, not a transaction.
+ *
+ * ── v2j: a republish goes back to its LANE, not to the shared queue ─────────
+ * Both republish paths resolve the lane for the judgment's own server (see
+ * `src/lib/queue/lanes.ts`). Without that, the reaper would be a lane leak: a
+ * reclaimed judgment would land on the shared fallback queue and stop being
+ * serialized against the box it calls, which is the failure lanes exist to
+ * prevent, arriving precisely when the system is already unhealthy.
+ *
+ * The endpoint each lane is derived from is fetched in ONE batched query per
+ * sweep path (`resolveEndpointsForPairs` for the cross-user stale sweep,
+ * `resolveEndpointsForVersions` for a single overdue run), never one query per
+ * judgment. And no lane failure can stop a republish: `resolveDestinationQueue`
+ * degrades to the fallback queue, which is consumed — an unrouted judgment is
+ * a lost judgment, an unlaned one is merely a slow one.
  */
 
 import { randomUUID } from 'crypto';
 import { getConnectedRedis } from '@/lib/redis';
 import { prisma } from '@/lib/db';
 import { logger, serializeError } from '@/lib/logger';
-import { publishJudgmentExecute } from '@/lib/queue/publish';
+import { publishJudgmentExecute, resolveDestinationQueue } from '@/lib/queue/publish';
+import { LANE_FALLBACK_QUEUE } from '@/lib/queue/lanes';
+import { resolveEndpointsForPairs, resolveEndpointsForVersions } from '@/lib/endpoint-resolution';
 import { maybeFinalizeRun } from '@/lib/run-finalizer';
 import { LEASE_MS } from './claim';
 
@@ -99,13 +115,90 @@ async function acquireLock(): Promise<boolean> {
   }
 }
 
+/**
+ * Lane queue per judgment id, resolved ONCE per distinct
+ * (endpoint URL, judge version) pair rather than once per judgment.
+ *
+ * A sweep can reclaim many judgments that all target one server; resolving a
+ * lane per judgment would issue an `INSERT .. ON CONFLICT` plus a `SELECT` for
+ * each of them the first time that key is seen in this process. The dedupe key
+ * is a JSON tuple rather than a concatenation because an endpoint URL may
+ * legitimately contain any separator character, and two different pairs
+ * colliding on one key would route a judgment to another server's lane —
+ * silently, and with the queue depth still looking healthy.
+ *
+ * Never throws: `resolveDestinationQueue` swallows lane failures into the
+ * fallback queue, and any judgment this map somehow misses also takes the
+ * fallback at the call site. A reaper that threw here would stop reclaiming.
+ */
+async function lanesByJudgmentId(
+  rows: Array<{ id: string; judgeModelVersionId: string | null; endpointUrl: string | null }>
+): Promise<Map<string, string>> {
+  const dedupeKey = (row: { judgeModelVersionId: string | null; endpointUrl: string | null }): string =>
+    JSON.stringify([row.endpointUrl, row.judgeModelVersionId]);
+
+  const distinct = new Map<string, (typeof rows)[number]>();
+  for (const row of rows) distinct.set(dedupeKey(row), row);
+
+  const laneByKey = new Map(
+    await Promise.all(
+      [...distinct].map(
+        async ([key, row]) =>
+          [
+            key,
+            row.judgeModelVersionId
+              ? await resolveDestinationQueue(row.endpointUrl, row.judgeModelVersionId)
+              : LANE_FALLBACK_QUEUE,
+          ] as const
+      )
+    )
+  );
+
+  return new Map(rows.map((row) => [row.id, laneByKey.get(dedupeKey(row)) ?? LANE_FALLBACK_QUEUE]));
+}
+
 async function reclaimStaleJudgments(): Promise<void> {
   const staleBefore = new Date(Date.now() - LEASE_MS);
 
   const stale = await prisma.modelJudgment.findMany({
     where: { status: 'running', updatedAt: { lt: staleBefore } },
-    select: { id: true, runId: true, attemptCount: true },
+    // v2j: judgeModelVersionId and the run's OWNER are what a lane is resolved
+    // from. `judgeModelVersionId` is a column on the row already being read;
+    // the nested `run` select costs one additional query for the whole sweep
+    // (Prisma loads a to-one relation with a second batched statement, not a
+    // JOIN) — one query, not one per judgment, which is the property that
+    // matters here.
+    select: {
+      id: true,
+      runId: true,
+      attemptCount: true,
+      judgeModelVersionId: true,
+      run: { select: { triggeredById: true } },
+    },
   });
+
+  // ONE endpoint query for the whole sweep. Unlike the two publishers, a stale
+  // sweep spans runs from DIFFERENT users, so the batch is over (owner, judge
+  // version) PAIRS — the same composite identity `ModelEndpoint` is keyed on.
+  // Resolved before the reclaim loop so the loop keeps its one-row-at-a-time,
+  // individually-attributable failure shape.
+  const endpoints = await resolveEndpointsForPairs(
+    stale
+      .filter((judgment) => judgment.run.triggeredById && judgment.judgeModelVersionId)
+      .map((judgment) => ({
+        userId: judgment.run.triggeredById as string,
+        judgeModelVersionId: judgment.judgeModelVersionId as string,
+      }))
+  );
+  const lanes = await lanesByJudgmentId(
+    stale.map((judgment) => ({
+      id: judgment.id,
+      judgeModelVersionId: judgment.judgeModelVersionId,
+      endpointUrl: judgment.judgeModelVersionId
+        ? endpoints(judgment.run.triggeredById, judgment.judgeModelVersionId)?.endpoint ?? null
+        : null,
+    }))
+  );
 
   for (const judgment of stale) {
     // eslint-disable-next-line no-await-in-loop -- sequential per-row reclaim; sweeps run every 60s and reclaim volume is expected to be small, not worth Promise.all's harder-to-reason partial-failure semantics here
@@ -122,11 +215,19 @@ async function reclaimStaleJudgments(): Promise<void> {
 
     try {
       // eslint-disable-next-line no-await-in-loop -- see above
-      await publishJudgmentExecute({
-        judgmentId: judgment.id,
-        runId: judgment.runId,
-        attempt: judgment.attemptCount + 1,
-      });
+      await publishJudgmentExecute(
+        {
+          judgmentId: judgment.id,
+          runId: judgment.runId,
+          attempt: judgment.attemptCount + 1,
+        },
+        // `?? LANE_FALLBACK_QUEUE` is belt-and-braces: `lanesByJudgmentId`
+        // returns an entry for every row it was given. A missing entry must
+        // still publish somewhere consumed — an `undefined` routing key would
+        // be published as the empty string and dropped by the direct exchange,
+        // turning a reclaim into a permanently stuck judgment.
+        lanes.get(judgment.id) ?? LANE_FALLBACK_QUEUE
+      );
     } catch (error) {
       logger.error('reaper: failed to republish a reclaimed stale judgment', {
         judgmentId: judgment.id,
@@ -152,16 +253,41 @@ async function forceFinalizeAbandonedRun(runId: string): Promise<void> {
   }
 }
 
-async function republishPendingForRun(runId: string): Promise<void> {
+async function republishPendingForRun(runId: string, triggeredById: string | null): Promise<void> {
   const pending = await prisma.modelJudgment.findMany({
     where: { runId, status: 'pending' },
-    select: { id: true, attemptCount: true },
+    // v2j: judgeModelVersionId is the lane key. Selected here rather than
+    // re-read per judgment.
+    select: { id: true, attemptCount: true, judgeModelVersionId: true },
   });
+
+  // ONE endpoint query for this run. A run has exactly one owner
+  // (`triggeredById`, passed in from the sweep's own query rather than re-read
+  // here), so the batch is over the run's distinct judge versions — the
+  // single-user shape, same as the two publishers.
+  const endpoints = await resolveEndpointsForVersions(
+    triggeredById,
+    pending.map((judgment) => judgment.judgeModelVersionId).filter((id): id is string => !!id)
+  );
+  const lanes = await lanesByJudgmentId(
+    pending.map((judgment) => ({
+      id: judgment.id,
+      judgeModelVersionId: judgment.judgeModelVersionId,
+      endpointUrl: judgment.judgeModelVersionId
+        ? endpoints.get(judgment.judgeModelVersionId)?.endpoint ?? null
+        : null,
+    }))
+  );
 
   for (const judgment of pending) {
     try {
       // eslint-disable-next-line no-await-in-loop -- sequential per-row republish; same "small volume, not worth Promise.all" reasoning as reclaimStaleJudgments
-      await publishJudgmentExecute({ judgmentId: judgment.id, runId, attempt: judgment.attemptCount + 1 });
+      await publishJudgmentExecute(
+        { judgmentId: judgment.id, runId, attempt: judgment.attemptCount + 1 },
+        // See the identical guard in reclaimStaleJudgments: never `undefined`,
+        // because a message with an empty routing key is silently discarded.
+        lanes.get(judgment.id) ?? LANE_FALLBACK_QUEUE
+      );
     } catch (error) {
       logger.error('reaper: failed to republish a still-pending judgment for an overdue run', {
         judgmentId: judgment.id,
@@ -177,7 +303,10 @@ async function sweepOverdueRuns(): Promise<void> {
 
   const overdueRuns = await prisma.evaluationRun.findMany({
     where: { status: { in: ['pending', 'judging'] }, deadlineAt: { lt: new Date(now) } },
-    select: { id: true, deadlineAt: true },
+    // v2j: triggeredById is the owner half of the endpoint identity a lane is
+    // resolved from. Selected here, on a query that was already reading these
+    // rows, so `republishPendingForRun` needs no extra round trip for it.
+    select: { id: true, deadlineAt: true, triggeredById: true },
   });
 
   for (const run of overdueRuns) {
@@ -188,7 +317,7 @@ async function sweepOverdueRuns(): Promise<void> {
       await forceFinalizeAbandonedRun(run.id);
     } else {
       // eslint-disable-next-line no-await-in-loop -- see above
-      await republishPendingForRun(run.id);
+      await republishPendingForRun(run.id, run.triggeredById);
     }
   }
 }

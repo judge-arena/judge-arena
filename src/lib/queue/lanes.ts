@@ -49,6 +49,7 @@
  * Map acceptable here; if rows ever became mutable this cache becomes a bug.
  */
 import { prisma } from '@/lib/db';
+import { logger, serializeError } from '@/lib/logger';
 
 /**
  * How many lane queues exist. Bounded on purpose: each lane is a durable quorum
@@ -156,13 +157,34 @@ export async function laneIndexFor(laneKey: string): Promise<number> {
 
 /**
  * The queue a judgment should be published to. Returns the fallback queue when
- * the lane cannot be resolved — never throws, because failing to ROUTE a
- * judgment must not fail the run that created it.
+ * the lane cannot be resolved, and NEVER THROWS — the try/catch below is what
+ * makes that sentence true rather than aspirational.
+ *
+ * It was aspirational when first written, which is the reason this comment is
+ * this long. `laneIndexFor` awaits two Prisma calls, so a pool exhaustion or a
+ * statement timeout propagated straight out of here. The worst call site is
+ * `launchSingleRun`: a throw there aborts the publish loop and compensates the
+ * entire run to `status: 'error'`. That is a LOST RUN caused by a routing
+ * optimisation — the judgments were valid, the judge was reachable, and the
+ * only thing that failed was deciding which queue to name.
+ *
+ * Losing lane isolation is a performance regression; losing the publish is lost
+ * work. Those are not comparable, so this degrades rather than fails, and it
+ * logs at WARN because silently falling back would hide a database problem
+ * behind nothing worse than slower runs.
  */
 export async function laneQueueFor(
   endpointUrl: string | null | undefined,
   judgeModelVersionId: string
 ): Promise<string> {
-  const index = await laneIndexFor(laneKeyFor(endpointUrl, judgeModelVersionId));
-  return index < 0 ? LANE_FALLBACK_QUEUE : laneQueue(index);
+  try {
+    const index = await laneIndexFor(laneKeyFor(endpointUrl, judgeModelVersionId));
+    return index < 0 ? LANE_FALLBACK_QUEUE : laneQueue(index);
+  } catch (error) {
+    logger.warn('laneQueueFor: lane resolution failed — falling back to the shared queue', {
+      judgeModelVersionId,
+      error: serializeError(error),
+    });
+    return LANE_FALLBACK_QUEUE;
+  }
 }

@@ -94,7 +94,9 @@ import type { Channel, ConsumeMessage } from 'amqplib';
 import type { RunProtocol } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { logger, serializeError } from '@/lib/logger';
-import { publishJudgmentExecute, type RunCreateMsg } from '@/lib/queue/publish';
+import { publishJudgmentExecute, resolveDestinationQueue, type RunCreateMsg } from '@/lib/queue/publish';
+import { LANE_FALLBACK_QUEUE } from '@/lib/queue/lanes';
+import { resolveEndpointsForVersions } from '@/lib/endpoint-resolution';
 import { deriveRunMode } from '@/lib/run-mode';
 
 const EVALUATION_MODEL_TIMEOUT_MS = Number(process.env.EVALUATION_MODEL_TIMEOUT_MS ?? '120000');
@@ -311,8 +313,44 @@ export function createRunCreateConsumer(): RunCreateConsumer {
 
       const judgments = await prisma.modelJudgment.findMany({
         where: { runId: run.id },
-        select: { id: true },
+        // v2j: judgeModelVersionId is the key a lane is resolved per.
+        select: { id: true, judgeModelVersionId: true },
       });
+
+      // ── Lane routing (v2j), batched ─────────────────────────────────────
+      // ONE endpoint query for the whole expansion, not one per judgment: a
+      // `run.create` message is single-user by construction
+      // (`runSpec.triggeredById` owns every judgment it expands to), so the
+      // batch is over the run's DISTINCT judge versions — which is exactly
+      // `modelSelections`, already deduped above. `resolveEndpointsForVersions`
+      // is the same resolver `judgment-consumer.ts` executes through, so the
+      // lane names the server this judgment will actually be sent to.
+      //
+      // Lane assignment then runs concurrently over those distinct versions
+      // (`laneIndexFor` is INSERT .. ON CONFLICT DO NOTHING — built to race),
+      // and `resolveDestinationQueue` cannot throw, so nothing here can turn a
+      // successful expansion into `recordExpansionFailure`.
+      const endpoints = await resolveEndpointsForVersions(
+        msg.runSpec.triggeredById,
+        modelSelections.map((sel) => sel.judgeModelVersionId)
+      );
+      // Keyed `string | null`: `ModelJudgment.judgeModelVersionId` is nullable
+      // in the schema, so a null-version row misses every key and takes the
+      // fallback below instead of needing a sentinel key.
+      const laneByVersion = new Map<string | null, string>(
+        await Promise.all(
+          modelSelections.map(
+            async (sel) =>
+              [
+                sel.judgeModelVersionId,
+                await resolveDestinationQueue(
+                  endpoints.get(sel.judgeModelVersionId)?.endpoint,
+                  sel.judgeModelVersionId
+                ),
+              ] as const
+          )
+        )
+      );
 
       // Post-commit: publishing must never happen inside the DB transaction
       // (holding it open across network round trips to RabbitMQ, and
@@ -320,7 +358,15 @@ export function createRunCreateConsumer(): RunCreateConsumer {
       // would desync the two systems).
       for (const judgment of judgments) {
         // eslint-disable-next-line no-await-in-loop -- sequential confirmed publishes, one run.create message expands to at most a handful of judge versions; not worth Promise.all's harder-to-reason-about partial-failure semantics here
-        await publishJudgmentExecute({ judgmentId: judgment.id, runId: run.id, attempt: 1 });
+        await publishJudgmentExecute(
+          { judgmentId: judgment.id, runId: run.id, attempt: 1 },
+          // Fallback rather than `undefined`: a judgment row can only exist
+          // for a version in `modelSelections`, so this is unreachable — but
+          // an undefined routing key would be published to the empty string
+          // and silently discarded by the direct exchange, which is a lost
+          // judgment. The fallback queue is consumed.
+          laneByVersion.get(judgment.judgeModelVersionId) ?? LANE_FALLBACK_QUEUE
+        );
       }
 
       ch.ack(raw);

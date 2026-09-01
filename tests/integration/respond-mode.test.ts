@@ -3,7 +3,8 @@ import { getServerSession } from 'next-auth';
 import type { Channel, ConsumeMessage } from 'amqplib';
 import { prisma } from '@/lib/db';
 import { closeRabbit, getRabbit } from '@/lib/queue/connection';
-import { assertTopology, QUEUE_JUDGMENT_EXECUTE, QUEUE_RUN_CREATE } from '@/lib/queue/topology';
+import { assertTopology, QUEUE_RUN_CREATE } from '@/lib/queue/topology';
+import { LANE_FALLBACK_QUEUE, LANE_QUEUES } from '@/lib/queue/lanes';
 import type { JudgmentExecuteMsg, RunCreateMsg } from '@/lib/queue/publish';
 import { launchSingleRun, launchBulkRunCreates } from '@/lib/run-launch';
 import {
@@ -78,6 +79,29 @@ async function drainQueue(ch: Channel, queue: string, quietMs = 400): Promise<Co
   });
 
   return messages;
+}
+
+/** ── v2j lane routing ───────────────────────────────────────────────────────
+ * A `judgment.execute` message is no longer published to one known queue:
+ * `publishJudgmentExecute` routes it to the LANE for the judge's endpoint
+ * origin (src/lib/queue/lanes.ts), and which lane that is depends on
+ * `QueueLane` assignment order — not something a test can name as a constant.
+ *
+ * These assertions were never about the queue NAME; they are about "was this
+ * judgment enqueued for execution at all". So they drain every queue a
+ * judgment can legally land on: the 8 lanes plus `LANE_FALLBACK_QUEUE`, which
+ * is the original `judgment.execute` and is kept and consumed forever. The
+ * lane CHOICE is asserted where it belongs, in
+ * tests/db/lane-publishing.test.ts. */
+const EXECUTE_QUEUES = [...LANE_QUEUES, LANE_FALLBACK_QUEUE];
+
+async function purgeExecuteQueues(ch: Channel): Promise<void> {
+  await Promise.all(EXECUTE_QUEUES.map((queue) => ch.purgeQueue(queue)));
+}
+
+async function drainExecuteQueues(ch: Channel, quietMs = 400): Promise<ConsumeMessage[]> {
+  const drained = await Promise.all(EXECUTE_QUEUES.map((queue) => drainQueue(ch, queue, quietMs)));
+  return drained.flat();
 }
 
 function fakeMessage(payload: unknown): ConsumeMessage {
@@ -278,7 +302,7 @@ describe('respond-mode: single run (launchSingleRun + judgment-consumer)', () =>
 
     const { confirmChannel } = await getRabbit();
     await assertTopology(confirmChannel);
-    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_EXECUTE);
+    await purgeExecuteQueues(confirmChannel);
 
     const result = await launchSingleRun({ evaluationId: evaluation.id, triggeredById: user.id });
     createdRunIds.push(result.run.id);
@@ -295,7 +319,7 @@ describe('respond-mode: single run (launchSingleRun + judgment-consumer)', () =>
       await trackJudgeIdentity(judgment.judgeModelVersionId!);
     }
 
-    const published = await drainQueue(confirmChannel, QUEUE_JUDGMENT_EXECUTE);
+    const published = await drainExecuteQueues(confirmChannel);
     expect(published).toHaveLength(2);
 
     // `provider` (judge seam) deliberately NOT injected — if mode
@@ -366,7 +390,7 @@ describe('respond-mode: bulk launch (launchBulkRunCreates + run-create-consumer)
       await trackJudgeIdentity(sel.judgeModelVersionId);
     }
 
-    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_EXECUTE);
+    await purgeExecuteQueues(confirmChannel);
     const runCreateConsumer = createRunCreateConsumer();
     const rcCh = fakeChannel();
     await runCreateConsumer.handle(fakeMessage(msg), rcCh);
@@ -381,7 +405,7 @@ describe('respond-mode: bulk launch (launchBulkRunCreates + run-create-consumer)
     expect(judgments).toHaveLength(1);
     expect(judgments[0].promptTemplateId).toBeNull(); // mode-conditional gate — no rubric template resolved for respond expansion
 
-    const executePublished = await drainQueue(confirmChannel, QUEUE_JUDGMENT_EXECUTE);
+    const executePublished = await drainExecuteQueues(confirmChannel);
     expect(executePublished).toHaveLength(1);
 
     const calls: RunProviderResponseInput[] = [];
@@ -420,7 +444,7 @@ describe('mode-dispatch regression: judge and respond runs handled by the SAME c
 
     const { confirmChannel } = await getRabbit();
     await assertTopology(confirmChannel);
-    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_EXECUTE);
+    await purgeExecuteQueues(confirmChannel);
 
     const judgeLaunch = await launchSingleRun({ evaluationId: judgeEval.id, triggeredById: user.id });
     createdRunIds.push(judgeLaunch.run.id);
@@ -442,7 +466,7 @@ describe('mode-dispatch regression: judge and respond runs handled by the SAME c
       providerResponse: fakeRespondProvider(respondCalls),
     });
 
-    const published = await drainQueue(confirmChannel, QUEUE_JUDGMENT_EXECUTE);
+    const published = await drainExecuteQueues(confirmChannel);
     expect(published).toHaveLength(2);
     for (const raw of published) {
       const msg = JSON.parse(raw.content.toString()) as JudgmentExecuteMsg;
@@ -484,7 +508,7 @@ describe('respond-mode: human best-model selection completes the run (human-judg
 
     const { confirmChannel } = await getRabbit();
     await assertTopology(confirmChannel);
-    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_EXECUTE);
+    await purgeExecuteQueues(confirmChannel);
 
     const launch = await launchSingleRun({ evaluationId: evaluation.id, triggeredById: user.id });
     createdRunIds.push(launch.run.id);
@@ -492,7 +516,7 @@ describe('respond-mode: human best-model selection completes the run (human-judg
       await trackJudgeIdentity(judgment.judgeModelVersionId!);
     }
 
-    const published = await drainQueue(confirmChannel, QUEUE_JUDGMENT_EXECUTE);
+    const published = await drainExecuteQueues(confirmChannel);
     const consumer = createJudgmentConsumer({ providerResponse: fakeRespondProvider([]) });
     for (const raw of published) {
       const msg = JSON.parse(raw.content.toString()) as JudgmentExecuteMsg;

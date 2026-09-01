@@ -2,7 +2,8 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Channel, ConsumeMessage } from 'amqplib';
 import { prisma } from '@/lib/db';
 import { closeRabbit, getRabbit } from '@/lib/queue/connection';
-import { assertTopology, QUEUE_JUDGMENT_EXECUTE } from '@/lib/queue/topology';
+import { assertTopology } from '@/lib/queue/topology';
+import { LANE_FALLBACK_QUEUE, LANE_QUEUES, laneQueueFor } from '@/lib/queue/lanes';
 import type { JudgmentExecuteMsg } from '@/lib/queue/publish';
 import { getConnectedRedis } from '@/lib/redis';
 import { maybeFinalizeRun, markRunCompleted } from '@/lib/run-finalizer';
@@ -103,6 +104,29 @@ async function drainQueue(ch: Channel, queue: string, quietMs = 400): Promise<Co
   });
 
   return messages;
+}
+
+/** ── v2j lane routing ───────────────────────────────────────────────────────
+ * A `judgment.execute` message is no longer published to one known queue:
+ * `publishJudgmentExecute` routes it to the LANE for the judge's endpoint
+ * origin (src/lib/queue/lanes.ts), and which lane that is depends on
+ * `QueueLane` assignment order — not something a test can name as a constant.
+ *
+ * These assertions were never about the queue NAME; they are about "was this
+ * judgment enqueued for execution at all". So they drain every queue a
+ * judgment can legally land on: the 8 lanes plus `LANE_FALLBACK_QUEUE`, which
+ * is the original `judgment.execute` and is kept and consumed forever. The
+ * lane CHOICE is asserted where it belongs, in
+ * tests/db/lane-publishing.test.ts. */
+const EXECUTE_QUEUES = [...LANE_QUEUES, LANE_FALLBACK_QUEUE];
+
+async function purgeExecuteQueues(ch: Channel): Promise<void> {
+  await Promise.all(EXECUTE_QUEUES.map((queue) => ch.purgeQueue(queue)));
+}
+
+async function drainExecuteQueues(ch: Channel, quietMs = 400): Promise<ConsumeMessage[]> {
+  const drained = await Promise.all(EXECUTE_QUEUES.map((queue) => drainQueue(ch, queue, quietMs)));
+  return drained.flat();
 }
 
 // ─── Fixture helpers ────────────────────────────────────────────────────────
@@ -422,7 +446,7 @@ describe('reaper (src/worker/reaper.ts): stale-judgment resweep end-to-end', () 
 
     const { confirmChannel } = await getRabbit();
     await assertTopology(confirmChannel);
-    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_EXECUTE);
+    await purgeExecuteQueues(confirmChannel);
 
     await runReaperSweep();
 
@@ -430,7 +454,17 @@ describe('reaper (src/worker/reaper.ts): stale-judgment resweep end-to-end', () 
     expect(afterSweep.status).toBe('pending');
     expect(afterSweep.attemptCount).toBe(1); // reaper does NOT bump attemptCount — see reaper.ts's doc
 
-    const published = await drainQueue(confirmChannel, QUEUE_JUDGMENT_EXECUTE);
+    // v2j: the republish goes back to the judgment's OWN lane, not to the
+    // shared fallback queue. Asserted by draining that one lane rather than
+    // everything: a reaper that republished onto `judgment.execute` would
+    // silently un-lane every judgment it touched — exactly when the system is
+    // already unhealthy — and a "drained from somewhere" assertion would stay
+    // green through it. This fixture's endpoint has no URL, so the lane key is
+    // `version:<id>` (see lanes.ts's laneKeyFor).
+    const expectedLane = await laneQueueFor(null, base.version.id);
+    expect(expectedLane).not.toBe(LANE_FALLBACK_QUEUE);
+
+    const published = await drainQueue(confirmChannel, expectedLane);
     expect(published).toHaveLength(1);
     const republished = JSON.parse(published[0].content.toString()) as JudgmentExecuteMsg;
     expect(republished.judgmentId).toBe(judgment.id);
@@ -469,14 +503,14 @@ describe('reaper (src/worker/reaper.ts): stale-judgment resweep end-to-end', () 
 
     const { confirmChannel } = await getRabbit();
     await assertTopology(confirmChannel);
-    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_EXECUTE);
+    await purgeExecuteQueues(confirmChannel);
 
     await runReaperSweep();
 
     const afterSweep = await prisma.modelJudgment.findUniqueOrThrow({ where: { id: judgment.id } });
     expect(afterSweep.status).toBe('running'); // untouched — well within LEASE_MS
 
-    const published = await drainQueue(confirmChannel, QUEUE_JUDGMENT_EXECUTE, 200);
+    const published = await drainExecuteQueues(confirmChannel, 200);
     expect(published).toHaveLength(0);
   });
 });
@@ -499,7 +533,7 @@ describe('reaper (src/worker/reaper.ts): overdue-run handling', () => {
 
     const { confirmChannel } = await getRabbit();
     await assertTopology(confirmChannel);
-    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_EXECUTE);
+    await purgeExecuteQueues(confirmChannel);
 
     await runReaperSweep();
 
@@ -509,7 +543,12 @@ describe('reaper (src/worker/reaper.ts): overdue-run handling', () => {
     const persistedRun = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: run.id } });
     expect(persistedRun.status).toBe('judging'); // not finalized yet
 
-    const published = await drainQueue(confirmChannel, QUEUE_JUDGMENT_EXECUTE);
+    // Same lane assertion as the stale-judgment case above, for the other of
+    // the reaper's two republish paths (`republishPendingForRun`).
+    const expectedLane = await laneQueueFor(null, base.version.id);
+    expect(expectedLane).not.toBe(LANE_FALLBACK_QUEUE);
+
+    const published = await drainQueue(confirmChannel, expectedLane);
     const relevant = published.filter(
       (m) => (JSON.parse(m.content.toString()) as JudgmentExecuteMsg).judgmentId === judgment.id
     );
@@ -540,7 +579,7 @@ describe('reaper (src/worker/reaper.ts): overdue-run handling', () => {
 
     const { confirmChannel } = await getRabbit();
     await assertTopology(confirmChannel);
-    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_EXECUTE);
+    await purgeExecuteQueues(confirmChannel);
 
     await runReaperSweep();
 
@@ -559,7 +598,7 @@ describe('reaper (src/worker/reaper.ts): overdue-run handling', () => {
     // (but still-within-grace) run from an earlier test in this same
     // persistent-DB suite could legitimately still be republishing on its
     // own account.
-    const published = await drainQueue(confirmChannel, QUEUE_JUDGMENT_EXECUTE, 200);
+    const published = await drainExecuteQueues(confirmChannel, 200);
     const relevant = published.filter(
       (m) => (JSON.parse(m.content.toString()) as JudgmentExecuteMsg).judgmentId === judgment.id
     );

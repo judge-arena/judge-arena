@@ -5,10 +5,10 @@ import { closeRabbit, getRabbit } from '@/lib/queue/connection';
 import {
   assertTopology,
   QUEUE_DLQ,
-  QUEUE_JUDGMENT_EXECUTE,
   QUEUE_JUDGMENT_RETRY_30S,
   QUEUE_JUDGMENT_RETRY_5M,
 } from '@/lib/queue/topology';
+import { LANE_FALLBACK_QUEUE, LANE_QUEUES, laneQueueFor } from '@/lib/queue/lanes';
 import { type DlqEnvelope, type JudgmentExecuteMsg, type RunCreateMsg } from '@/lib/queue/publish';
 import { ProviderError } from '@/lib/llm/errors';
 import {
@@ -124,6 +124,23 @@ async function drainQueue(ch: Channel, queue: string, quietMs = 400): Promise<Co
   });
 
   return messages;
+}
+
+/** ── v2j lane routing ───────────────────────────────────────────────────────
+ * A `judgment.execute` message is no longer published to one known queue:
+ * `publishJudgmentExecute` routes it to the LANE for the judge's endpoint
+ * origin (src/lib/queue/lanes.ts), and which lane that is depends on
+ * `QueueLane` assignment order — not something a test can name as a constant.
+ *
+ * So a test that wants a clean slate has to purge every queue a judgment can
+ * legally land on: the 8 lanes plus `LANE_FALLBACK_QUEUE`, which is the
+ * original `judgment.execute` and is kept and consumed forever. Draining, by
+ * contrast, is done per-lane below ON PURPOSE — "it arrived somewhere" would
+ * pass even if lane routing regressed to one shared queue. */
+const EXECUTE_QUEUES = [...LANE_QUEUES, LANE_FALLBACK_QUEUE];
+
+async function purgeExecuteQueues(ch: Channel): Promise<void> {
+  await Promise.all(EXECUTE_QUEUES.map((queue) => ch.purgeQueue(queue)));
 }
 
 // ─── Fixture helpers ────────────────────────────────────────────────────────
@@ -444,7 +461,7 @@ describe('worker claim idempotency (src/worker/claim.ts, judgment-consumer.ts, r
 
     const { confirmChannel } = await getRabbit();
     await assertTopology(confirmChannel);
-    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_EXECUTE);
+    await purgeExecuteQueues(confirmChannel);
 
     const runCreateConsumer = createRunCreateConsumer();
     const msg: RunCreateMsg = {
@@ -497,7 +514,22 @@ describe('worker claim idempotency (src/worker/claim.ts, judgment-consumer.ts, r
       new Set([modelConfig1.id, modelConfig2.id])
     );
 
-    const published = await drainQueue(confirmChannel, QUEUE_JUDGMENT_EXECUTE);
+    // v2j: the expansion publishes each judgment to ITS OWN judge's lane, not
+    // all of them onto one shared queue. Neither fixture endpoint carries a
+    // URL, so each judge lanes by `version:<id>` and the two land on different
+    // lanes. Draining per-lane (rather than "from anywhere") is what makes a
+    // regression to the fallback queue fail here instead of passing.
+    const lanes = await Promise.all([
+      laneQueueFor(null, fixture.version.id),
+      laneQueueFor(null, version2.id),
+    ]);
+    expect(new Set(lanes).size).toBe(2);
+    for (const lane of lanes) expect(lane).not.toBe(LANE_FALLBACK_QUEUE);
+
+    const perLane = await Promise.all(lanes.map((lane) => drainQueue(confirmChannel, lane)));
+    expect(perLane.map((messages) => messages.length)).toEqual([1, 1]);
+
+    const published = perLane.flat();
     expect(published).toHaveLength(2); // exactly once per row, not doubled by the redelivery
     const publishedIds = published
       .map((m) => (JSON.parse(m.content.toString()) as JudgmentExecuteMsg).judgmentId)

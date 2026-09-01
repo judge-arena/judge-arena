@@ -36,12 +36,43 @@
  */
 
 import type { EventEmitter } from 'node:events';
-import { QUEUE_JUDGMENT_EXECUTE, QUEUE_RUN_CREATE } from '@/lib/queue/topology';
+import { LANE_FALLBACK_QUEUE, LANE_QUEUES } from '@/lib/queue/lanes';
+import { QUEUE_RUN_CREATE } from '@/lib/queue/topology';
 
-/** The queues this worker must hold a live consumer on to be doing its job at
- * all. Both are consumed below; this list exists so `/health` has something
- * to compare the live count against. */
-export const WORKER_CONSUMER_QUEUES = [QUEUE_JUDGMENT_EXECUTE, QUEUE_RUN_CREATE] as const;
+/**
+ * The queues this worker must hold a live consumer on to be doing its job at
+ * all: every lane, the fallback that lanes never retire, and `run.create`.
+ * `main.ts` consumes exactly this set; this list exists so `/health` has
+ * something to compare the live registration against.
+ *
+ * ── THIS LIST IS A COMPILE-TIME CONSTANT ON PURPOSE. DO NOT DERIVE IT FROM
+ *    THE BROKER. ───────────────────────────────────────────────────────────
+ * The obvious-looking "improvement" is to ask RabbitMQ which queues have
+ * consumers and check that they match. That inverts the detector into a
+ * tautology: a lane whose `consume()` never fired has no consumer AND is not
+ * in the broker-derived expectation, so the two agree and /health says
+ * healthy. This is the exact shape of the 2026-08-24 -> 08-29 outage, where
+ * every check was about a dependency being reachable and none was about this
+ * process doing its job. The expectation has to come from the SOURCE — what
+ * this build intends to consume — so that reality failing to meet it is
+ * visible.
+ *
+ * Adding a lane (`LANE_COUNT` in lanes.ts) therefore raises
+ * `EXPECTED_CONSUMER_COUNT` automatically, and a worker that declares nine
+ * lanes but consumes eight reports 503 rather than a comfortable 200.
+ *
+ * `LANE_FALLBACK_QUEUE` and `QUEUE_JUDGMENT_EXECUTE` are the SAME string; the
+ * fallback name is used here because "the queue lanes fall back to" is why it
+ * is still consumed. Listing both would make `EXPECTED_CONSUMER_COUNT` one
+ * higher than the number of distinct queues the registry can ever hold, and
+ * /health would then be permanently degraded — `tests/lib/worker-health.test.ts`
+ * asserts the list has no duplicates for exactly that reason.
+ */
+export const WORKER_CONSUMER_QUEUES: readonly string[] = [
+  ...LANE_QUEUES,
+  LANE_FALLBACK_QUEUE,
+  QUEUE_RUN_CREATE,
+];
 export const EXPECTED_CONSUMER_COUNT = WORKER_CONSUMER_QUEUES.length;
 
 /**
@@ -72,8 +103,18 @@ export interface ConsumerRegistry {
    * deleted, mirrored-queue failover), which amqplib surfaces as a `null`
    * message to the consume callback. */
   unregister(queue: string, reason: string): void;
-  /** Drop every consumer — channel or connection level loss. */
-  clear(reason: string): void;
+  /**
+   * Drop consumers on a channel/connection level loss.
+   *
+   * `queues` SCOPES the clear, and it exists because the worker now runs its
+   * consumers on TWO channels (see main.ts): the lane channel and the shared
+   * confirm channel. An unscoped clear from the lane channel's 'close' would
+   * report `run.create` as lost while it is still happily consuming — which is
+   * a lie in the safe direction, but it also erases the tag drain() needs to
+   * cancel it with. Omitted means "everything", which is what a connection
+   * loss means.
+   */
+  clear(reason: string, queues?: readonly string[]): void;
   /** Mark a deliberate shutdown, so the losses that follow are reported as
    * `draining` rather than as the incident (see `drain()`). */
   beginDrain(): void;
@@ -81,6 +122,17 @@ export interface ConsumerRegistry {
   draining(): boolean;
   /** Consumer tags to `channel.cancel()` during drain. */
   tags(): string[];
+  /**
+   * Queue + tag pairs, for a drain that must cancel each tag on the channel
+   * that owns it. `tags()` alone was enough when every consumer lived on one
+   * channel; cancelling a lane's tag on the shared confirm channel is a
+   * broker-side error that would close the channel the drain still needs.
+   */
+  entries(): Array<{ queue: string; tag: string }>;
+  /** Which of `WORKER_CONSUMER_QUEUES` currently have no live consumer.
+   *  Reported by /health so "9 of 10" says WHICH one, rather than making an
+   *  operator diff two lists by hand at 3am. */
+  missing(expected?: readonly string[]): string[];
 }
 
 /**
@@ -114,8 +166,8 @@ export function createConsumerRegistry(
     unregister(queue, reason) {
       drop(reason, [queue]);
     },
-    clear(reason) {
-      drop(reason, [...tagByQueue.keys()]);
+    clear(reason, queues) {
+      drop(reason, [...(queues ?? tagByQueue.keys())]);
     },
     beginDrain() {
       // Only flips the flag — the tags stay readable so drain()'s cancel loop
@@ -125,6 +177,9 @@ export function createConsumerRegistry(
     registered: () => tagByQueue.size,
     draining: () => draining,
     tags: () => [...tagByQueue.values()],
+    entries: () => [...tagByQueue].map(([queue, tag]) => ({ queue, tag })),
+    missing: (expected = WORKER_CONSUMER_QUEUES) =>
+      expected.filter((queue) => !tagByQueue.has(queue)),
   };
 }
 
@@ -139,20 +194,30 @@ export function createConsumerRegistry(
  *
  * FOLLOW-UP (tier 2, deliberately NOT implemented here): re-registration
  * belongs in these same 'close' handlers — await a fresh `getRabbit()` with
- * backoff, re-`prefetch`, re-`consume` both queues, `register()` each new
+ * backoff, re-`prefetch`, re-`consume` every queue, `register()` each new
  * tag. It does NOT belong in `src/lib/queue/connection.ts`'s reconnect loop:
  * that module is shared with the web tier, which publishes and never
  * consumes. Until that lands, this fix only makes the loss VISIBLE (503 ->
  * readiness -> KubeDeploymentReplicasMismatch); recovery is a pod restart.
+ *
+ * @param queues the consumers this emitter pair owns. Called once per CHANNEL
+ * now that lanes live on their own (main.ts), so a lane-channel failure clears
+ * the lanes and leaves `run.create`'s registration — and its cancellable tag —
+ * intact. Omit for "this emitter owns everything". A connection loss fires
+ * both channels' listeners (amqplib's `_closeChannels` calls `toClosed()` on
+ * every channel under a dying connection), so the scoped clears still add up
+ * to a full clear; the visible cost is two log lines for one failure, each
+ * naming a scope that really was lost.
  */
 export function trackConsumerRegistration(
   registry: ConsumerRegistry,
-  amqp: { conn: EventEmitter; channel: EventEmitter }
+  amqp: { conn: EventEmitter; channel: EventEmitter },
+  queues?: readonly string[]
 ): void {
-  amqp.channel.on('close', () => registry.clear('amqp channel closed'));
-  amqp.channel.on('error', () => registry.clear('amqp channel error'));
-  amqp.conn.on('close', () => registry.clear('amqp connection closed'));
-  amqp.conn.on('error', () => registry.clear('amqp connection error'));
+  amqp.channel.on('close', () => registry.clear('amqp channel closed', queues));
+  amqp.channel.on('error', () => registry.clear('amqp channel error', queues));
+  amqp.conn.on('close', () => registry.clear('amqp connection closed', queues));
+  amqp.conn.on('error', () => registry.clear('amqp connection error', queues));
 }
 
 export interface WorkerHealthDeps {
@@ -167,6 +232,13 @@ export interface WorkerHealthResult {
   body: {
     status: 'healthy' | 'degraded' | 'draining';
     checks: { rabbitmq: boolean; redis: boolean; database: boolean; consumers: number };
+    /** What `checks.consumers` is compared against — printed so a reader of
+     *  the body never has to know `LANE_COUNT` to interpret the number. */
+    expectedConsumers: number;
+    /** The queues in `WORKER_CONSUMER_QUEUES` with no live consumer. Empty on
+     *  a healthy worker. With ten consumers, "consumers: 9" on its own is an
+     *  invitation to guess; this says `judgment.execute.lane.3`. */
+    missingConsumers: string[];
   };
 }
 
@@ -200,15 +272,26 @@ export async function evaluateWorkerHealth(deps: WorkerHealthDeps): Promise<Work
   ]);
   const consumers = deps.consumers.registered();
   const draining = deps.consumers.draining();
+  const missingConsumers = deps.consumers.missing();
 
-  const healthy =
-    rabbitmq && redis && database && consumers >= EXPECTED_CONSUMER_COUNT && !draining;
+  // `missingConsumers.length === 0` rather than `consumers >= EXPECTED`: a
+  // count comparison passes whenever the worker holds the right NUMBER of
+  // consumers, even on the wrong SET. With one shared queue that was a
+  // distinction without a difference; with eight lane names built by string
+  // interpolation (`laneQueue(i)`, lanes.ts) it is not — a consume loop that
+  // is off by one registers a live consumer on a queue nobody publishes to
+  // while a real lane sits dark, and the count still says 10. The count stays
+  // in the body because it is the number the incident report cited, but the
+  // healthy/degraded conjunction is driven by the set.
+  const healthy = rabbitmq && redis && database && missingConsumers.length === 0 && !draining;
 
   return {
     statusCode: healthy ? 200 : 503,
     body: {
       status: draining ? 'draining' : healthy ? 'healthy' : 'degraded',
       checks: { rabbitmq, redis, database, consumers },
+      expectedConsumers: EXPECTED_CONSUMER_COUNT,
+      missingConsumers,
     },
   };
 }
