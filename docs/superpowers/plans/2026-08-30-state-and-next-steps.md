@@ -10,6 +10,12 @@ turned out to be false, and they are called out as corrections rather than quiet
 
 ---
 
+> **SUPERSEDED FOR STATUS, 2026-09-01.** The current state of the world, the scoreboard, the traps
+> and the prioritised open list are in
+> [`2026-09-01-scoreboard-handoff.md`](./2026-09-01-scoreboard-handoff.md). **This document's §5.5
+> and §5.6 follow-up registers remain the canonical list of open items** and are referenced from
+> there; its corrections and traps are still accurate. Read the handoff first, then this.
+
 ## UPDATE 2026-09-01 — THREE JUDGES SCORED, AND A SCOREBOARD TO PUT THEM ON
 
 **The two update blocks below remain accurate; this is the delta on top of both.**
