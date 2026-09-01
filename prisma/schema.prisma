@@ -1095,3 +1095,37 @@ model GoldenAssignment {
   @@index([goldenSetId, annotatorId])
   @@index([annotatorId, revokedAt])
 }
+
+/// A2.1 / queue lanes: the permanent lane assignment for one SERIALIZATION
+/// DOMAIN — a normalized inference-server origin such as
+/// `http://192.168.1.9:11434`, or `version:<judgeModelVersionId>` for a judge
+/// with no endpoint URL (an elastic hosted API, which is rate-limited rather
+/// than slot-limited and needs no server-level serialization).
+///
+/// WHY A TABLE AND NOT A HASH. The obvious design routes by a consistent hash
+/// of the key into N shards. It has a birthday problem: at two distinct
+/// origins and 32 shards there is a ~3% chance both land on one shard, and
+/// the entire change then ships and does nothing — silently, permanently, and
+/// undetectably from shard depth alone. The key space here is tiny and
+/// slow-moving (2 servers today, perhaps 10 in a year), so assignment can
+/// simply be recorded instead of computed.
+///
+/// Three properties that follow, none of which hashing has:
+///   - ZERO collisions for the first LANE_COUNT origins. Not usually — always.
+///   - Growing LANE_COUNT is nearly free: `(id-1) % 8 == (id-1) % 32` for
+///     id <= 8, so existing origins keep their exact lane and only new ones
+///     move. A consistent hash reshuffles a fraction of ALL keys.
+///   - `SELECT * FROM "QueueLane"` answers "what is on lane 5" and "who is
+///     starved". Shard depth cannot.
+///
+/// `id` is the assignment ORDER and is load-bearing — the lane is derived from
+/// it. Rows are never deleted: a deletion would renumber nothing (ids are not
+/// reused) but would let a live origin be re-assigned to a different lane
+/// while messages for it are still queued on the old one.
+model QueueLane {
+  id        Int      @id @default(autoincrement())
+  /// Normalized origin (scheme://host:port, lowercased, explicit port, no
+  /// path) or `version:<id>`. Unique because the assignment must be stable.
+  laneKey   String   @unique
+  createdAt DateTime @default(now())
+}
