@@ -10,6 +10,42 @@ turned out to be false, and they are called out as corrections rather than quiet
 
 ---
 
+## UPDATE 2026-09-01 — THREE JUDGES SCORED, AND A SCOREBOARD TO PUT THEM ON
+
+**The two update blocks below remain accurate; this is the delta on top of both.**
+
+Production is at **`sha-414e826a3ba3`**. Nine calibration runs now exist across **three distinct
+judge models** on two inference servers. The full ledger, the per-model throughput envelopes, and the
+traps that will corrupt a leaderboard built from them are in
+[`docs/superpowers/specs/2026-09-01-judge-scoreboard-and-model-envelopes.md`](../specs/2026-09-01-judge-scoreboard-and-model-envelopes.md).
+
+**The headline, and it is not the top score.** On this golden set a judge that stamps `A>B` on every
+item scores **0.5667**, because the answer key is 17/13. `granite4.1:3b` scored **0.5000** — *below*
+the constant. An accuracy that reads as a weak-but-real signal was in fact worse than a stamp, and
+nothing in the report says so, because the floor is never computed. That is now follow-up §5.6/7 and
+it is a display bug with real consequence: the leaderboard's whole job is to rank, and it currently
+cannot tell "learned a little" from "learned nothing and guesses A".
+
+**The best recorded result is Qwen3.6-35B-A3B at `max_tokens: 12288` — accuracy 0.8667, κ 0.7285,
+30/30.** Raising the budget from 8192 both eliminated truncation *and* improved accuracy, which is
+the ordinary result that a reasoning model given headroom uses it. On 30 items that is one extra
+correct item; treat it as directional, not significant.
+
+**Two structural findings outrank both numbers:**
+
+1. **`CalibrationRun` does not snapshot the sampling config.** Editing a judge's `samplingDefaults`
+   silently rewrites what the obvious join reports about *past* runs. §5.6/6.
+2. **`max_tokens` and the timeout are stacked limits.** Fixing truncation on granite4.2 by raising
+   the budget to 12288 exposed a 300 s wall underneath it — the model emits ~35 tok/s, so the budget
+   was unreachable by construction. This is what forced the escalating-timeout promote mid-session.
+   §5.6/8, and runbook §8.6.
+
+**One thing worth carrying forward as method:** two `granite4.1:3b` runs 14 hours apart produced
+**bit-identical verdicts on all 30 items**. That is a reproducibility check on the whole path —
+prompt assembly, ordering, parsing — for 108 seconds of compute. Re-run it after any change to those.
+
+---
+
 ## UPDATE 2026-08-31 — A2.1 SHIPPED, AND THIS PRODUCT PRODUCED ITS FIRST NUMBER
 
 **Everything in §§0–6 below was true on 2026-08-30 and is left as written.** This section is the
@@ -366,6 +402,42 @@ There is no `frozenAt` column and no unfreeze verb.
 5. **Run-grain `status` can be stale.** Five `EvaluationRun` rows read `error` on run 1 while only
    four `ModelJudgment` rows did (§7.2). Scoring reads the judgment and is right; any ad-hoc SQL that
    counts runs will disagree by one. Small, and it will mislead someone.
+
+### 5.6 Follow-ups added 2026-09-01 (the scoreboard session)
+
+Full record: [`docs/superpowers/specs/2026-09-01-judge-scoreboard-and-model-envelopes.md`](../specs/2026-09-01-judge-scoreboard-and-model-envelopes.md).
+
+6. **`CalibrationRun` does not snapshot the sampling config, and `samplingDefaults` is mutable.**
+   The obvious join — run → version → `samplingDefaults` — reports **today's** config for a
+   historical run. Raising granite4.2 from 4096 to 12288 for a re-run silently rewrote what that
+   query says about the *earlier* run, with nothing updated and nothing logged. The truth survives
+   one level deeper on `ModelJudgment.samplingParams`, which is written per call and never revised.
+   **This is the highest-value item in this list**, because a leaderboard is exactly the artifact
+   that will do the wrong join. `rubricId`, `kappaVariant` and `passThreshold` are already pinned on
+   the run for precisely this reason; `samplingDefaults` was missed. Additive, one column.
+
+7. **`granite4.1:3b` scores BELOW the degenerate baseline and nothing on screen says so.** It scored
+   0.5000 where a judge that stamps `A>B` on every item scores **0.5667** on this set. The floor is a
+   property of the answer key (17/13) and is computable at score time, but it is not computed or
+   displayed anywhere — so a reader compares 0.5000 against an imagined 0.50 coin flip and concludes
+   "weak but real". `score.ts`'s header already derives the 0.5667 figure in prose. **Emit it beside
+   the accuracy.**
+
+8. **Two limits are stacked and only one is visible.** Fixing truncation by raising `max_tokens`
+   exposed a timeout ceiling underneath it (`max_tokens / tok_per_s` must fit the hard cap). Nothing
+   validates that relationship at registration, though both inputs are known: the endpoint verify step
+   could measure `tok_per_s` on its probe call and refuse — or warn on — a budget the timeout cannot
+   afford. Runbook §8.6 documents the manual check; **the check wants to be code.**
+
+9. **`reasoningTokens` from Ollama — now answerable.** Item 2 above asked what Ollama sends. It sends
+   nothing either: the column is NULL across all granite runs, same as llama.cpp. So the field is
+   currently unpopulated on *every* self-hosted backend, which makes it dead weight in the capture
+   completeness report rather than a gap in one backend. Decide whether to derive it or drop it from
+   the checklist.
+
+10. **`judge.dlq` is now at 10, up from the 4 in item 3.** Still no consumer, still no replay verb.
+   The depth grew during ordinary operation, which is the argument item 3 was missing — this is not a
+   one-off residue from run 1, it is an accumulating sink.
 
 ---
 

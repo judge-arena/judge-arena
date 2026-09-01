@@ -20,6 +20,15 @@ is named** rather than resolved by preference — see §2.4 and §3.4.
 
 ---
 
+> **SUPERSEDED IN PART, 2026-09-01.** The method, the storage numbers and the concurrency lesson
+> below all stand. What has moved is the *result set*: three judge models have now been scored across
+> nine runs, and the baseline named in §1 is no longer the best recorded number. The running ledger,
+> the per-model throughput envelopes, and two traps this document could not have known about —
+> `CalibrationRun` not snapshotting the sampling config, and `max_tokens`/timeout being **stacked**
+> limits — are in
+> [`2026-09-01-judge-scoreboard-and-model-envelopes.md`](./2026-09-01-judge-scoreboard-and-model-envelopes.md).
+> Read §1 below as the first careful measurement, not as the current standing.
+
 ## 0. If you read one thing
 
 > **Qwen3.6-35B-A3B scores 0.8333 accuracy — 25 of 30 — against `JudgeBenchSample — 30 random`,

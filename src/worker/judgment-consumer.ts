@@ -177,6 +177,7 @@ import type {
   RespondResult as RegistryRespondResult,
   PairwiseResult as RegistryPairwiseResult,
   SamplingParams,
+  TimeoutEscalationContext,
 } from '@/lib/llm';
 import { maybeFinalizeRun } from '@/lib/run-finalizer';
 import { deriveRunMode } from '@/lib/run-mode';
@@ -314,24 +315,52 @@ export type ProviderFn = (input: RunProviderJudgmentInput) => Promise<JudgmentRe
  * adapter object needed); `registry.ts`'s `runProviderJudgment` owns the
  * `baseModel`-unset and key-resolution guards (moved there in Task 10, see
  * module doc). */
-export const defaultRunProviderJudgment: ProviderFn = async (input) => {
-  const { run, rubric, version, endpoint, judgment } = input;
-
-  // ── The escalating timeout's inputs ───────────────────────────────────────
-  // Without this block the policy is INERT: `execute()` falls back to a single
-  // fixed budget, a hard-cap abort stays `retryable` so it burns the full
-  // 3-attempt budget instead of stopping after two, and the 5-minute alert
-  // never fires with a baseline. The module is only a policy; this is where the
-  // facts it decides on come from.
-  //
-  // `attempt` is the larger of the queue message's attempt and the row's own
-  // counter: a redelivery after a broker hiccup can arrive with a stale message
-  // attempt, and under-counting here would grant a third 15-minute try.
-  //
-  // The baseline read is one indexed aggregate per judgment and deliberately
-  // NOT fatal — a judge with no history is exactly the "first record" case the
-  // owner asked to be forgiving about, so a failure to load history must not
-  // fail the judgment that would have created the first data point.
+/**
+ * The escalating timeout's inputs, for ONE provider call.
+ *
+ * ── WHY THIS IS A FUNCTION AND NOT THREE INLINE BLOCKS ──────────────────────
+ *
+ * It was three inline blocks, and only one of them existed. Shipped
+ * 2026-09-01 in `sha-414e826a3ba3`, the escalation was wired into
+ * `defaultRunProviderJudgment` (pointwise) and into NEITHER
+ * `defaultRunProviderPairwise` NOR `defaultRunProviderResponse` — so the
+ * calibration path, which is pairwise and is the entire reason the feature
+ * was requested, ran without it.
+ *
+ * The failure was silent in the worst way: `execute()` arms its own timers
+ * from `resolveTimeoutBudgets()` unconditionally, so **the hard cap still
+ * aborted and the 5-minute alert still fired.** The feature looked live. What
+ * was missing was the *context*, and each omission degrades quietly:
+ *
+ *   - `attempt` fell back to 1, so `hardCapAbortKind(1)` returned `retryable`
+ *     FOREVER. The owner asked for "two 15-minute attempts, then give up";
+ *     what shipped could burn the full 3-attempt budget at 15 minutes each.
+ *     This is the consequential one.
+ *   - `latencyBaseline` was absent, so the alert claimed "this is the first
+ *     judgment for this judge" against a judge with 26 completed judgments —
+ *     stating the opposite of the truth, in an alert whose entire job is to
+ *     tell an operator whether to worry.
+ *   - `onInitialBudgetElapsed` never fired, so the "alert back to the running
+ *     process" half of the request did not happen at all on this path.
+ *
+ * So the seams take a shared constructor rather than each remembering. A
+ * fourth protocol added later gets it by calling one function, and
+ * `judgment-consumer-escalation.test.ts` asserts every default seam does.
+ *
+ * `attempt` is the ROW's counter, not the message's. claim.ts increments
+ * `attemptCount` on every claim AND every reclaim (:107, :138), so it survives
+ * a redelivery carrying a stale message attempt — and under-counting here
+ * would grant a third 15-minute try after the policy said stop.
+ *
+ * The baseline read is one indexed aggregate per judgment and deliberately
+ * NOT fatal: a judge with no history is exactly the "first record" case the
+ * owner asked to be forgiving about, so a failure to LOAD history must not
+ * fail the judgment that would have CREATED the first data point.
+ */
+async function buildTimeoutEscalation(
+  judgment: JudgmentContext,
+  version: VersionWithJudgeModel
+): Promise<TimeoutEscalationContext> {
   let latencyBaseline: LatencyBaseline | null = null;
   try {
     latencyBaseline = await judgeLatencyBaseline(version.id);
@@ -342,28 +371,27 @@ export const defaultRunProviderJudgment: ProviderFn = async (input) => {
     });
   }
 
+  return {
+    attempt: judgment.attemptCount ?? 1,
+    judgeModelVersionId: version.id,
+    latencyBaseline,
+    onInitialBudgetElapsed: (alert) => {
+      logger.warn('judgment passed the initial timeout budget', {
+        judgmentId: judgment.id,
+        judgeModelVersionId: version.id,
+        ...alert,
+      });
+    },
+  };
+}
+
+export const defaultRunProviderJudgment: ProviderFn = async (input) => {
+  const { run, rubric, version, endpoint, judgment } = input;
+
   const registryInput: RegistryJudgmentInput = {
     judgeVersion: version,
     endpoint,
-    escalation: {
-      // The ROW's counter, not the message's. claim.ts increments attemptCount
-      // on every claim AND every reclaim (:107, :138), so it survives a
-      // redelivery that carries a stale message attempt — and under-counting
-      // here would grant a third 15-minute try after the policy said stop.
-      // The seam deliberately does not carry the message attempt (see
-      // RunProviderJudgmentInput's doc on keeping the fakes unchanged), and
-      // this is the more authoritative of the two anyway.
-      attempt: judgment.attemptCount ?? 1,
-      judgeModelVersionId: version.id,
-      latencyBaseline,
-      onInitialBudgetElapsed: (alert) => {
-        logger.warn('judgment passed the initial timeout budget', {
-          judgmentId: judgment.id,
-          judgeModelVersionId: version.id,
-          ...alert,
-        });
-      },
-    },
+    escalation: await buildTimeoutEscalation(judgment, version),
     // Guarded by the consumer's own `mode === 'judge' && !context.promptTemplate`
     // check before this seam is ever called (see `handle()` below) — the
     // non-null assertion documents that invariant rather than re-checking it.
@@ -405,11 +433,12 @@ export type RespondProviderFn = (input: RunProviderResponseInput) => Promise<Res
  * mirrors v1's `evaluation-run-manager.ts` respond branch exactly:
  * `promptText` if set, else fall back to `inputText`. */
 export const defaultRunProviderResponse: RespondProviderFn = async (input) => {
-  const { run, version, endpoint } = input;
+  const { run, version, endpoint, judgment } = input;
 
   const registryInput: RegistryResponseInput = {
     judgeVersion: version,
     endpoint,
+    escalation: await buildTimeoutEscalation(judgment, version),
     submission: { promptText: run.evaluation.promptText?.trim() || run.evaluation.inputText },
   };
 
@@ -450,6 +479,7 @@ export const defaultRunProviderPairwise: PairwiseProviderFn = async (input) => {
   const registryInput: RegistryJudgmentInput = {
     judgeVersion: version,
     endpoint,
+    escalation: await buildTimeoutEscalation(judgment, version),
     // Guarded by the consumer's own promptTemplate check before this seam
     // is ever called (see `handle()` below).
     template: judgment.promptTemplate!,

@@ -164,3 +164,10 @@ export {
   runProviderResponse,
 } from './registry';
 export type { ProviderDescriptor, SamplingParams, EndpointCredentials, JudgeVersionForExecution } from './registry';
+// Re-exported so the worker's provider seams can name the context they must
+// build. It is deliberately part of the barrel rather than a deep import: the
+// seams are the only correct place to construct one, and a type they cannot
+// reach through the same entry point as `executeJudgment`/`executePairwise` is
+// a type they will quietly omit — which is exactly what happened on the
+// pairwise and respond paths in sha-414e826a3ba3.
+export type { TimeoutEscalationContext } from './registry';

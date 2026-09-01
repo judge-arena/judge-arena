@@ -402,12 +402,26 @@ making a generation chopped in half indistinguishable in the corpus from a finis
 finish reason is almost always "it thought until the budget ran out" — a reasoning model needs
 headroom for the thinking channel *plus* the answer.
 
+> **Check the clock before you raise the budget — see §8.6.** A larger `max_tokens` is a larger
+> *worst-case call duration*, and on a slow local server the new budget may not be reachable inside
+> the timeout at all. Raising it blind converts a truncation failure into a timeout failure, which
+> looks like a regression and is not.
+
+> **Do not copy a budget from a same-size sibling.** `granite4.2:3b` was registered at 4096 because
+> `granite4.1:3b` ran fine there. Same family, same parameter count — and 4.1 emits ~109 output
+> tokens per judgment while 4.2 emits ~1950. Half the set truncated. A budget is a property of the
+> model's *behaviour*, not of its size.
+
 ### 8.3 Timeouts that are really queueing — the run-1 signature
 
 Four items failed with `Provider call to "llamacpp" (...) timed out after 300000ms`. **The model was
 not too slow.** Prefetch was `concurrency(2) × 4 = 8` against a server advertising `total_slots: 2`,
 so six requests queued *inside the inference server* while their client timeout ran. Same judge, same
 set, sequential: zero timeouts and a 42.6 s mean.
+
+**The 300 000 ms in that message is now the INITIAL BUDGET, not the wall** — as of
+`sha-414e826a3ba3` it warns and keeps waiting, and 900 000 ms aborts (§8.7). The diagnosis below is
+unchanged; only the number a timeout message carries has moved.
 
 **Recognising it:** timeouts clustered on the items that queued longest, latencies bunched just under
 the ceiling, and a server whose own slot count is smaller than your in-flight count. Over-subscribing
@@ -443,6 +457,85 @@ On run 1, five `EvaluationRun` rows carried `status='error'` while only four `Mo
 did: one run stayed stamped `error` while its judgment completed on a later attempt. **Scoring reads
 the judgment**, so that item was correctly inside the denominator. Any ad-hoc SQL you write to
 double-check a calibration must do the same, or it will disagree with the report by one.
+
+### 8.6 TWO LIMITS ARE STACKED — fixing `max_tokens` can expose a timeout underneath it
+
+`max_tokens` bounds **how much the model may say**. The timeout bounds **how long you will wait to
+hear it**. They fail in ways that look nothing alike, and only the outer one is visible until you
+remove it.
+
+Observed 2026-09-01 on `granite4.2:3b`. At `max_tokens: 4096`, 15 of 30 items truncated (§8.2) — so
+the fix was obvious and correct: raise it to 12288. The re-run then reached 11/30 and stalled on
+
+```
+Provider call to "ollama" (granite4.2:3b) timed out after 300000ms
+```
+
+**Nothing regressed.** The model emits ~35 output tok/s, so a 12288-token budget needs ~351 s to
+exhaust and the 300 s wall could only ever afford ~8,700 tokens. At 4096 the model was being cut off
+*before* it could run out of time; removing the token ceiling let it run into the clock instead.
+
+**The check is two numbers and one division. Do it at registration, not after a failed run:**
+
+```
+time_to_exhaust_budget = max_tokens / tok_per_s      # must fit under the 900 s hard cap
+max_safe_tokens        = timeout_s  × tok_per_s      # the ceiling your timeout can actually afford
+```
+
+Get `tok_per_s` from a single scored item — `ModelJudgment.outputTokens / (latencyMs/1000)`. The
+recorded envelopes for every judge scored so far are in
+[`docs/superpowers/specs/2026-09-01-judge-scoreboard-and-model-envelopes.md`](../superpowers/specs/2026-09-01-judge-scoreboard-and-model-envelopes.md) §2.
+
+**Recognising which limit you hit:** truncation gives `finishReason: 'length'` with `completion_tokens`
+exactly equal to `max_tokens`, on *every* long item, deterministically. A timeout gives no
+`finishReason` at all, a retry in the worker log, and it clusters on the long items while short ones
+sail through. A run that shows **both** has had its budget raised without its clock checked.
+
+### 8.7 The timeout ESCALATES — 300 s is an alert, not the wall
+
+As of `sha-414e826a3ba3`, `EVALUATION_MODEL_TIMEOUT_MS` (still `"300000"`) is the **initial budget**
+and no longer aborts anything:
+
+| | value | behaviour |
+|---|---|---|
+| initial budget | `EVALUATION_MODEL_TIMEOUT_MS`, 300 000 ms | **warns and keeps waiting** |
+| hard cap | `EVALUATION_MODEL_HARD_CAP_MS`, default 900 000 ms | **aborts** |
+| attempts | 2 | then `non_retryable` |
+
+At 300 s the worker emits `judgment passed the initial timeout budget`. If that judge has completed
+a judgment before, the warning states how far past its own baseline this call is; if it has not, it
+says *confirm model access, waiting 10 more minutes*. **Health means "this judge has returned a
+successful response", not "the server answers a probe"** — a side-channel probe proves the server is
+up, not that this request is progressing, and would happily extend a wedged call to the full 15
+minutes.
+
+> **Do not raise the timeout by environment variable on an older image.** Before this release
+> `claim.ts` derived `LEASE_MS` as `EVALUATION_MODEL_TIMEOUT_MS + 30s`. A 15-minute call under a
+> 330 s lease is **reclaimed by the reaper mid-flight and executed twice** (§8.4). `LEASE_MS` now
+> derives from the hard cap instead (930 s). Setting the env var alone happens to move the lease with
+> it — which is exactly what makes the shortcut look safe — but it forfeits the alert and the
+> attempt policy, and it re-arms the hazard for anyone who later tunes the two numbers apart.
+
+**Sizing `--poll-timeout` against the new cap:** the worst case per item is now 900 s, not 300 s, so a
+run whose tail exceeds the initial budget takes correspondingly longer. Size from the observed mean
+(§4) and let the cap bound the tail; do not size from the cap or you will wait 7.5 hours for 30 items.
+
+### 8.8 Extending a timeout mid-run is SAFE; changing `max_tokens` mid-run is NOT
+
+Both feel like "editing the config while it runs", and they are not the same act.
+
+- **`max_tokens` changes what the model produces.** A truncated answer and a complete one are
+  different data, so a run whose budget moved mid-flight is a mixture of two experiments and is
+  neither one. Let a doomed run finish, mark it void, re-run whole.
+- **A timeout changes only whether the client is still listening.** Judgments already recorded were
+  produced under identical model configuration; only the harness's patience differed. Mixing them
+  with the rest is sound.
+
+Run `cmtircx0x` is the worked example: 11 items completed under the flat 300 s wall, the remaining 19
+under the escalating policy, and the run is internally comparable because the model's own
+configuration never moved. The tell that a run *is* contaminated is §4.1 of the scoreboard spec —
+`SELECT DISTINCT mj."samplingParams"->>'max_tokens'` returning more than one row.
+
 
 ---
 
