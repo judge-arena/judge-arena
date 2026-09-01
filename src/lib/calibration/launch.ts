@@ -40,9 +40,9 @@ import type { GoldenCandidate } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { logger } from '@/lib/logger';
 import { goldenItemLifecycleWhere, isGoldenSetFrozen } from '@/lib/golden-sets';
+import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
 import {
   DEADLINE_SLACK_MS,
-  EVALUATION_MODEL_TIMEOUT_MS,
   launchSingleRun,
   requireOwnedActiveEndpoints,
   resolveCurrentPromptTemplate,
@@ -257,8 +257,46 @@ export async function launchCalibrationRun(
   // a reaper that understands never-started runs — worker-side, out of scope
   // for phase 1. Until then this widened formula is a bound, not a guarantee:
   // a batch queued behind ANOTHER batch can still outlive it.
+  //
+  // ── WHICH BUDGET: THE HARD CAP, NOT THE INITIAL BUDGET ───────────────────
+  // With the escalating timeout (`src/lib/llm/timeout-policy.ts`),
+  // `EVALUATION_MODEL_TIMEOUT_MS` is no longer the longest a provider call may
+  // legitimately run — it is only where the 5-minute alert fires. The longest
+  // legitimate call is `EVALUATION_MODEL_HARD_CAP_MS`, so that is the term this
+  // per-item ceiling has to multiply.
+  //
+  // Keying off the initial budget instead would make the batch deadline
+  // SMALLER THAN THE TIME ONE ITEM MAY LEGITIMATELY TAKE, times N. What the
+  // reaper does to an overdue run is stamp its still-`pending` judgments
+  // `error: 'reaper: abandoned'` (reaper.ts:243-246, three sweeps past the
+  // deadline) — i.e. it kills the QUEUED TAIL, not the in-flight call. The
+  // queued tail is precisely what a longer per-call ceiling makes wait longer:
+  // one item allowed 15 minutes instead of 5 pushes everything behind it out
+  // by the same amount. Before that, from the moment the deadline passes, the
+  // gentler branch (`republishPendingForRun`) re-publishes every pending
+  // judgment of the run once a MINUTE, piling duplicate deliveries onto a lane
+  // that runs one call at a time.
+  //
+  // That is not hypothetical: killing the healthy queued tail is the bug that
+  // cost 4 of 30 items on a real calibration and that the comment above was
+  // written to fix. Keying this off the initial budget would re-arm it from a
+  // new direction.
+  //
+  // The cost of the other direction is bounded and small. 30 items × 15
+  // minutes is a 7.5-hour ceiling, but a ceiling is not an expectation: at the
+  // measured Qwen average of 42.6s (max 95.1s) those 30 items drain in ~21
+  // minutes, and the deadline only matters at all once something is genuinely
+  // stuck. Nor does it delay the OPERATOR noticing — `scripts/calibration/run.ts`
+  // has its own `--poll-timeout` (default 3600s) and, with the sibling change,
+  // reports any judgment running past the initial budget on every 5s poll. So
+  // the human-facing detection bound is unchanged by this; only the database's
+  // last-resort safety net is later.
+  //
+  // Asymmetry, stated plainly: too tight destroys real results and produces a
+  // kappa that lies. Too loose delays a safety net that is already the
+  // slowest of three detectors. Pick loose.
   const deadlineAt = new Date(
-    Date.now() + items.length * EVALUATION_MODEL_TIMEOUT_MS + DEADLINE_SLACK_MS
+    Date.now() + items.length * resolveTimeoutBudgets().hardCapMs + DEADLINE_SLACK_MS
   );
 
   // ── The irreversible write ───────────────────────────────────────────────

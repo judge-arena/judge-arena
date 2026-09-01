@@ -2,8 +2,9 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { db, truncateAll, mkUser, mkRubric } from './helpers';
 import { prisma } from '@/lib/db';
 import { isGoldenSetFrozen } from '@/lib/golden-sets';
+import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
 import { launchCalibrationRun, MAX_CALIBRATION_ITEMS } from '@/lib/calibration/launch';
-import { DEADLINE_SLACK_MS, EVALUATION_MODEL_TIMEOUT_MS } from '@/lib/run-launch';
+import { DEADLINE_SLACK_MS } from '@/lib/run-launch';
 import { seedPromptTemplates } from '../../prisma/seed-prompt-templates';
 
 // ─── The calibration ⇄ golden-item link (A2.1, v2i) ────────────────────────
@@ -317,8 +318,17 @@ describe('v2i calibration ⇄ golden item link (DB)', () => {
     // src/worker/reaper.ts force-finalizes a run 180s past its deadline by
     // stamping every still-pending judgment `error: 'reaper: abandoned'`, so
     // the naive deadline silently scores only the head of the batch.
-    const naiveSingleModelDeadline = launchedAt + EVALUATION_MODEL_TIMEOUT_MS + DEADLINE_SLACK_MS;
-    const batchAwareDeadline = launchedAt + 3 * EVALUATION_MODEL_TIMEOUT_MS + DEADLINE_SLACK_MS;
+    // Both bounds are computed from the HARD CAP, not the initial budget, and
+    // that is the point rather than an implementation detail. Since the
+    // escalating timeout landed, reaching EVALUATION_MODEL_TIMEOUT_MS only
+    // raises an alert — the call keeps running to the cap. A deadline sized on
+    // the initial budget would therefore let the reaper abandon judgments that
+    // are still legitimately executing, which is the same failure this test was
+    // written to prevent, reintroduced through the timeout rather than through
+    // the batch size.
+    const perCallCeilingMs = resolveTimeoutBudgets().hardCapMs;
+    const naiveSingleModelDeadline = launchedAt + perCallCeilingMs + DEADLINE_SLACK_MS;
+    const batchAwareDeadline = launchedAt + 3 * perCallCeilingMs + DEADLINE_SLACK_MS;
     for (const run of runs) {
       expect(run.deadlineAt).not.toBeNull();
       expect(run.deadlineAt!.getTime()).toBeGreaterThan(naiveSingleModelDeadline);

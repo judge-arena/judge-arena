@@ -71,8 +71,16 @@ import { createHash } from 'crypto';
 import type { ServingBackend } from '@prisma/client';
 import type { CriteriaScore } from '@/types';
 import { decryptSafe } from '@/lib/crypto';
-import { logger } from '@/lib/logger';
+import { logger, serializeError } from '@/lib/logger';
 import { ProviderError } from './errors';
+import {
+  armEscalatingTimeout,
+  buildInitialBudgetAlert,
+  hardCapAbortKind,
+  resolveTimeoutBudgets,
+  type InitialBudgetAlert,
+  type JudgeLatencyBaseline,
+} from './timeout-policy';
 import { callAnthropic } from './anthropic';
 import { callOpenAICompatible } from './openai-compatible';
 import { renderJudgmentPrompt, type RenderRubric, type RenderSubmission, type RenderTemplate } from './render';
@@ -290,8 +298,8 @@ export function getDescriptor(backend: ServingBackend): ProviderDescriptor {
   }
 
   // vLLM's `defaultBaseUrl` is read from VLLM_BASE_URL on every call
-  // (like getTimeoutMs() below) rather than baked into the static
-  // DESCRIPTORS object at module load — self-hosted vLLM has no
+  // (like resolveTimeoutBudgets() in ./timeout-policy.ts) rather than baked
+  // into the static DESCRIPTORS object at module load — self-hosted vLLM has no
   // well-known host the way OpenRouter/real OpenAI/local Ollama do, so
   // unlike ollama's hardcoded localhost default, this one must come from
   // the deployment's own env config, and reading it fresh lets tests
@@ -485,6 +493,69 @@ export interface ExecuteRequest {
    * relying on that default.
    */
   expectContent?: boolean;
+
+  /**
+   * Which attempt this call is — the SAME number the queue already tracks
+   * (`judgment-consumer.ts`'s `effectiveAttempt = Math.max(msg.attempt,
+   * judgment.attemptCount)`), not a new counter. It selects the `kind` of a
+   * hard-cap timeout and nothing else; see `timeout-policy.ts`'s
+   * `hardCapAbortKind`.
+   *
+   * Defaults to 1, i.e. "retryable", because that is the safe direction: a
+   * caller that does not know its attempt must never cause a judgment to be
+   * abandoned after a single 15-minute call. Optional so every pre-existing
+   * `execute()` caller (`verify.ts`'s connection test, the direct callers in
+   * the unit suites) keeps its exact prior behaviour.
+   *
+   * NOT YET SET BY `judgment-consumer.ts`, which is owned by a concurrent
+   * change; until it threads `effectiveAttempt` through
+   * `runProviderJudgment`, hard-cap aborts stay `retryable` and fall back to
+   * the pre-existing 3-attempt budget. That is a smaller budget change than
+   * shipping the give-up rule half-wired, and it is reported rather than
+   * assumed.
+   */
+  attempt?: number;
+
+  /**
+   * The judge's observed latency baseline, when the caller has it — the
+   * return of `judgeLatencyBaseline(judgeModelVersionId)` from
+   * `src/lib/calibration/latency.ts`.
+   *
+   * PASSED IN, NOT FETCHED HERE, for two reasons. (1) It is a read over
+   * ALREADY-COMPLETED judgments, so it cannot change during this one call —
+   * fetching it inside the 5-minute timer callback would buy nothing and cost
+   * an async DB round trip on a code path that is by definition already
+   * unhealthy. (2) Fetching it here would put `prisma` in `src/lib/llm/**`'s
+   * import graph, which is exactly what keeps this layer unit-testable
+   * without a database.
+   *
+   * `null`/omitted means "no completed judgment for this judge yet" and
+   * selects the owner's CONFIRM MODEL ACCESS wording.
+   */
+  latencyBaseline?: JudgeLatencyBaseline | null;
+
+  /** Identifies the judge in the alert, for an operator with several in
+   *  flight. Not used for any lookup. */
+  judgeModelVersionId?: string;
+
+  /**
+   * THE ALERT SINK — "send alert back to running process if it's surpassing
+   * 5min". Fires exactly once, at the initial budget, in the process making
+   * the call, while the call is STILL RUNNING. It must not throw; if it does,
+   * the throw is caught and logged rather than allowed to kill a healthy call.
+   *
+   * Deliberately a plain callback and not an event/queue publish: the worker
+   * that makes this call and the operator's calibration CLI are different OS
+   * processes, and the cheapest honest cross-process delivery is the one that
+   * needs no new plumbing at all — the CLI already polls
+   * `modelJudgment.groupBy` every 5s (`scripts/calibration/run.ts:127`) and
+   * `ModelJudgment.startedAt` is already stamped at claim time
+   * (`src/worker/claim.ts`), so "this judgment has been running past the
+   * initial budget" is derivable there with NO schema change and NO migration.
+   * A dedicated column or a Redis alert channel would both be new plumbing for
+   * information the database already holds.
+   */
+  onInitialBudgetElapsed?: (alert: InitialBudgetAlert) => void;
 }
 
 /** 32 KiB, measured in BYTES (KiB is a byte unit) — the cap on the copy of
@@ -638,38 +709,33 @@ function callCaptureFields(raw: ProviderCallResult): CallCaptureFields {
   };
 }
 
-const DEFAULT_TIMEOUT_MS = 120_000;
-
-/** `Number(process.env.EVALUATION_MODEL_TIMEOUT_MS ?? '120000')`, matching
- * `claim.ts`/`run-launch.ts`/`run-create-consumer.ts`'s existing convention
- * — deliberately read as a FUNCTION (not a module-load-time constant like
- * those three) so tests can override `process.env.EVALUATION_MODEL_TIMEOUT_MS`
- * per-test without module-reset gymnastics; the extra `process.env` read
- * per call is negligible.
- *
- * Guarded against a malformed value: `Number('')`/`Number('nope')` is `NaN`,
- * and `setTimeout(fn, NaN)` is clamped by Node to fire on effectively the
- * NEXT TICK (verified directly) — before this guard, a typo'd/malformed env
- * var wouldn't just misconfigure the timeout, it would abort EVERY provider
- * call cluster-wide almost instantly. A non-finite or non-positive value
- * falls back to the same 120s default the schema (`src/lib/env.ts`) ships. */
-function getTimeoutMs(): number {
-  const raw = Number(process.env.EVALUATION_MODEL_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS);
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_MS;
-}
-
 /**
  * Dispatch a single provider call for `descriptor`, with a real
- * `AbortController` wired to the `EVALUATION_MODEL_TIMEOUT_MS` budget
- * (Task 8 review's MANDATORY carry: before this task, that env var was
- * read into `LEASE_MS`/deadline math but never actually bounded a live
- * HTTP/SDK call — a hung provider request could occupy a worker slot
- * indefinitely). NOT retried and NOT breaker-wrapped — see `index.ts`'s
+ * `AbortController` wired to the ESCALATING timeout policy
+ * (`./timeout-policy.ts`) — the initial `EVALUATION_MODEL_TIMEOUT_MS` budget
+ * alerts, the `EVALUATION_MODEL_HARD_CAP_MS` hard cap aborts. (Task 8
+ * review's MANDATORY carry: before that task, the timeout env var was read
+ * into `LEASE_MS`/deadline math but never actually bounded a live HTTP/SDK
+ * call — a hung provider request could occupy a worker slot indefinitely.)
+ * NOT retried and NOT breaker-wrapped — see `index.ts`'s
  * `executeJudgment`/`executeRespond` for that layer.
  *
- * On timeout: throws a `ProviderError` with `kind: 'retryable'` and
- * `timeout: true` (distinguishable from an ordinary connection abort) —
- * verified by `tests/lib/llm-timeout.test.ts`'s hung-fetch test.
+ * ── THE FIVE-MINUTE ALERT IS NOT AN ABORT ──────────────────────────────────
+ * At `initialBudgetMs` this fires `request.onInitialBudgetElapsed` (and logs
+ * at `warn`) and lets the call keep running. That is the owner's design:
+ * "start at 5min, but if the health is good, extend to up to 15min". A single
+ * timer that aborted at 5 minutes is what this replaces, and on the measured
+ * local judges (avg 42.6s, max 95.1s, but explicitly expected to be slow and
+ * variable) the difference is between a judgment that finishes at minute 7 and
+ * one that is thrown away at minute 5 and then retried at the same cost.
+ *
+ * On the hard-cap abort: throws a `ProviderError` with `timeout: true`
+ * (distinguishable from an ordinary connection abort) whose `kind` is
+ * `hardCapAbortKind(request.attempt)` — `retryable` on the first attempt,
+ * `non_retryable` on the second, which is how "15 + 15, then we exit" is
+ * expressed through the retry accounting that already exists rather than
+ * through a second one. See `timeout-policy.ts`'s `hardCapAbortKind`.
+ * Verified by `tests/lib/llm-timeout.test.ts`'s hung-call tests.
  *
  * A2.1 v2i adds two things here, and HERE specifically because this is the
  * one function every provider call in the tree funnels through (judge,
@@ -678,10 +744,73 @@ function getTimeoutMs(): number {
  * (`assertUsableContent`), the latter running before any caller gets a
  * chance to parse the text.
  */
+/**
+ * Flatten a `TimeoutEscalationContext` into the `ExecuteRequest` fields it
+ * supplies. Spread at the call site so an ABSENT context contributes nothing
+ * at all — not four `undefined`s — keeping every pre-existing `execute()`
+ * request byte-identical to what it was before the escalation existed. Same
+ * reasoning `dispatch-failure.ts` records for its two publisher call shapes:
+ * an unchanged path must not start seeing new arguments.
+ */
+function escalationFields(context: TimeoutEscalationContext | undefined): Partial<ExecuteRequest> {
+  if (!context) return {};
+  return {
+    ...(context.attempt !== undefined ? { attempt: context.attempt } : {}),
+    ...(context.latencyBaseline !== undefined ? { latencyBaseline: context.latencyBaseline } : {}),
+    ...(context.judgeModelVersionId !== undefined ? { judgeModelVersionId: context.judgeModelVersionId } : {}),
+    ...(context.onInitialBudgetElapsed !== undefined
+      ? { onInitialBudgetElapsed: context.onInitialBudgetElapsed }
+      : {}),
+  };
+}
+
 export async function execute(descriptor: ProviderDescriptor, request: ExecuteRequest): Promise<ProviderCallResult> {
-  const timeoutMs = getTimeoutMs();
+  const budgets = resolveTimeoutBudgets();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const attempt = request.attempt ?? 1;
+
+  const escalation = armEscalatingTimeout({
+    budgets,
+    onInitialBudget: (elapsedMs) => {
+      const alert = buildInitialBudgetAlert({
+        elapsedMs,
+        budgets,
+        baseline: request.latencyBaseline,
+        modelId: request.modelId,
+        judgeModelVersionId: request.judgeModelVersionId,
+      });
+
+      // BOTH, and neither is redundant. The log is the durable record an
+      // operator reads afterwards; the callback is the alert reaching a
+      // RUNNING process while the call is still in flight, which is the half
+      // the owner actually asked for ("send alert back to running process").
+      // A logger-only implementation satisfies the letter and none of the
+      // point: nobody is tailing worker logs during a 30-item calibration.
+      logger.warn(alert.message, {
+        provider: descriptor.id,
+        modelId: request.modelId,
+        judgeModelVersionId: request.judgeModelVersionId,
+        attempt,
+        elapsedMs: alert.elapsedMs,
+        hardCapMs: alert.hardCapMs,
+        remainingMs: alert.remainingMs,
+        baselineKind: alert.kind,
+        multipleOfMean: alert.multipleOfMean,
+      });
+
+      try {
+        request.onInitialBudgetElapsed?.(alert);
+      } catch (sinkError) {
+        // A broken alert sink must never abort a provider call that is still
+        // healthy — the alert is advisory, the call is the work.
+        logger.error('timeout escalation alert sink threw', {
+          provider: descriptor.id,
+          error: serializeError(sinkError),
+        });
+      }
+    },
+    onHardCap: () => controller.abort(),
+  });
 
   const call = descriptor.id === 'anthropic' ? callAnthropic : callOpenAICompatible;
 
@@ -705,14 +834,33 @@ export async function execute(descriptor: ProviderDescriptor, request: ExecuteRe
     result = { ...raw, ...capturePrompts(request.systemPrompt, request.userPrompt) };
   } catch (error) {
     if (controller.signal.aborted) {
+      // WHERE "TWO ATTEMPTS, THEN EXIT" IS DECIDED: the `kind` stamped here.
+      // `retryable` on attempt 1 sends the judgment round
+      // `judgment-consumer.ts`'s existing 5m retry path for its second
+      // 15-minute attempt; `non_retryable` on attempt 2 hits that consumer's
+      // `kind === 'non_retryable'` branch, which marks the judgment `error`
+      // and acks — returning BEFORE the `effectiveAttempt >= MAX_ATTEMPTS`
+      // branch that is the only route to the DLQ. So a third attempt and DLQ
+      // churn are both excluded without a single new branch downstream.
       throw new ProviderError(
-        `Provider call to "${descriptor.id}" (${request.modelId}) timed out after ${timeoutMs}ms`,
-        { kind: 'retryable', provider: descriptor.id, timeout: true, cause: error }
+        `Provider call to "${descriptor.id}" (${request.modelId}) hit the ${budgets.hardCapMs}ms hard cap ` +
+          `on attempt ${attempt} (initial budget ${budgets.initialBudgetMs}ms)`,
+        {
+          kind: hardCapAbortKind(attempt),
+          provider: descriptor.id,
+          timeout: true,
+          attempt,
+          cause: error,
+        }
       );
     }
     throw error;
   } finally {
-    clearTimeout(timer);
+    // Clears BOTH the alert and the hard-cap timer. Without it a 3-second call
+    // leaves a 15-minute timer pending, and a pending setTimeout keeps the Node
+    // event loop alive — the worker would refuse to shut down promptly and a
+    // test process would hang for a quarter of an hour instead of exiting.
+    escalation.cancel();
   }
 
   // Outside the try/catch on purpose. Inside it, a timeout timer that fired
@@ -738,6 +886,29 @@ export interface JudgeVersionForExecution {
   judgeModel: { baseModel: string | null; slug: string };
 }
 
+/**
+ * The per-judgment context the escalating timeout needs, bundled so a caller
+ * sets ONE optional field rather than four, and so adding to it later does not
+ * change four signatures.
+ *
+ * Entirely optional, and its absence is the pre-existing behaviour: attempt 1
+ * (hard-cap aborts stay retryable), no baseline (the CONFIRM MODEL ACCESS
+ * wording), log-only alerting. `src/worker/judgment-consumer.ts` is the caller
+ * that has all of it — `effectiveAttempt` and `judgeModelVersionId` are
+ * already in hand there — and is owned by a concurrent change, so this is the
+ * seam it plugs into rather than something already plugged in.
+ */
+export interface TimeoutEscalationContext {
+  /** `Math.max(msg.attempt, judgment.attemptCount)` — the queue's number, not
+   *  a new one. Decides the `kind` of a hard-cap abort. */
+  attempt?: number;
+  /** `judgeLatencyBaseline(judgeModelVersionId)`; `null` = first record. */
+  latencyBaseline?: JudgeLatencyBaseline | null;
+  judgeModelVersionId?: string;
+  /** Fires once, at the initial budget, while the call is still running. */
+  onInitialBudgetElapsed?: (alert: InitialBudgetAlert) => void;
+}
+
 export interface RunProviderJudgmentInput {
   judgeVersion: JudgeVersionForExecution;
   endpoint: EndpointCredentials;
@@ -745,6 +916,7 @@ export interface RunProviderJudgmentInput {
   rubric: RenderRubric;
   submission: RenderSubmission;
   samplingOverrides?: Partial<SamplingParams>;
+  escalation?: TimeoutEscalationContext;
 }
 
 /** Per the task brief, verbatim field set (plus the pre-existing
@@ -869,6 +1041,9 @@ export interface PreparedJudgmentCall {
   userPrompt: string;
   samplingParamsUsed: SamplingParams;
   criteria: RenderRubric['criteria'];
+  /** Carried through `prepare` untouched — the timeout escalation is a
+   *  property of the CALL, and `prepare` does no I/O to attach it to. */
+  escalation?: TimeoutEscalationContext;
 }
 
 /**
@@ -940,6 +1115,7 @@ export function prepareJudgmentCall(input: RunProviderJudgmentInput): PreparedJu
     userPrompt,
     samplingParamsUsed,
     criteria: input.rubric.criteria,
+    escalation: input.escalation,
   };
 }
 
@@ -987,6 +1163,7 @@ export async function executeJudgmentCall(prepared: PreparedJudgmentCall): Promi
     userPrompt: prepared.userPrompt,
     samplingParams: prepared.samplingParamsUsed,
     mode: 'judgment',
+    ...escalationFields(prepared.escalation),
   });
 
   const parsed = parseJudgmentText(prepared.descriptor.id, prepared.modelId, raw, prepared.criteria);
@@ -1070,6 +1247,7 @@ export async function executePairwiseCall(prepared: PreparedJudgmentCall): Promi
     samplingParams: prepared.samplingParamsUsed,
     mode: 'judgment',
     jsonSchema: PAIRWISE_JUDGMENT_JSON_SCHEMA as unknown as Record<string, unknown>,
+    ...escalationFields(prepared.escalation),
   });
 
   const parsed = tryParsePairwiseJudgment(raw.text);
@@ -1099,6 +1277,7 @@ export interface RunProviderResponseInput {
   endpoint: EndpointCredentials;
   submission: { promptText: string };
   samplingOverrides?: Partial<SamplingParams>;
+  escalation?: TimeoutEscalationContext;
 }
 
 export interface RespondResult extends CallCaptureFields {
@@ -1122,6 +1301,7 @@ export interface PreparedRespondCall {
   systemPrompt: string;
   userPrompt: string;
   samplingParamsUsed: SamplingParams;
+  escalation?: TimeoutEscalationContext;
 }
 
 /**
@@ -1154,6 +1334,7 @@ export function prepareRespondCall(input: RunProviderResponseInput): PreparedRes
     systemPrompt,
     userPrompt,
     samplingParamsUsed,
+    escalation: input.escalation,
   };
 }
 
@@ -1172,6 +1353,7 @@ export async function executeRespondCall(prepared: PreparedRespondCall): Promise
     // declares caps.structuredOutput !== 'none' (Task 11's seam gates on
     // mode === 'judgment' specifically).
     mode: 'respond',
+    ...escalationFields(prepared.escalation),
   });
 
   return {

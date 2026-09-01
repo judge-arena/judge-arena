@@ -56,12 +56,31 @@ export interface ProviderErrorOptions {
   breakerOpen?: boolean;
   /**
    * Set when this error represents `registry.ts`'s `execute()` aborting a
-   * call once `EVALUATION_MODEL_TIMEOUT_MS` elapsed (Task 8 review carry:
-   * the timeout budget was never wired into an actual provider-call abort
-   * before Task 10) — distinguishes a deliberate budget timeout from an
-   * ordinary connection-level abort/timeout the SDK itself raised.
+   * call once its timeout budget elapsed (Task 8 review carry: the timeout
+   * budget was never wired into an actual provider-call abort before Task
+   * 10) — distinguishes a deliberate budget timeout from an ordinary
+   * connection-level abort/timeout the SDK itself raised.
+   *
+   * Under the escalating policy (`./timeout-policy.ts`) the budget that
+   * produces this is the HARD CAP (`EVALUATION_MODEL_HARD_CAP_MS`), not the
+   * initial `EVALUATION_MODEL_TIMEOUT_MS` budget — reaching the initial
+   * budget raises an alert and produces no error at all.
    */
   timeout?: boolean;
+  /**
+   * Which attempt produced this error, when the thrower knew it. Set by
+   * `registry.ts`'s `execute()` on a hard-cap timeout, where the attempt is
+   * what decides `kind` (`retryable` on the first, `non_retryable` on the
+   * second — `timeout-policy.ts`'s `hardCapAbortKind`, the owner's "15 + 15,
+   * then we exit").
+   *
+   * Carried on the error purely so that decision is AUDITABLE: without it, a
+   * judgment marked `error` with a timeout message gives no way to tell
+   * whether it was abandoned deliberately at the two-attempt limit or
+   * misclassified, and those two look identical in the row. Never set by
+   * `classify()` — only by code that had the attempt number in hand.
+   */
+  attempt?: number;
   /**
    * A2.1 v2i: the provider response that CAUSED this failure, when there
    * was one (a truncated or empty-content call — see `registry.ts`'s
@@ -91,6 +110,7 @@ export class ProviderError extends Error {
   readonly retryAfterMs?: number;
   readonly breakerOpen?: boolean;
   readonly timeout?: boolean;
+  readonly attempt?: number;
   readonly callResult?: ProviderCallResult;
 
   constructor(message: string, opts: ProviderErrorOptions) {
@@ -101,6 +121,7 @@ export class ProviderError extends Error {
     this.retryAfterMs = opts.retryAfterMs;
     this.breakerOpen = opts.breakerOpen;
     this.timeout = opts.timeout;
+    this.attempt = opts.attempt;
     this.callResult = opts.callResult;
   }
 }

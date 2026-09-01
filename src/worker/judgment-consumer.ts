@@ -181,6 +181,7 @@ import type {
 import { maybeFinalizeRun } from '@/lib/run-finalizer';
 import { deriveRunMode } from '@/lib/run-mode';
 import { claimJudgment } from './claim';
+import { judgeLatencyBaseline, type LatencyBaseline } from '@/lib/calibration/latency';
 import {
   GATE_WAIT_TIMEOUT_MS,
   JudgeGateTimeoutError,
@@ -316,9 +317,53 @@ export type ProviderFn = (input: RunProviderJudgmentInput) => Promise<JudgmentRe
 export const defaultRunProviderJudgment: ProviderFn = async (input) => {
   const { run, rubric, version, endpoint, judgment } = input;
 
+  // ── The escalating timeout's inputs ───────────────────────────────────────
+  // Without this block the policy is INERT: `execute()` falls back to a single
+  // fixed budget, a hard-cap abort stays `retryable` so it burns the full
+  // 3-attempt budget instead of stopping after two, and the 5-minute alert
+  // never fires with a baseline. The module is only a policy; this is where the
+  // facts it decides on come from.
+  //
+  // `attempt` is the larger of the queue message's attempt and the row's own
+  // counter: a redelivery after a broker hiccup can arrive with a stale message
+  // attempt, and under-counting here would grant a third 15-minute try.
+  //
+  // The baseline read is one indexed aggregate per judgment and deliberately
+  // NOT fatal — a judge with no history is exactly the "first record" case the
+  // owner asked to be forgiving about, so a failure to load history must not
+  // fail the judgment that would have created the first data point.
+  let latencyBaseline: LatencyBaseline | null = null;
+  try {
+    latencyBaseline = await judgeLatencyBaseline(version.id);
+  } catch (error) {
+    logger.warn('judgeLatencyBaseline failed — treating this call as unbaselined', {
+      judgeModelVersionId: version.id,
+      error: serializeError(error),
+    });
+  }
+
   const registryInput: RegistryJudgmentInput = {
     judgeVersion: version,
     endpoint,
+    escalation: {
+      // The ROW's counter, not the message's. claim.ts increments attemptCount
+      // on every claim AND every reclaim (:107, :138), so it survives a
+      // redelivery that carries a stale message attempt — and under-counting
+      // here would grant a third 15-minute try after the policy said stop.
+      // The seam deliberately does not carry the message attempt (see
+      // RunProviderJudgmentInput's doc on keeping the fakes unchanged), and
+      // this is the more authoritative of the two anyway.
+      attempt: judgment.attemptCount ?? 1,
+      judgeModelVersionId: version.id,
+      latencyBaseline,
+      onInitialBudgetElapsed: (alert) => {
+        logger.warn('judgment passed the initial timeout budget', {
+          judgmentId: judgment.id,
+          judgeModelVersionId: version.id,
+          ...alert,
+        });
+      },
+    },
     // Guarded by the consumer's own `mode === 'judge' && !context.promptTemplate`
     // check before this seam is ever called (see `handle()` below) — the
     // non-null assertion documents that invariant rather than re-checking it.
@@ -519,21 +564,63 @@ export async function publishJudgmentRetryPreservingLane(
  * was no response to carry), and the spread below writes nothing in that
  * case — an existing column is never overwritten with `undefined`.
  *
+ * ── `claimedAt`: THE RUNTIME OF A FAILURE THAT RETURNED NOTHING ─────────────
+ *
+ * A TIMEOUT CARRIES NO `callResult`. `execute()`'s abort branch in
+ * registry.ts (the `controller.signal.aborted` arm, ~registry.ts:836-855)
+ * throws its `ProviderError` where there is no response to attach — and the
+ * hard-cap abort on the final attempt is stamped `non_retryable`, so it lands
+ * in exactly the branch below that passes `claimedAt`. Before this parameter,
+ * the one judgment in the corpus with no
+ * `latencyMs` was the one that had burned the ENTIRE budget. That is exactly
+ * backwards: a judgment that ran fifteen minutes and died is the runtime you
+ * most want recorded, and src/lib/calibration/latency.ts's (dataset, item,
+ * model) projection would have silently excluded every slow failure while
+ * looking complete. A runtime dataset that omits its expensive rows is worse
+ * than none, because it reads as if the expensive rows do not exist.
+ *
+ * `claimedAt` is `ModelJudgment.startedAt` as loaded at claim time
+ * (claim.ts:107/138 stamps it on every claim AND reclaim, so it is THIS attempt's
+ * start). Elapsed-since-claim is a superset of the provider call — it also
+ * covers the gate wait and the context load — which is why
+ * `callResult.latencyMs`, measured around the HTTP call itself
+ * (openai-compatible.ts:249), WINS when there is one.
+ *
+ * PASSED ONLY BY THE CALL SITES WHERE A PROVIDER CALL ACTUALLY RAN, and that
+ * omission elsewhere is deliberate, not an oversight to be tidied up: the
+ * configuration guards (no rubric, no endpoint, no prompt template, listwise,
+ * row vanished) fail before anything is dispatched. Stamping their ~2ms of
+ * Postgres round-trip into `latencyMs` would file rows in the runtime corpus
+ * that measure nothing that was computed.
+ *
  * Exported for the same reason `commonSuccessUpdateData` below is, and the
  * review that found it necessary: deleting this entire evidence spread left
  * all 726 tests green, because the only other way to observe this write is
- * a live DB. tests/lib/llm-truncation.test.ts now asserts it directly.
+ * a live DB. tests/lib/llm-truncation.test.ts now asserts it directly, and
+ * tests/lib/calibration-latency.test.ts asserts the `claimedAt` arm.
  */
 export async function markJudgmentError(
   judgmentId: string,
   message: string,
-  callResult?: ProviderCallResult
+  callResult?: ProviderCallResult,
+  claimedAt?: Date | null
 ): Promise<void> {
+  // `Math.max(0, ...)` rather than a raw subtraction: a clock that stepped
+  // backwards between the claim and the failure would otherwise write a
+  // NEGATIVE latency, which every consumer of this column (mean, p90, the
+  // per-tuple sum) would happily fold in and none would flag.
+  const elapsedMs = claimedAt ? Math.max(0, Date.now() - claimedAt.getTime()) : undefined;
+
   await prisma.modelJudgment.update({
     where: { id: judgmentId },
     data: {
       status: 'error',
       error: message,
+      // Written OUTSIDE the `callResult` spread so a timeout — which has no
+      // callResult at all — still records what it cost. `undefined` when
+      // there was no provider call, and an `undefined` in a Prisma update is
+      // a no-op, so an existing column is never blanked.
+      ...(elapsedMs !== undefined ? { latencyMs: elapsedMs } : {}),
       ...(callResult
         ? {
             rawResponse: callResult.text,
@@ -1119,8 +1206,15 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
       // `mapServingBackendToProvider` indirection).
       const providerError = classify(rawError, judgeModelVersion.servingBackend);
 
+      // `context.startedAt` is this attempt's claim timestamp
+      // (claim.ts:107/138, loaded by `judgmentContextQuery` — an `include`, so
+      // every scalar column comes back and this costs no extra query). It is
+      // what gives a TIMEOUT a recorded runtime: a timed-out call throws with
+      // no `callResult`, and without this the judgment that burned the whole
+      // budget would be the only one in the corpus with no `latencyMs`. See
+      // `markJudgmentError`'s doc.
       if (providerError.kind === 'non_retryable') {
-        await markJudgmentError(msg.judgmentId, providerError.message, providerError.callResult);
+        await markJudgmentError(msg.judgmentId, providerError.message, providerError.callResult, context.startedAt);
         await safeFinalizeRun(msg.runId);
         ch.ack(raw);
         return;
@@ -1132,7 +1226,9 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
       const effectiveAttempt = Math.max(msg.attempt, context.attemptCount);
 
       if (effectiveAttempt >= MAX_ATTEMPTS) {
-        await markJudgmentError(msg.judgmentId, providerError.message, providerError.callResult);
+        // The give-up path, and the one whose runtime matters most: this is
+        // where a judge that timed out on every attempt lands terminally.
+        await markJudgmentError(msg.judgmentId, providerError.message, providerError.callResult, context.startedAt);
         await publishToDlq({ ...msg, attempt: effectiveAttempt }, providerError.message);
         await safeFinalizeRun(msg.runId);
         ch.ack(raw);
@@ -1143,6 +1239,18 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
       // so the redelivered message claims fresh (see claim.ts's docstring:
       // leaving it 'running' would make the redelivery look like a
       // duplicate of a still-live claim and get ack-skipped, never retried).
+      //
+      // NO RUNTIME IS RECORDED HERE, and that is a KNOWN, BOUNDED GAP rather
+      // than an omission. This attempt's elapsed time is real spend, but the
+      // row is not terminal: the next attempt overwrites `latencyMs` whether
+      // it succeeds (`persistSuccess`) or fails (`markJudgmentError` above),
+      // so writing it now would be erased rather than kept. Preserving EVERY
+      // attempt's runtime needs a per-attempt row, which is a schema change
+      // A2.3 explicitly rules out for this work ("the report is a PROJECTION,
+      // not stored"). Consequence to know when reading
+      // src/lib/calibration/latency.ts: a tuple's `totalMs` is the runtime of
+      // its FINAL attempt, so a judgment that timed out once and then
+      // succeeded under-reports by the abandoned attempt.
       await prisma.modelJudgment.update({
         where: { id: msg.judgmentId },
         data: { status: 'pending', error: providerError.message },

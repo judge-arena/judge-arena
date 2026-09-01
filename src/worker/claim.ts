@@ -38,18 +38,44 @@
  */
 
 import { prisma } from '@/lib/db';
-
-const EVALUATION_MODEL_TIMEOUT_MS = Number(process.env.EVALUATION_MODEL_TIMEOUT_MS ?? '120000');
+import { leaseMsFor, resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
 
 /**
  * Claim lease: how long a `running` judgment is presumed still in-flight
- * before another delivery is allowed to reclaim it. Generous slack (30s)
- * over the model call's own timeout — the timeout bounds the provider call
- * itself, but the DB writes / event publish / finalization that happen
- * after the call returns need their own margin before a claimant is
- * declared dead.
+ * before another delivery is allowed to reclaim it. Generous slack (30s,
+ * `POST_CALL_SLACK_MS`) over the model call's own budget — the budget bounds
+ * the provider call itself, but the DB writes / event publish / finalization
+ * that happen after the call returns need their own margin before a claimant
+ * is declared dead.
+ *
+ * ── DERIVED FROM THE HARD CAP, NOT THE INITIAL BUDGET. THIS IS A CORRECTNESS
+ *    BUG FIX, NOT A TUNING CHANGE. ─────────────────────────────────────────
+ * This used to read `EVALUATION_MODEL_TIMEOUT_MS + 30_000`. Under the
+ * escalating timeout (`src/lib/llm/timeout-policy.ts`) that variable is only
+ * the ALERT point — a provider call may now legitimately run to
+ * `EVALUATION_MODEL_HARD_CAP_MS` (15 minutes) before anything aborts it. The
+ * old derivation therefore produced a 330s lease over a call allowed to take
+ * 900s.
+ *
+ * What that costs, concretely: nothing writes the judgment row between the
+ * claim above and the persist after the provider returns, so `updatedAt`
+ * sits at claim time for the entire call. `src/worker/reaper.ts`'s
+ * `reclaimStaleJudgments` sweeps `status: 'running' AND updatedAt < now −
+ * LEASE_MS`, so at t=330s it would find a PERFECTLY HEALTHY in-flight
+ * judgment, declare its claimant dead, and republish it — a second provider
+ * call for the same row (billed, and on the local CPU judge a second
+ * quarter-hour occupancy of a server that does one call at a time), then two
+ * writers racing to persist one judgment. The row that survives is whichever
+ * finished last; nothing in the data afterwards says it happened twice.
+ *
+ * ONE hard cap, not two: the second of the two allowed attempts arrives as a
+ * separate delivery that re-claims the row and re-stamps `updatedAt`, so it
+ * gets its own lease. Read at module load (matching this file's existing
+ * convention and `run-launch.ts`/`run-create-consumer.ts`), which is why
+ * `tests/lib/timeout-policy.test.ts` asserts the relationship
+ * `LEASE_MS > hardCapMs` rather than a literal.
  */
-export const LEASE_MS = EVALUATION_MODEL_TIMEOUT_MS + 30_000;
+export const LEASE_MS = leaseMsFor(resolveTimeoutBudgets());
 
 export type ClaimResult = 'claimed' | 'already_done' | 'not_found' | 'stale_running' | 'in_progress' | 'retry_claim';
 

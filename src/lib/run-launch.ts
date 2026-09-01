@@ -106,6 +106,7 @@ import {
   type JudgmentExecuteMsg,
   type RunCreateMsg,
 } from '@/lib/queue/publish';
+import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
 import { LANE_FALLBACK_QUEUE } from '@/lib/queue/lanes';
 import { resolveEndpointsForVersions } from '@/lib/endpoint-resolution';
 import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
@@ -116,7 +117,7 @@ import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
  * launcher and the run it launches cannot disagree about the per-model budget
  * — a third copy of this literal is a third thing to keep in step with
  * `EVALUATION_MODEL_TIMEOUT_MS`'s env override. */
-export const EVALUATION_MODEL_TIMEOUT_MS = Number(process.env.EVALUATION_MODEL_TIMEOUT_MS ?? '120000');
+export const EVALUATION_MODEL_TIMEOUT_MS = Number(process.env.EVALUATION_MODEL_TIMEOUT_MS ?? '300000');
 /** Same slack literal as src/worker/run-create-consumer.ts's
  * `DEADLINE_SLACK_MS` — covers DB round trips, queue publish latency, and
  * finalization overhead on top of the per-model provider timeout budget.
@@ -521,7 +522,13 @@ export async function launchSingleRun(
   // what the reaper does to a batch stamped with the default.
   const deadlineAt =
     params.deadlineAt ??
-    new Date(Date.now() + selectedVersionIds.length * EVALUATION_MODEL_TIMEOUT_MS + DEADLINE_SLACK_MS);
+    // The HARD CAP, not the initial budget. A call may now legally run to the
+    // hard cap while the initial budget only triggers an alert, so sizing the
+    // deadline on the initial budget would let the reaper force-finalize a run
+    // whose judgments are still legitimately executing — the same failure that
+    // silently scored 4 of 30 items once already, reintroduced by a timeout
+    // change rather than by a concurrency one.
+    new Date(Date.now() + selectedVersionIds.length * resolveTimeoutBudgets().hardCapMs + DEADLINE_SLACK_MS);
 
   const createdRun = await prisma.$transaction(async (tx) => {
     return tx.evaluationRun.create({

@@ -95,11 +95,11 @@ import type { RunProtocol } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { logger, serializeError } from '@/lib/logger';
 import { publishJudgmentExecute, resolveDestinationQueue, type RunCreateMsg } from '@/lib/queue/publish';
+import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
 import { LANE_FALLBACK_QUEUE } from '@/lib/queue/lanes';
 import { resolveEndpointsForVersions } from '@/lib/endpoint-resolution';
 import { deriveRunMode } from '@/lib/run-mode';
 
-const EVALUATION_MODEL_TIMEOUT_MS = Number(process.env.EVALUATION_MODEL_TIMEOUT_MS ?? '120000');
 /** Slack added on top of `judgmentCount * EVALUATION_MODEL_TIMEOUT_MS` when
  * computing `EvaluationRun.deadlineAt` — covers DB round trips, queue
  * publish latency, and finalization overhead that isn't part of any single
@@ -246,7 +246,10 @@ export function createRunCreateConsumer(): RunCreateConsumer {
       }
 
       const deadlineAt = new Date(
-        Date.now() + modelSelections.length * EVALUATION_MODEL_TIMEOUT_MS + DEADLINE_SLACK_MS
+        // Hard cap, mirroring run-launch.ts: a judgment may legally run to the
+        // cap, so a deadline sized on the initial budget would let the reaper
+        // abandon work that is still executing.
+        Date.now() + modelSelections.length * resolveTimeoutBudgets().hardCapMs + DEADLINE_SLACK_MS
       );
 
       const run = await prisma.$transaction(async (tx) => {

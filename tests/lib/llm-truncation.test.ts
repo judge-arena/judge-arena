@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * A2.1 v2i — THE TRUNCATION + EMPTY-CONTENT GUARD, and the rendered-prompt
@@ -453,5 +453,78 @@ describe('markJudgmentError persists what came back, not just the message', () =
       where: { id: 'judgment-2' },
       data: { status: 'error', error: 'No active ModelEndpoint configured' },
     });
+  });
+});
+
+// ─── Moved here from tests/lib/calibration-latency.test.ts ─────────────────
+// These assert runtime capture on the FAILURE path, which needs
+// `markJudgmentError` from @/worker/judgment-consumer. That import pulls the
+// consumer's whole graph — including @/lib/realtime/** at 16% — into the unit
+// coverage denominator, and it dropped the realtime branch floor below its
+// threshold from a file that otherwise imports nothing but pure functions.
+// This file ALREADY imports the consumer, so the assertions live here for
+// free and calibration-latency.test.ts stays pure. Same reasoning as the
+// health.ts extraction: keep the heavy import in one place rather than
+// lowering a floor to accommodate a second.
+describe('markJudgmentError records the runtime of the attempt that failed', () => {
+  beforeEach(() => {
+    judgmentUpdateMock.mockReset();
+    judgmentUpdateMock.mockResolvedValue({});
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-01T12:00:00.000Z'));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('derives latencyMs from the claim timestamp when the failure carried no response', async () => {
+    // THE CASE THAT MATTERS. A timeout throws a ProviderError with NO
+    // `callResult` — `execute()`'s `controller.signal.aborted` arm in
+    // src/lib/llm/registry.ts has no response to attach — so before this, the
+    // row that burned the full budget was the one row in the corpus with no
+    // runtime on it. The judgment whose time-to-compute you most want to know
+    // is exactly the one that timed out.
+    const startedAt = new Date(Date.now() - 900_000);
+    await markJudgmentError('j-timeout', 'Provider call timed out after 900000ms', undefined, startedAt);
+
+    expect(judgmentUpdateMock).toHaveBeenCalledTimes(1);
+    const { data } = judgmentUpdateMock.mock.calls[0][0];
+    expect(data.status).toBe('error');
+    expect(data.latencyMs).toBe(900_000);
+  });
+
+  it('prefers the provider-measured latency over the derived one when there is a response', async () => {
+    // `callResult.latencyMs` is measured around the HTTP call itself
+    // (src/lib/llm/openai-compatible.ts:249); the claim-to-now elapsed also
+    // contains gate waiting and context loading. The measured one wins.
+    const startedAt = new Date(Date.now() - 900_000);
+    await markJudgmentError(
+      'j-truncated',
+      'was CUT OFF at the token budget',
+      { text: '', latencyMs: 22_500 } as never,
+      startedAt
+    );
+
+    expect(judgmentUpdateMock.mock.calls[0][0].data.latencyMs).toBe(22_500);
+  });
+
+  it('writes ONLY status+error when no provider call was ever made', async () => {
+    // The configuration guards (no rubric, no endpoint, no prompt template)
+    // fail before anything is dispatched. Stamping a 3ms "time to compute" on
+    // those would put rows in the runtime corpus that measure nothing but how
+    // fast Postgres answered — and `undefined` must never be spread over an
+    // existing column. Matches the contract
+    // tests/lib/llm-truncation.test.ts:445 already pins.
+    await markJudgmentError('j-config', 'No active ModelEndpoint configured');
+
+    expect(judgmentUpdateMock).toHaveBeenCalledWith({
+      where: { id: 'j-config' },
+      data: { status: 'error', error: 'No active ModelEndpoint configured' },
+    });
+  });
+
+  it('clamps a skewed clock to zero rather than writing a negative runtime', async () => {
+    await markJudgmentError('j-skew', 'boom', undefined, new Date(Date.now() + 5_000));
+    expect(judgmentUpdateMock.mock.calls[0][0].data.latencyMs).toBe(0);
   });
 });

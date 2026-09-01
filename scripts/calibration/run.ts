@@ -20,7 +20,20 @@
  *   - the RAW verdict distribution, because a judge that answers 'A' every
  *     time is the failure a good-looking accuracy on a 17/13 corpus hides;
  *   - every disagreement with the model's own reasoning, because being able to
- *     read WHY it was wrong is the point of capturing the thinking channel.
+ *     read WHY it was wrong is the point of capturing the thinking channel;
+ *   - TIME TO COMPUTE, per (dataset, item, model) tuple, beside the capture
+ *     completeness — a leaderboard entry without its cost is half a result,
+ *     and on a CPU-hosted judge (measured here: 16.1s to 95.1s per item) the
+ *     cost is the difference between a usable judge and an unusable one.
+ *
+ * ── THE 5-MINUTE ALERT COMES BACK HERE ─────────────────────────────────────
+ * The owner asked for an alert "back to running process if it's surpassing
+ * 5min". THIS is that running process: the CLI is what a human is watching
+ * while a calibration executes on the worker. The poll loop below therefore
+ * reports any judgment that has been `running` past the initial budget, with
+ * the judge's latency baseline for context when one exists — derived entirely
+ * from `ModelJudgment.startedAt`, with NO schema change and NO probe of the
+ * inference server (the owner was explicit: "DON'T POLL THE SERVER").
  *
  * Usage:
  *   npm run calibration:run -- --golden-set=<id> --judge-version=<id>
@@ -28,7 +41,19 @@
  */
 import { prisma } from '@/lib/db';
 import { launchCalibrationRun } from '@/lib/calibration/launch';
+import {
+  describeBaseline,
+  formatDurationMs,
+  judgeLatencyBaseline,
+  selectOverdue,
+  summarizeLatencies,
+  timeToComputeByTuple,
+  type LatencyBaseline,
+} from '@/lib/calibration/latency';
 import { scoreCalibrationRun } from '@/lib/calibration/score';
+// The alert wording and the budgets it thresholds on live with the timeout
+// policy, not here — see `reportOverdue`.
+import { buildInitialBudgetAlert, resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
 
 // Use the SHARED singleton, not a second `new PrismaClient()`. launch/score
 // default to this one, so a private client would leave the shared pool open
@@ -46,6 +71,80 @@ function fmt(n: number | null, digits = 4): string {
 
 function cap(v: string | null | undefined): string {
   return v == null ? 'NULL' : `${v.length} chars`;
+}
+
+/**
+ * Report any judgment of this calibration that has been `running` past the
+ * initial budget — once per attempt, not once per poll.
+ *
+ * THE WORDING IS NOT WRITTEN HERE. `buildInitialBudgetAlert`
+ * (src/lib/llm/timeout-policy.ts) is the one implementation of the owner's
+ * two-branch message, and the budgets come from `resolveTimeoutBudgets()`
+ * rather than a constant of this script's own. Both are deliberate: an alert
+ * the worker raises and an alert the CLI raises about the SAME condition,
+ * phrased differently or thresholded differently, is two policies wearing one
+ * name — and the one an operator reads would be the one that is wrong.
+ *
+ * `alerted` is keyed on (judgment id + claim timestamp), not on the id alone:
+ * a reclaimed or retried judgment gets a fresh `startedAt` (claim.ts:107,138),
+ * and that second attempt going long is news again. Keying on the id alone
+ * would announce the first attempt and then stay silent through the second.
+ *
+ * `baselines` caches only the baselines that EXIST. A `null` is re-queried on
+ * the next alert on purpose: `null` means "this judge has not completed
+ * anything yet", which is precisely the state a calibration in flight is
+ * expected to leave — the first item to land turns it into a real baseline,
+ * and a cached `null` would keep reporting "no baseline" for the rest of the
+ * run.
+ */
+async function reportOverdue(
+  calibrationRunId: string,
+  alerted: Set<string>,
+  baselines: Map<string, LatencyBaseline>
+): Promise<void> {
+  const running = await prisma.modelJudgment.findMany({
+    where: { run: { calibrationRunId }, status: 'running' },
+    select: {
+      id: true,
+      startedAt: true,
+      judgeModelVersionId: true,
+      run: { select: { goldenItem: { select: { index: true } } } },
+    },
+  });
+
+  const budgets = resolveTimeoutBudgets();
+  const overdue = selectOverdue(
+    running.map((r) => ({
+      id: r.id,
+      startedAt: r.startedAt,
+      judgeModelVersionId: r.judgeModelVersionId,
+      goldenItemIndex: r.run.goldenItem?.index ?? null,
+    })),
+    Date.now(),
+    budgets.initialBudgetMs
+  );
+
+  for (const j of overdue) {
+    const key = `${j.id}@${j.startedAt.toISOString()}`;
+    if (alerted.has(key)) continue;
+    alerted.add(key);
+
+    let baseline: LatencyBaseline | null = null;
+    if (j.judgeModelVersionId) {
+      baseline = baselines.get(j.judgeModelVersionId) ?? (await judgeLatencyBaseline(j.judgeModelVersionId));
+      if (baseline) baselines.set(j.judgeModelVersionId, baseline);
+    }
+
+    const alert = buildInitialBudgetAlert({
+      elapsedMs: j.elapsedMs,
+      budgets,
+      baseline,
+      judgeModelVersionId: j.judgeModelVersionId ?? undefined,
+    });
+
+    console.log(`  ⚠ ALERT [${alert.kind}]  item ${j.goldenItemIndex ?? '?'}  judgment ${j.id}`);
+    console.log(`     ${alert.message}`);
+  }
 }
 
 async function main(): Promise<void> {
@@ -123,6 +222,9 @@ async function main(): Promise<void> {
   // difference.
   const deadline = Date.now() + pollTimeoutSec * 1000;
   let lastLine = '';
+  // Alert bookkeeping, held across polls — see `reportOverdue`.
+  const alerted = new Set<string>();
+  const baselines = new Map<string, LatencyBaseline>();
   for (;;) {
     const rows = await prisma.modelJudgment.groupBy({
       by: ['status'],
@@ -137,6 +239,14 @@ async function main(): Promise<void> {
       console.log(line);
       lastLine = line;
     }
+
+    // The owner's "send alert back to running process if it's surpassing
+    // 5min". Runs BEFORE the terminal-state break, so an alert cannot be
+    // skipped by the poll that happens to observe the last judgment landing.
+    // Cheap enough to run every 5s: one indexed read of the `running` rows,
+    // and the baseline query only fires when something is actually overdue.
+    if (by.running) await reportOverdue(calibrationRunId, alerted, baselines);
+
     if (total > 0 && done === total) break;
     if (Date.now() > deadline) {
       console.log(`  ⏱ poll timeout after ${pollTimeoutSec}s — scoring what landed.`);
@@ -168,6 +278,10 @@ async function main(): Promise<void> {
       reasoning: true, reasoningContent: true, reasoningSource: true, reasoningTokens: true,
       rawResponse: true, systemPrompt: true, userPrompt: true, userPromptSha256: true, promptTruncated: true,
       inputTokens: true, outputTokens: true, latencyMs: true, servedModelId: true, finishReason: true, parseMode: true,
+      // The model leg of the (dataset, item, model) tuple. Read here so the
+      // time-to-compute block can print a per-judge baseline in --score-only
+      // mode too, where no judge id was passed on the command line.
+      judgeModelVersionId: true,
       run: { select: { goldenItem: { select: { index: true, expected: true } } } },
     },
     orderBy: { createdAt: 'asc' },
@@ -186,9 +300,73 @@ async function main(): Promise<void> {
     ['outputTokens', (j) => j.outputTokens],
     ['servedModelId', (j) => j.servedModelId],
     ['finishReason', (j) => j.finishReason],
+    // Runtime is a captured field like the others, and its completeness is
+    // the one that decides whether the time-to-compute block below describes
+    // the run or only the part of it that happened to succeed.
+    ['latencyMs', (j) => j.latencyMs],
   ];
   for (const [label, get] of fields) {
     console.log(`  ${label.padEnd(18)} ${judgments.filter((j) => get(j) != null).length}/${judgments.length}`);
+  }
+
+  // ── Time to compute ───────────────────────────────────────────────────────
+  // Beside capture completeness, because it is the same kind of fact: a
+  // leaderboard entry without its cost is half a result. Everything here is a
+  // PROJECTION over rows that already exist (A2.3) — no column was added to
+  // produce it, and re-running this script recomputes rather than accumulates.
+  const tuples = await timeToComputeByTuple({ calibrationRunId });
+  const measured = judgments.filter((j) => j.latencyMs != null);
+  const perJudgment = summarizeLatencies(judgments.map((j) => j.latencyMs));
+
+  console.log('\n── Time to compute — (dataset, item, model) ──────────────────');
+  console.log(`  tuples ${tuples.length}   judgments with a recorded runtime ${measured.length}/${judgments.length}`);
+  if (perJudgment) {
+    console.log(
+      `  per judgment  mean ${formatDurationMs(perJudgment.meanMs)}  ` +
+        `p50 ${formatDurationMs(perJudgment.p50Ms)}  ` +
+        `p90 ${formatDurationMs(perJudgment.p90Ms)}  ` +
+        `max ${formatDurationMs(perJudgment.maxMs)}`
+    );
+    console.log(
+      `  attributable compute ${formatDurationMs(tuples.reduce((sum, t) => sum + t.totalMs, 0))} ` +
+        `over ${tuples.length} tuple(s)`
+    );
+  } else {
+    // Deliberately NOT "0ms". Nothing was measured; saying zero would read as
+    // a run that cost nothing.
+    console.log('  no runtime was recorded on any judgment in this run — nothing to report');
+  }
+
+  // The FAILURES are the reason this is worth printing separately from the
+  // mean: a judgment that burned the whole budget and timed out is the most
+  // expensive tuple in the corpus, and it is only visible here because the
+  // failure path records a runtime (see markJudgmentError in
+  // src/worker/judgment-consumer.ts).
+  const slowest = [...tuples].sort((a, b) => b.totalMs - a.totalMs).slice(0, 5);
+  if (slowest.length) {
+    console.log('  slowest tuples:');
+    for (const t of slowest) {
+      console.log(
+        `    item ${String(t.goldenItemIndex).padEnd(3)} judge ${t.judgeModelVersionId}  ` +
+          `${formatDurationMs(t.totalMs)}  (${t.count} judgment(s): ${t.completedCount} completed, ${t.failedCount} failed)`
+      );
+    }
+  }
+
+  // The judge's baseline over ALL its history, not just this run — the same
+  // number the timeout policy branches on, printed so this run can be read
+  // against what the judge normally does rather than only against itself.
+  for (const judgeId of [...new Set(judgments.map((j) => j.judgeModelVersionId).filter((id): id is string => id !== null))]) {
+    console.log(`  ${judgeId}: ${describeBaseline(await judgeLatencyBaseline(judgeId))}`);
+  }
+
+  const unmeasured = judgments.length - measured.length;
+  if (unmeasured > 0) {
+    const statuses = [...new Set(judgments.filter((j) => j.latencyMs == null).map((j) => j.status))].join(', ');
+    console.log(
+      `  ⚠ ${unmeasured} judgment(s) recorded no runtime (status: ${statuses}) — ` +
+        'the numbers above are over the rest, not the run.'
+    );
   }
 
   const first = judgments.find((j) => j.status === 'completed');

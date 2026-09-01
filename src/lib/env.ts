@@ -5,11 +5,30 @@
  * Fails fast with clear error messages if required vars are missing.
  *
  * Import this module in layout.tsx (server component) to validate on boot.
+ *
+ * ── WARNING: NOTHING CURRENTLY IMPORTS THIS MODULE. ────────────────────────
+ * The line above is an instruction that was never carried out — `getEnv()` has
+ * zero callers in `src/`, `scripts/` or `worker.ts` (verified by grep), so
+ * every refusal declared below, including the timeout-budget ordering rule
+ * added here, is INERT at runtime today. That is why
+ * `src/lib/llm/timeout-policy.ts`'s `resolveTimeoutBudgets()` ALSO clamps an
+ * inverted pair instead of trusting this schema to have refused it: a policy
+ * that depends on a validator nobody runs is not a policy. Wiring `getEnv()`
+ * into `src/app/layout.tsx` and `worker.ts` is the real fix and is out of
+ * scope here (neither file belongs to this change) — it is reported rather
+ * than silently assumed.
  */
 
 import { z } from 'zod';
+import {
+  DEFAULT_HARD_CAP_MS,
+  DEFAULT_INITIAL_BUDGET_MS,
+  MAX_HARD_CAP_MS,
+  MIN_BUDGET_MS,
+  budgetOrderingError,
+} from '@/lib/llm/timeout-policy';
 
-const envSchema = z.object({
+const envObject = z.object({
   // ─── Required ──
   DATABASE_URL: z
     .string()
@@ -53,7 +72,45 @@ const envSchema = z.object({
   // ─── Evaluation Engine ──
   EVALUATION_RUN_QUEUE_CONCURRENCY: z.coerce.number().int().min(1).max(32).optional().default(4),
   EVALUATION_MODEL_CONCURRENCY_PER_RUN: z.coerce.number().int().min(1).max(16).optional().default(2),
-  EVALUATION_MODEL_TIMEOUT_MS: z.coerce.number().int().min(5000).optional().default(120000),
+  /**
+   * The INITIAL budget of the escalating timeout — the point at which a slow
+   * provider call raises the 5-minute alert. Reaching it does NOT abort
+   * anything; `EVALUATION_MODEL_HARD_CAP_MS` below is the abort. See
+   * `src/lib/llm/timeout-policy.ts`.
+   *
+   * Default moved 120000 -> 300000 to match the owner's "start at 5min" AND
+   * the value both production pods have actually been running with (helmrelease
+   * `extraEnv`) for as long as this has mattered. A default that disagrees
+   * with every deployment of it is not a default, it is a trap for whoever
+   * next runs this locally and gets different timeout behaviour from prod.
+   */
+  EVALUATION_MODEL_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(MIN_BUDGET_MS)
+    .optional()
+    .default(DEFAULT_INITIAL_BUDGET_MS),
+
+  /**
+   * The HARD CAP — the owner's "15min which is a hard-cutoff". Reaching this
+   * aborts the provider call (`registry.ts`'s `execute()`).
+   *
+   * The upper bound is derived, not chosen: `MAX_HARD_CAP_MS` is
+   * `consumer_timeout (1_800_000) − GATE_WAIT_TIMEOUT_MS (600_000) −
+   * POST_CALL_SLACK_MS (30_000)`. Above it, a fallback-queue delivery's
+   * unacked window exceeds RabbitMQ's `consumer_timeout` by construction, and
+   * that does not fail one message — it closes the CHANNEL and every consumer
+   * on it (see src/worker/concurrency.ts's module doc, and src/worker/health.ts
+   * for what a worker with no consumers looks like from the outside: 1/1
+   * Running, /health 200, five days of silence).
+   */
+  EVALUATION_MODEL_HARD_CAP_MS: z.coerce
+    .number()
+    .int()
+    .min(MIN_BUDGET_MS)
+    .max(MAX_HARD_CAP_MS)
+    .optional()
+    .default(DEFAULT_HARD_CAP_MS),
 
   // ─── Application ──
   NEXT_PUBLIC_APP_NAME: z.string().optional().default('Judge Arena'),
@@ -74,6 +131,36 @@ const envSchema = z.object({
   TRUSTED_PROXY: z.enum(['true', 'false']).optional().default('false'),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).optional().default('info'),
   RAILWAY_PUBLIC_DOMAIN: z.string().optional(),
+});
+
+/**
+ * The one CROSS-FIELD rule: the hard cap may not precede the initial budget.
+ *
+ * A config where the cutoff comes before the warning is not "aggressive", it
+ * is incoherent — the alert promises "waiting N more minutes" and the abort
+ * has already happened. It must fail where a human is reading output (boot),
+ * not at 3am inside a 30-item calibration, so it is a schema refusal rather
+ * than a runtime log line.
+ *
+ * The issue is attached to `EVALUATION_MODEL_HARD_CAP_MS` because that is the
+ * variable an operator should change: the initial budget is the documented
+ * 5-minute alert point, the cap is the knob being widened.
+ *
+ * The rule itself lives in `timeout-policy.ts` (`budgetOrderingError`) so the
+ * schema and the runtime that obeys it cannot drift apart.
+ *
+ * CAVEAT, and it is the second reason `resolveTimeoutBudgets()` clamps as well
+ * as this refusing: zod runs `superRefine` ONLY when the object parse
+ * succeeded. Any unrelated invalid field above (and `ENCRYPTION_KEY` is
+ * declared `.min(16)` with a `''` default it can never satisfy, so an
+ * environment that simply omits it is already invalid) makes this check
+ * silently not run at all.
+ */
+export const envSchema = envObject.superRefine((value, ctx) => {
+  const message = budgetOrderingError(value.EVALUATION_MODEL_TIMEOUT_MS, value.EVALUATION_MODEL_HARD_CAP_MS);
+  if (message) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['EVALUATION_MODEL_HARD_CAP_MS'], message });
+  }
 });
 
 export type Env = z.infer<typeof envSchema>;
