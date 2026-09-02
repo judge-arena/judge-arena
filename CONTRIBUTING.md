@@ -1381,6 +1381,44 @@ comment on the job, not the file header, and it dates from authoring rather than
 Treat the file's `needs:` chain as the enforced coupling and check the repo settings before assuming
 a red job physically blocks the merge button.
 
+> **CORRECTION (2026-09-01).** The sentence above — *"There is no Gitea CLI or API token available
+> in this working environment"* — is still true and was still misleading: this repo is public, so
+> the read-only Actions endpoints answer **without** a token. Nobody needs the runner pod log to
+> read a run's outcome, and the pod log is the one surface that lies (below).
+
+### Reading a run's outcome without a token
+
+```sh
+bash scripts/ci/ci-status.sh <sha>      # 12-40 hex; exit 0 image present, 1 absent, 2 no run
+```
+
+It reads, in order of authority:
+
+1. `GET https://gitea.lab.asethi.com/api/v1/repos/trij/judge-arena/actions/tasks` — one row per
+   job that reached a runner: `id`, `name`, `head_sha`, `status`, `run_number`, timestamps.
+   Filter by `head_sha` prefix. **This is the authoritative surface.**
+2. `GET …/commits/<sha>/status` — per-job commit statuses. A job that never got a task (e.g.
+   `build-push` behind a cancelled `db-tests`) appears here as "Has been cancelled". **Empty
+   (`state: ""`, `statuses: null`) means the commit never had a run** — it was not the head of its
+   push.
+3. Harbor, via `scripts/ci/assert-harbor-tag.sh judge-arena sha-<12>` (anonymous; project
+   `homelab` is public). `skopeo inspect --no-tags docker://harbor.cluster.asethi.com/homelab/judge-arena:sha-<12>`
+   is the same check by hand.
+
+`/actions/runs` and `/actions/workflows/{file}/dispatches` still 404 on Gitea 1.23.6; re-running a
+task is the web UI's button, and rebuilding a superseded SHA takes a new push.
+
+**Rapid successive pushes to `main` cancel each other's runs.** Gitea 1.23.6 calls
+`CancelPreviousJobs` on every push to the same ref before it inserts the new run — built in, not
+opt-out, and unrelated to the `concurrency:` block in `ci.yml` (inert on this version). The
+cancelled run's SHA never gets an image. The runner pod log then prints `this step has been
+cancelled: signal: killed` followed by `🏁 Job succeeded` (act v0.261.10 `job_executor.go` swaps in
+a fresh context and loses the job error); Gitea's record says `cancelled` throughout. On 2026-09-01
+this left `60be6f6` and `7f0e0cb` (cancelled) and `2c1e85e` and `740e7bb` (never the head of a
+push) without images. **Before every promote, run `ci-status.sh` on the SHA you intend to promote.**
+The in-run `Assert Harbor has sha-<12>` step (`build-push`) is a sentinel for "kaniko said
+Complete, registry empty"; it cannot fire for a cancelled run.
+
 ### Why the Gitea workflow is raw shell
 
 > **CORRECTION (2026-08-29).** This subsection used to open *"This repo is not hosted on Gitea yet —
