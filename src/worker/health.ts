@@ -31,8 +31,15 @@
  * re-subscribe reads as degraded, /health returns 503, readiness fails, and
  * the existing KubeDeploymentReplicasMismatch alert fires.
  *
- * DETECTION ONLY. Re-registering consumers on reconnect is the real fix and is
- * deliberately not attempted here.
+ * DETECTION HERE, RECOVERY BY EXIT. Re-registering consumers on reconnect was
+ * the follow-up this file originally deferred; what landed instead is
+ * `createConsumerLossPolicy` below — the registry's `onLost` exits the
+ * process and Kubernetes' restartPolicy re-runs the one registration path
+ * that is proven to bring up all ten consumers (main.ts's boot). CORRECTION
+ * (2026-09-01): this line used to read "DETECTION ONLY. Re-registering
+ * consumers on reconnect is the real fix and is deliberately not attempted
+ * here." In-process re-registration was rejected, not merely deferred — the
+ * policy's docblock says why.
  */
 
 import type { EventEmitter } from 'node:events';
@@ -192,13 +199,18 @@ export function createConsumerRegistry(
  * common case — all four are wired anyway because the cost is nothing and the
  * failure this guards against is invisible for days.
  *
- * FOLLOW-UP (tier 2, deliberately NOT implemented here): re-registration
- * belongs in these same 'close' handlers — await a fresh `getRabbit()` with
- * backoff, re-`prefetch`, re-`consume` every queue, `register()` each new
- * tag. It does NOT belong in `src/lib/queue/connection.ts`'s reconnect loop:
- * that module is shared with the web tier, which publishes and never
- * consumes. Until that lands, this fix only makes the loss VISIBLE (503 ->
- * readiness -> KubeDeploymentReplicasMismatch); recovery is a pod restart.
+ * RECOVERY (2026-09-01): none of these handlers re-consumes, and none will.
+ * The registry's `onLost` is `createConsumerLossPolicy` (below), which exits
+ * the process so the pod restarts and boot re-registers everything. The
+ * earlier FOLLOW-UP here proposed re-registration in these same 'close'
+ * handlers; that is a SECOND registration path — re-create the lane channel,
+ * re-`prefetch` both channels, re-`consume` ten queues, re-`register()` each
+ * tag AND re-attach these very listeners on the new epoch's objects, or the
+ * detector goes blind after the first recovery — the "N sibling call sites,
+ * half-works without it" shape that shipped the escalating timeout into one
+ * of three seams. It still does NOT belong in `src/lib/queue/connection.ts`'s
+ * reconnect loop either: that module is shared with the web tier, which
+ * publishes and never consumes and must keep publishing through a reconnect.
  *
  * @param queues the consumers this emitter pair owns. Called once per CHANNEL
  * now that lanes live on their own (main.ts), so a lane-channel failure clears

@@ -40,7 +40,7 @@
  * what this change adds, and adding it to the existing hazard would have been
  * the regression. And the lane channel is NOT managed by connection.ts's
  * reconnect loop: it dies with its connection and is not recreated, exactly
- * like today's consumers. Detection, not recovery — see below.
+ * like the consumers. That is why consumer loss EXITS — see below.
  *
  * Dev/local: `npm run worker` (`tsx src/worker/main.ts`). Build wiring
  * (bundling this into a deployable worker image/target, a docker-compose
@@ -70,9 +70,26 @@
  * (`ConsumerRegistry` below), and it participates in the `healthy`
  * conjunction, so zero consumers => 503 => the readiness probe fails => the
  * replica goes unavailable => the existing KubeDeploymentReplicasMismatch
- * alert fires. Detection only — the actual re-registration-on-reconnect fix
- * is separate, later work (see the FOLLOW-UP note on
- * `trackConsumerRegistration`).
+ * alert fires.
+ *
+ * ── Consumer loss EXITS the process (2026-09-01) ────────────────────────────
+ * Detection alone left the pod 1/1 Running with a 503 forever: the liveness
+ * probe is tcpSocket (homelab charts/judge-arena/templates/deployment.yaml)
+ * and this health server keeps accepting TCP with zero consumers, so
+ * Kubernetes never restarted it and recovery was a human running
+ * `kubectl rollout restart`. The registry's `onLost` is now
+ * `createConsumerLossPolicy` (health.ts): log once, flush the background
+ * writes (bounded), `process.exit(1)`. restartPolicy brings the container
+ * back through THIS function, the only consume path there is. All three loss
+ * routes reach it — socket loss (conn 'error'/'close'), a channel-level close
+ * with the connection alive (channel 'error'/'close'; the shape the five-day
+ * silence most likely took), and a broker `basic.cancel` (null message ->
+ * `unregister`). During a genuine broker outage this is a visible
+ * CrashLoopBackOff (bounded, 5-minute backoff cap, self-clearing when the
+ * broker returns) instead of a silent zombie. CORRECTION: the paragraph above
+ * used to end "Detection only — the actual re-registration-on-reconnect fix
+ * is separate, later work"; re-registration was rejected, not deferred (see
+ * createConsumerLossPolicy's docblock for why).
  */
 
 import http from 'node:http';
@@ -97,6 +114,7 @@ import {
 import {
   EXPECTED_CONSUMER_COUNT,
   WORKER_CONSUMER_QUEUES,
+  createConsumerLossPolicy,
   createConsumerRegistry,
   evaluateWorkerHealth,
   trackConsumerRegistration,
@@ -184,14 +202,24 @@ async function main(): Promise<void> {
   const laneChannel = await conn.createChannel();
   await laneChannel.prefetch(LANE_PREFETCH);
 
-  const consumers = createConsumerRegistry((reason, remaining) => {
-    logger.error('amqp consumers lost — this worker has stopped consuming', {
-      reason,
-      remaining,
-      expected: EXPECTED_CONSUMER_COUNT,
-      missing: consumers.missing(),
-    });
-  });
+  // FAIL FAST. Consumer loss is not recoverable in this process: connection.ts's
+  // reconnect loop restores the socket, one confirm channel and the topology —
+  // never the lane channel, never a prefetch, never a single consume() — and
+  // the tcpSocket liveness probe cannot see any of that (the health server
+  // keeps accepting TCP with zero consumers). Exiting hands recovery to the
+  // ONE registration path proven to bring up all ten consumers — this
+  // function — with Kubernetes' restartPolicy supplying the retry. See
+  // createConsumerLossPolicy (health.ts) for the idempotency and the bounded
+  // flush of fire-and-forget writes. Annotated because the policy's `missing`
+  // reads back from the registry it is installed on.
+  const consumers: ConsumerRegistry = createConsumerRegistry(
+    createConsumerLossPolicy({
+      exit: (code) => process.exit(code),
+      log: (message, context) => logger.error(message, context),
+      flush: flushBackgroundWrites,
+      missing: () => consumers.missing(),
+    })
+  );
 
   /** Which channel owns a queue's consumer. Drain cancels by tag, and a tag can
    *  only be cancelled on the channel that created it — asking the shared
@@ -281,7 +309,9 @@ async function main(): Promise<void> {
         // On a lane this is not hypothetical: `x-single-active-consumer` makes
         // the broker cancel the losing consumer on failover, so the ONE thing
         // that keeps a lane serial is also the thing that hands this callback
-        // a null.
+        // a null. `unregister` reaches the loss policy, so this EXITS too:
+        // with replicas=1 a lane nobody consumes is a lane whose judgments
+        // queue forever, and nothing in-process re-consumes it.
         if (!msg) {
           consumers.unregister(queue, 'broker cancelled the consumer');
           return;
