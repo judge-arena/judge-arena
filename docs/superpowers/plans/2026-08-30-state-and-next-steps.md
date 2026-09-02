@@ -457,6 +457,19 @@ Full record: [`docs/superpowers/specs/2026-09-01-judge-scoreboard-and-model-enve
    invariant that closes all three is one `skopeo inspect` asserting a tag for the pushed SHA.
    Detail: scoreboard spec §5.5.
 
+   > **CORRECTION (2026-09-01).** *"`next build` was OOM-killed"* and *"the job still printed
+   > `🏁 Job succeeded`"* — the first is false and the second is true only of the runner pod log.
+   > Run 51 (task 4816) was cancelled by Gitea 1.23.6's built-in `CancelPreviousJobs` when
+   > `7f0e0cb` was pushed 28 s later; act v0.261.10 prints `this step has been cancelled: signal:
+   > killed` only on a cancelled context and then logs a spurious `🏁 Job succeeded` from a fresh
+   > context that has lost the job error. Gitea's record said `cancelled` / "Has been cancelled"
+   > throughout; the runner never restarted or OOMKilled; the same signature hit task 4818
+   > (`7f0e0cb`, `db-tests`, no Node process) at 15:56:32Z. Of the two fixes proposed above, the
+   > first was not needed (nothing in `ci.yml` swallows a failure) and the second addresses an
+   > event that did not happen. Landed instead: `scripts/ci/assert-harbor-tag.sh` behind a new
+   > `build-push` step, `scripts/ci/ci-status.sh <sha>` for the pre-promote read, and this note's
+   > siblings in the handoff and spec §5.5.
+
 ---
 
 ## 6. Repo state

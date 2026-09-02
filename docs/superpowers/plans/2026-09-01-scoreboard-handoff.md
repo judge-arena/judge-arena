@@ -277,6 +277,25 @@ direction from the mechanism.
    judge-arena (`helmrelease.yaml:152`) *and* watches built-not-promoted, whereas this is
    pushed-not-built. Marginal rather than systematic — the same build passed 70 minutes earlier and
    again on retry — which is what makes it read as flaky CI.
+
+   > **CORRECTION (2026-09-01).** The cause stated above — *"`next build` was OOM-killed against
+   > the runner's `limits.memory: 4Gi`"* — is wrong, and so is *"CI reports `🏁 Job succeeded`"*.
+   > The run for `60be6f6` (run 51, task 4816) was **cancelled server-side by the next push**:
+   > Gitea 1.23.6 calls `CancelPreviousJobs` on every push to the same ref, and `7f0e0cb` was
+   > authored 28 s before the kill. `this step has been cancelled: signal: killed` is the string act
+   > v0.261.10 prints only when the step's context is cancelled — never on a kernel OOM — and the
+   > `🏁 Job succeeded` that follows it appears in the **runner pod log only** (act's
+   > `job_executor.go` swaps in a fresh context and loses the job error). Gitea's own record was
+   > never green: task `cancelled`, all three commit statuses "Has been cancelled". The runner had
+   > `restartCount 0` and no `OOMKilled` state, and the identical signature recurred at 15:56:32Z
+   > on task 4818 (`7f0e0cb`, job `db-tests`, a kubectl polling loop with no Node process), 8 s
+   > after `d21f31d` was authored (15:56:24Z). `2c1e85e` and `740e7bb` have no image for a different reason:
+   > they were never the head of a push and never had a run. "Passed again on retry" is also
+   > wrong — `d21f31d` was a new push whose run was simply not cancelled; `60be6f6` was never
+   > rebuilt. What stands: a green-looking pod log is not evidence of an image. What changed: read
+   > `bash scripts/ci/ci-status.sh <sha>` (tasks + commit-status APIs, no token, then Harbor)
+   > before every promote; `build-push` now prints `IMAGE_PUBLISHED …` after asserting the tag.
+   > Do not retune the runner or `NODE_OPTIONS` on this evidence. Detail: spec §5.5 correction.
 4. **Verify the artifact, not the source tree.** `e4b9948`'s image never built because
    `.dockerignore` excluded `scripts/**`; Harbor silently stayed on the previous tag. Third instance
    of this family with trap 3 and homelab's chart-version no-op. **The invariant that closes all
@@ -322,7 +341,14 @@ what a leaderboard actually needs.
    *detects* it; the reconnect itself is still broken. homelab PR #932 is still draft.
 5. **`judge.dlq` holds 10 messages, has no consumer and no replay verb.** It grew from 4 during
    ordinary operation, so it is an accumulating sink, not run-1 residue.
-6. **CI's false green** (trap 3). Make the job fail when a step fails *first*; the OOM is secondary.
+6. **CI's false green** (trap 3) — **CORRECTION (2026-09-01)**, same day: the item as written —
+   *"Make the job fail when a step fails first; the OOM is secondary"* — assumed a YAML defect and
+   an OOM, and there was neither (trap 3 correction). Done as far as this repo can do it. What landed:
+   `scripts/ci/assert-harbor-tag.sh` + an `Assert Harbor has sha-<12>` step in `build-push`,
+   `scripts/ci/ci-status.sh <sha>` as the pre-promote read, and comment/doc corrections. Still
+   open, and not in this repo: nothing watches pushed-not-built out-of-band (a cancelled run never
+   reaches the assert step) — a homelab-setup exporter comparing Gitea `main` HEAD to Harbor tags
+   would be the shape that catches it.
 
 ### Product
 
@@ -363,6 +389,8 @@ kubectl -n tenant-public exec judge-arena-pg-1 -c postgres -- psql -U postgres -
    ORDER BY cr.\"startedAt\" DESC;"
 
 # 4. Confirm main has an image in Harbor. Green CI does not mean this. (trap 3/4)
+# CORRECTION (2026-09-01): read Gitea's record first — exit 2 = never ran, 1 = ran, no image.
+bash /root/judge-arena/scripts/ci/ci-status.sh $(git -C /root/judge-arena rev-parse main)
 skopeo inspect --no-tags \
   docker://harbor.cluster.asethi.com/homelab/judge-arena:sha-$(git -C /root/judge-arena rev-parse main | cut -c1-12)
 ```

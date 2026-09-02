@@ -536,6 +536,29 @@ budget, and nothing at this sample size is a statement about difficulty. "Length
 
 ## 5.5 CI reported SUCCESS on a build that was OOM-killed, and nothing else would have caught it
 
+> **CORRECTION (2026-09-01).** Same day. The heading and the interpretation below are wrong; the
+> quoted log is exact. The build was not OOM-killed — the run was **cancelled by the next push**.
+> Gitea 1.23.6 calls `CancelPreviousJobs(repo, ref, workflow, event)` on every push to the same ref
+> before inserting the new run (`services/actions/notifier_helper.go`); `7f0e0cb` was authored at
+> 15:41:44Z and the kill landed at 15:42:12Z. act v0.261.10 emits `this step has been cancelled: %w`
+> only inside `select { case <-ctx.Done(): … }` (`pkg/container/host_environment.go`) — a kernel
+> OOM does not close `ctx.Done()` — and its `job_executor.go` then replaces the cancelled context
+> with a fresh `context.Background()` that carries no job-error container, so `JobError()` is nil
+> and `🏁 Job succeeded` is logged. **Only the runner pod log says that.** Gitea ignored the report
+> (the task was already Done) and its record for `60be6f6` is task 4816 `cancelled`, run 51, all
+> three commit statuses "Has been cancelled". The runner container: `restartCount 0`, no
+> `OOMKilled`, same pod since 15:27:13Z. And the identical signature recurred at 15:56:32Z on task
+> 4818 — `7f0e0cb`, job `db-tests`, step "Wait for the DB-test Job", a kubectl polling loop with no
+> Node process — 8 s after `d21f31d` was authored; that rules out memory without any argument about
+> Next.js. `2c1e85e` and `740e7bb` have no image because they were never the head of a push (runs
+> 50-55 are exactly 414e826, 60be6f6, 7f0e0cb, d21f31d, ba237bd, fc9e936). "Passed again on retry"
+> is also wrong: `d21f31d` was a new push whose run was not cancelled; `60be6f6` was never rebuilt.
+> The CPU-count paragraph is true in general and irrelevant here — and Next 15.5.22 strips
+> `--max-old-space-size` from its static workers (`isolatedMemory: true`), so `NODE_OPTIONS` never
+> bounded them anyway. Neither the runner's 4Gi nor `NODE_OPTIONS` should be retuned on this
+> evidence. What is right below: nothing watches pushed-not-built, `BuildPromoteLag` is the wrong
+> shape, and the family resemblance to `e4b9948`. The fix table at the end is replaced.
+
 Observed 2026-09-01 while trying to promote the §5.3 fix. The runner log, verbatim:
 
 ```
@@ -580,12 +603,16 @@ chart-version no-op in homelab's CLAUDE.md is the same shape one layer up. The i
 enforcing is small and mechanical: **after any push to `main`, assert that a tag matching the commit
 SHA exists in Harbor.** One `skopeo inspect`, and it closes all three.
 
-Two fixes are available and they are not alternatives — the first is the real one:
+What was done (2026-09-01; replaces the table that stood here — *"make the job fail when a step
+fails"* / *"raise the runner limit, or bound Next's build workers"* — both of which addressed things
+that had not happened, per the correction at the top of this section):
 
-| fix | what it addresses |
+| change | what it addresses |
 |---|---|
-| make the job fail when a step fails | the false-green. Until this lands, a green CI run is not evidence that an image exists. |
-| raise the runner limit, or bound Next's build workers | the OOM itself. 4 Gi is marginal on a 16-core node. |
+| `scripts/ci/ci-status.sh <sha>` — `actions/tasks` + `commits/<sha>/status` (no token), then Harbor | the reading rule: Gitea's record, never the runner pod log. Exit 2 = never ran (not the head of a push); exit 1 = ran, no image. **Run before every promote.** |
+| `scripts/ci/assert-harbor-tag.sh` + the `Assert Harbor has sha-<12>` step in `build-push`, printing `IMAGE_PUBLISHED repo=… tag=… digest=…` | kaniko-said-Complete-but-registry-empty (never observed; cheap). Cannot fire for a cancelled run. |
+| `ci.yml` comments: `CancelPreviousJobs` mechanism; `concurrency:` inert on 1.23.6; `if: always()` reap step does not run after a cancel | the next reader of a `signal: killed` / `Job succeeded` pair |
+| **not done, out of repo:** an out-of-band pushed-not-built exporter (Gitea `main` HEAD vs Harbor tags) | the only shape that would have caught `60be6f6` |
 
 ---
 
