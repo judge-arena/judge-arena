@@ -132,6 +132,17 @@ Five commits on `main`, all promoted.
 | hard cap | `EVALUATION_MODEL_HARD_CAP_MS`, default 900 000 ms (unset in the manifest) | **aborts** |
 | attempts | 2, then `non_retryable` | |
 
+> **CORRECTION (2026-09-01, U3).** The `attempts` row above was true of the *consumer's* disposition
+> and false of the *process*. `callThroughResilience` (`src/lib/llm/index.ts`) wrapped every
+> `execute()` in `withRetry` with the default 3-attempt taxonomy predicate, and a hard-cap abort on
+> attempt 1 is `kind: 'retryable'` — so one delivery could run the 900 s cap up to three times
+> (~2700 s) inside a 930 s lease. The reaper reclaimed mid-flight and the row executed twice; that
+> is the mechanism behind the paired attempt-3/attempt-4 `judge.dlq` envelopes on run 1, and it was
+> still live on `sha-d21f31d47c35`. "2, then `non_retryable`" was never enforced end-to-end. Fixed by
+> `isRetryableInProcess`: a `timeout: true` `ProviderError` escapes `withRetry` on its first throw,
+> so the consumer's attempt policy is the only one that runs. Pinned by
+> `tests/lib/llm-index.test.ts` ("U3: a timeout ProviderError … is NOT retried in-process").
+
 "Health" means **this judge has completed a judgment before** — not that a probe answers. A
 side-channel probe proves the server is up, not that *this request* is progressing, and would
 extend a wedged call to the full 15 minutes. With a baseline the alert says how far past normal the

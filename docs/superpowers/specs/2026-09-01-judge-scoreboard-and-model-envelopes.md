@@ -304,6 +304,16 @@ Promoted `sha-414e826a3ba3` (homelab-setup #950):
 No manifest change was needed: `EVALUATION_MODEL_TIMEOUT_MS` stays `"300000"` and is now the
 *initial budget*; `EVALUATION_MODEL_HARD_CAP_MS` is unset and takes the 900 000 default.
 
+> **CORRECTION (2026-09-01, U3).** "Two attempts, then `non_retryable`" described the consumer's
+> disposition of the hard-cap error, not what the process did with it. `src/lib/llm/index.ts`'s
+> `callThroughResilience` still passed the attempt-1 abort (`kind: 'retryable'`, `timeout: true`)
+> through `withRetry`'s default 3-attempt predicate, so one delivery could execute the 900 s cap
+> three times under the 930 s lease that the paragraph directly below says closed the double-execution hazard — the
+> lease fix bounded one `execute()`; it did not bound the retry loop around it. The
+> `"LLM call failed, retrying" attempt 2 maxAttempts 3 … timed out` log line in §5 is that loop.
+> Fixed by making a `timeout: true` `ProviderError` escape `withRetry` on its first throw
+> (`isRetryableInProcess`, `src/lib/llm/index.ts`).
+
 **The part that was a bug rather than a feature:** `claim.ts`'s `LEASE_MS` was
 `EVALUATION_MODEL_TIMEOUT_MS + 30s` = 330 s. A 15-minute call under a 330 s lease is **reclaimed by
 the reaper mid-flight and executed twice.** `LEASE_MS` now derives from the hard cap (930 s), and two

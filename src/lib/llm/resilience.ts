@@ -40,7 +40,7 @@ export interface RetryOptions {
  * `classify()`'s `err instanceof ProviderError` short-circuit, so the real
  * label is preserved end-to-end.
  */
-function defaultIsRetryable(error: unknown): boolean {
+export function defaultIsRetryable(error: unknown): boolean {
   const { kind } = classify(error, 'unknown');
   return kind === 'retryable' || kind === 'rate_limited';
 }

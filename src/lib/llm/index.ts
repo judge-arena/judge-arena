@@ -37,7 +37,8 @@ import {
   prepareRespondCall,
   executeRespondCall,
 } from './registry';
-import { withRetry } from './resilience';
+import type { RetryOptions } from './resilience';
+import { defaultIsRetryable, withRetry } from './resilience';
 import { classify, ProviderError } from './errors';
 import { getBreaker } from './breaker-redis';
 
@@ -57,6 +58,34 @@ function breakerKey(servingBackend: string, endpoint: string | null, modelId: st
 }
 
 /**
+ * The in-process retry predicate for `callThroughResilience`.
+ *
+ * Defers to `withRetry`'s taxonomy default for everything EXCEPT a
+ * `ProviderError` carrying `timeout: true` — `registry.ts`'s `execute()`
+ * hard-cap abort, or an SDK-level abort/connection error that `classify()`
+ * marks the same way (errors.ts `isAbortOrTimeout`). Those escape to the
+ * caller on the first throw.
+ *
+ * Why a timeout is different from a 500: retrying a 500 in-process is cheap
+ * and often works. Retrying a timeout in-process re-runs the WHOLE budget. A
+ * hard-cap abort on attempt 1 is `kind: 'retryable'` (`timeout-policy.ts`'s
+ * `hardCapAbortKind` — the consumer is meant to give it one more delivery),
+ * so under the default predicate ONE delivery ran `execute()` up to
+ * `maxAttempts` (3) times at the full 900 s hard cap, ~2700 s, inside a 930 s
+ * lease (`claim.ts`'s `LEASE_MS`). The reaper reclaimed the row mid-flight
+ * and republished it, the second delivery ran beside the first, and both
+ * dead-lettered: that is the paired attempt-3/attempt-4 `judge.dlq` envelope
+ * per judgment on calibration run 1 (2026-08-31). The "15 + 15, then exit"
+ * policy is decided by `judgment-consumer.ts`'s disposition of this SAME
+ * error, so the correct number of in-process attempts for a timeout is
+ * exactly one — anything more silently multiplies that policy.
+ */
+function isRetryableInProcess(error: unknown): boolean {
+  if (error instanceof ProviderError && error.timeout === true) return false;
+  return defaultIsRetryable(error);
+}
+
+/**
  * Gate + run a provider call through the Redis-backed circuit breaker and
  * taxonomy-driven retry.
  *
@@ -70,8 +99,12 @@ function breakerKey(servingBackend: string, endpoint: string | null, modelId: st
  *   point of a single probe.
  * - Every error crossing the provider boundary is classified immediately
  *   (with the real provider name) before `withRetry` ever sees it, so
- *   `withRetry`'s default taxonomy check and the error that ultimately
- *   propagates to the caller are both properly-typed `ProviderError`s.
+ *   the retry predicate and the error that ultimately propagates to the
+ *   caller are both properly-typed `ProviderError`s.
+ * - A `timeout: true` `ProviderError` is never retried here (see
+ *   `isRetryableInProcess` above): it goes straight to the caller, whose
+ *   attempt policy — not `withRetry`'s — decides whether there is a second
+ *   attempt.
  * - The breaker only ever records ONE outcome per call to `executeJudgment`/
  *   `executeRespond` — the whole retry sequence counts as a single
  *   breaker failure (or success).
@@ -91,7 +124,10 @@ async function callThroughResilience<T>(
     );
   }
 
-  const retryOpts = state === 'half_open_probe' ? { maxAttempts: 1 } : {};
+  const retryOpts: RetryOptions = {
+    isRetryable: isRetryableInProcess,
+    ...(state === 'half_open_probe' ? { maxAttempts: 1 } : {}),
+  };
 
   try {
     const result = await withRetry(async () => {

@@ -43,6 +43,10 @@ vi.mock('@/lib/llm/breaker-redis', () => ({
 
 const { executeJudgment, executeRespond } = await import('@/lib/llm');
 import type { RunProviderJudgmentInput, RunProviderResponseInput } from '@/lib/llm';
+// The real class, not a mock: `classify()` passes a ProviderError through by
+// identity (errors.ts:146) and `withRetry` rethrows the same object, so the
+// U3 tests below can assert `rejects.toBe(theErrorWeThrew)`.
+import { ProviderError } from '@/lib/llm/errors';
 
 const baseJudgeVersion = {
   servingBackend: 'anthropic' as const,
@@ -180,6 +184,71 @@ describe('llm/index: executeJudgment/executeRespond breaker + retry wiring', () 
     await expect(executeJudgment(baseJudgmentInput)).rejects.toMatchObject({
       kind: 'non_retryable',
     });
+    expect(executeJudgmentCallMock).toHaveBeenCalledTimes(1);
+    expect(onFailureMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('U3: a timeout ProviderError (hard-cap abort, attempt 1, kind retryable) is NOT retried in-process — one call, one breaker failure, the same error propagates', async () => {
+    // Fake timers so that if the implementation DOES retry, the failure is a
+    // clean "called 3 times" rather than a 5 s test timeout spent in
+    // withRetry's real backoff sleeps.
+    vi.useFakeTimers();
+    // Exactly what registry.ts's execute() throws when the 900 s hard cap
+    // fires on a first delivery (registry.ts:845-856): kind is
+    // hardCapAbortKind(1) === 'retryable', timeout: true, attempt: 1.
+    const hardCap = new ProviderError(
+      'Provider call to "llamacpp" (Qwen3.6-35B-A3B) hit the 900000ms hard cap on attempt 1 (initial budget 300000ms)',
+      { kind: 'retryable', provider: 'llamacpp', timeout: true, attempt: 1 }
+    );
+    executeJudgmentCallMock.mockRejectedValue(hardCap);
+
+    const promise = executeJudgment(baseJudgmentInput);
+    promise.catch(() => {}); // swallow the eventual rejection before we assert on it below
+
+    await vi.runAllTimersAsync();
+
+    await expect(promise).rejects.toBe(hardCap);
+    expect(executeJudgmentCallMock).toHaveBeenCalledTimes(1); // NOT withRetry's default 3
+    expect(onFailureMock).toHaveBeenCalledTimes(1);
+    expect(onSuccessMock).not.toHaveBeenCalled();
+  });
+
+  it('U3: a rate_limited ProviderError WITHOUT timeout keeps the full in-process retry budget', async () => {
+    vi.useFakeTimers();
+    const limited = new ProviderError('429 slow down', {
+      kind: 'rate_limited',
+      provider: 'llamacpp',
+      status: 429,
+    });
+    executeJudgmentCallMock.mockRejectedValue(limited);
+
+    const promise = executeJudgment(baseJudgmentInput);
+    promise.catch(() => {});
+
+    await vi.runAllTimersAsync();
+
+    await expect(promise).rejects.toBe(limited);
+    expect(executeJudgmentCallMock).toHaveBeenCalledTimes(3); // default maxAttempts, unchanged
+    expect(onFailureMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('U3: a raw AbortError — which classify() stamps timeout: true with no attempt (errors.ts isAbortOrTimeout) — also escapes after one call', async () => {
+    vi.useFakeTimers();
+    // NOT a ProviderError: this one goes through classify()'s isAbortOrTimeout
+    // branch (errors.ts:176-184, :229), which yields kind 'retryable',
+    // timeout: true and no `attempt`. It pins the "Consequence" paragraph
+    // above — the predicate keys on the timeout flag alone, not on the
+    // hard-cap shape — and is the only test that exercises the
+    // classify()->timeout wiring rather than classify()'s identity short-circuit.
+    const aborted = Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+    executeJudgmentCallMock.mockRejectedValue(aborted);
+
+    const promise = executeJudgment(baseJudgmentInput);
+    promise.catch(() => {});
+
+    await vi.runAllTimersAsync();
+
+    await expect(promise).rejects.toMatchObject({ name: 'ProviderError', kind: 'retryable', timeout: true, provider: 'anthropic' });
     expect(executeJudgmentCallMock).toHaveBeenCalledTimes(1);
     expect(onFailureMock).toHaveBeenCalledTimes(1);
   });

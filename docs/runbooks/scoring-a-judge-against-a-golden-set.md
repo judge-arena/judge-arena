@@ -502,6 +502,15 @@ and no longer aborts anything:
 | hard cap | `EVALUATION_MODEL_HARD_CAP_MS`, default 900 000 ms | **aborts** |
 | attempts | 2 | then `non_retryable` |
 
+> **CORRECTION (2026-09-01, U3).** On images up to and including `sha-d21f31d47c35` the `attempts`
+> row was only half true: the consumer gave the judgment two deliveries, but inside EACH delivery
+> `withRetry` re-ran the 900 s hard cap up to three times, so the worst case per delivery was
+> ~2700 s, not 900 s, and the 930 s lease let the reaper republish it mid-flight. The operator-visible
+> symptoms are a `"LLM call failed, retrying" … hard cap` line in the worker log and paired
+> attempt-3/attempt-4 envelopes for one judgment in `judge.dlq`. Fixed in `src/lib/llm/index.ts`
+> (`isRetryableInProcess`): a timeout now escapes on its first throw. Worst case per item is 900 s
+> per delivery, as the §8.7 sizing paragraph below assumes.
+
 At 300 s the worker emits `judgment passed the initial timeout budget`. If that judge has completed
 a judgment before, the warning states how far past its own baseline this call is; if it has not, it
 says *confirm model access, waiting 10 more minutes*. **Health means "this judge has returned a
