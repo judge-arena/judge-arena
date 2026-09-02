@@ -351,6 +351,15 @@ actually consumed from. See `src/lib/queue/topology.ts`.
 > 0 consumers and always will — they have no consumer by design, so they are not a signal either way;
 > the two work queues are.) Nothing about the reconnect path changed, so the next broker or Postgres
 > roll can silently do this again.
+>
+> **Update (2026-09-01) — fixed, by exiting.** The worker no longer outlives a lost consumer set:
+> the registry's `onLost` is `createConsumerLossPolicy` (`src/worker/health.ts`), which logs once,
+> flushes the fire-and-forget writes with a 2 s bound and `process.exit(1)`s; Kubernetes'
+> `restartPolicy` re-runs boot, the only path that registers consumers. In-process re-registration
+> was rejected on purpose, and a broker outage now CrashLoops the worker visibly instead of leaving
+> a zombie — both explained in CONTRIBUTING.md under "The 2026-08-24 consumer loss". The queue count
+> quoted above was true on 2026-08-24; since per-server lanes landed there are ten consumed queues
+> (`consumers == expectedConsumers == 10` in the worker's boot log).
 
 ---
 

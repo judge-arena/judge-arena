@@ -1218,32 +1218,73 @@ providers. A calibration run is an ordinary pairwise run with two extra columns 
 same `judgment.execute` consumer as everything else. If you are debugging one, debug the normal
 pipeline.
 
-### Known open production defect (2026-08-24 →, unfixed)
+### The 2026-08-24 consumer loss — what it was, and what now happens instead (fixed in code 2026-09-01; promoted separately)
 
-Worth knowing before you touch the queue layer, because it is a code defect and not a config one:
+Worth knowing before you touch the queue layer, because it was a code defect and not a config one:
 **the evaluation pipeline was dead from 2026-08-24T17:55Z until the 2026-08-29 promote rolled the
-worker** — read the dated update at the end of this subsection before acting on the paragraph that
-follows it. At the time it was diagnosed, all five RabbitMQ queues reported
-`consumer_count=0`. A Cozystack v1.6.2 roll recreated `judge-arena-pg-1` at 17:54:57Z; 21 seconds
-later the worker logged `Can't reach database server` / `terminating connection due to administrator
-command` (SQLSTATE `57P01`) and then emitted no log line for five days. The pod was `1/1 Running`
-with 0 restarts throughout, which is exactly why this is easy to miss. Its socket reconnected; **its AMQP consumers
-never re-registered.** A worker rollout restores service, but the underlying defect — the AMQP
-client re-registers consumers only on boot, never on reconnect — is still open in `src/lib/queue/`
-and `src/worker/`. If you fix it, the test for it belongs in `tests/integration/` (real broker), and
-per [Testing Conventions](#testing-conventions) the injection to try is killing the connection out
-from under a live consumer and asserting delivery resumes.
+worker.** At the time it was diagnosed, every work queue reported `consumer_count=0`. A Cozystack
+v1.6.2 roll recreated `judge-arena-pg-1` at 17:54:57Z; 21 seconds later the worker logged `Can't
+reach database server` / `terminating connection due to administrator command` (SQLSTATE `57P01`)
+and then emitted no log line for five days. The pod was `1/1 Running` with 0 restarts throughout,
+which is exactly why this is easy to miss. Its socket reconnected; **its AMQP consumers never
+re-registered.** `src/lib/queue/connection.ts`'s reconnect loop restores the socket, one publish
+channel and the topology — never a prefetch, never the lane channel, never a `consume()` — and the
+only `consume()` calls in the tree are in `main()`'s boot (`src/worker/main.ts`).
 
-**Update (2026-08-29, later the same day): the outage is over; the defect is not.** Promoting to
-`sha-14d75f7d46de` rolled `judge-arena-worker`, which is exactly the "a worker rollout restores
-service" path above — nobody fixed anything. `kubectl exec -n tenant-public
-rabbitmq-judge-arena-server-0 -c rabbitmq -- rabbitmqctl list_queues name consumers messages` now
-reports `run.create` **1** and `judgment.execute` **1**, both with 0 messages. The other three
-(`judge.dlq`, `judgment.retry.30s`, `judgment.retry.5m`) still read 0 consumers and always should:
-they are the dead-letter and TTL-delay queues from `src/lib/queue/topology.ts`, and nothing
-subscribes to them by design — so "5 queues at zero" was the shape of the outage, but "2 queues at
-one" is the shape of health. **The reconnect defect is still open**, so the next broker or database
-blip reproduces this on a pod that stays `1/1 Running` with 0 restarts.
+**The contract now: consumer loss EXITS the process, and `restartPolicy` re-runs boot.** The
+worker's `ConsumerRegistry` (`src/worker/health.ts`) drops a queue on every event that means its
+consumer is gone — channel `'close'`/`'error'`, connection `'close'`/`'error'`, and a broker
+`basic.cancel` (which amqplib hands the consume callback as a `null` message). Its `onLost` is
+`createConsumerLossPolicy`: log once, race `flushBackgroundWrites()` against a
+`CONSUMER_LOSS_GRACE_MS` (2 s) timer, `process.exit(1)`. Kubernetes restarts the container, and
+boot — the one registration path that is proven to bring up all ten consumers — re-registers
+everything. All three loss routes reach it, including a **single** cancelled lane (`replicas: 1`; a
+lane nobody consumes is a lane whose judgments queue forever). A deliberate drain (SIGTERM) never
+reaches it: the registry suppresses `onLost` after `beginDrain()`.
+
+Three things follow from that, and two of them look like problems until you know why:
+
+1. **During a genuine broker outage the worker CrashLoops.** That is intended. Boot throws in
+   `getRabbit()`, `main().catch` exits 1, Kubernetes backs off to at most 5 minutes, and the loop
+   clears itself the moment the broker answers. The alternative — a process that survives the
+   outage and consumes nothing afterwards — is what August was. Do not "fix" it by switching the
+   worker's liveness probe to `httpGet /health`; that would also restart on Redis/Postgres blips.
+2. **In-process re-registration was rejected, not deferred.** It is a second registration path
+   that must re-create the lane channel, re-`prefetch` both channels, re-`consume` ten queues,
+   re-`register()` each tag *and* re-attach `trackConsumerRegistration` on the new epoch's objects
+   (they are bound to boot-time `conn`/channel objects), or the detector goes blind after the first
+   recovery. That is the shape of the §5.1 escalating-timeout miss — a feature spread across N
+   sibling call sites that half-works without it — and it cannot be unit-tested until `main()`'s
+   consume loop is extracted. Nothing changed in `connection.ts`: the web tier shares it and must
+   keep publishing through reconnects.
+3. **The tests are split by what a process can observe about itself.**
+   `tests/lib/worker-health.test.ts` (`createConsumerLossPolicy — consumer loss exits the process`)
+   drives the policy with an injected `exit` under fake timers, wired the way `main.ts` wires it —
+   two scoped trackers on one connection, events emitted in amqplib's order (`conn 'error'` → each
+   channel `'close'` → `conn 'close'`) — and asserts exit exactly once with 1; not during a drain;
+   before the grace when the flush settles; never twice. `tests/integration/consumer-loss-epoch.test.ts`
+   destroys the socket under a live consumer on the real broker (with
+   `stream.destroy(new Error(...))` — amqplib listens only for `'error'`/`'end'` after the handshake,
+   so a bare `destroy()` goes unnoticed for two heartbeat intervals) and asserts the epoch the fix
+   relies on: the registry empties, a reconnect is scheduled, the next `getRabbit()` is a new
+   connection, and the broker holds no consumer. Neither asserts `process.exit` in a real process;
+   the wiring in `main()` is verified by booting the worker against the podman broker and
+   `rabbitmqctl close_connection` on its connection — one log line, exit 1.
+
+> **CORRECTION (2026-09-01).** Until this date this subsection was titled "Known open production
+> defect (2026-08-24 →, unfixed)" and said three things that are no longer true or were wrong when
+> written. (a) "The reconnect defect is still open" — closed by the change described above.
+> (b) "If you fix it, the test for it belongs in `tests/integration/` (real broker), and … the
+> injection to try is killing the connection out from under a live consumer and asserting delivery
+> resumes." That prescription assumed the fix would re-consume in-process. Under fail-fast, delivery
+> resumes in a **new** process, which no in-process test can assert — item 3 above is what replaced
+> it. (c) "all five RabbitMQ queues … The other three (`judge.dlq`, `judgment.retry.30s`,
+> `judgment.retry.5m`) still read 0 consumers and always should" — true of the topology on
+> 2026-08-24, before per-server lanes (v2j). On 2026-09-01 `rabbitmqctl list_queues name consumers`
+> on the production broker reported **fifteen** queues: eight `judgment.execute.lane.N`, the
+> fallback `judgment.execute` and `run.create` with one consumer each (`consumers == expectedConsumers
+> == 10` in the boot log), and `judge.dlq` plus four `judgment.retry.*` queues at 0 consumers by
+> design. "Ten queues at one" is the shape of health now; "the two work queues at one" no longer is.
 
 ---
 
