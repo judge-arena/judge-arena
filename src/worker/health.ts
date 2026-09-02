@@ -220,6 +220,119 @@ export function trackConsumerRegistration(
   amqp.conn.on('error', () => registry.clear('amqp connection error', queues));
 }
 
+/**
+ * How long `createConsumerLossPolicy` waits for `flushBackgroundWrites()` to
+ * settle before exiting anyway. Two seconds covers an audit INSERT on a
+ * healthy Postgres and is short enough that a wedged one cannot keep a worker
+ * that consumes nothing alive. Never `DRAIN_TIMEOUT_MS`: a drain waits for
+ * in-flight handlers whose acks can still succeed; on a dead channel they
+ * cannot, so there is nothing to wait for beyond the writes.
+ */
+export const CONSUMER_LOSS_GRACE_MS = 2_000;
+
+/**
+ * Non-zero on purpose. `restartPolicy: Always` restarts the container on any
+ * code, but a 1 records the loss in `kubectl get pod`'s RESTARTS column with
+ * a last-state reason of Error rather than Completed — the difference between
+ * "it crashed" and "it decided to stop", read at 3am.
+ */
+export const CONSUMER_LOSS_EXIT_CODE = 1;
+
+export interface ConsumerLossPolicyDeps {
+  /** `process.exit` in main.ts; a spy in tests. Called at most once. */
+  exit: (code: number) => void;
+  /** `logger.error` in main.ts. Called exactly once, before the flush. */
+  log: (message: string, context: Record<string, unknown>) => void;
+  /** `flushBackgroundWrites` (src/lib/background-writes.ts) in main.ts —
+   *  awaited, bounded by `CONSUMER_LOSS_GRACE_MS`. */
+  flush: () => Promise<void>;
+  /** `consumers.missing()` on the registry this policy is installed on;
+   *  evaluated at loss time so the log line names the queues that went dark. */
+  missing: () => string[];
+}
+
+/**
+ * The `onLost` for `createConsumerRegistry` in the worker: log once, flush
+ * the fire-and-forget writes (bounded), exit 1.
+ *
+ * WHY EXIT RATHER THAN RE-CONSUME. Consumer loss is not recoverable in this
+ * process. `src/lib/queue/connection.ts`'s reconnect loop restores the
+ * socket, one confirm channel and the topology — never a prefetch, never the
+ * lane channel, never a single `consume()` — and the worker's liveness probe
+ * is `tcpSocket` on a health server that keeps accepting TCP with zero
+ * consumers, so Kubernetes never restarted the pod either. That is how the
+ * pipeline sat 1/1 Running, 0 restarts, consuming nothing for five days in
+ * August. In-process re-registration would be a SECOND registration path
+ * that has to re-create the lane channel, re-`prefetch` both channels,
+ * re-`consume` ten queues, re-`register()` each tag AND re-attach
+ * `trackConsumerRegistration` on the new epoch's objects — or the detector
+ * goes blind after the first recovery — which is exactly the "feature spread
+ * across N sibling call sites, half-works without it" shape that shipped the
+ * escalating timeout into one of three seams. Exiting hands recovery to the
+ * ONE path proven to bring up all ten consumers (main.ts's boot), with
+ * `restartPolicy` supplying the retry and backoff. During a genuine broker
+ * outage that is a visible CrashLoopBackOff (bounded, 5-minute backoff cap,
+ * self-clearing when the broker returns) instead of a silent zombie.
+ *
+ * IDEMPOTENT, and it has to be. main.ts installs two SCOPED
+ * `trackConsumerRegistration`s on ONE connection, and amqplib emits conn
+ * 'error' before any 'close' (amqplib/lib/connection.js onSocketError), so
+ * on a connection loss both scoped listeners drop a non-empty subset and the
+ * registry's size-unchanged guard cannot dedupe them: `onLost` runs twice for
+ * one failure. A synchronous `process.exit` would mask that; the deferred
+ * exit below would fire twice without the `fired` latch.
+ *
+ * THREE ROUTES REACH HERE, all through the registry: a socket loss (conn
+ * 'error'/'close'), a channel-level close with the connection still up
+ * (channel 'error'/'close' — a RabbitMQ `consumer_timeout` or any server
+ * ChannelClose; connection.ts recreates a consumer-less publish channel on
+ * the next `rabbitHealthy()` without a log line, which is why "one channel,
+ * zero consumers, silence" is the five-day shape), and a broker
+ * `basic.cancel` (null message -> `unregister`). The last one exits on a
+ * SINGLE cancelled lane by design: with replicas=1 a lane nobody consumes is
+ * a lane whose judgments queue forever.
+ *
+ * NOT DURING A DRAIN. `createConsumerRegistry` never calls `onLost` after
+ * `beginDrain()`, so a SIGTERM rollout is never reported as an exit-1 crash.
+ *
+ * WHAT IS LOST. In-flight judgments: their acks would fail on the dead channel
+ * anyway and the reaper reclaims the leased rows — the same loss as today,
+ * bounded to one call. NOT lost: fire-and-forget writes (audit rows, API-key
+ * lastUsedAt), which a bare `process.exit(1)` from here would have dropped —
+ * `drain()` flushes them for the same reason, and calls it "the worst time to
+ * drop them".
+ */
+export function createConsumerLossPolicy(
+  deps: ConsumerLossPolicyDeps
+): (reason: string, remaining: number) => void {
+  let fired = false;
+
+  return (reason, remaining) => {
+    if (fired) return;
+    fired = true;
+
+    deps.log('amqp consumers lost — exiting so the pod restarts and boot re-registers every consumer', {
+      reason,
+      remaining,
+      expected: EXPECTED_CONSUMER_COUNT,
+      missing: deps.missing(),
+      graceMs: CONSUMER_LOSS_GRACE_MS,
+    });
+
+    let exited = false;
+    const exitOnce = (): void => {
+      if (exited) return;
+      exited = true;
+      deps.exit(CONSUMER_LOSS_EXIT_CODE);
+    };
+    const grace = setTimeout(exitOnce, CONSUMER_LOSS_GRACE_MS);
+    void Promise.resolve()
+      .then(() => deps.flush())
+      .then(exitOnce, exitOnce)
+      .finally(() => clearTimeout(grace));
+  };
+}
+
 export interface WorkerHealthDeps {
   rabbitHealthy: () => Promise<boolean>;
   redisHealthy: () => Promise<boolean>;

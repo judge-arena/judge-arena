@@ -44,15 +44,26 @@
  * that gap needs the registration loop lifted out of `main()` into an
  * injectable function the way `handleDispatchFailure` already was (see
  * src/worker/dispatch-failure.ts).
+ *
+ * ── FAIL-FAST (2026-09-01) ──────────────────────────────────────────────────
+ * The registry's `onLost` in main.ts is now `createConsumerLossPolicy`, which
+ * exits the process so restartPolicy re-runs boot. The policy is covered
+ * below with an injected `exit`; the main.ts line that installs it is, like
+ * every other main() call site, unreachable from here — it is verified by a
+ * local smoke (kill the worker's broker connection, watch it exit 1) and by
+ * tests/integration/consumer-loss-epoch.test.ts, which shows what a reconnect
+ * restores WITHOUT the exit: a socket, a channel, zero consumers.
  */
 
 import { EventEmitter } from 'node:events';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LANE_COUNT, LANE_FALLBACK_QUEUE, LANE_QUEUES } from '@/lib/queue/lanes';
 import { QUEUE_JUDGMENT_EXECUTE, QUEUE_RUN_CREATE } from '@/lib/queue/topology';
 import {
+  CONSUMER_LOSS_GRACE_MS,
   EXPECTED_CONSUMER_COUNT,
   WORKER_CONSUMER_QUEUES,
+  createConsumerLossPolicy,
   createConsumerRegistry,
   evaluateWorkerHealth,
   trackConsumerRegistration,
@@ -481,5 +492,144 @@ describe('/health degrades when a LANE consumer is missing', () => {
 
     expect(result.statusCode).toBe(200);
     expect(result.body.missingConsumers).toEqual([]);
+  });
+});
+
+// ─── Fail-fast on consumer loss ─────────────────────────────────────────────
+
+describe('createConsumerLossPolicy — consumer loss exits the process', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /** A flush that never settles: the case the grace timer exists for. */
+  const neverSettles = (): Promise<void> => new Promise<void>(() => {});
+
+  /**
+   * A booted registry whose onLost IS the policy, wired the way main.ts wires
+   * it: `missing` reads back from the registry the policy is installed on.
+   * Annotated so the self-reference inside `missing` is not a circular
+   * inference for tsc.
+   */
+  function bootedWithPolicy(flush: () => Promise<void> = neverSettles) {
+    const exit = vi.fn<(code: number) => void>();
+    const log = vi.fn<(message: string, context: Record<string, unknown>) => void>();
+    const registry: ConsumerRegistry = createConsumerRegistry(
+      createConsumerLossPolicy({ exit, log, flush, missing: () => registry.missing() })
+    );
+    for (const queue of WORKER_CONSUMER_QUEUES) registry.register(queue, `amq.ctag-${queue}`);
+    return { exit, log, registry };
+  }
+
+  it('exits exactly once with code 1 when a connection loss fires onLost TWICE (the real main.ts wiring)', async () => {
+    // main.ts attaches two SCOPED trackers to ONE connection: the shared
+    // confirm channel owns the fallback + run.create, the lane channel owns
+    // the eight lanes. amqplib delivers a socket loss as conn 'error' FIRST
+    // (connection.js onSocketError), and both scoped conn-'error' listeners
+    // drop a non-empty subset, so the registry's size-unchanged guard cannot
+    // dedupe them: onLost runs twice for one failure. A deferred exit that is
+    // not idempotent therefore fires twice. Emission order below is
+    // amqplib's: conn 'error' -> every channel 'close' -> conn 'close'.
+    const conn = new EventEmitter();
+    const confirmChannel = new EventEmitter();
+    const laneChannel = new EventEmitter();
+    const { exit, log, registry } = bootedWithPolicy();
+    trackConsumerRegistration(registry, { conn, channel: confirmChannel }, [
+      LANE_FALLBACK_QUEUE,
+      QUEUE_RUN_CREATE,
+    ]);
+    trackConsumerRegistration(registry, { conn, channel: laneChannel }, LANE_QUEUES);
+
+    conn.emit('error', new Error('ECONNRESET'));
+    confirmChannel.emit('close');
+    laneChannel.emit('close');
+    conn.emit('close');
+
+    expect(registry.registered()).toBe(0);
+    // The flush never settles, so nothing exits until the grace elapses.
+    await vi.advanceTimersByTimeAsync(CONSUMER_LOSS_GRACE_MS - 1);
+    expect(exit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(log).toHaveBeenCalledTimes(1);
+    // The log line names the FIRST scope that went dark, and the expectation.
+    expect(log.mock.calls[0][1]).toMatchObject({
+      reason: 'amqp connection error',
+      remaining: LANE_QUEUES.length,
+      expected: EXPECTED_CONSUMER_COUNT,
+      missing: [LANE_FALLBACK_QUEUE, QUEUE_RUN_CREATE],
+      graceMs: CONSUMER_LOSS_GRACE_MS,
+    });
+  });
+
+  it('exits on a single lane cancelled by the broker (basic.cancel -> null message -> unregister)', async () => {
+    // DECISION: with replicas=1 a lane without a consumer is a lane whose
+    // judgments queue forever, and nothing in-process re-consumes it. The
+    // registry routes unregister() through the same onLost as a full clear,
+    // so this needs no extra wiring — this test pins that it stays so.
+    const { exit, log, registry } = bootedWithPolicy();
+
+    registry.unregister(LANE_QUEUES[5], 'broker cancelled the consumer');
+    await vi.advanceTimersByTimeAsync(CONSUMER_LOSS_GRACE_MS);
+
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(log.mock.calls[0][1]).toMatchObject({
+      reason: 'broker cancelled the consumer',
+      remaining: EXPECTED_CONSUMER_COUNT - 1,
+      missing: [LANE_QUEUES[5]],
+    });
+  });
+
+  it('does not exit during a deliberate drain', async () => {
+    // SIGTERM cancels every consumer on purpose. The registry suppresses
+    // onLost while draining (createConsumerRegistry), so the policy is never
+    // consulted; a drain that exited 1 would turn every rollout into a crash
+    // in the Deployment's history.
+    const { exit, log, registry } = bootedWithPolicy();
+
+    registry.beginDrain();
+    registry.clear('drained');
+    await vi.advanceTimersByTimeAsync(CONSUMER_LOSS_GRACE_MS * 2);
+
+    expect(exit).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('exits as soon as the background writes are flushed, before the grace elapses', async () => {
+    const flush = vi.fn(async () => {});
+    const { exit, registry } = bootedWithPolicy(flush);
+
+    registry.clear('amqp connection error');
+    // Settle the promise chain WITHOUT moving the fake clock: tickAsync starts
+    // on a real macrotask, so every pending microtask runs first.
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(flush).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(1);
+    // The grace timer was cancelled — it must not exit a second time.
+    await vi.advanceTimersByTimeAsync(CONSUMER_LOSS_GRACE_MS);
+    expect(exit).toHaveBeenCalledTimes(1);
+  });
+
+  it('a flush that outlives the grace does not exit twice when it finally settles', async () => {
+    let release: () => void = () => {};
+    const flush = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        })
+    );
+    const { exit, registry } = bootedWithPolicy(flush);
+
+    registry.clear('amqp channel closed');
+    await vi.advanceTimersByTimeAsync(CONSUMER_LOSS_GRACE_MS);
+    expect(exit).toHaveBeenCalledTimes(1);
+
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(exit).toHaveBeenCalledTimes(1);
   });
 });
