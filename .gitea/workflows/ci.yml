@@ -54,6 +54,34 @@
 # step and a red test step look identical in the run list but mean opposite
 # things about coverage, and only one of them is a flake.
 #
+# HOW TO READ A RUN'S OUTCOME — AND THE ONE SURFACE THAT LIES (2026-09-01).
+# Gitea 1.23.6 calls CancelPreviousJobs on every push to the same ref
+# (services/actions/notifier_helper.go) before it inserts the new run.
+# Built in, not opt-out, and nothing to do with the `concurrency:` block
+# below. The cancelled task is StopTask'd server-side; act_runner cancels
+# the job context; act v0.261.10 then prints, in the RUNNER POD LOG only:
+#
+#   ❌ Failure - Main <step>
+#   this step has been cancelled: signal: killed
+#   🏁 Job succeeded
+#
+# The last line is an act bug (pkg/runner/job_executor.go replaces the
+# cancelled context with a fresh context.Background() that has no job-error
+# container, so JobError() is nil and the result is logged as success; act
+# main still does this). Gitea ignores that report — the task is already
+# Done — and its record says `cancelled` / "Has been cancelled" throughout.
+# Seen twice on 2026-09-01: task 4816 (60be6f6, `ci`, step Build) and task
+# 4818 (7f0e0cb, `db-tests`, a kubectl polling loop — no Node process, so
+# not memory). Neither SHA got an image; nor did 2c1e85e / 740e7bb, which
+# were never the head of a push and never had a run at all.
+#
+# So: read a run's outcome from `scripts/ci/ci-status.sh <sha>` (the
+# actions/tasks + commit-status APIs, no token) or from the positive
+# `IMAGE_PUBLISHED repo=… tag=… digest=…` sentinel the build-push job
+# prints — never the pod log's "Job succeeded". And assert the Harbor tag
+# for the SHA you intend to promote; a cancelled run never reaches the
+# in-run assert step.
+#
 #   `scripts/ci-local.sh` runs the full sequence INCLUDING the DB and
 #   integration suites against local podman services, and remains the fastest
 #   way to exercise those two locally. It and the `db-tests` job below source
@@ -87,6 +115,13 @@ on:
   # the `args:` heredoc — rolls them. See homelab-setup divergence entry 63.
   workflow_dispatch:
 
+# INERT on Gitea 1.23.6 (2026-09-01): models/actions/run.go at that version
+# has no Concurrency field, so this block is parsed and ignored. The
+# cancel-on-new-push behaviour this LOOKS like it provides comes from the
+# server's built-in CancelPreviousJobs (see the header) and cannot be opted
+# out of. Kept because it becomes live on a Gitea upgrade and then asks for
+# the same behaviour the server already imposes — do not attribute a
+# cancellation to it.
 concurrency:
   group: ci-judge-arena-${{ github.ref }}
   cancel-in-progress: true
@@ -377,21 +412,31 @@ jobs:
           exit 1
 
       # ─── Reap the Job if we are leaving while it still runs ────────────
-      # `concurrency.cancel-in-progress: true` is set at the top of this
-      # file, so a second push to the same ref kills this workflow mid-wait
-      # — and the spawned Job does NOT die with it. It keeps a pod holding
-      # ~1.7Gi of memory requests plus 9.25Gi of ephemeral-storage ceilings
-      # in tenant-builds until activeDeadlineSeconds (30m) expires. Same
-      # applies to the 25m-deadline path above.
+      # Covers the 25m-deadline path above and any ordinary step failure:
+      # the spawned Job does NOT die with the workflow. It keeps a pod
+      # holding ~1.7Gi of memory requests plus 9.25Gi of ephemeral-storage
+      # ceilings in tenant-builds until activeDeadlineSeconds (30m) expires.
       #
       # ONLY reaps a Job that is still ACTIVE. A Job that finished — passed
       # or failed — is left for ttlSecondsAfterFinished (1h) so its pod
       # stays inspectable; the failure path above dumps logs, but a pod you
       # can still `kubectl describe` is worth more than a log tail.
       #
-      # `always()` rather than `failure()`: cancellation is the case this
-      # exists for, and a cancelled job runs neither `success()` nor
-      # `failure()` steps.
+      # CORRECTION (2026-09-01). This comment used to say the cancel came
+      # from `concurrency.cancel-in-progress: true` and that `always()` was
+      # chosen because "cancellation is the case this exists for". Both
+      # wrong. The cancel is Gitea 1.23.6's built-in CancelPreviousJobs (the
+      # `concurrency:` block is inert on that version), and `if: always()`
+      # steps do NOT run after a server-side cancel: act SIGKILLs the
+      # current step (exec.CommandContext) and goes straight to container
+      # cleanup — task 4818's log (7f0e0cb, 2026-09-01 15:56:32Z) shows
+      # "Wait for the DB-test Job" killed, then "Cleaning up container",
+      # then "🏁 Job succeeded", with no reap line between. So a run
+      # cancelled by the next push to main LEAKS its DB-test Job to the 30m
+      # activeDeadlineSeconds. There is no in-run fix — SIGKILL cannot be
+      # trapped — which is one more reason not to push twice to main within
+      # a run's duration. `always()` is still right for the failure paths
+      # it does cover.
       - name: Reap the DB-test Job if still running
         if: always()
         run: |
