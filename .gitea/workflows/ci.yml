@@ -586,6 +586,30 @@ jobs:
           kubectl describe -n tenant-builds "$JOB" || true
           exit 1
 
+      # ─── Assert the registry, not the Job ──────────────────────────────
+      # `Complete` on the kaniko Job is one hop away from a tag in Harbor.
+      # Ask Harbor. Anonymous GET works because project `homelab` is public;
+      # the runner has curl + jq (no skopeo) and its ServiceAccount cannot
+      # read secrets, so this needs no credentials. On success it prints
+      #
+      #   IMAGE_PUBLISHED repo=judge-arena tag=sha-<12> digest=sha256:…
+      #
+      # which is the line to grep for in the runner pod log — NOT
+      # "🏁 Job succeeded", which that log prints even after a server-side
+      # cancel (see the file header). This is a cheap sentinel, not the
+      # closure of pushed-not-built: a run cancelled by the next push to
+      # main never reaches this step, and a commit that was not the head of
+      # its push never gets a run. Assert the tag for the SHA you intend to
+      # PROMOTE — `scripts/ci/ci-status.sh <sha>` from gharial — before
+      # every promote.
+      - name: Assert Harbor has ${{ steps.tag.outputs.tag }}
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci/assert-harbor-tag.sh judge-arena "$TAG"
+
       - name: Report the pushed image
         if: steps.gate.outputs.publish == 'true'
         run: |

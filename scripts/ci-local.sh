@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 # ─── Judge Arena — local CI equivalence (Task 17, 1b plan) ──────────────────
 #
-# Runs the EXACT shell sequence .gitea/workflows/ci.yml runs, step for step,
-# against already-running local podman services (postgres/redis/rabbitmq on
-# localhost — see CONTRIBUTING.md's "Development Setup"). The repo isn't
-# hosted on Gitea yet (that's Phase 2 of the 1b plan) and the Gitea runner
-# itself currently has no Docker/container engine to execute the
-# `services:` block the workflow declares (see that file's header comment)
-# — so THIS script passing, end to end, from a clean `npm ci`, IS what
-# "CI green" means until both of those land.
+# Runs the shell sequence of .gitea/workflows/ci.yml's `ci` and `db-tests`
+# jobs, step for step, against already-running local podman services
+# (postgres/redis/rabbitmq on localhost — see CONTRIBUTING.md's "Development
+# Setup"). It stops at `npm run build`; the `build-push` job (kaniko in
+# tenant-builds + scripts/ci/assert-harbor-tag.sh) has no local mirror
+# because it cannot publish from here.
+#
+# CORRECTION (2026-09-01). This header used to say the repo "isn't hosted on
+# Gitea yet (that's Phase 2 of the 1b plan)" and that the runner could not
+# execute "the `services:` block the workflow declares". Both were stale:
+# Gitea is canonical (CONTRIBUTING.md "Continuous Integration", and its
+# own CORRECTION of 2026-08-29), the `services:` block was deleted and
+# replaced by the `db-tests` k8s Job, and "CI green" means the Gitea run —
+# read from `scripts/ci/ci-status.sh <sha>`, never from the runner pod log.
 #
 # Prerequisites (not started by this script — it fails fast with a clear
 # message if any are missing):
@@ -119,11 +125,17 @@ NEXTAUTH_SECRET="build-time-placeholder-secret-16" \
 NEXTAUTH_URL="http://localhost:3000" \
 npm run build
 
-# Docker/Kaniko image build + Harbor push and the docker-compose
-# scale-validation smoke check are NOT part of this script — they're
-# CI-only steps (.gitea/workflows/ci.yml's `docker` job), both currently
-# stubbed with Phase-2 TODO markers there. Task 16 already proved the
-# image/compose scale-up locally via podman; this script's job stops at
-# `build`, matching the brief's step list exactly.
+# The kaniko image build + Harbor push live in .gitea/workflows/ci.yml's
+# `build-push` job (live, not stubbed — it publishes on every push to main
+# and then asserts the tag with scripts/ci/assert-harbor-tag.sh). They are
+# NOT part of this script because nothing here can publish. The
+# docker-compose scale-validation smoke check is still CI-less (see that
+# file's trailing comment). Task 16 proved the image/compose scale-up
+# locally via podman; this script's job stops at `build`.
+#
+# CORRECTION (2026-09-01): this comment used to call the publish job
+# "ci.yml's `docker` job … stubbed with Phase-2 TODO markers". The job is
+# `build-push` and it publishes sha-<12> tags on every push to main (Harbor
+# holds sha-414e826a3ba3 … sha-fc9e93628149 for the un-cancelled runs).
 
 printf "\n${GREEN}${BOLD}CI-local: ALL GREEN${RESET} — lint, tsc, migrate deploy, v1 db seed, unit, db, integration, and build all passed.\n"
