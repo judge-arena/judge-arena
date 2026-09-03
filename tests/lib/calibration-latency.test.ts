@@ -47,6 +47,7 @@ const { judgmentUpdateMock } = vi.hoisted(() => ({ judgmentUpdateMock: vi.fn() }
 vi.mock('@/lib/db', () => ({ prisma: { modelJudgment: { update: judgmentUpdateMock } } }));
 
 import {
+  budgetWarningFor,
   describeBaseline,
   formatDurationMs,
   judgeLatencyBaseline,
@@ -489,6 +490,121 @@ describe('judgeThroughputEstimate', () => {
       latencyMs: true,
       reasoningContent: true,
     });
+  });
+});
+
+// ─── the stacked-limits rule: max_tokens / tok_per_s against the hard cap ───
+
+describe('budgetWarningFor', () => {
+  const HARD_CAP = 900_000;
+
+  it('says nothing when there is no history — a first-ever judge must launch', () => {
+    // The first calibration of any judge has no completed judgment to
+    // measure. null is "nothing to say", never a refusal.
+    expect(budgetWarningFor({ maxTokens: 12288, throughput: null, hardCapMs: HARD_CAP })).toBeNull();
+  });
+
+  it('says nothing when the budget fits', () => {
+    // Qwen: 12288 / 58.5 = 210 s against a 900 s cap (spec §2.1).
+    expect(
+      budgetWarningFor({ maxTokens: 12288, throughput: { tokPerSec: 58.5, n: 30 }, hardCapMs: HARD_CAP })
+    ).toBeNull();
+  });
+
+  it('exhausting EXACTLY at the cap is not a warning — the rule is strictly over', () => {
+    // 900 tokens at 1 tok/s is 900 s: the cap itself. `>`, not `>=`, so the
+    // boundary is stated rather than left to floating-point luck.
+    expect(
+      budgetWarningFor({ maxTokens: 900, throughput: { tokPerSec: 1, n: 1 }, hardCapMs: HARD_CAP })
+    ).toBeNull();
+  });
+
+  it('names the budget, the rate, the sample, both durations and the LOWER-bound caveat when it does not fit', () => {
+    // THE REAL CASE, not a round number, and NOT the raw-formula figure round
+    // 3 carried ("measured at 11.9 tok/s" via Σ outputTokens / Σ latencyMs).
+    // qwen3.5:9b's judge path always sends response_format: json_schema, and
+    // outputTokens EXCLUDES the reasoning channel for this model — a naive
+    // Σ outputTokens / Σ latencyMs computes ~0.5 tok/s here, not a measure of
+    // this judge's real speed (see the `judgeThroughputEstimate` test "pools
+    // via accountTokens" in Task 1, which pins the mechanism). The number
+    // below is the POOLED, `accountTokens`-derived rate: measured via
+    // read-only psql against judge-arena-pg-1 on 2026-09-02, over the 15
+    // completed judgments of the currently-registered version
+    // (`cmtkqwen35ord2v20000001`, ordinal 2) — Σ estimatedGeneratedTokens
+    // 46,401 (= Σ (outputTokens + round(reasoningChars / 3.64)) per row) /
+    // Σ latencyMs 3,856,364 ms = 12.032 tok/s, rounded to **12.0 tok/s** at
+    // one decimal place, the same precision every other measured envelope in
+    // this plan uses (58.5, 35.9, 23.2). `max_tokens: 12288` is kept as an
+    // illustrative registered budget (the two ACTUAL registered versions
+    // carry 6144 and 8192, not 12288 — chosen here, as in round 3, so the
+    // boundary math stays close). 12288 / 12.0 = **1024.0 s exactly** (a
+    // clean division, no repeating decimal), which formatDurationMs rounds
+    // to 1024 s = 17m4s, against a 15m0s cap. Deliberately the NEAREST
+    // fixture to the boundary in this file (1.14x over): the db fixtures
+    // are 2 tok/s / 6.8x over, and a 6.8x margin cannot discriminate an
+    // off-by-a-factor error in the seconds↔milliseconds conversion the way
+    // a 1.14x one can.
+    const warning = budgetWarningFor({ maxTokens: 12288, throughput: { tokPerSec: 12.0, n: 15 }, hardCapMs: HARD_CAP });
+    expect(warning).not.toBeNull();
+    expect(warning).toContain('max_tokens 12288');
+    expect(warning).toContain('12.0 tok/s');
+    // Pinned to its ROLE, not as the bare substring `n=1`: `toContain('n=1')`
+    // would also match `n=10`, `n=15`, `n=100` (failure mode 3, the
+    // substring class). The phrase is the rendered clause.
+    expect(warning).toContain('(n=15 completed judgment(s))');
+    // Each duration is pinned to its ROLE, not merely to its presence. Bare
+    // toContain('17m4s') + toContain('15m0s') cannot tell the two apart, so
+    // an implementation that swaps the two formatDurationMs arguments —
+    // "cannot be produced inside the 17m4s hard cap … takes ~15m0s", which
+    // inverts the whole sentence for the operator — would still pass.
+    expect(warning).toContain('inside the 15m0s hard cap');
+    expect(warning).toContain('takes ~17m4s');
+    // Throughput DECAYS with output length (granite4.2: 35.9 tok/s at 4.5k
+    // tokens, 23.2 at 12k — spec §5.4.1), so the linear figure understates
+    // the tail and the text must say so.
+    expect(warning).toMatch(/LOWER bound/);
+    // Never the advice registry.ts gives on truncation ("raise
+    // samplingDefaults.max_tokens") — raising max_tokens is what produces
+    // this condition in the first place. (No line number on purpose: the
+    // dependency plan's Task 1 moves every registry.ts line >= 460 by -36,
+    // so the familiar :673 becomes :637. Locate it with
+    // `grep -n -a 'raise samplingDefaults.max_tokens' src/lib/llm/registry.ts`.)
+    expect(warning).not.toMatch(/raise samplingDefaults\.max_tokens/);
+  });
+
+  it('uses the hardCapMs it was GIVEN, not the 900 s default', () => {
+    // `hardCapMs` is the one input `budgetWarningFor` cannot self-check, and
+    // until this case existed no test varied it: all the others use
+    // HARD_CAP = 900_000, which is byte-identical to `DEFAULT_HARD_CAP_MS`
+    // (src/lib/llm/timeout-policy.ts:55). Name the wrong implementation:
+    // one that destructures `hardCapMs` for the TEXT but compares against
+    // the imported `DEFAULT_HARD_CAP_MS`. It passes every other test here,
+    // renders the identical string, and lint stays clean because
+    // `hardCapMs` is still used by formatDurationMs. Only a cap that is not
+    // 900 000 can tell them apart.
+    //
+    // 900 tokens at 1 tok/s = 900 s against a 60 s cap. Note that `15m0s`
+    // is the ESTIMATE here and `1m0s` is the cap — the inverse of the test
+    // above, where `15m0s` is the cap; that is deliberate, and it is a
+    // second guard on the argument order.
+    const warning = budgetWarningFor({ maxTokens: 900, throughput: { tokPerSec: 1, n: 4 }, hardCapMs: 60_000 });
+    expect(warning).toContain('inside the 1m0s hard cap');
+    expect(warning).toContain('takes ~15m0s');
+  });
+
+  it('a NaN estimate is silence, not a sentence with NaN in it', () => {
+    // The `!( … > …)` form is load-bearing and the JSDoc says so, but nothing
+    // else here discriminates it: the obvious `if (estimatedMs <= hardCapMs)
+    // return null;` passes all four tests above and yet renders
+    // "max_tokens NaN cannot be produced inside the 15m0s hard cap … takes
+    // ~NaNmNaNs" to the operator, because `NaN <= cap` is false.
+    // The caller can produce exactly this: a RAW read of the nullable
+    // `samplingDefaults.max_tokens` is `undefined`, and `undefined / rate` is
+    // NaN (see the Task 3 db test 'reads the RESOLVED budget', whose comment
+    // rests on this being silence).
+    expect(
+      budgetWarningFor({ maxTokens: Number.NaN, throughput: { tokPerSec: 2, n: 1 }, hardCapMs: HARD_CAP })
+    ).toBeNull();
   });
 });
 

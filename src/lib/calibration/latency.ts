@@ -50,6 +50,15 @@
  *     sends `max_tokens: 1`. This is the input to the stacked-limits check
  *     (runbook §8.6) that `launchCalibrationRun` runs.
  *
+ *   budgetWarningFor({ maxTokens, throughput, hardCapMs }) -> string | null
+ *
+ *     The stacked-limits rule as one operator sentence: `max_tokens /
+ *     tokPerSec` strictly over the hard cap yields a warning naming the
+ *     budget, the rate, the sample size, both durations and the fact that
+ *     the figure is a LOWER bound; `null` otherwise — including when
+ *     `throughput` is null, because a first-ever judge must still launch.
+ *     Pure. WARNS, NEVER REFUSES; the caller decides where it goes.
+ *
  *   timeToComputeByTuple(scope, client?) -> Promise<TimeToCompute[]>
  *
  *     The (dataset, item, model) projection. COMPUTED ON READ, per A2.3's rule
@@ -311,6 +320,110 @@ export async function judgeThroughputEstimate(
   // the WHERE above, so it is exercised by the unit suite instead of by
   // Postgres.
   return summarizeThroughput(rows);
+}
+
+export interface BudgetWarningInput {
+  /** The EFFECTIVE `max_tokens` the run will execute under — the resolved
+   *  snapshot on the CalibrationRun header (`effectiveSamplingParams`), never
+   *  the raw, nullable `JudgeModelVersion.samplingDefaults`. */
+  maxTokens: number;
+  /** `judgeThroughputEstimate(...)`. `null` = no history, which is NOT a
+   *  warning: a first-ever judge has nothing to be measured against. */
+  throughput: ThroughputEstimate | null;
+  /** `resolveTimeoutBudgets().hardCapMs` — the abort, not the alert. */
+  hardCapMs: number;
+}
+
+/**
+ * The stacked-limits rule (runbook §8.6), as one sentence an operator reads:
+ * `max_tokens / tok_per_s` must fit under the HARD CAP, or a judgment that
+ * needs its whole budget is ABORTED rather than truncated.
+ *
+ * WHICH WALL, PRECISELY — because the obvious one-line history is wrong and
+ * a wrong motivation would mis-set every reader's expectation. granite4.2's
+ * 2026-09-01 stall (runbook §8.6) was the 300 s PROVIDER timeout: 35 tok/s
+ * against a 12288 budget is ~351 s, which overran 300 s and fits 900 s
+ * comfortably. This rule would have been SILENT on granite, correctly, and
+ * it is not the check that would have caught it. What it guards is the wall
+ * that is still an abort: as of `sha-414e826a3ba3` (runbook §8.7) the 300 s
+ * `EVALUATION_MODEL_TIMEOUT_MS` only WARNS and keeps waiting, and
+ * `EVALUATION_MODEL_HARD_CAP_MS` (900 000 ms) is the only value that aborts.
+ * The live case this exists for is qwen3.5:9b: its judge path always sends
+ * response_format: json_schema, and outputTokens EXCLUDES the reasoning
+ * channel on this model, so the rate below is `judgeThroughputEstimate`'s
+ * `accountTokens`-derived pooled figure, never a raw outputTokens count —
+ * measured against judge-arena-pg-1 (read-only psql, 2026-09-02) at
+ * 12.0 tok/s (Σ estimatedGeneratedTokens / Σ latencyMs over its 15 completed
+ * judgments): 12288 / 12.0 = 1024 s against a 900 s cap.
+ *
+ * WHOSE CAP. `hardCapMs` is the LAUNCHER's `resolveTimeoutBudgets().hardCapMs`
+ * — the env of the process that runs the CLI — while the abort happens in the
+ * WORKER pod, which reads its own `EVALUATION_MODEL_HARD_CAP_MS`. If the two
+ * differ the check silently uses the wrong ceiling (a worker configured at
+ * 600 000 aborts a run the launcher called fine). This adds no new coupling:
+ * `launch.ts`'s batch deadline (:312-314) already assumes the same equality.
+ * It is stated so an operator knows to confirm it before trusting silence.
+ *
+ * SCOPE — one of four launch paths, deliberately. This runs at CALIBRATION
+ * launch only. `launchSingleRun` / `launchBulkRunCreates` are also reached
+ * from `src/app/api/evaluations/[id]/runs/route.ts:84` and
+ * `src/app/api/evaluations/route.ts:303 / :494 / :605`; those ordinary and
+ * bulk launches execute under the same `samplingDefaults` and the same hard
+ * cap and get NO warning. That is a scope decision, not an oversight, and it
+ * is recorded rather than left to be discovered (handoff §5.1: the escalating
+ * timeout shipped into ONE of three seams and looked live).
+ *
+ * WHAT SILENCE DOES NOT MEAN. The rule fires only when the OPTIMISTIC,
+ * flat-rate estimate already exceeds the cap, and the flat model understates
+ * the tail by ~51% at 12k tokens (spec §5.4.1): granite4.2's flat-rate
+ * estimate at 12288 tokens is 351 s (35 tok/s) but the real run took 529 s,
+ * ~1.51x the flat estimate. So a judge whose flat-rate estimate lands
+ * anywhere in roughly 0.65x-1.0x of the cap (900 s / 1.51 ≈ 597 s and up)
+ * can still abort at it with no warning. Deliberate — a second, softer band
+ * would need its own sentence, its own test and its own injection, and this
+ * commit does one thing — but it means "no warning" is not a clean bill. The
+ * runbook paragraph says so.
+ *
+ * WARNS, NEVER REFUSES. `null` means "nothing to say", covering both "it
+ * fits" and "no history yet" — deliberately one value, because the caller's
+ * action is identical (launch) and the two states are told apart by the
+ * launch log, not by a refusal.
+ *
+ * The estimate is a LOWER BOUND on duration and the text says so: throughput
+ * DECAYS with output length (granite4.2 ran 35.9 tok/s at 4.5k tokens and
+ * 23.2 tok/s at 12k — scoreboard spec §5.4.1), so a budget that "just fits"
+ * at the pooled rate does not fit.
+ *
+ * Strictly `>`: exhausting exactly at the cap is the boundary of the abort
+ * and nothing here is precise to the millisecond. The `!( … > …)` form also
+ * swallows a NaN estimate rather than rendering it — that is load-bearing,
+ * not incidental: the equivalent-looking `estimatedMs <= hardCapMs` would
+ * print "max_tokens NaN cannot be produced …" at an operator, because
+ * `NaN <= cap` is false. Pinned by the 'a NaN estimate is silence' test.
+ *
+ * The advice deliberately does NOT say "raise samplingDefaults.max_tokens"
+ * (registry.ts's truncation advice): raising it is what produces this
+ * condition, and `samplingDefaults` is meant to be immutable under a
+ * judgment (prisma/seed-core.ts:223-229 — a different value is a new
+ * ordinal). The other lever it names is bounded: `src/lib/env.ts:111`
+ * clamps EVALUATION_MODEL_HARD_CAP_MS with `.max(MAX_HARD_CAP_MS)` and
+ * MAX_HARD_CAP_MS is 1_170_000 ms (src/lib/llm/timeout-policy.ts:94), so
+ * the sentence says so rather than offering an unreachable remedy.
+ */
+export function budgetWarningFor(input: BudgetWarningInput): string | null {
+  const { maxTokens, throughput, hardCapMs } = input;
+  if (throughput === null) return null;
+  const estimatedMs = (maxTokens / throughput.tokPerSec) * 1000;
+  if (!(estimatedMs > hardCapMs)) return null;
+  return (
+    `max_tokens ${maxTokens} cannot be produced inside the ${formatDurationMs(hardCapMs)} hard cap ` +
+    `at this judge's measured ${throughput.tokPerSec.toFixed(1)} tok/s ` +
+    `(n=${throughput.n} completed judgment(s)): exhausting the budget takes ~${formatDurationMs(estimatedMs)}, ` +
+    `and a judgment that needs its full budget will be ABORTED at the cap, not truncated. ` +
+    `Throughput decays with output length, so that figure is a LOWER bound on the duration, not an estimate. ` +
+    `Register a new ordinal with a smaller max_tokens (never edit samplingDefaults mid-run), ` +
+    `or raise EVALUATION_MODEL_HARD_CAP_MS (bounded: env.ts refuses anything above MAX_HARD_CAP_MS, 1170000 ms).`
+  );
 }
 
 /**
