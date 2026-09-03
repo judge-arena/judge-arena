@@ -5,12 +5,14 @@ import {
   HARD_CAP_MAX_ATTEMPTS,
   MAX_HARD_CAP_MS,
   POST_CALL_SLACK_MS,
+  RUN_DEADLINE_SLACK_MS,
   armEscalatingTimeout,
   buildInitialBudgetAlert,
   budgetOrderingError,
   hardCapAbortKind,
   leaseMsFor,
   resolveTimeoutBudgets,
+  runStartBudgetMs,
   type JudgeLatencyBaseline,
 } from '@/lib/llm/timeout-policy';
 import { envSchema } from '@/lib/env';
@@ -324,5 +326,36 @@ describe('timeout-policy: the LEASE must cover the hard cap (the double-executio
   it('the lease covers ONE hard cap, not two — the second attempt re-claims and re-stamps updatedAt', () => {
     const budgets = { initialBudgetMs: 5 * MINUTE, hardCapMs: 15 * MINUTE };
     expect(leaseMsFor(budgets)).toBeLessThan(2 * budgets.hardCapMs);
+  });
+});
+
+describe('timeout-policy: runStartBudgetMs — the run-level deadline is sized on THIS run\'s own work, not queue depth', () => {
+  it('one judgment (the calibration shape): budget is exactly one hard cap plus slack', () => {
+    const budgets = { initialBudgetMs: 5 * MINUTE, hardCapMs: 15 * MINUTE };
+    expect(runStartBudgetMs(1, budgets)).toBe(15 * MINUTE + RUN_DEADLINE_SLACK_MS);
+  });
+
+  it('N judgments (an ordinary multi-model run): budget scales with THIS run\'s own count', () => {
+    const budgets = { initialBudgetMs: 5 * MINUTE, hardCapMs: 15 * MINUTE };
+    expect(runStartBudgetMs(4, budgets)).toBe(4 * 15 * MINUTE + RUN_DEADLINE_SLACK_MS);
+  });
+
+  it('CRITICAL: derived from the HARD CAP, not the initial budget — same asymmetry as leaseMsFor', () => {
+    // A budget sized on the shorter initial-alert window would let the
+    // reaper force-finalize a judgment that is still legitimately executing
+    // to the hard cap — the exact failure this task exists to fix,
+    // reintroduced through the wrong budget instead of through queue depth.
+    const budgets = { initialBudgetMs: 5 * MINUTE, hardCapMs: 15 * MINUTE };
+    expect(runStartBudgetMs(1, budgets)).toBeGreaterThan(budgets.initialBudgetMs);
+    expect(runStartBudgetMs(1, budgets)).not.toBe(budgets.initialBudgetMs + RUN_DEADLINE_SLACK_MS);
+  });
+
+  it('a custom slack overrides the default, mirroring leaseMsFor\'s own optional parameter', () => {
+    const budgets = { initialBudgetMs: 5 * MINUTE, hardCapMs: 15 * MINUTE };
+    expect(runStartBudgetMs(2, budgets, 10_000)).toBe(2 * 15 * MINUTE + 10_000);
+  });
+
+  it('RUN_DEADLINE_SLACK_MS is 60 seconds, matching the three now-deleted creation-time copies it replaces', () => {
+    expect(RUN_DEADLINE_SLACK_MS).toBe(60_000);
   });
 });

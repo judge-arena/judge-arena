@@ -203,6 +203,70 @@ export function leaseMsFor(budgets: TimeoutBudgets, slackMs: number = POST_CALL_
 }
 
 /**
+ * Slack added on top of `judgmentCount * hardCapMs` to get the run-level
+ * deadline `src/worker/claim.ts` stamps on `EvaluationRun.deadlineAt` at
+ * FIRST DEQUEUE (see that module's `stampRunStartedAtFirstDequeue`). Same
+ * PURPOSE as `leaseMsFor`'s `POST_CALL_SLACK_MS` a few lines above — DB
+ * round trips, queue publish latency, finalization overhead — but a
+ * SEPARATE constant, not a reuse of `POST_CALL_SLACK_MS`: the lease covers
+ * ONE provider call's post-call work, this covers the WHOLE run's (every
+ * judgment's persist plus the run's own finalization pass), and the two are
+ * free to diverge in size without a shared constant forcing them to move
+ * together for an unrelated reason.
+ *
+ * THE ONLY REMAINING HOME FOR THIS LITERAL. Before this task, THREE
+ * independent copies existed, one per launch call site: `src/lib/run-launch.ts`'s
+ * exported `DEADLINE_SLACK_MS`, `src/worker/run-create-consumer.ts`'s own
+ * local copy, and `src/lib/calibration/launch.ts` importing run-launch.ts's.
+ * All three sized `EvaluationRun.deadlineAt` AT CREATION, on queue position
+ * rather than the run's own work — the defect this whole plan fixes. Once
+ * none of them stamp a deadline at creation any more (see
+ * `docs/superpowers/plans/2026-09-03-deadline-at-first-dequeue.md`'s Tasks
+ * 4-5), `claim.ts`'s first-dequeue stamp is the ONLY remaining place that
+ * needs this constant — so it gets ONE definition, here, next to the budget
+ * arithmetic it is added to, rather than a fourth independent copy.
+ */
+export const RUN_DEADLINE_SLACK_MS = 60_000;
+
+/**
+ * The run-level budget stamped onto `EvaluationRun.deadlineAt` at FIRST
+ * DEQUEUE — see `src/worker/claim.ts`'s `stampRunStartedAtFirstDequeue`, the
+ * only caller. Returns a DURATION (milliseconds), not an absolute `Date`,
+ * mirroring `leaseMsFor` exactly: the caller combines it with `Date.now()`,
+ * which keeps this function pure and testable without faking the clock.
+ *
+ * `judgmentCount` is the TOTAL number of `ModelJudgment` rows the run was
+ * created with — fixed forever once the run exists (nothing in this
+ * codebase adds a judgment to a run after creation), so it is safe for the
+ * caller to read once, outside any lock, and combine with `Date.now()` at
+ * claim time without racing itself. For an ordinary run this is the model
+ * count `launchSingleRun` created it with; for a calibration run (A2.1) it
+ * is always 1 — one judge, one item, one judgment per `EvaluationRun` — so
+ * the deadline this produces is `now + 1 * hardCapMs + slackMs`, roughly 16
+ * minutes at the defaults, REGARDLESS of how many OTHER calibration runs
+ * are queued ahead of or behind it. That queue-depth independence is the
+ * entire point: the OLD formula (deleted from `run-launch.ts` and
+ * `calibration/launch.ts`) multiplied this same `hardCapMs` by "judgments
+ * queued ahead of this one" — a property of the WHOLE SYSTEM's queue depth
+ * at LAUNCH time — instead of by this run's own judgment count, a property
+ * of the run itself, fixed at creation and measured from CLAIM time.
+ *
+ * `hardCapMs`, not `initialBudgetMs` — same reasoning as the deleted
+ * creation-time formulas: since the escalating timeout landed
+ * (`src/lib/llm/timeout-policy.ts`'s own module doc), a call may
+ * legitimately run to the hard cap before anything aborts it, so sizing the
+ * deadline on the shorter initial-alert budget would let the reaper
+ * force-finalize a judgment that is still legitimately executing.
+ */
+export function runStartBudgetMs(
+  judgmentCount: number,
+  budgets: TimeoutBudgets,
+  slackMs: number = RUN_DEADLINE_SLACK_MS
+): number {
+  return judgmentCount * budgets.hardCapMs + slackMs;
+}
+
+/**
  * The latency baseline for one judge — THE contract, re-exported under a
  * judge-scoped name rather than redeclared: this is
  * `src/lib/calibration/latency.ts`'s `LatencyBaseline`, the return of
