@@ -11,6 +11,17 @@ but "here is the number, its denominator, the config that produced it, and what 
 
 ---
 
+> **WAVE 2 IS NOT DEPLOYED — 2026-09-03. Read every *landed* and *shipped* note below as
+> *committed*.** Production is `sha-5e48187cfb3a`, which is Wave 1 only. Everything described below
+> as landed, shipped, stored, or printed by `npm run calibration:run` — v2k
+> (`CalibrationRun.samplingParams`, `33b7be4`), v2l (`CalibrationRun.constantBaselineAccuracy` and
+> the constant floor, `1ef04ab`/`712301b`/`f78d90c`), `src/lib/llm/degeneration.ts` (`a272519`),
+> `accountTokens()` and pairwise `parseMode` (`781bf58`) — is **committed and not running**: 16
+> commits local on one workstation, no image in Harbor, neither migration applied. Measured against
+> `judge-arena-pg-1` on 2026-09-03, **neither column exists**, so a query selecting one **errors**;
+> it does not return NULL. Status and the promote order:
+> [`../plans/2026-09-03-wave1-wave2-handoff.md`](../plans/2026-09-03-wave1-wave2-handoff.md).
+
 ## 0. If you read one thing
 
 **On this golden set, a judge that stamps `A>B` on every item scores 0.5667.** That is the number
@@ -47,6 +58,8 @@ from the version row, for the reason in §4.1.
 | 7 | `cmtiplr3x` | granite4.2:3b | ollama | 4096 | 0.6667 | 0.3182 | **15/30** | **15** | ⛔ **VOID** — half the set truncated |
 | 8 | `cmtipm1nb` | Qwen3.6-35B-A3B | llamacpp | **12288** | **0.8667** | **0.7285** | 30/30 | 0 | ✅ **best recorded** |
 | 9 | `cmtircx0x` | granite4.2:3b | ollama | **12288** | 0.6000 | 0.2355 | **25/30** | **5** | ⛔ 5 items lost to a REPETITION LOOP — §5.4.2 |
+| 10 | `cmtkt3sg2` | qwen3.5:9b | ollama | 6144 | — | — | **0/30** | 0 | ⛔ **VOID** — abandoned at 8 scored judgments; header aggregates NULLed, §1.2 |
+| 11 | `cmtkub3ym` | qwen3.5:9b | ollama | **8192** | **0.8571** | **0.7128** | 28/30 | 0 | ✅ 2 items lost to the 900 s HARD CAP, not to tokens — §1.2 |
 
 > **CORRECTION (2026-09-02).** Row 9's *n* read `15/25` until v2l — correct/verdictCount, where every
 > other row is verdictCount/items. Under the table's own convention it is **25/30** (`verdictCount` 25).
@@ -68,12 +81,38 @@ items, and that subset's key is 14 `A>B` / 11 `B>A` — a constant-`A>B` baselin
 compute.** Comparing a partial run against the whole set's floor would have flattered it, which is
 the second reason (after §4.1) that a leaderboard cannot compute this number once and cache it.
 
+Run 11 is the second partial run and needs the same treatment, in the other direction. The two items
+`qwen3.5:9b` never returned are both `A>B` items, so its 28-item subset key is **15 `A>B` / 13 `B>A`**
+and its floor is **0.5357 (15/28) — DERIVED by hand, not read from the database**, because v2l is
+local-only and `CalibrationRun.constantBaselineAccuracy` does not exist in the production schema yet.
+Its margin is therefore **+0.3214** — wider than Qwen3.6 at 12288 (+0.3000) even though its accuracy
+is lower, because losing two `A>B` items lowered its floor as well as its denominator. That is the
+widest margin of those worked so far, which is not the same as the widest on the board: runs 1 and 6
+are also partial and their subset floors have never been computed. **A margin ranking and an accuracy
+ranking already disagree over the five rows that have a floor** — row 11 is second on accuracy and
+first on margin — and the disagreement is arithmetic rather than a finding about either judge. Five,
+not eleven: rows 7 and 10 are VOID and have no accuracy at all, rows 1 and 6 are partial and have no
+floor, and rows 3 and 5 repeat rows 2 and 4's accuracy exactly, so they add no ordering.
+
 > **Landed (v2l, 2026-09-02).** The floor is no longer hand-worked: `src/lib/calibration/baseline.ts`
 > computes `max(key class) / verdictCount` over the scored subset, `scoreCalibrationRun` returns it as
 > `constantBaseline` (with every top class named when the key ties) and stores it as
 > `CalibrationRun.constantBaselineAccuracy` beside `rawAgreement`, and `scripts/calibration/run.ts`
 > prints `constant <floor> (… 14/25) margin +0.0400` with a `⚠` when accuracy is at or below it. Rows
 > not re-scored since v2l hold NULL. Only the subset floor is ever printed or stored.
+
+> **CORRECTION (2026-09-03) — "Landed" there means committed, and this one is not running.** The note
+> above says *"The floor is no longer hand-worked"*, that `scoreCalibrationRun` *"stores it as
+> `CalibrationRun.constantBaselineAccuracy` beside `rawAgreement`"*, and that *"Rows not re-scored
+> since v2l hold NULL."* All three are true of the tree only. v2l — `1ef04ab` / `712301b` / `f78d90c`,
+> migration `20260901190000_v2l_calibration_constant_baseline`, all authored 2026-09-02 — is Wave 2:
+> not pushed, not promoted. Measured against `judge-arena-pg-1` on 2026-09-03,
+> `CalibrationRun.constantBaselineAccuracy` **does not exist as a column** (production is at
+> `20260901000000_v2j_queue_lanes`, 20 migrations applied), so **no row can hold NULL for it and a
+> query selecting it errors**. Every floor in §1 and §1.2 is DERIVED by hand and stays that way until
+> a v2l image is promoted and the runs are re-scored with `--score-only` — which the 2026-09-03
+> handoff §8 warns must skip the VOID run `cmtkt3sg2`, because scoring is a full overwrite and would
+> resurrect its phantom aggregate.
 
 ### 1.1 What changed between the two Qwen configurations
 
@@ -94,11 +133,75 @@ It is the ordinary result that a reasoning model given more headroom uses it. Th
 clock for one extra correct item out of thirty, which on a 30-item set is one sample and **not yet
 a significant difference**; treat it as directional until a larger set repeats it.
 
+### 1.2 qwen3.5:9b at 8192 — 0.8571 over 28 of 30, and what the two missing items cost
+
+Run 11 (`cmtkub3ym00017h4xf68aguqh`), judge version ordinal 2 (`cmtkqwen35ord2v20000001`), against the
+Ollama server at `http://192.168.1.9:11434/v1`. Same frozen set, same rubric, sequential.
+
+| | measured | how to read it |
+|---|---|---|
+| accuracy (`rawAgreement`) | **0.8571** | 24/28. **The denominator is 28, not 30.** |
+| κ | **0.7128** | same set and rubric as every other row, so comparable *here* — and only here (§4.2). |
+| `verdictCount` | **28/30** | the 2 missing are failures, not ties. |
+| constant floor | **0.5357** | 15/28 on the scored subset — **DERIVED**, see §1 above. |
+| margin over floor | **+0.3214** | |
+| compute | **151 min** | mean 5m02s · p50 3m51s · p90 7m05s · max 15m00s, over all 30 attempts; percentiles are nearest-rank. |
+| truncations | **0** | no judgment on this run carried `finishReason: 'length'`. |
+| closest to budget | **80%** | 6,558 estimated tokens of 8192 — DERIVED at 3.64 chars/token, ±10%. |
+| failures | **2** | items 10 and 16, both `hit the 900000ms hard cap on attempt 2`. |
+
+**Accuracy is not strictly comparable to the rows above it, because the denominators differ**, and the
+28 items are not a random 28: items 10 and 16 are the two the judge was *slowest* on — they are the
+only two that reached the 900 s cap, at `latencyMs` 900 019 and 900 028 with `attemptCount 2` and no
+content returned. §5.4.3 is the general form of this worry, and its finding was that the direction of
+any such correction is not determinable at this sample size; the only difference here is that the
+mechanism selecting the dropped items is the **clock**, not the token budget. κ is the column to lean
+on when comparing this row to the others, and κ is comparable only within one set and rubric — which
+holds for every row in §1 today and stops holding the moment a second set exists.
+
+**The failure mode was time, on a judge that never once truncated.** Zero `length` finishes across
+30 attempts, and the widest completed item sat at 80% of its budget. Both facts point the same way:
+8192 was enough room, and 900 s was not enough patience for two items.
+
+**Why 8192 — the §2.1 arithmetic, run before the registration rather than after a failed run.** A
+pre-registration probe measured ~11.9 tok/s; the pooled `accountTokens`-derived figure is **12.03
+tok/s over the first 15 of run 11's 28 completed judgments** — the mid-run number the session handoff
+recorded — and **12.61 tok/s** re-measured over all 28 (see §2's `‡` note). At either rate a 12288
+budget needs **975–1021 s against a 900 s hard cap**, so
+12288 was unreachable by construction. 6144 was refuted from the other side: the largest item run 11
+completed estimates at **6,558 tokens = 107% of the abandoned 6144 budget**, i.e. it would have
+truncated there, and it finished cleanly at 8192.
+
+**The VOIDED 6144 run (row 10) is kept on the board on purpose.** `prisma/seed-core.ts:223-229` makes
+a config change a NEW ORDINAL rather than a mutation, so 6144 is version ordinal 1
+(`cmtkt2d6w00027h33of3j9iky`) and 8192 is ordinal 2; the earlier attempt did not have to be edited
+away to run the later one. It was abandoned when one judgment was measured at **82.4% of its 6144
+budget** — 5,065 estimated tokens, DERIVED — which `outputTokens` alone could not have shown, because
+`outputTokens` for that item is **115**. (The `VOID:` string retained on the rows says "98% of
+budget"; 82.4% is what the shipped estimator produces over that row, and 82.4% is the number to
+quote.) Its poller had already scored the run at **0.75 over 8**; the orchestrator has since NULLed
+`rawAgreement` and `kappa` and zeroed `verdictCount`, so no reader or query can mistake a partial for
+a result. **The judgments are retained**: every error row carries an explicit
+`VOID: run abandoned at max_tokens 6144 …` string, and every completed row carries
+`samplingParams {"max_tokens": 6144}`, so the provenance of §2's 6144 envelope row survives the void.
+
+> **Why row 10 says 8 and §2's 6144 row says n=9.** The run was stopped at 01:21:37Z with 8 judgments
+> complete — that is the population the phantom 0.75 was scored over. A ninth judgment landed at
+> 01:27:40Z, after the stop, and is `completed` in the database. The envelope in §2 is measured over
+> `status='completed'` and therefore sees 9. Both numbers are right for their own denominator, which
+> is the whole reason this document prints denominators.
+
 ---
 
 ## 2. OPERATING ENVELOPES — what a model costs, before you queue 300 of them
 
-Measured over every `status='completed'` judgment attached to a calibration run.
+Measured over every `status='completed'` judgment attached to a calibration run. Every column is a
+direct provider measurement **except `tok/s`, which must be `accountTokens`-derived**:
+`Σ estimatedGeneratedTokens / Σ (latencyMs / 1000)`, never `Σ outputTokens / Σ latencyMs`. That is
+runbook §8.6's formula **as corrected by `db5bff9`** — the uncorrected version reads 0.54 tok/s where
+the judge generates 12.03, a 22× error, on any model whose provider count excludes the reasoning
+channel. `accountTokens()` (`src/lib/calibration/token-accounting.ts`) is the only in-tree thing that
+tells the two kinds of model apart, and `npm run calibration:run` prints it.
 
 | judge | `max_tokens` | n | mean out | max out | mean lat | max lat | **tok/s** | mean in |
 |---|---|---|---|---|---|---|---|---|
@@ -108,12 +211,23 @@ Measured over every `status='completed'` judgment attached to a calibration run.
 | granite4.2:3b | 4096 | 15 | 1950 | 3058 | 52.3 s | 99.8 s | 37.3 | 1650 |
 | granite4.1:3b | 4096 | 60 | 109 | 163 | 3.6 s | 16.8 s | 30.2 | 1660 |
 | qwen3.5:9b † | 6144 | 9 | 147 | 184 | 261.3 s | 477.7 s | 0.6 ⚠⚠ → **11.1** | 4582 |
+| qwen3.5:9b †‡ | 8192 | 28 | 141 | 184 | 259.3 s | 574.4 s | 0.54 ⚠⚠ → **12.61** | 4824 |
 
 \* partial — run #9 was still draining when this table was built.
 
 † **`outputTokens` on this judge does not include the reasoning channel, so the naive 0.6 tok/s is
 wrong by 18x.** The bolded 11.1 is `Σ estimatedGeneratedTokens / Σ latency` — see the CORRECTION
 below. Every other cell in this row is a direct measurement and needs no correction.
+
+‡ **On the 8192 row, `mean out` and `max out` are `outputTokens`, which on this judge is the JSON
+verdict ALONE** — 141 is not a mean generation length. The `accountTokens` estimate over the same 28
+judgments is **3,270 mean / 6,558 max**, DERIVED at 3.64 chars/token, ±10%. `mean lat`, `max lat` and
+`mean in` are direct measurements over the 28 **completed** judgments; the run's two hard-cap failures
+are excluded from all of them and are recorded in §1.2. The **12.61** is the pooled
+`accountTokens`-derived rate over all 28. The session handoff recorded **12.03**, which is the same
+statistic taken while the run was still draining, over the first 15 of those 28 — both are stated
+because §2.1's sizing verdict is identical under either (12288 needs 975 s at 12.61, 1021 s at 12.03,
+against a 900 s cap) and because the number an operator sees mid-run is the one they will act on.
 
 > **CORRECTION (2026-09-02, `0bd6b6b`) — the `tok/s` column is `outputTokens / latency`, and
 > `outputTokens` does not mean the same thing on every model.**
@@ -143,6 +257,35 @@ below. Every other cell in this row is a direct measurement and needs no correct
 > marked `11*` partial and that run has since drained. Re-measured 2026-09-02 it is `n=25`, mean out
 > 3493, mean lat 101.7 s, **34.4** tok/s. The other four rows reproduce exactly.
 
+> **CORRECTION (2026-09-03) — the "understated ~2.2×" claim was a DOUBLE COUNT and is wrong.**
+>
+> Written mid-session and reproduced here rather than deleted: *"the recorded throughput envelopes are
+> understated ~2.2× — Qwen3.6 31.3 → 67.4, granite4.2 35.1 → 78.3."* **No published row moves.** The
+> note above already declined those figures; this one records the measurement that settles them, and
+> names the one rate that really was wrong.
+>
+> The discriminator is a single ratio — the whole generated stream over what the provider counted,
+> `Σ (length(reasoningContent) + length(rawResponse)) / Σ outputTokens` — measured 2026-09-03 against
+> `judge-arena-pg-1` over every `status='completed'` judgment:
+>
+> | judge | (reasoning + content) chars / `outputTokens` | reading |
+> |---|---|---|
+> | Qwen3.6-35B-A3B | **3.76** (n=145) | at the model's own chars-per-token ⇒ the count ALREADY includes reasoning |
+> | granite4.2:3b | **3.87** (n=40) | same |
+> | qwen3.5:9b | **78.96** (n=20, see below) | ~20× above any physically possible tokenizer rate ⇒ the count EXCLUDES reasoning |
+>
+> A ratio of 3–4 means `outputTokens` already covers the reasoning channel, so adding a chars-derived
+> reasoning estimate on top counts it **twice** — which is precisely the operation that turned 31.3
+> into 67.4 and 35.1 into 78.3. **Qwen3.6's and granite4.2's rates were correct as published.** The
+> one rate that was wrong is qwen3.5:9b's: **0.54 raw against 12.03 pooled-and-derived** on run 11, a
+> 22× error, and the case `accountTokens()` was written to catch.
+>
+> **78.96 carries a denominator, like everything else here.** It is pooled over the first 20 of this
+> judge's completed judgments — all 9 at 6144 plus the first 11 at 8192 — taken while run 11 was
+> still draining. Re-measured 2026-09-03 over all 37 it is **82.28** (73.09 at 6144, 85.36 at 8192).
+> Both readings sit an order of magnitude above `REASONING_EXCLUDED_RATIO = 8`, so the
+> classification, and every number derived from it, is unchanged.
+
 **The 8192 row's 27.3 tok/s is polluted and must not be quoted as Qwen's speed.** It pools run #1,
 which was over-subscribed (prefetch 8 against `total_slots: 2`), so its latencies include time spent
 queued *inside* the inference server. The clean sequential figure for Qwen is **58.5 tok/s**. This is
@@ -161,6 +304,14 @@ time_to_exhaust_budget  =  max_tokens / tok_per_s
 | granite4.2:3b | 35.0 | 12288 | **351 s** | ✗ **exceeds** | fits |
 | granite4.2:3b | 35.0 | 4096 | 117 s | fits | fits |
 | granite4.1:3b | 30.2 | 4096 | 136 s | fits | fits |
+| qwen3.5:9b | 12.03 ‡ | 8192 | **681 s** | ✗ exceeds (alerts only, §5.2) | fits |
+| qwen3.5:9b | 12.03 ‡ | 12288 | **1021 s** | ✗ exceeds | ✗ **exceeds** |
+
+The two qwen3.5:9b rows are the first time this arithmetic was run **before** a registration rather
+than after a failed run, and they are what picked 8192: 12288 cannot finish inside the 900 s hard cap
+at this judge's rate. Under the full-run 12.61 tok/s the same two rows read 650 s and 975 s, and the
+verdict is the same. Note also that **the rate that matters here is unobtainable from `outputTokens`**
+— the naive 0.54 would have predicted 22,756 s for 12288 and refused a budget that works.
 
 **Run this before registering a judge.** It is two numbers and it is the difference between a clean
 30/30 and the failure in §5. Rearranged, the token ceiling a given timeout can afford is:
@@ -201,6 +352,7 @@ granite4.1 time. Re-run #5's exact command after any change to prompt assembly o
 | answer key | 17 `A>B`, 13 `B>A`, 0 tie | — |
 | granite4.1:3b | **21 A, 2 B, 7 tie** | **109** |
 | Qwen @ 12288 | 17 A, 13 B, 0 tie | 2869 |
+| qwen3.5:9b @ 8192 (28 of 30) | **15 A, 13 B, 0 tie** | 141 counted / **3,270 DERIVED** — §2 `‡` |
 
 Three things at once, and the accuracy number alone shows none of them:
 
@@ -214,6 +366,16 @@ Three things at once, and the accuracy number alone shows none of them:
 
 Qwen at 12288 reproducing the key's 17/13 marginal *exactly* is worth noting but not over-reading —
 on 30 items that is one plausible draw among several, not evidence of calibration.
+
+**qwen3.5:9b discriminates rather than stamps, and this is the evidence — not its accuracy.** Over
+the 28 items it scored it returned **15 A / 13 B**, an exact match to that subset's key (15 `A>B` /
+13 `B>A`), and its four misses are **symmetric**: 2 × (expected `A>B`, said B) and 2 ×
+(expected `B>A`, said A). A judge buying its score by leaning on the majority class looks like the
+opposite — a marginal skewed toward `A` and its misses piled on the `B>A` items — which is exactly
+granite4.1's shape above, and is why granite4.1's 0.5000 sits *below* the 0.5667 an `A>B` stamp would
+have scored on the same 30 items. Read the marginal match itself the way Qwen's 17/13 is read: on 28 items it
+is one plausible draw, **not** evidence of calibration. What the symmetry does rule out is the
+stamping mode, and that is a narrower and more durable claim than the accuracy.
 
 ### 3.3 A void run is not a low score
 
@@ -283,6 +445,8 @@ internally comparable.
 > `{ temperature, max_tokens }`, never the raw JSON), so the header itself is now the right answer:
 >
 > ```sql
+> -- STOP — CORRECTION 2026-09-03: THIS QUERY ERRORS TODAY. The column does not exist on
+> -- judge-arena-pg-1; v2k is Wave 2 and local. Read the note under this block first.
 > -- RIGHT, since v2k. NULL only on the 9 runs launched before the column existed —
 > -- for those, and only those, fall through to the per-judgment query above.
 > SELECT cr.id, cr."samplingParams"->>'max_tokens' AS max_tokens, cr."samplingParams" IS NULL AS pre_v2k
@@ -298,6 +462,18 @@ internally comparable.
 > gets a **new version ordinal** (`prisma/seed-core.ts:223-229` states the invariant) or, at the very
 > minimum, is never edited mid-run; `scripts/calibration/run.ts` prints a ⚠ when a run's judgments
 > disagree with the header or with each other, comparing with keys canonicalised (JSONB reorders them).
+>
+> **CORRECTION (2026-09-03) — "Landed (v2k, 2026-09-01)" is wrong twice over, and "the 9 runs" is now
+> 11.** The commit is `33b7be4`, authored **2026-09-02T21:01**, and it is Wave 2: in the tree, not
+> pushed, not promoted. So *"the header itself is now the right answer"* and the SQL comment *"RIGHT,
+> since v2k"* describe the tree, not production. Measured against `judge-arena-pg-1` on 2026-09-03,
+> `CalibrationRun.samplingParams` **does not exist as a column** — the query above **errors** today
+> rather than returning NULL, and the per-judgment query further up is the only one that runs. The
+> count moved too: *"NULL only on the 9 runs launched before the column existed"* was measured when
+> there were nine. Production holds **11 `CalibrationRun` rows**, both qwen3.5:9b ordinals launched
+> pre-v2k, so when the migration is applied **11 rows hold NULL, not 9** — deliberately not
+> backfilled, because a snapshot invented after the fact is not a snapshot. Same correction, recorded
+> independently: 2026-09-01 handoff §7 #1.
 
 ### 4.2 Kappa is not comparable across sets — and the scoreboard is cross-set by design
 
@@ -557,6 +733,14 @@ and wants its own test, not a drive-by edit during a calibration.~~ **Shipped in
 ≥ 5×, keeping `non_retryable` and stamping the measure on `ProviderError.repetition`. Plan:
 `docs/superpowers/plans/2026-09-01-repetition-loop-detector.md`.
 
+> **CORRECTION (2026-09-03) — "Shipped" there means committed, not running.** *"Shipped in `a272519`
+> (2026-09-01)"* is wrong on both halves: `a272519` was authored **2026-09-02T22:02**, and it is
+> Wave 2 — not pushed, not promoted. Production is `sha-5e48187cfb3a`, which **still emits the
+> "raise `samplingDefaults.max_tokens`" advice quoted in the block above, verbatim**
+> (`src/lib/llm/registry.ts:673` at `5e48187`, unconditional), on exactly the
+> runs where it makes things worse. Nothing about the degeneration guard is live until Wave 2 is
+> promoted (2026-09-03 handoff §8). Same correction: 2026-09-01 handoff §7 #3.
+
 > **CORRECTION (2026-09-01).** Two statements above were checked with node `zlib.deflateSync` on
 > the same five rows before the threshold was pinned. (1) "It is cycling one clause verbatim … and
 > it is all five of them" — four of the five show verbatim cycling (deflate 6.3×, 7.1×, 10.8×,
@@ -731,3 +915,13 @@ Capacity is a property of the fleet, not of the scoreboard.
   **CORRECTION (2026-09-01):** `reasoningTokens` is NULL on Ollama and Anthropic too and is now
   documented as usage-reported rather than derived or dropped; `parseMode` is written on pairwise
   from 2026-09-01 (rows in this ledger predate that and stay NULL). Handoff §7 items 10–11.
+
+  > **CORRECTION (2026-09-03).** *"`parseMode` is written on pairwise from 2026-09-01 (rows in this
+  > ledger predate that and stay NULL)"* is wrong in both clauses. The commit that first writes it on
+  > the pairwise path is `781bf58`, authored **2026-09-02T23:17**, and it is **Wave 2: in the tree,
+  > not pushed, not promoted** — production writes NULL today. And the ledger's rows do not all
+  > predate it: measured on `judge-arena-pg-1` on 2026-09-03, `parseMode` is **NULL on 330 of 330**
+  > `ModelJudgment` rows, including all **60** rows of runs 10 and 11, which ran on 2026-09-03 under
+  > `sha-5e48187cfb3a`. No row in this ledger carries a value and none will until Wave 2 is promoted.
+  > Because `781bf58` touches the path every calibration runs on, it owes a regression re-run before
+  > anything else lands on it — the granite4.1:3b bit-identical check, 2026-09-03 handoff §8 step 2.
