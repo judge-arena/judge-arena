@@ -459,10 +459,19 @@ export interface RunProviderPairwiseInput {
 /** Pairwise mirror of `JudgmentResult`/`RespondResult` — same "looser local
  * type, strict registry type is a subtype" rationale. A pairwise judge
  * emits a preference, so there is no `overallScore` and no
- * `criteriaScores`. */
+ * `criteriaScores`. `parseMode` is OPTIONAL here for SYMMETRY with
+ * `JudgmentResult` above (judgment-consumer.ts:305), which is optional for a
+ * reason that does NOT apply on this seam: there is exactly one
+ * `PairwiseProviderFn` fake in the tree (tests/integration/pairwise-run.test.ts:113,
+ * the only `providerPairwise:` call site) and it is updated in the same commit,
+ * so nothing here is kept compiling by the `?`. The registry's `PairwiseResult`
+ * always carries the field. The cost of optional is that forgetting the write in
+ * `persistPairwiseSuccess` type-checks green — tests/integration/pairwise-run.test.ts
+ * pins it. */
 export interface PairwiseJudgmentResult extends CommonResultFields {
   verdict: 'A' | 'B' | 'tie';
   reasoning: string;
+  parseMode?: 'structured' | 'fallback';
 }
 
 export type PairwiseProviderFn = (input: RunProviderPairwiseInput) => Promise<PairwiseJudgmentResult>;
@@ -827,6 +836,9 @@ async function persistPairwiseSuccess(
       reasoning: result.reasoning,
       criteriaScores: Prisma.DbNull,
       verdict: result.verdict,
+      // #11 (2026-09-01): 'structured' = schema attached AND no fence/verdict
+      // repair; 'fallback' otherwise. Rows written before this line are NULL.
+      parseMode: result.parseMode,
     },
   });
 }

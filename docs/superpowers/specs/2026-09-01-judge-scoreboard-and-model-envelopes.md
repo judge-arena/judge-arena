@@ -718,3 +718,6 @@ Capacity is a property of the fleet, not of the scoreboard.
   makes the local numbers hard to place.
 - **Reasoning-token capture is still partial.** `reasoningTokens` is NULL for llama.cpp, and
   `parseMode` is NULL on pairwise; both are open and recorded in the baseline spec §5.
+  **CORRECTION (2026-09-01):** `reasoningTokens` is NULL on Ollama and Anthropic too and is now
+  documented as usage-reported rather than derived or dropped; `parseMode` is written on pairwise
+  from 2026-09-01 (rows in this ledger predate that and stay NULL). Handoff §7 items 10–11.

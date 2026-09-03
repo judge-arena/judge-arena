@@ -344,12 +344,13 @@ a heavily one-sided pair means the judge is systematically resolving one directi
   reasoningContent chars   error  n=5  mean=44287  max=56004
 ```
 
-Every field should be `n/n` where n is the judgment count. Two **known, honest** exceptions:
+Every field should be `n/n` where n is the judgment count. Two **known, honest** exceptions
+(**CORRECTION 2026-09-01:** one exception now; the `parseMode` row records what changed):
 
 | Field | Expect | Why |
 |---|---|---|
 | `reasoningTokens` | **0/n on llama.cpp AND Ollama** (and never set for Anthropic) | its `usage` payload carries no `completion_tokens_details`. Nothing was dropped; the field was never sent. **Do not "fix" it by defaulting to 0** — a real 0 and an absent measurement are different facts. **CORRECTION (2026-09-01):** this row said llama.cpp only; Ollama sends nothing either and the Anthropic adapter never sets it. The line is now labelled usage-reported in the report, and the two `reasoningContent chars` lines beneath the checklist — one for `completed` rows, one for `error` rows — are the size signal to read. **Compare the two lines, do not read either alone:** an `error` mean several times the `completed` mean, with `content length 0` failures, is the repetition-loop signature (handoff 2026-09-01 §5.2 measured 44,287 vs 13,138), not a `max_tokens` problem. Pooling the two hides it — the same run pools to 18,330 |
-| `parseMode` | **NULL on the pairwise path** | one parse path, so no strict→lenient demotion to record. Meaningful only pointwise |
+| `parseMode` | **NULL on pairwise rows written before 2026-09-01; `structured`/`fallback` after** | one parse path, so — this row used to say — no strict→lenient demotion to record, meaningful only pointwise. **CORRECTION (2026-09-01):** pairwise now writes it. `structured` = schema attached (llamacpp/ollama/vllm) **and** no fence/verdict repair; `fallback` otherwise (always, on Anthropic/openai/openrouter). The capture-completeness checklist does NOT count this column — only the "One judgment in full" dump prints it (the `── One judgment in full ──` block in `scripts/calibration/run.ts`) — so group on it in psql. A self-hosted judge with a large `fallback` share is one that ignores `response_format` or answers in prose; read the raw responses. NULL on a pre-change row is NOT `fallback` |
 
 **A NULL `systemPrompt` means the call never came back.** Transport failures have no response to
 capture, so a shortfall here counts your transport failures, not a capture bug.

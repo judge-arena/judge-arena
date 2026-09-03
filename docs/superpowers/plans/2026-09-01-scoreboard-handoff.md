@@ -386,6 +386,15 @@ what a leaderboard actually needs.
     block; what was missing was the completed-population baseline.
 11. **`parseMode` is NULL on pairwise.** One fence-tolerant parse path, so no strict→lenient
     demotion to record. Document as pointwise-only or give it a pairwise meaning.
+    **CLOSED 2026-09-01 — given a meaning.** `tryParsePairwiseJudgment` now reports `lenient`
+    (fence stripped OR verdict repaired); `executePairwiseCall` records `'structured'` iff a schema
+    was attached AND nothing was lenient, else `'fallback'` — the pointwise rule, with the caveat
+    (on the schema comment) that extra keys are ignored so pairwise `'structured'` is weaker. No
+    migration, no backfill: every pairwise row written before this change stays NULL = pre-change
+    (the production ledger held 270 model judgments on 2026-09-01, all pairwise as far as §1's table
+    shows, but the count was not measured for this claim and the schema comment states none). Parse OUTPUT is
+    unchanged, so the §2 granite4.1 regression check must stay bit-identical — operator re-run after
+    promotion.
 
 ---
 

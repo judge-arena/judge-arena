@@ -502,7 +502,30 @@ model ModelJudgment {
   outputTokens   Int?
   servedModelId  String? // model id actually reported by the serving backend
   finishReason   String?
-  parseMode      String? // how the raw response was parsed into structured scores
+  // 'structured' | 'fallback' | NULL.
+  // POINTWISE (src/lib/llm/provider.ts): 'structured' = the strict schema parse
+  //   SUCCEEDED on a request that attached a schema; 'fallback' = the lenient
+  //   JSON-in-markdown parse (always, when no schema was attached).
+  // PAIRWISE (from 2026-09-01, src/lib/llm/registry.ts executePairwiseCall):
+  //   'structured' = this request ACTUALLY CARRIED a schema AND
+  //   tryParsePairwiseJudgment needed no repair — no markdown fence stripped,
+  //   no verdict case/whitespace normalisation; 'fallback' otherwise.
+  //   "Carried a schema" is the flag `structuredOutputRequested`, which only
+  //   callOpenAICompatible sets, for mode:'judgment' on a descriptor whose
+  //   caps.structuredOutput is not 'none' — llamacpp, ollama, vllm. READ THE
+  //   FLAG, NOT THE CAPS: anthropic's caps are 'tool_use' (not 'none'), but it
+  //   dispatches through callAnthropic, which never attaches a schema and
+  //   never sets the flag, so anthropic is always 'fallback' — as are openai
+  //   and openrouter, whose caps are 'none'.
+  //   CAVEAT when grouping across protocols: pairwise 'structured' is WEAKER
+  //   than pointwise 'structured' — extra keys are ignored, so a response with
+  //   junk fields that otherwise needed no repair still reads 'structured'.
+  // NULL means one of: respond mode (never written); v1 import
+  //   (scripts/importer/runs.ts writes null); any error-status row of any
+  //   protocol (markJudgmentError never writes it); any pairwise row written
+  //   before 2026-09-01, none of which are backfilled — rawResponse is
+  //   retained if that is ever wanted. NULL is NOT 'fallback'.
+  parseMode      String?
 
   // ── What the model was ACTUALLY given, and what it ACTUALLY thought ────────
   // Stored, not reconstructed. "Reconstructible from promptTemplateId + the

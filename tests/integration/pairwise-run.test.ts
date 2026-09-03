@@ -119,6 +119,16 @@ function fakePairwiseProvider(callLog: RunProviderPairwiseInput[]): PairwiseProv
       rawResponse: '{"verdict":"B","reasoning":"fixture pairwise reasoning"}',
       latencyMs: 42,
       tokenCount: 100,
+      // #11: 'fallback' on purpose. The fake bypasses the registry, so the
+      // value is arbitrary — but a single-value fake cannot tell a passthrough
+      // from a constant, and 'fallback' is the value a hardcoded 'structured'
+      // or a `?? 'structured'` default would NOT produce. NULL here means
+      // persistPairwiseSuccess dropped it — the optional seam field makes that
+      // deletion type-check green, so this assertion is the only guard
+      // (handoff §5.1 shape). Remaining blind spot, recorded in the plan's
+      // Self-review "Accepted verification gaps" (ii): a `?? 'fallback'`
+      // default would pass here, because this fake is single-valued.
+      parseMode: 'fallback' as const,
     };
   };
 }
@@ -322,6 +332,10 @@ describe('a0 pairwise: launchSingleRun + judgment-consumer end to end', () => {
     expect(persisted.reasoning).toBe('fixture pairwise reasoning');
     expect(persisted.rawResponse).toBe('{"verdict":"B","reasoning":"fixture pairwise reasoning"}');
     expect(persisted.latencyMs).toBe(42);
+    // #11: pairwise parseMode is written by persistPairwiseSuccess; before
+    // 2026-09-01 this column was NULL by construction on every pairwise row.
+    // 'fallback' (not 'structured') so a hardcoded/defaulted 'structured' fails too.
+    expect(persisted.parseMode).toBe('fallback');
 
     const run = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: result.run.id } });
     expect(run.status).toBe('needs_human');

@@ -115,6 +115,15 @@ export const PAIRWISE_JUDGMENT_JSON_SCHEMA = {
 export interface ParsedPairwiseJudgment {
   verdict: 'A' | 'B' | 'tie';
   reasoning: string;
+  /** TRUE when the parser had to REPAIR the text to read it: a markdown fence
+   * was stripped, or the verdict string needed case/whitespace normalisation
+   * (`"a"`, `" TIE "`). FALSE when the trimmed text parsed as-is with a
+   * canonical verdict. Extra keys the model volunteers are ignored and do NOT
+   * count as repair. `registry.ts`'s `executePairwiseCall` combines this with
+   * whether a schema was attached to the request to record
+   * `ModelJudgment.parseMode` — the pairwise mirror of the pointwise
+   * strict-then-lenient demotion. */
+  lenient: boolean;
 }
 
 /** Case- and whitespace-tolerant normalization of the raw `verdict` string
@@ -132,14 +141,21 @@ function normalizeVerdict(raw: unknown): 'A' | 'B' | 'tie' | null {
 }
 
 /**
- * Parse a pairwise judge response into `{verdict, reasoning}`, or `null`.
+ * Parse a pairwise judge response into `{verdict, reasoning, lenient}`, or
+ * `null`.
  *
  * ONE parse path, unlike the pointwise pair (`tryParseStructuredJudgment`
  * strict, `parseJudgmentResponse` lenient — see provider.ts). This function
  * is deliberately fence-tolerant on its own (a model that wraps its JSON in
- * ```json despite guided decoding is still conforming enough), so there is
- * no strict-then-lenient demotion to record and no `parseMode` to persist
- * for a pairwise judgment.
+ * ```json despite guided decoding is still conforming enough). Until
+ * 2026-09-01 that meant "no strict-then-lenient demotion to record and no
+ * `parseMode` to persist" — CORRECTED: the demotion IS observable from
+ * inside this one path (did a fence have to go? did the verdict need
+ * normalising?), and `lenient` reports it so `executePairwiseCall` can
+ * record `parseMode` with the same meaning pointwise gives it. The parse
+ * RESULT is unchanged by this: a fenced or lower-cased verdict is still
+ * accepted, it is merely no longer indistinguishable afterwards from one
+ * that needed nothing.
  *
  * NEVER throws. A `null` return is the caller's signal that the response
  * carried no usable verdict — `registry.ts`'s `executePairwiseCall` turns
@@ -150,6 +166,7 @@ function normalizeVerdict(raw: unknown): 'A' | 'B' | 'tie' | null {
 export function tryParsePairwiseJudgment(raw: string): ParsedPairwiseJudgment | null {
   let jsonStr = raw.trim();
   const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const fenced = codeBlockMatch !== null;
   if (codeBlockMatch) {
     jsonStr = codeBlockMatch[1].trim();
   }
@@ -168,5 +185,8 @@ export function tryParsePairwiseJudgment(raw: string): ParsedPairwiseJudgment | 
   if (!verdict) return null;
   if (typeof record.reasoning !== 'string') return null;
 
-  return { verdict, reasoning: record.reasoning };
+  // `record.verdict` is a string here (normalizeVerdict returned non-null);
+  // any difference from the canonical value is case/whitespace repair.
+  const lenient = fenced || record.verdict !== verdict;
+  return { verdict, reasoning: record.reasoning, lenient };
 }

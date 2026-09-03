@@ -13,19 +13,37 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
  * `@/lib/llm/breaker-redis` is mocked too, purely so `executePairwise`
  * (@/lib/llm) can be called without a live Redis.
  */
-const { openaiCreateMock, OpenAIConstructorMock, getBreakerMock, allowMock, onSuccessMock, onFailureMock } =
-  vi.hoisted(() => ({
-    openaiCreateMock: vi.fn(),
-    OpenAIConstructorMock: vi.fn(),
-    getBreakerMock: vi.fn(),
-    allowMock: vi.fn(),
-    onSuccessMock: vi.fn(),
-    onFailureMock: vi.fn(),
-  }));
+const {
+  openaiCreateMock,
+  OpenAIConstructorMock,
+  anthropicCreateMock,
+  getBreakerMock,
+  allowMock,
+  onSuccessMock,
+  onFailureMock,
+} = vi.hoisted(() => ({
+  openaiCreateMock: vi.fn(),
+  OpenAIConstructorMock: vi.fn(),
+  anthropicCreateMock: vi.fn(),
+  getBreakerMock: vi.fn(),
+  allowMock: vi.fn(),
+  onSuccessMock: vi.fn(),
+  onFailureMock: vi.fn(),
+}));
 
 vi.mock('openai', () => ({
   default: OpenAIConstructorMock.mockImplementation(() => ({
     chat: { completions: { create: openaiCreateMock } },
+  })),
+}));
+// #11: anthropic pairwise is the case that separates "a schema was attached
+// to THIS request" (`raw.structuredOutputRequested`) from "this descriptor's
+// caps are not 'none'" — its caps are `tool_use`. Same constructor-level
+// interception as tests/lib/reasoning-capture.test.ts, so the REAL
+// callAnthropic runs.
+vi.mock('@anthropic-ai/sdk', () => ({
+  default: vi.fn().mockImplementation(() => ({
+    messages: { create: anthropicCreateMock },
   })),
 }));
 vi.mock('@/lib/llm/breaker-redis', () => ({ getBreaker: getBreakerMock }));
@@ -83,6 +101,7 @@ const pairwiseInput: RunProviderJudgmentInput = {
 beforeEach(() => {
   OpenAIConstructorMock.mockClear();
   openaiCreateMock.mockReset();
+  anthropicCreateMock.mockReset();
   getBreakerMock.mockReset();
   allowMock.mockReset();
   onSuccessMock.mockReset();
@@ -261,6 +280,139 @@ describe('pairwise: the rendered prompt reaches the persist path', () => {
     expect(data.reasoningSource).toBe('reasoning_content');
     expect(data.reasoningTokens).toBe(4);
     expect(result.reasoning).toBe('r');
+    // #11: vllm (caps 'guided') requested a schema and the bare JSON needed no
+    // repair — the registry result carries 'structured' into the seam. The
+    // column write itself is pinned by tests/integration/pairwise-run.test.ts,
+    // because persistPairwiseSuccess (not commonSuccessUpdateData) writes it.
+    expect(result.parseMode).toBe('structured');
+  });
+});
+
+/**
+ * #11 (handoff 2026-09-01 §7): pairwise `parseMode`, mirroring the pointwise
+ * rule pinned in tests/lib/backends.test.ts (describe 'Structured-output
+ * parse seam: parseMode "structured" vs "fallback"') — 'structured' is only
+ * possible when a schema was ATTACHED TO THE REQUEST, i.e. when
+ * `raw.structuredOutputRequested` is true, which only `callOpenAICompatible`
+ * ever sets (for `mode: 'judgment'` on a descriptor whose caps are not
+ * 'none'), and then only when the text needed no repair (no fence stripped,
+ * no verdict normalisation). Everything else is 'fallback'. Runs the REAL
+ * callOpenAICompatible / execute / prepareJudgmentCall / executePairwiseCall
+ * against the mocked SDK client, so the request-shaping and the parse seam
+ * are both the production code.
+ *
+ * The anthropic case below is the one that DISCRIMINATES the rule. Its
+ * descriptor caps are `tool_use`, NOT 'none', so an implementation keyed on
+ * `descriptor.caps.structuredOutput !== 'none'` rather than on
+ * `raw.structuredOutputRequested` is indistinguishable from the correct one
+ * on llamacpp ('json_schema') and on openai ('none') — every other case in
+ * this file stays green on it — while writing 'structured' for a request
+ * that never carried a schema. Anthropic never reaches
+ * callOpenAICompatible: registry's `execute` sends
+ * `descriptor.id === 'anthropic'` to callAnthropic, whose result omits
+ * `structuredOutputRequested`, so the correct rule lands on 'fallback'
+ * through the `undefined && …` arm. Its SDK client is mocked at the same
+ * constructor level as `openai` (tests/lib/reasoning-capture.test.ts mocks
+ * both packages this way).
+ */
+describe('pairwise parseMode: "structured" only when a schema was requested AND the text needed no repair', () => {
+  const llamacppInput: RunProviderJudgmentInput = {
+    ...pairwiseInput,
+    judgeVersion: {
+      servingBackend: 'llamacpp' as const,
+      samplingDefaults: null,
+      judgeModel: { baseModel: 'Qwen3.6-35B-A3B', slug: 'qwen-llamacpp-judge' },
+    },
+    // An explicit endpoint URL, so LLAMACPP_BASE_URL is not consulted.
+    endpoint: { apiKeyEnc: 'sk-llamacpp-test', endpoint: 'http://llamacpp.internal:8001/v1' },
+  };
+
+  const openaiInput: RunProviderJudgmentInput = {
+    ...pairwiseInput,
+    judgeVersion: {
+      servingBackend: 'openai' as const,
+      samplingDefaults: null,
+      judgeModel: { baseModel: 'gpt-4o', slug: 'gpt4o-openai-judge' },
+    },
+    endpoint: { apiKeyEnc: 'sk-openai-test', endpoint: null },
+  };
+
+  const anthropicInput: RunProviderJudgmentInput = {
+    ...pairwiseInput,
+    judgeVersion: {
+      servingBackend: 'anthropic' as const,
+      samplingDefaults: null,
+      judgeModel: { baseModel: 'claude-3-5-sonnet-20241022', slug: 'claude-anthropic-judge' },
+    },
+    // apiKeyEnc set, endpoint null: the anthropic descriptor is `kind: 'api'`
+    // with no defaultBaseUrl, so callAnthropic gets `baseURL: undefined`.
+    endpoint: { apiKeyEnc: 'sk-anthropic-test', endpoint: null },
+  };
+
+  it('llamacpp (caps json_schema) + bare canonical JSON -> "structured", and the schema was really on the request', async () => {
+    openaiCreateMock.mockResolvedValue(okChatResponse('{"verdict":"A","reasoning":"r"}'));
+
+    const result = await executePairwiseCall(prepareJudgmentCall(llamacppInput));
+
+    const [params] = openaiCreateMock.mock.calls[0];
+    expect(params.response_format).toEqual({
+      type: 'json_schema',
+      json_schema: { name: JUDGMENT_JSON_SCHEMA_NAME, schema: PAIRWISE_JUDGMENT_JSON_SCHEMA, strict: true },
+    });
+    expect(result.verdict).toBe('A');
+    expect(result.parseMode).toBe('structured');
+  });
+
+  it('llamacpp + ```json-fenced JSON -> "fallback": the verdict is still accepted, but a fence had to be stripped', async () => {
+    openaiCreateMock.mockResolvedValue(okChatResponse('```json\n{"verdict":"A","reasoning":"r"}\n```'));
+
+    const result = await executePairwiseCall(prepareJudgmentCall(llamacppInput));
+
+    expect(result.verdict).toBe('A');
+    expect(result.parseMode).toBe('fallback');
+  });
+
+  it('llamacpp + lower-case verdict -> "fallback": the verdict was repaired, not read', async () => {
+    openaiCreateMock.mockResolvedValue(okChatResponse('{"verdict":"a","reasoning":"r"}'));
+
+    const result = await executePairwiseCall(prepareJudgmentCall(llamacppInput));
+
+    expect(result.verdict).toBe('A');
+    expect(result.parseMode).toBe('fallback');
+  });
+
+  it('openai (caps none) + bare canonical JSON -> "fallback": no schema was requested, so nothing was "structured" (the pointwise rule, backends.test.ts "Structured-output parse seam" describe)', async () => {
+    openaiCreateMock.mockResolvedValue(okChatResponse('{"verdict":"B","reasoning":"r"}', 'gpt-4o'));
+
+    const result = await executePairwiseCall(prepareJudgmentCall(openaiInput));
+
+    const [params] = openaiCreateMock.mock.calls[0];
+    expect(params.response_format).toBeUndefined();
+    expect(params.guided_json).toBeUndefined();
+    expect(result.verdict).toBe('B');
+    expect(result.parseMode).toBe('fallback');
+  });
+
+  it('anthropic (caps tool_use — NOT "none") + bare canonical JSON -> "fallback": an ATTACHED schema is the rule, descriptor caps are not', async () => {
+    anthropicCreateMock.mockResolvedValue({
+      model: 'claude-3-5-sonnet-20241022',
+      content: [{ type: 'text', text: '{"verdict":"A","reasoning":"r"}' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 11, output_tokens: 7 },
+    });
+
+    const result = await executePairwiseCall(prepareJudgmentCall(anthropicInput));
+
+    // callAnthropic ran and callOpenAICompatible did not — which is exactly
+    // why no request carried a schema and `structuredOutputRequested` is
+    // undefined on the raw result.
+    expect(anthropicCreateMock).toHaveBeenCalledTimes(1);
+    expect(openaiCreateMock).not.toHaveBeenCalled();
+    expect(result.verdict).toBe('A');
+    // THE discriminating assertion: caps here are `tool_use`, so a rule
+    // written as `caps.structuredOutput !== 'none'` says 'structured' and a
+    // rule written as `raw.structuredOutputRequested` says 'fallback'.
+    expect(result.parseMode).toBe('fallback');
   });
 });
 

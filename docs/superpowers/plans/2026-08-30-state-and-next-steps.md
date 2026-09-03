@@ -389,6 +389,9 @@ There is no `frozenAt` column and no unfreeze verb.
    only pointwise. **It is not a capture bug, but the gap is real:** on pairwise a leniently-parsed
    verdict and a strictly-parsed one are indistinguishable afterwards. Decide whether to write a
    pairwise-meaningful value or to document the column as pointwise-only.
+   **CLOSED 2026-09-01 — written.** The gap named here is exactly what is now recorded: `lenient`
+   on the parse, `parseMode` on the row (`structured` = schema attached and no repair). See the
+   2026-09-01 handoff §7 item 11 and the `ModelJudgment.parseMode` schema comment for the NULL cases.
 2. **`reasoningTokens` is unavailable from llama.cpp.** 0/30 on the baseline run, because its `usage`
    payload has no `completion_tokens_details`. **Do not "fix" this by defaulting to 0** — a real zero
    and an absent measurement are different facts, and the field will populate on backends that emit
@@ -675,7 +678,7 @@ text, so a capped copy still identifies the exact bytes.
 | Gap | Measured | Why |
 |---|---|---|
 | `reasoningTokens` | **NULL on 30/30** | Read from `usage.completion_tokens_details.reasoning_tokens`. llama.cpp does not emit `completion_tokens_details` at all — nothing was dropped, nothing was sent. **CORRECTION (2026-09-01):** also NULL on Ollama and never set by the Anthropic adapter — usage-reported, kept, labelled in the report; see handoff 2026-09-01 §7 item 10 |
-| `parseMode` | **NULL on 30/30** | The pairwise path has one parse path (`tryParsePairwiseJudgment` is fence-tolerant), so there is no strict→lenient demotion and no mode to persist. The column is meaningful only pointwise |
+| `parseMode` | **NULL on 30/30** | The pairwise path has one parse path (`tryParsePairwiseJudgment` is fence-tolerant), so there is no strict→lenient demotion and no mode to persist. The column is meaningful only pointwise. **CORRECTION (2026-09-01):** pairwise now writes it — `structured` = schema attached AND no fence/verdict repair, else `fallback`; rows in this table predate that and stay NULL (= pre-change, not `fallback`). See the `ModelJudgment.parseMode` schema comment |
 
 `reasoningSource` is `reasoning_content` on all 30; `systemPrompt` is non-null on **26** of 30,
 because the four timeouts are transport failures with no response to capture.

@@ -238,7 +238,13 @@ export interface ParsedJudgment {
    * (`caps.structuredOutput`: `json_schema`/`guided` — `tool_use`
    * (Anthropic) is untouched by this task) actually drove the response,
    * via `tryParseStructuredJudgment` below — see `registry.ts`'s
-   * `executeJudgmentCall` for the strict-then-lenient decision. */
+   * `executeJudgmentCall` for the strict-then-lenient decision.
+   *
+   * The PAIRWISE path records the same two values with a documented weaker
+   * meaning (`registry.ts`'s `executePairwiseCall`: schema attached AND no
+   * fence/verdict repair, extra keys ignored) — see the
+   * `ModelJudgment.parseMode` comment in prisma/schema.prisma before grouping
+   * on this column across protocols. */
   parseMode: 'structured' | 'fallback';
 }
 

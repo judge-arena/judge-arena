@@ -1218,6 +1218,26 @@ export interface PairwiseResult extends CallCaptureFields {
   inputTokens?: number;
   outputTokens?: number;
   latencyMs: number;
+  /** #11 (2026-09-01). `'structured'` iff this request ACTUALLY CARRIED a
+   * schema — `raw.structuredOutputRequested`, which only
+   * `callOpenAICompatible` sets, for `mode: 'judgment'` on a descriptor whose
+   * `caps.structuredOutput !== 'none'` (llamacpp, ollama, vllm) — AND
+   * `tryParsePairwiseJudgment` needed no repair (no fence stripped, no verdict
+   * normalisation). Otherwise `'fallback'`.
+   *
+   * Read the flag, NOT the caps. Anthropic's caps are `tool_use`, which is not
+   * `'none'`, but it dispatches through `callAnthropic`, which never attaches
+   * a schema and never sets the flag — so anthropic is always `'fallback'`.
+   * `caps.structuredOutput !== 'none'` agrees with the flag on llamacpp and on
+   * openai and disagrees only there, which is why
+   * tests/lib/pairwise-execution.test.ts pins the anthropic case directly.
+   *
+   * Mirrors pointwise's rule with one
+   * documented difference: pointwise `'structured'` means the strict schema
+   * parse SUCCEEDED; pairwise `'structured'` means "no repair was needed" —
+   * extra keys are ignored, so a response carrying junk fields still reads
+   * `'structured'` here. See the `ModelJudgment.parseMode` schema comment. */
+  parseMode: 'structured' | 'fallback';
   samplingParamsUsed: SamplingParams;
 }
 
@@ -1233,9 +1253,13 @@ export interface PairwiseResult extends CallCaptureFields {
  *   Guided decoding must constrain to `{verdict, reasoning}`; handed the
  *   pointwise schema, a vLLM/llama.cpp judge would be forced to emit scores
  *   and no verdict at all.
- * - ONE parse path. `tryParsePairwiseJudgment` is already fence-tolerant,
- *   so there is no strict-then-lenient demotion and no `parseMode` to
- *   persist. A response carrying no usable verdict is `non_retryable`:
+ * - ONE parse path. `tryParsePairwiseJudgment` is already fence-tolerant.
+ *   Until 2026-09-01 this bullet concluded "so there is no strict-then-
+ *   lenient demotion and no `parseMode` to persist" — CORRECTED: the parser
+ *   now reports `lenient`, and `parseMode` is derived from it plus whether
+ *   the request carried a schema (`raw.structuredOutputRequested`), giving
+ *   the column the same meaning pointwise's `parseJudgmentText` gives it.
+ *   A response carrying no usable verdict is still `non_retryable`:
  *   re-asking the same model the same question is not a provider-health
  *   signal, and classifying it retryable would burn the 3-attempt budget,
  *   DLQ the judgment, and count three failures against a breaker shared
@@ -1271,6 +1295,7 @@ export async function executePairwiseCall(prepared: PreparedJudgmentCall): Promi
     inputTokens: raw.inputTokens,
     outputTokens: raw.outputTokens,
     latencyMs: raw.latencyMs,
+    parseMode: raw.structuredOutputRequested && !parsed.lenient ? 'structured' : 'fallback',
     samplingParamsUsed: prepared.samplingParamsUsed,
     ...callCaptureFields(raw),
   };

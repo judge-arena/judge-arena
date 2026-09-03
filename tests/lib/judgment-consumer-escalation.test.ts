@@ -174,4 +174,30 @@ describe('every provider seam carries the timeout escalation', () => {
     // (it spreads only defined keys), putting us straight back in the bug.
     expect(executePairwiseMock.mock.calls[0][0].escalation.attempt).toBe(1);
   });
+
+  /**
+   * #11 (2026-09-01). The pairwise seam is a PASSTHROUGH — it returns the
+   * registry's PairwiseResult unchanged — and that is the only reason
+   * `parseMode` reaches persistPairwiseSuccess without a seam edit. Nothing
+   * else in the suite can see it: the registry unit tests assert upstream of
+   * this function, and the integration test replaces it with a fake. An edit
+   * that "tidies" this into an explicit field map would drop parseMode with
+   * tsc, unit and integration ALL green (handoff §5.1's shape: a feature that
+   * reaches some seams and looks live). Injection F verifies this red.
+   */
+  it('PAIRWISE returns the registry result UNCHANGED — parseMode survives the seam', async () => {
+    executePairwiseMock.mockResolvedValue({
+      verdict: 'A',
+      reasoning: '',
+      rawResponse: '{}',
+      latencyMs: 1,
+      parseMode: 'structured',
+    });
+
+    const mod = await import('@/worker/judgment-consumer');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await (mod as any).defaultRunProviderPairwise(input);
+
+    expect(result.parseMode).toBe('structured');
+  });
 });

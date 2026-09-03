@@ -571,12 +571,14 @@ saw, and `promptTruncated` says which it is. `reasoningContent` is deliberately 
 and the entire generated answer in respond mode); merging two channels that carry different content
 is unrecoverable once written.
 
-Two fields are null on this data, and both are gaps rather than bugs:
+Two fields are null on this data, and both are gaps rather than bugs. **CORRECTION (2026-09-01):**
+"gaps rather than bugs" was written when both were treated as by-construction; only the first still
+is. The `parseMode` row below describes the pre-2026-09-01 state, and its note says what changed:
 
 | Field | State on all 30 judgments | Why |
 |---|---|---|
 | `reasoningTokens` | **NULL, 30/30** | Read from `usage.completion_tokens_details.reasoning_tokens` (`src/lib/llm/openai-compatible.ts`). llama.cpp does not emit `completion_tokens_details` in its usage payload at all, so there is nothing to read. It is not dropped on the floor — it was never sent. **CORRECTION (2026-09-01):** this row read as a llama.cpp-only gap. Ollama sends nothing either (NULL on every granite run) and the Anthropic adapter never sets the field, so it is NULL on **every** backend this fleet runs. Decision: keep the column (it is a real measurement wherever the split is emitted), never default it to 0, and stop counting it as a capture failure — the calibration report now labels it usage-reported and instead prints `reasoningContent` length (n / mean / max chars) **for the completed rows and the error rows as two separate lines**. That contrast is what §5.2 of the 2026-09-01 handoff read to identify the repetition loop (failed mean 44,287 vs completed 13,138); a pooled figure over the same run is 18,330 and identifies nothing. |
-| `parseMode` | **NULL, 30/30** | The pairwise path has **one** parse path. `tryParsePairwiseJudgment` is already fence-tolerant, so there is no strict-then-lenient demotion and therefore no `parseMode` to persist (`src/lib/llm/registry.ts:1005-1007`). The column is meaningful only on the pointwise path. |
+| `parseMode` | **NULL, 30/30** (on rows written before 2026-09-01) | The pairwise path has **one** parse path. `tryParsePairwiseJudgment` is already fence-tolerant, so — this row used to say — there is no strict-then-lenient demotion and therefore no `parseMode` to persist; the column was meaningful only pointwise. **CORRECTION (2026-09-01):** the demotion *is* observable inside that one path, and pairwise now records it: `'structured'` = a schema was attached to the request (llamacpp/ollama/vllm) **and** the text needed no repair (no fence stripped, no verdict normalisation); `'fallback'` otherwise, including every Anthropic/openai/openrouter pairwise call. Pairwise `'structured'` is weaker than pointwise `'structured'` (extra keys are ignored) — see the schema comment before grouping across protocols. Existing pairwise rows stay NULL (= pre-change, not "fallback"); no backfill. The line reference this row carried (`registry.ts:1005-1007`) was stale; the rule lives in `executePairwiseCall`'s doc comment, cited by symbol. |
 
 `reasoningSource` is `reasoning_content` on all 30 — the extraction order is fixed and recorded
 rather than guessed, so a future judge that answers on a different key is distinguishable in the

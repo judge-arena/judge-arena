@@ -34,6 +34,7 @@ describe('tryParsePairwiseJudgment: conforming responses', () => {
     expect(tryParsePairwiseJudgment('{"verdict":"A","reasoning":"A is more accurate"}')).toEqual({
       verdict: 'A',
       reasoning: 'A is more accurate',
+      lenient: false,
     });
   });
 
@@ -41,6 +42,7 @@ describe('tryParsePairwiseJudgment: conforming responses', () => {
     expect(tryParsePairwiseJudgment('{"verdict":"B","reasoning":"B is complete"}')).toEqual({
       verdict: 'B',
       reasoning: 'B is complete',
+      lenient: false,
     });
   });
 
@@ -48,17 +50,18 @@ describe('tryParsePairwiseJudgment: conforming responses', () => {
     expect(tryParsePairwiseJudgment('{"verdict":"tie","reasoning":"neither wins"}')).toEqual({
       verdict: 'tie',
       reasoning: 'neither wins',
+      lenient: false,
     });
   });
 
-  it('strips a ```json markdown fence, like parseJudgmentResponse does', () => {
+  it('strips a ```json markdown fence, like parseJudgmentResponse does — and reports it as lenient', () => {
     const raw = 'Here you go:\n```json\n{"verdict":"B","reasoning":"clearer"}\n```\n';
-    expect(tryParsePairwiseJudgment(raw)).toEqual({ verdict: 'B', reasoning: 'clearer' });
+    expect(tryParsePairwiseJudgment(raw)).toEqual({ verdict: 'B', reasoning: 'clearer', lenient: true });
   });
 
-  it('strips a bare ``` fence too', () => {
+  it('strips a bare ``` fence too — lenient', () => {
     const raw = '```\n{"verdict":"A","reasoning":"r"}\n```';
-    expect(tryParsePairwiseJudgment(raw)).toEqual({ verdict: 'A', reasoning: 'r' });
+    expect(tryParsePairwiseJudgment(raw)).toEqual({ verdict: 'A', reasoning: 'r', lenient: true });
   });
 
   it('normalizes verdict casing and surrounding whitespace', () => {
@@ -72,13 +75,47 @@ describe('tryParsePairwiseJudgment: conforming responses', () => {
     expect(tryParsePairwiseJudgment('{"verdict":"A","reasoning":""}')).toEqual({
       verdict: 'A',
       reasoning: '',
+      lenient: false,
     });
   });
 
-  it('ignores extra properties the model volunteers', () => {
+  it('ignores extra properties the model volunteers — and does NOT count them as lenient (extra keys are not repair)', () => {
     expect(
       tryParsePairwiseJudgment('{"verdict":"A","reasoning":"r","confidence":0.9}')
-    ).toEqual({ verdict: 'A', reasoning: 'r' });
+    ).toEqual({ verdict: 'A', reasoning: 'r', lenient: false });
+  });
+});
+
+/**
+ * #11 (handoff 2026-09-01 §7). `lenient` is the pairwise mirror of the
+ * pointwise strict-then-lenient demotion: TRUE whenever the parser had to
+ * REPAIR the text to read it — a fence was stripped, or the verdict needed
+ * case/whitespace normalisation. registry.ts turns this into
+ * `parseMode: 'structured' | 'fallback'`. The whole point is that a
+ * guided-decoding backend whose output needed no repair is distinguishable,
+ * afterwards, from one that wrapped its JSON in ``` or wrote "a".
+ */
+describe('tryParsePairwiseJudgment: the lenient flag', () => {
+  it('is false for bare JSON with a canonical verdict', () => {
+    expect(tryParsePairwiseJudgment('{"verdict":"tie","reasoning":"r"}')?.lenient).toBe(false);
+  });
+
+  it('is true when a ```json fence had to be stripped, even with a canonical verdict', () => {
+    expect(tryParsePairwiseJudgment('```json\n{"verdict":"A","reasoning":"r"}\n```')?.lenient).toBe(true);
+  });
+
+  it('is true when the verdict needed case repair ("a", "TIE", "Tie")', () => {
+    expect(tryParsePairwiseJudgment('{"verdict":"a","reasoning":"r"}')?.lenient).toBe(true);
+    expect(tryParsePairwiseJudgment('{"verdict":"TIE","reasoning":"r"}')?.lenient).toBe(true);
+    expect(tryParsePairwiseJudgment('{"verdict":"Tie","reasoning":"r"}')?.lenient).toBe(true);
+  });
+
+  it('is true when the verdict needed whitespace repair (" A ")', () => {
+    expect(tryParsePairwiseJudgment('{"verdict":" A ","reasoning":"r"}')?.lenient).toBe(true);
+  });
+
+  it('is false when only the OUTER text had surrounding whitespace (trim is not repair of the verdict)', () => {
+    expect(tryParsePairwiseJudgment('  \n{"verdict":"B","reasoning":"r"}\n  ')?.lenient).toBe(false);
   });
 });
 
