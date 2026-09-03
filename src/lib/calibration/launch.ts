@@ -59,15 +59,59 @@ import {
 } from '@/lib/run-launch';
 
 /**
- * Phase-1 cap on items per calibration. A STATED LIMIT THAT REFUSES, never a
- * silent `take: 100` — a truncated calibration produces a kappa over a subset
- * nobody chose, reported as if it measured the whole set, and there is nothing
- * in the numbers afterwards that says so. 100 items × one judge is already
- * ~3.5 hours of queue against a 2-slot local server; the way to lift this is
- * the deadline fix named in `LaunchSingleRunParams.deadlineAt` (stamp at first
- * dequeue), not a bigger number here.
+ * Cap on items per calibration. A STATED LIMIT THAT REFUSES, never a silent
+ * `take: N` — a truncated calibration produces a kappa over a subset nobody
+ * chose, reported as if it measured the whole set, and there is nothing in
+ * the numbers afterwards that says so.
+ *
+ * ── RAISED FROM 100 TO 1000, 2026-09-03, GATED ON THE DEADLINE FIX ─────────
+ * The 100 cap existed because `EvaluationRun.deadlineAt` used to be stamped
+ * at CREATION, sized on queue position — a large batch's tail could be
+ * force-finalized by `src/worker/reaper.ts` while still healthily queued
+ * (the bug that cost 4 of 30 items on a real calibration). That mechanism
+ * is gone: `src/worker/claim.ts`'s `stampRunStartedAtFirstDequeue` now
+ * stamps the deadline at FIRST DEQUEUE, sized on THIS run's own judgment
+ * count (always 1 here) — immune to how long this item waited in queue.
+ * See `docs/superpowers/plans/2026-09-03-deadline-at-first-dequeue.md` for
+ * the fix and this constant's own raise.
+ *
+ * 1000 is not "as high as possible" — it is sized against
+ * `src/worker/reaper.ts`'s `NEVER_STARTED_TIMEOUT_MS` (45 days), the ONE
+ * remaining bound on a never-dequeued run once the execution deadline
+ * stops depending on queue position, and it is sized on the LEGAL bound
+ * rather than on measured throughput. A calibration serialises through ONE
+ * judge's gate; each item may legally run to `hardCapMs` (900_000 ms) and
+ * be delivered up to `MAX_ATTEMPTS` (3) times, so 1000 items is
+ * 1000 x 3 x 900_000 ms = 750 h = 31.25 days of legal occupancy — inside
+ * the 45-day net. (Measured throughput is far kinder: at 5.03 min/item a
+ * 30-item calibration ran 151 minutes, which extrapolates to ~3.49 days
+ * for 1000 items. That is the EXPECTATION; the net is sized on the bound,
+ * because sizing a force-finalize threshold on an expectation is the
+ * original defect.) The named target — "JudgeBench pairwise — full", 620
+ * items, seeded but previously unrunnable under the 100 cap — is 19.4 days
+ * of legal occupancy and ~52 hours expected, inside both.
+ *
+ * `tests/integration/finalization.test.ts` pins the RELATIONSHIP
+ * (`NEVER_STARTED_TIMEOUT_MS > MAX_CALIBRATION_ITEMS x 3 x hardCapMs`), not
+ * a second literal, so raising this number again without revisiting the net
+ * goes red rather than silently re-arming the bug.
+ *
+ * WHAT STILL BOUNDS THIS NUMBER, so it is not "raise it again next time
+ * someone wants more": (1) `NEVER_STARTED_TIMEOUT_MS` — raising the item
+ * cap further without ALSO reconsidering that timeout reopens the exact
+ * race this constant's previous form existed to prevent, just relocated
+ * from "queue position at creation" to "never-started safety net fires
+ * before the batch finishes draining"; (2) ONE max-size batch per judge
+ * lane at a time — the net measures wall clock from `createdAt`, so
+ * concurrent batches on the same lane SUM and two of these would exceed
+ * it; (3) wall-clock reality — 1000 items at the measured throughput is
+ * ~3.5 days for ONE judge against a single-slot server, an operational
+ * cost this constant does not make disappear, only survivable;
+ * (4) `scripts/calibration/run.ts`'s own `--poll-timeout` (default 3600s)
+ * must be raised by the operator to watch a run this size to completion —
+ * unrelated to correctness, but worth knowing before launching one.
  */
-export const MAX_CALIBRATION_ITEMS = 100;
+export const MAX_CALIBRATION_ITEMS = 1000;
 
 export interface LaunchCalibrationRunParams {
   goldenSetId: string;

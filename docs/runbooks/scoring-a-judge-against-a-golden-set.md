@@ -36,7 +36,7 @@ the design). Read this to run one; read those to argue about one.
 > The failure this ordering prevents: a golden set pinned forever by a calibration in which all
 > thirty items failed for a single reason that was knowable before any of them ran. That is why
 > `launchCalibrationRun` checks everything knowable **without touching an item** — set exists, not
-> tombstoned, pairwise, ≥1 live item and ≤ `MAX_CALIBRATION_ITEMS` (100), project + rubric exist, a
+> tombstoned, pairwise, ≥1 live item and ≤ `MAX_CALIBRATION_ITEMS` (1000), project + rubric exist, a
 > pairwise `PromptTemplate` exists, and the caller owns an **active, verified** endpoint — *before*
 > writing the header.
 
@@ -163,7 +163,7 @@ report itself truncated.)*
 kubectl exec -n tenant-public judge-arena-pg-1 -c postgres -- psql -U postgres -d judge_arena -c \
   'SELECT id, name, version, protocol, "retiredAt", "tombstonedAt" FROM "GoldenSet" ORDER BY "createdAt";'
 
-# How many live items it has (the runner caps at MAX_CALIBRATION_ITEMS = 100)
+# How many live items it has (the runner caps at MAX_CALIBRATION_ITEMS = 1000)
 kubectl exec -n tenant-public judge-arena-pg-1 -c postgres -- psql -U postgres -d judge_arena -tAc \
   "SELECT count(*) FROM \"GoldenItem\" WHERE \"goldenSetId\" = '<goldenSetId>';"
 

@@ -485,6 +485,10 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
     expect(await db.calibrationRun.count()).toBe(0);
   });
 
+  it('MAX_CALIBRATION_ITEMS is 1000 — raised from 100, gated on the deadline-at-first-dequeue fix landing (see reaper.ts NEVER_STARTED_TIMEOUT_MS)', () => {
+    expect(MAX_CALIBRATION_ITEMS).toBe(1000);
+  });
+
   it(`refuses more than ${MAX_CALIBRATION_ITEMS} items rather than silently truncating`, async () => {
     const world = await mkWorld({ items: 0 });
     // Bulk-created (createMany, no candidates needed — the cap is refused
@@ -515,7 +519,7 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
     // is not frozen.
     expect(await db.evaluationRun.count()).toBe(0);
     expect(await db.$transaction((tx) => isGoldenSetFrozen(tx, world.goldenSet.id))).toBe(false);
-  });
+  }, 30_000); // 2026-09-03: row count went 101 -> 1001 with the cap raise
 
   it('refuses a judge the caller has no active verified endpoint for — and does not freeze the set', async () => {
     const world = await mkWorld({ items: 2 });
