@@ -375,6 +375,15 @@ what a leaderboard actually needs.
    scoreboard.
 10. **`reasoningTokens` is NULL on every self-hosted backend** — llama.cpp and Ollama both. It is
     dead weight in the capture report rather than a per-backend gap. Derive it or drop it.
+    **CLOSED 2026-09-01 — neither.** It is NULL on the Anthropic adapter too, so "self-hosted" was an
+    understatement. Derivation is impossible without the served model's tokenizer and an estimate
+    would be a fabricated number under a usage-reported column; dropping touches four seams and
+    eleven test assertions to remove a real measurement on any OpenAI-shaped server. Documented on
+    the schema, de-listed as a capture failure in the report (labelled usage-reported), and the
+    report now prints `reasoningContent` length beside it as TWO lines — `completed` and `error`.
+    The contrast between them is §5.2's loop signal (44,287 vs 13,138); a pooled line would print
+    18,330 and show nothing. Per-failure chars were already printed by `cap()` in the Failures
+    block; what was missing was the completed-population baseline.
 11. **`parseMode` is NULL on pairwise.** One fence-tolerant parse path, so no strict→lenient
     demotion to record. Document as pointwise-only or give it a pairwise meaning.
 

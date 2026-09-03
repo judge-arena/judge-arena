@@ -338,7 +338,7 @@ character boundary so a stored copy cannot end in `U+FFFD`; `userPromptSha256` i
 
 | Gap | Measured | Why, and what it is not |
 |---|---|---|
-| `reasoningTokens` | **NULL on 30/30** | Read from `usage.completion_tokens_details.reasoning_tokens`. **llama.cpp does not emit `completion_tokens_details` at all** — nothing was dropped and nothing was mis-parsed; the field was never sent. Expect it to be non-null on backends that do emit it, so do not "fix" this by defaulting it to 0: a real 0 and an absent measurement are different facts |
+| `reasoningTokens` | **NULL on 30/30** | Read from `usage.completion_tokens_details.reasoning_tokens`. **llama.cpp does not emit `completion_tokens_details` at all** — nothing was dropped and nothing was mis-parsed; the field was never sent. Expect it to be non-null on backends that do emit it, so do not "fix" this by defaulting it to 0: a real 0 and an absent measurement are different facts. **CORRECTION (2026-09-01):** also NULL on Ollama and never set by the Anthropic adapter — usage-reported, kept, labelled in the report; see handoff 2026-09-01 §7 item 10 |
 | `parseMode` | **NULL on 30/30** | The pairwise path has exactly one parse path (`tryParsePairwiseJudgment`, fence-tolerant), so there is no strict→lenient demotion and no mode to persist. **The column is meaningful only pointwise.** It reads as a capture bug and is not one — but it does mean pairwise loses the "this response needed the lenient parser" signal entirely, which is a real gap on a path where a leniently-parsed verdict and a strictly-parsed one are indistinguishable afterwards |
 
 `reasoningSource` is `reasoning_content` on all 30 of run 2. On run 1, `systemPrompt` was non-null

@@ -393,6 +393,9 @@ There is no `frozenAt` column and no unfreeze verb.
    payload has no `completion_tokens_details`. **Do not "fix" this by defaulting to 0** — a real zero
    and an absent measurement are different facts, and the field will populate on backends that emit
    it. Worth confirming what Ollama sends before the next run reads the same column.
+   **CLOSED 2026-09-01** (with §5.6 item 9): documented on the schema as usage-reported and NULL on
+   llama.cpp, Ollama and Anthropic; de-listed as a capture failure in the report; not defaulted, not
+   derived, not dropped. See the 2026-09-01 handoff §7 item 10.
 3. **`judge.dlq` holds four dead-lettered judgments from run 1, and NOTHING WILL RETRY THEM.** There
    is no consumer on `judge.dlq` and no retry-from-DLQ verb anywhere. Those four items are parked
    permanently; run 2 re-judged them only because it was a *new* run over the whole set. Two work
@@ -446,6 +449,12 @@ Full record: [`docs/superpowers/specs/2026-09-01-judge-scoreboard-and-model-enve
    currently unpopulated on *every* self-hosted backend, which makes it dead weight in the capture
    completeness report rather than a gap in one backend. Decide whether to derive it or drop it from
    the checklist.
+   **CLOSED 2026-09-01 — kept, labelled.** Not derived (no tokenizer; an estimate is a fabricated
+   measurement) and not dropped (real on OpenAI-shaped servers; four seams and eleven assertions to
+   remove). The checklist line is now labelled usage-reported with the expected 0/n, and the report
+   prints `reasoningContent` chars (n/mean/max) as two lines, `completed` and `error`. It is the
+   CONTRAST between those two that separated the granite4.2 loop from truncation (§5.2: 44,287 vs
+   13,138); one pooled line over the same run reads 18,330 and separates nothing.
 
 10. **`judge.dlq` is now at 10, up from the 4 in item 3.** Still no consumer, still no replay verb.
    The depth grew during ordinary operation, which is the argument item 3 was missing — this is not a
@@ -665,7 +674,7 @@ text, so a capped copy still identifies the exact bytes.
 
 | Gap | Measured | Why |
 |---|---|---|
-| `reasoningTokens` | **NULL on 30/30** | Read from `usage.completion_tokens_details.reasoning_tokens`. llama.cpp does not emit `completion_tokens_details` at all — nothing was dropped, nothing was sent |
+| `reasoningTokens` | **NULL on 30/30** | Read from `usage.completion_tokens_details.reasoning_tokens`. llama.cpp does not emit `completion_tokens_details` at all — nothing was dropped, nothing was sent. **CORRECTION (2026-09-01):** also NULL on Ollama and never set by the Anthropic adapter — usage-reported, kept, labelled in the report; see handoff 2026-09-01 §7 item 10 |
 | `parseMode` | **NULL on 30/30** | The pairwise path has one parse path (`tryParsePairwiseJudgment` is fence-tolerant), so there is no strict→lenient demotion and no mode to persist. The column is meaningful only pointwise |
 
 `reasoningSource` is `reasoning_content` on all 30; `systemPrompt` is non-null on **26** of 30,

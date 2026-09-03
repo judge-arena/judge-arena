@@ -50,6 +50,7 @@ import {
   timeToComputeByTuple,
   type LatencyBaseline,
 } from '@/lib/calibration/latency';
+import { formatReasoningLengthLine, summarizeReasoningLength } from '@/lib/calibration/reasoning-length';
 import { scoreCalibrationRun } from '@/lib/calibration/score';
 import { canonicalJson, describeSamplingSnapshot, detectSamplingDrift } from '@/lib/calibration/sampling-drift';
 import { accountTokens, formatTokenAccountingLines } from '@/lib/calibration/token-accounting';
@@ -329,7 +330,13 @@ async function main(): Promise<void> {
     ['rawResponse', (j) => j.rawResponse],
     ['reasoning', (j) => j.reasoning],
     ['reasoningContent', (j) => j.reasoningContent],
-    ['reasoningTokens', (j) => j.reasoningTokens],
+    // #10 (handoff 2026-09-01 §7): usage-reported, and NULL on every backend
+    // this fleet runs — llama.cpp and Ollama send no completion_tokens_details,
+    // the Anthropic adapter never sets it. Kept as a LABELLED line rather than
+    // deleted so a backend that does emit the split (vLLM, OpenAI-shaped)
+    // still shows a regression here; 0/n on the self-hosted fleet is expected,
+    // not a capture failure. Reasoning LENGTH is printed after this loop.
+    ['reasoningTokens (usage-reported; expected 0/n on llama.cpp/Ollama)', (j) => j.reasoningTokens],
     ['inputTokens', (j) => j.inputTokens],
     ['outputTokens', (j) => j.outputTokens],
     ['servedModelId', (j) => j.servedModelId],
@@ -341,6 +348,25 @@ async function main(): Promise<void> {
   ];
   for (const [label, get] of fields) {
     console.log(`  ${label.padEnd(18)} ${judgments.filter((j) => get(j) != null).length}/${judgments.length}`);
+  }
+
+  // The signal that IS available on every backend: how much the judge wrote
+  // in its thinking channel. SPLIT BY STATUS, because §5.2 of the 2026-09-01
+  // handoff read a CONTRAST, not a total — failed n=5 mean 44,287 chars with
+  // empty content against completed n=25 mean 13,138. Pooled, that same run
+  // prints n=30 mean=18330, which is neither figure and is exactly what a
+  // judge that merely writes long also prints. The Failures block below
+  // already shows each failing item's chars via cap(); these two lines give
+  // the completed-population baseline to read them against, in the report
+  // rather than only in a psql session. Template, label and null branch are
+  // in the TESTED module, not in this untestable file.
+  for (const status of ['completed', 'error'] as const) {
+    console.log(
+      formatReasoningLengthLine(
+        summarizeReasoningLength(judgments.filter((j) => j.status === status).map((j) => j.reasoningContent)),
+        status
+      )
+    );
   }
 
   // ── Time to compute ───────────────────────────────────────────────────────
@@ -428,7 +454,7 @@ async function main(): Promise<void> {
     console.log(`\n── One judgment in full (item ${first.run.goldenItem?.index}) ──────────────`);
     console.log(`  expected ${first.run.goldenItem?.expected}   verdict ${first.verdict}   pairOrder ${first.pairOrder}`);
     console.log(`  servedModelId ${first.servedModelId}   finishReason ${first.finishReason}   parseMode ${first.parseMode}`);
-    console.log(`  tokens in=${first.inputTokens} out=${first.outputTokens} reasoning=${first.reasoningTokens}   latency ${first.latencyMs}ms`);
+    console.log(`  tokens in=${first.inputTokens} out=${first.outputTokens} reasoning=${first.reasoningTokens} reasoningChars=${first.reasoningContent?.length ?? 'n/a'}   latency ${first.latencyMs}ms`);
     const firstAccounting = accountTokens(first);
     console.log(`  DERIVED  accounting=${firstAccounting.accounting}   estimatedGeneratedTokens=${firstAccounting.estimatedGeneratedTokens ?? 'n/a'}   (out= above is what the provider reported, unchanged)`);
     console.log(`  systemPrompt ${cap(first.systemPrompt)}   userPrompt ${cap(first.userPrompt)} (truncated=${first.promptTruncated}, sha256=${first.userPromptSha256?.slice(0, 12)}…)`);

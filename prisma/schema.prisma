@@ -517,7 +517,18 @@ model ModelJudgment {
   /// the two carry different content — a live Qwen judge returned 762 chars of
   /// deliberation here and `{"verdict":"A"}` in `reasoning`'s source.
   reasoningContent String?
-  reasoningTokens  Int? // usage.completion_tokens_details.reasoning_tokens
+  // usage.completion_tokens_details.reasoning_tokens — USAGE-REPORTED, read in
+  // src/lib/llm/openai-compatible.ts only. Populated solely when the server
+  // emits the OpenAI usage split. NULL on llama.cpp and on Ollama (measured
+  // 2026-08-31 / 2026-09-01, 0/n on every run) and never set by the Anthropic
+  // adapter — i.e. NULL on every backend this fleet runs today. Do NOT default
+  // it to 0: a real zero and an absent measurement are different facts. For a
+  // size signal use `length(reasoningContent)`, and compare the completed
+  // rows against the error rows rather than pooling them — that contrast is
+  // what identified the 2026-09-01 repetition loop (handoff §5.2: failed mean
+  // 44,287 chars vs completed 13,138). scripts/calibration/run.ts prints both
+  // populations under "Capture completeness".
+  reasoningTokens  Int?
   reasoningSource  String? // 'reasoning_content' | 'reasoning' | 'think_tag' | 'anthropic_thinking'
   systemPrompt     String? // verbatim; small, and its source is MUTABLE (see above)
   userPrompt       String? // verbatim, capped — see promptTruncated

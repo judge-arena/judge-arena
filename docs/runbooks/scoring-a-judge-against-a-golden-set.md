@@ -338,14 +338,17 @@ a heavily one-sided pair means the judge is systematically resolving one directi
   systemPrompt       30/30
   userPrompt         30/30
   ...
-  reasoningTokens     0/30
+  reasoningTokens (usage-reported; expected 0/n on llama.cpp/Ollama) 0/30
+  ...
+  reasoningContent chars   completed  n=25  mean=13138  max=26549
+  reasoningContent chars   error  n=5  mean=44287  max=56004
 ```
 
 Every field should be `n/n` where n is the judgment count. Two **known, honest** exceptions:
 
 | Field | Expect | Why |
 |---|---|---|
-| `reasoningTokens` | **0/n on llama.cpp** | its `usage` payload carries no `completion_tokens_details`. Nothing was dropped; the field was never sent. **Do not "fix" it by defaulting to 0** — a real 0 and an absent measurement are different facts |
+| `reasoningTokens` | **0/n on llama.cpp AND Ollama** (and never set for Anthropic) | its `usage` payload carries no `completion_tokens_details`. Nothing was dropped; the field was never sent. **Do not "fix" it by defaulting to 0** — a real 0 and an absent measurement are different facts. **CORRECTION (2026-09-01):** this row said llama.cpp only; Ollama sends nothing either and the Anthropic adapter never sets it. The line is now labelled usage-reported in the report, and the two `reasoningContent chars` lines beneath the checklist — one for `completed` rows, one for `error` rows — are the size signal to read. **Compare the two lines, do not read either alone:** an `error` mean several times the `completed` mean, with `content length 0` failures, is the repetition-loop signature (handoff 2026-09-01 §5.2 measured 44,287 vs 13,138), not a `max_tokens` problem. Pooling the two hides it — the same run pools to 18,330 |
 | `parseMode` | **NULL on the pairwise path** | one parse path, so no strict→lenient demotion to record. Meaningful only pointwise |
 
 **A NULL `systemPrompt` means the call never came back.** Transport failures have no response to
