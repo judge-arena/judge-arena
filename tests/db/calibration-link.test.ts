@@ -5,9 +5,7 @@ import { prisma } from '@/lib/db';
 import { logger } from '@/lib/logger';
 import { isGoldenSetFrozen } from '@/lib/golden-sets';
 import { effectiveSamplingParams } from '@/lib/llm/sampling';
-import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
 import { launchCalibrationRun, MAX_CALIBRATION_ITEMS } from '@/lib/calibration/launch';
-import { DEADLINE_SLACK_MS } from '@/lib/run-launch';
 import { seedPromptTemplates } from '../../prisma/seed-prompt-templates';
 
 // ─── The calibration ⇄ golden-item link (A2.1, v2i) ────────────────────────
@@ -27,9 +25,11 @@ import { seedPromptTemplates } from '../../prisma/seed-prompt-templates';
 //       calibration columns are both NULL and asserts they coexist.
 //
 //   (2) THE LAUNCH PATH THAT WRITES THAT LINK — `launchCalibrationRun`
-//       (src/lib/calibration/launch.ts), including the batch-aware deadline
-//       that keeps `src/worker/reaper.ts` from force-finalizing the tail of a
-//       long batch as `'reaper: abandoned'`.
+//       (src/lib/calibration/launch.ts), including that since 2026-09-03 it
+//       creates every run with `deadlineAt` NULL: the execution deadline is
+//       stamped at first dequeue by `src/worker/claim.ts` instead, which is
+//       what keeps `src/worker/reaper.ts` from force-finalizing the tail of
+//       a long batch as `'reaper: abandoned'`.
 //
 //   (3) THE LAUNCH-TIME SAMPLING SNAPSHOT (v2k) —
 //       `CalibrationRun.samplingParams`, the RESOLVED
@@ -364,42 +364,25 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
     expect(header.judgeModelVersionId).toBe(world.version.id);
   });
 
-  it('stamps a BATCH-aware deadline, far beyond the naive single-model one the reaper would abandon', async () => {
+  it('creates every run in the batch with deadlineAt NULL — the execution deadline is stamped later, at first dequeue', async () => {
     const world = await mkWorld({ items: 3 });
-    const launchedAt = Date.now();
 
     const result = await launchCalibrationRun(launchParamsFrom(world), { publish: noopPublish });
 
     const runs = await db.evaluationRun.findMany({ where: { calibrationRunId: result.calibrationRunId } });
     expect(runs).toHaveLength(3);
 
-    // THE REAPER FIX. `launchSingleRun`'s own formula is
-    // now + (#models × timeout) + slack, which for one model is ~180s — but a
-    // 3-item batch is 3 judgments deep in ONE queue, and the runs at the back
-    // do not start executing for as long as the ones ahead of them take.
-    // src/worker/reaper.ts force-finalizes a run 180s past its deadline by
-    // stamping every still-pending judgment `error: 'reaper: abandoned'`, so
-    // the naive deadline silently scores only the head of the batch.
-    // Both bounds are computed from the HARD CAP, not the initial budget, and
-    // that is the point rather than an implementation detail. Since the
-    // escalating timeout landed, reaching EVALUATION_MODEL_TIMEOUT_MS only
-    // raises an alert — the call keeps running to the cap. A deadline sized on
-    // the initial budget would therefore let the reaper abandon judgments that
-    // are still legitimately executing, which is the same failure this test was
-    // written to prevent, reintroduced through the timeout rather than through
-    // the batch size.
-    const perCallCeilingMs = resolveTimeoutBudgets().hardCapMs;
-    const naiveSingleModelDeadline = launchedAt + perCallCeilingMs + DEADLINE_SLACK_MS;
-    const batchAwareDeadline = launchedAt + 3 * perCallCeilingMs + DEADLINE_SLACK_MS;
+    // 2026-09-03: launchCalibrationRun no longer computes a batch-aware
+    // deadline override, and launchSingleRun no longer computes a
+    // creation-time default either — see run-launch.ts's and this
+    // module's own "no batch deadline computed here anymore" doc. Every
+    // run this function creates carries deadlineAt: null until a worker
+    // actually claims its judgment (src/worker/claim.ts's
+    // stampRunStartedAtFirstDequeue) — exercised end-to-end in
+    // tests/integration/worker-claims.test.ts, not here: this suite never
+    // touches a broker or a real judgment-consumer (see noopPublish above).
     for (const run of runs) {
-      expect(run.deadlineAt).not.toBeNull();
-      expect(run.deadlineAt!.getTime()).toBeGreaterThan(naiveSingleModelDeadline);
-      // Widened from "models in this run" to "judgments queued ahead of this
-      // one" — the same formula, not a bigger fudge factor. Every run in the
-      // batch carries the SAME deadline (the batch finishes as a unit), so the
-      // bound holds for all of them, ±the wall clock spent launching.
-      expect(run.deadlineAt!.getTime()).toBeGreaterThanOrEqual(batchAwareDeadline);
-      expect(run.deadlineAt!.getTime()).toBeLessThan(batchAwareDeadline + 60_000);
+      expect(run.deadlineAt).toBeNull();
     }
   });
 

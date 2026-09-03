@@ -85,15 +85,30 @@
  * ── A2.1: calibration reuses this module, it does not fork it ──────────────
  * `src/lib/calibration/launch.ts` launches a calibration as N ordinary
  * pairwise runs through `launchSingleRun` — no second execution path, no
- * calibration-specific consumer. It needs exactly three things from a run
- * that an ordinary launch does not set, and all three are plain optional
- * params here: `goldenItemId` and `calibrationRunId` (the v2i link columns,
- * NULL on every ordinary run) and `deadlineAt` (a batch-aware override of the
- * per-run deadline formula — read that param's doc, the default silently
- * loses the tail of a batch to `src/worker/reaper.ts`). It deliberately does
- * NOT go through `launchBulkRunCreates`: `src/worker/run-create-consumer.ts`
- * refuses any protocol but `'pointwise'`, because `RunCreateMsg` carries no
- * candidate set to expand a pairwise comparison from.
+ * calibration-specific consumer. It needs exactly two things from a run that
+ * an ordinary launch does not set, and both are plain optional params here:
+ * `goldenItemId` and `calibrationRunId` (the v2i link columns, NULL on every
+ * ordinary run). It deliberately does NOT go through `launchBulkRunCreates`:
+ * `src/worker/run-create-consumer.ts` refuses any protocol but `'pointwise'`,
+ * because `RunCreateMsg` carries no candidate set to expand a pairwise
+ * comparison from.
+ *
+ * ── 2026-09-03: EvaluationRun.deadlineAt is no longer stamped here ─────────
+ * This module used to compute `deadlineAt` at CREATION — `now + (#judgments
+ * in this run) × hardCapMs + slack` — and calibration's batch launcher
+ * (`src/lib/calibration/launch.ts`) used to override it with the SAME
+ * formula over a bigger denominator ("judgments queued ahead of this one"),
+ * because sizing a batch's deadline on one run's own model count silently
+ * lost the tail of a large batch to `src/worker/reaper.ts` — a
+ * queue-position estimate that could be hours, stamped as if the run's OWN
+ * work would take minutes. That mechanism is gone: `EvaluationRun.deadlineAt`
+ * is now left `null` at creation and is stamped once, at FIRST DEQUEUE, by
+ * `src/worker/claim.ts`'s `stampRunStartedAtFirstDequeue` — sized on THIS
+ * run's own judgment count, measured from the moment a worker actually
+ * claims it, immune to how many other runs are queued ahead of it. See that
+ * function's doc for the mechanism and `src/worker/reaper.ts`'s
+ * `NEVER_STARTED_TIMEOUT_MS` for the safety net covering a run that is
+ * published and never dequeued at all.
  */
 import type { Prisma, RunProtocol } from '@prisma/client';
 import { prisma } from '@/lib/db';
@@ -106,23 +121,23 @@ import {
   type JudgmentExecuteMsg,
   type RunCreateMsg,
 } from '@/lib/queue/publish';
-import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
 import { LANE_FALLBACK_QUEUE } from '@/lib/queue/lanes';
 import { resolveEndpointsForVersions } from '@/lib/endpoint-resolution';
 import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
 
-/** Exported for `src/lib/calibration/launch.ts`, which computes the SAME
- * deadline formula over a different denominator (see `deadlineAt` on
- * `LaunchSingleRunParams`). Exported rather than re-declared there so a batch
- * launcher and the run it launches cannot disagree about the per-model budget
- * — a third copy of this literal is a third thing to keep in step with
- * `EVALUATION_MODEL_TIMEOUT_MS`'s env override. */
+/** UNUSED since 2026-09-03: this module no longer computes a deadline at
+ * creation (see the module doc's "EvaluationRun.deadlineAt is no longer
+ * stamped here" section), and nothing else in the tree imports this export.
+ * Confirmed with a command that cannot miss the multi-line
+ * `import {\n  X,\n} from '...'` form this repo actually uses (a per-line
+ * `grep "import.*NAME"` walks straight past it):
+ * `grep -ran "EVALUATION_MODEL_TIMEOUT_MS" src tests | grep -v "^src/lib/run-launch.ts"`
+ * returns only comments and `process.env` / env-schema string keys — no
+ * value import, before or after this change. Left in place rather
+ * than deleted here — removing it is an unrelated cleanup, not a
+ * `deadlineAt` behaviour, and this plan's one-concern-per-commit rule is
+ * exactly why it stays for now. */
 export const EVALUATION_MODEL_TIMEOUT_MS = Number(process.env.EVALUATION_MODEL_TIMEOUT_MS ?? '300000');
-/** Same slack literal as src/worker/run-create-consumer.ts's
- * `DEADLINE_SLACK_MS` — covers DB round trips, queue publish latency, and
- * finalization overhead on top of the per-model provider timeout budget.
- * Exported for the same reason as `EVALUATION_MODEL_TIMEOUT_MS` above. */
-export const DEADLINE_SLACK_MS = 60_000;
 
 export class RunLaunchError extends Error {
   status: number;
@@ -337,38 +352,6 @@ export interface LaunchSingleRunParams {
    * under `@@unique([calibrationRunId, goldenItemId])`, so one calibration
    * cannot measure the same item twice. */
   calibrationRunId?: string;
-  /**
-   * A2.1 — THE REAPER FIX. Overrides the default deadline below.
-   *
-   * The default is `now + (#models in THIS run) × EVALUATION_MODEL_TIMEOUT_MS
-   * + DEADLINE_SLACK_MS`, which is correct for a run whose judgments start
-   * executing more or less immediately — one model, ~180s. It is WRONG for a
-   * run launched as part of a batch: 30 calibration runs are created within
-   * seconds of each other, all carrying ~the same deadline, but they execute
-   * through one queue against a server with a handful of slots, so the batch
-   * takes minutes. `src/worker/reaper.ts` sweeps `status IN
-   * ('pending','judging') AND deadlineAt < now`, and 3 sweep intervals
-   * (~180s) past the deadline it force-finalizes: every still-`pending`
-   * judgment on the run is stamped `error: 'reaper: abandoned'` and the run is
-   * finalized. The tail of a batch is therefore scored as errors while it is
-   * still sitting in the queue, waiting its turn — silently, because a
-   * force-finalized run looks exactly like a run that genuinely failed.
-   *
-   * A batch launcher passes `now + (#judgments queued ahead of this one) ×
-   * EVALUATION_MODEL_TIMEOUT_MS + DEADLINE_SLACK_MS` — the SAME formula, with
-   * "models in this run" widened to "work that must drain before this run
-   * can finish", which is what the deadline was always trying to express.
-   *
-   * DELIBERATELY NOT ATTEMPTED HERE: stamping `deadlineAt` at FIRST DEQUEUE
-   * (when a worker actually claims the run's first judgment) instead of at
-   * creation. That is the correct long-term fix — it makes the deadline mean
-   * "this run has been executing too long" rather than "this run was created
-   * too long ago", and it is immune to queue depth, worker count and
-   * concurrency entirely. It needs a `startedAt`-driven deadline write in the
-   * claim path plus a reaper that understands never-started runs, which is a
-   * worker-side change out of scope for phase 1.
-   */
-  deadlineAt?: Date;
 }
 
 export interface LaunchSingleRunDeps {
@@ -516,20 +499,6 @@ export async function launchSingleRun(
     promptTemplateId = promptTemplate.id;
   }
 
-  // The default is unchanged for every existing caller: this run's own model
-  // count is the only thing a single launch knows about. `params.deadlineAt`
-  // is the batch-aware override — see its doc on LaunchSingleRunParams for
-  // what the reaper does to a batch stamped with the default.
-  const deadlineAt =
-    params.deadlineAt ??
-    // The HARD CAP, not the initial budget. A call may now legally run to the
-    // hard cap while the initial budget only triggers an alert, so sizing the
-    // deadline on the initial budget would let the reaper force-finalize a run
-    // whose judgments are still legitimately executing — the same failure that
-    // silently scored 4 of 30 items once already, reintroduced by a timeout
-    // change rather than by a concurrency one.
-    new Date(Date.now() + selectedVersionIds.length * resolveTimeoutBudgets().hardCapMs + DEADLINE_SLACK_MS);
-
   const createdRun = await prisma.$transaction(async (tx) => {
     return tx.evaluationRun.create({
       data: {
@@ -537,7 +506,11 @@ export async function launchSingleRun(
         rubricId: rubric?.id ?? null,
         protocol,
         status: 'pending',
-        deadlineAt,
+        // deadlineAt is deliberately OMITTED — it defaults to null and
+        // stays null until src/worker/claim.ts's
+        // stampRunStartedAtFirstDequeue sets it at FIRST DEQUEUE. See the
+        // module doc's "EvaluationRun.deadlineAt is no longer stamped here"
+        // section for why.
         triggeredById: params.triggeredById,
         // A2.1: both NULL on every ordinary run. Written INSIDE the create, in
         // the same statement as the run itself, so a calibration run never

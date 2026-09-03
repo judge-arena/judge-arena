@@ -50,7 +50,6 @@ import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
 // sampling.ts a leaf.
 import { effectiveSamplingParams, type SamplingParams } from '@/lib/llm/sampling';
 import {
-  DEADLINE_SLACK_MS,
   launchSingleRun,
   requireOwnedActiveEndpoints,
   resolveCurrentPromptTemplate,
@@ -250,78 +249,26 @@ export async function launchCalibrationRun(
   // fails for a reason the caller can actually fix from the Models page.
   await requireOwnedActiveEndpoints(triggeredById, [judgeModelVersionId]);
 
-  // ── THE REAPER FIX ───────────────────────────────────────────────────────
-  // ONE deadline, computed once, stamped on every run in the batch.
+  // ── 2026-09-03: no batch deadline computed here anymore ───────────────────
+  // This block used to stamp ONE deadline, computed once, on every run in
+  // the batch — `now + (#judgments queued ahead of this one) × hardCapMs +
+  // slack` — because `launchSingleRun`'s OWN creation-time formula only knew
+  // about ONE run's model count, and a 30-item batch created within seconds
+  // of itself would otherwise carry ~30 nearly-identical deadlines while the
+  // batch itself took 30x as long to drain through one judge's queue.
+  // `src/worker/reaper.ts` would then force-finalize the still-healthy tail
+  // as `error: 'reaper: abandoned'` — the bug that cost 4 of 30 items on a
+  // real calibration.
   //
-  // `launchSingleRun`'s own formula is `now + (#models in this run) ×
-  // EVALUATION_MODEL_TIMEOUT_MS + DEADLINE_SLACK_MS` — for the one judge model
-  // a calibration uses, ~180s. All N runs here are created within seconds of
-  // each other, so under that formula they would all carry ~the same 180s
-  // deadline while the batch itself takes N × (a provider call) to drain
-  // through a queue with a couple of slots. `src/worker/reaper.ts` sweeps
-  // `pending`/`judging` runs whose `deadlineAt` has passed and, three sweep
-  // intervals (~180s) later, FORCE-FINALIZES them: every still-`pending`
-  // judgment is stamped `error: 'reaper: abandoned'`. The tail of the batch
-  // would be scored as errors while it was still queued and healthy — and a
-  // force-finalized run is indistinguishable from one that really failed, so
-  // the resulting kappa would be computed over the head of the set with no
-  // sign that anything went wrong.
-  //
-  // The fix is the SAME formula with the denominator widened from "models in
-  // this run" to "judgments queued ahead of this one" — which is what the
-  // deadline was always trying to express. It is generous for the first item
-  // and exact for the last; a too-late deadline only delays the reaper's
-  // safety net, while a too-early one destroys results.
-  //
-  // NOT ATTEMPTED HERE, AND IT IS THE RIGHT LONG-TERM FIX: stamp `deadlineAt`
-  // at FIRST DEQUEUE, when a worker actually claims the run's first judgment.
-  // That makes the deadline mean "this run has been executing too long"
-  // instead of "this run was created too long ago", and is immune to queue
-  // depth, worker count and concurrency. It is a change to the claim path plus
-  // a reaper that understands never-started runs — worker-side, out of scope
-  // for phase 1. Until then this widened formula is a bound, not a guarantee:
-  // a batch queued behind ANOTHER batch can still outlive it.
-  //
-  // ── WHICH BUDGET: THE HARD CAP, NOT THE INITIAL BUDGET ───────────────────
-  // With the escalating timeout (`src/lib/llm/timeout-policy.ts`),
-  // `EVALUATION_MODEL_TIMEOUT_MS` is no longer the longest a provider call may
-  // legitimately run — it is only where the 5-minute alert fires. The longest
-  // legitimate call is `EVALUATION_MODEL_HARD_CAP_MS`, so that is the term this
-  // per-item ceiling has to multiply.
-  //
-  // Keying off the initial budget instead would make the batch deadline
-  // SMALLER THAN THE TIME ONE ITEM MAY LEGITIMATELY TAKE, times N. What the
-  // reaper does to an overdue run is stamp its still-`pending` judgments
-  // `error: 'reaper: abandoned'` (reaper.ts:243-246, three sweeps past the
-  // deadline) — i.e. it kills the QUEUED TAIL, not the in-flight call. The
-  // queued tail is precisely what a longer per-call ceiling makes wait longer:
-  // one item allowed 15 minutes instead of 5 pushes everything behind it out
-  // by the same amount. Before that, from the moment the deadline passes, the
-  // gentler branch (`republishPendingForRun`) re-publishes every pending
-  // judgment of the run once a MINUTE, piling duplicate deliveries onto a lane
-  // that runs one call at a time.
-  //
-  // That is not hypothetical: killing the healthy queued tail is the bug that
-  // cost 4 of 30 items on a real calibration and that the comment above was
-  // written to fix. Keying this off the initial budget would re-arm it from a
-  // new direction.
-  //
-  // The cost of the other direction is bounded and small. 30 items × 15
-  // minutes is a 7.5-hour ceiling, but a ceiling is not an expectation: at the
-  // measured Qwen average of 42.6s (max 95.1s) those 30 items drain in ~21
-  // minutes, and the deadline only matters at all once something is genuinely
-  // stuck. Nor does it delay the OPERATOR noticing — `scripts/calibration/run.ts`
-  // has its own `--poll-timeout` (default 3600s) and, with the sibling change,
-  // reports any judgment running past the initial budget on every 5s poll. So
-  // the human-facing detection bound is unchanged by this; only the database's
-  // last-resort safety net is later.
-  //
-  // Asymmetry, stated plainly: too tight destroys real results and produces a
-  // kappa that lies. Too loose delays a safety net that is already the
-  // slowest of three detectors. Pick loose.
-  const deadlineAt = new Date(
-    Date.now() + items.length * resolveTimeoutBudgets().hardCapMs + DEADLINE_SLACK_MS
-  );
+  // The fix is no longer "widen the formula's denominator" — it's that
+  // `EvaluationRun.deadlineAt` is not computed at creation AT ALL any more.
+  // `src/worker/claim.ts`'s `stampRunStartedAtFirstDequeue` stamps it once,
+  // at FIRST DEQUEUE, sized on THIS run's own judgment count (always 1 for a
+  // calibration run) and measured from the moment a worker actually claims
+  // it — immune to how many other runs, from this batch or any other, are
+  // queued ahead of it. `launchSingleRun` below is called with no
+  // `deadlineAt` override; every run this function launches is created with
+  // `deadlineAt: null` and stays that way until claimed.
 
   // ── The stacked-limits check, part 1 of 2: the measurement ────────────────
   // BEFORE the header write, and the placement is load-bearing. This module's
@@ -335,10 +282,10 @@ export async function launchCalibrationRun(
   // the `$transaction` a few lines below would have failed it anyway — before
   // anything irreversible exists.
   //
-  // `resolveTimeoutBudgets()` is called a second time here (the batch deadline
-  // at :312-314 is the first). Deliberate and cheap: it reads `env` and does
-  // arithmetic, and hoisting one shared const across the deadline comment
-  // block would put an unrelated edit in the middle of THE REAPER FIX.
+  // `resolveTimeoutBudgets()` reads `env` and does arithmetic — cheap, and
+  // this is now its only call in this module (the batch-deadline call it
+  // used to share the file with was deleted 2026-09-03; see the "no batch
+  // deadline computed here anymore" block above).
   //
   // The rate cannot come from the endpoint verify probe (verify.ts sends
   // max_tokens 1, and one token is not a rate) — only from this judge's own
@@ -477,7 +424,6 @@ export async function launchCalibrationRun(
           candidates: toRunCandidates(item.candidates),
           goldenItemId: item.id,
           calibrationRunId: calibrationRun.id,
-          deadlineAt,
         },
         deps
       );
