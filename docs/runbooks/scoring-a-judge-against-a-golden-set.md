@@ -377,30 +377,79 @@ attempts each against a budget of three; `attemptCount` can advance past the mes
 across crash-reclaim cycles, so read the DLQ trigger as "the attempt budget ran out", not as a fixed
 number of provider calls.)*
 
-### 8.2 A truncated response is a **hard, non-retryable** failure — and the message names `max_tokens`
+### 8.2 A truncated response is a **hard, non-retryable** failure — and the message says whether it was a loop
 
 `finish_reason: 'length'` / `stop_reason: 'max_tokens'`, or an empty content channel, throws
 `non_retryable` in `registry.ts`'s `execute()` — **one chokepoint, before any parse**, so pointwise,
-pairwise and respond all inherit it. The message carries every number needed to size the fix:
+pairwise and respond all inherit it. The message carries every number needed to size the fix, and
+since `a272519` it ends with one of TWO pieces of advice, chosen by measuring the output:
 
 ```
 Provider call to "<backend>" (<model>) was CUT OFF at the token budget (finish_reason "length"):
 max_tokens 8192, completion_tokens 8192, reasoning_tokens unknown, content length 0 chars.
 A response cut off mid-reasoning is not a completed judgment — raise samplingDefaults.max_tokens
-on the JudgeModelVersion for this judge.
+on a NEW ordinal of the JudgeModelVersion for this judge (never edit samplingDefaults mid-run:
+a version is an immutable provenance pin, prisma/seed-core.ts:223-229).
 ```
 
-**Non-retryable is deliberate.** The token budget is a property of the *request*, not of provider
-health: the identical call truncates identically every time, so retrying burns the attempt budget,
-DLQs the judgment, and charges three failures to a circuit breaker shared with healthy calls.
+```
+Provider call to "ollama" (granite4.2:3b) was CUT OFF at the token budget (finish_reason "length"):
+max_tokens 12288, completion_tokens 12288, reasoning_tokens unknown, content length 0 chars.
+The output looks like DEGENERATE REPETITION (deflate ratio 10.8x over 56004 reasoning chars;
+ordinary prose compresses ~2-4x) — raising samplingDefaults.max_tokens buys a longer loop, not a
+verdict. Try a repetition/frequency penalty, a different temperature, or a different judge.
+```
+
+**How it decides.** `src/lib/llm/degeneration.ts` deflates each output channel that is at least
+8,000 characters long — reasoning always, content only for judgment calls — and calls it a loop at
+a ratio of 5× or more. Measured on production rows: granite4.2 judgments that finished deflate at
+3.0–4.1×; run 9's five loops at 5.2–29×. Under 8,000 characters a loop cannot be told from a short
+truncation and the `max_tokens` advice is harmless — one raise surfaces a longer loop, which the
+message will then name. The measure also rides on the error as `ProviderError.repetition`, and the
+failure row keeps the whole reasoning channel (`ModelJudgment.reasoningContent`), so
+`SELECT … WHERE error LIKE '%DEGENERATE REPETITION%'` finds every loop after the fact.
+
+**If you suspect the message called a loop wrongly, here is how to check.** Threshold 5× sits
+slightly *below* the most compressible genuine granite4.2 completion ever measured (5.38× at 32,899
+characters, verbose but not cycling), so a very long, very verbose *real* truncation can in
+principle be labelled a loop — and if it is, you would stop raising a budget that would have
+worked. The detector never runs on a completed row, so this has no production instance; the
+after-the-fact test is whether the text actually *cycles*, which compression alone cannot tell you:
+
+```bash
+kubectl -n tenant-public exec judge-arena-pg-1 -c postgres -- psql -U postgres -d judge_arena -At \
+  -c "SELECT \"reasoningContent\" FROM \"ModelJudgment\" WHERE id = '<judgment-id>';" \
+| node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const c=new Map();for(let i=0;i+80<=s.length;i+=40){const k=s.slice(i,i+80);c.set(k,(c.get(k)||0)+1);}console.log("max repeated 80-char window:",Math.max(...c.values()));});'
+```
+
+A genuine loop repeats an 80-character window three or more times; verbose-but-real reasoning
+prints `1`. A `1` on a row the message called a loop means raise the budget after all — and it
+means the threshold wants revisiting, so say so rather than working around it.
+
+**Non-retryable is deliberate, in both cases.** The token budget is a property of the *request*,
+not of provider health: the identical call truncates identically every time, so retrying burns the
+attempt budget, DLQs the judgment, and charges three failures to a circuit breaker shared with
+healthy calls. A loop at the same sampling settings re-loops.
 
 **The failure it prevents:** respond mode used to persist truncated output as `status: 'completed'`,
 making a generation chopped in half indistinguishable in the corpus from a finished one.
 
-**The fix is yours to make, and it is one field:** raise `samplingDefaults.max_tokens` on the
-`JudgeModelVersion` (`--max-tokens=` at registration). An **empty** content channel at a healthy
-finish reason is almost always "it thought until the budget ran out" — a reasoning model needs
-headroom for the thinking channel *plus* the answer.
+**For a genuine truncation the fix is one field, on a NEW ordinal:** register a new
+`JudgeModelVersion` ordinal with a larger `samplingDefaults.max_tokens` (`--max-tokens=` at
+registration) and calibrate that. An **empty** content channel at a healthy finish reason is almost
+always "it thought until the budget ran out" — a reasoning model needs headroom for the thinking
+channel *plus* the answer. **For a loop, a bigger budget is the wrong lever**: run 9's five loops
+consumed 41 of the run's 82 minutes for zero verdicts, and 16k would have pushed that toward an
+hour for the same nothing.
+
+> **CORRECTION (2026-09-01).** Until `a272519` this section quoted a single message ending
+> "raise `samplingDefaults.max_tokens` on the `JudgeModelVersion` for this judge" and said "the fix
+> is yours to make, and it is one field". That was wrong twice. (1) On calibration run 9 the five
+> `finish_reason: length` failures were a degenerate repetition loop, and raising the budget — the
+> advice this section and the message both gave — is what turned run 8's 11,680-char loop at 4096
+> tokens into run 9's 56,004-char loop at 12288. (2) "Raise it on the version" invited editing
+> `samplingDefaults` in place, which §8.8 already forbids mid-run; the field is a provenance pin and
+> the fix is a new ordinal.
 
 > **Check the clock before you raise the budget — see §8.6.** A larger `max_tokens` is a larger
 > *worst-case call duration*, and on a slow local server the new budget may not be reachable inside

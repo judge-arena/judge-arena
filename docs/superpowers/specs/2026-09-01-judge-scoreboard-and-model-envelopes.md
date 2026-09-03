@@ -507,8 +507,23 @@ a second model call. The message could then say *"this looks like degenerate rep
 max_tokens will make it worse — try a repetition penalty or a different judge"* — which is
 actionable, where the current text is actively misleading.
 
-Recorded as a follow-up rather than fixed here: it is a guard change on the `execute()` chokepoint
-and wants its own test, not a drive-by edit during a calibration.
+~~Recorded as a follow-up rather than fixed here: it is a guard change on the `execute()` chokepoint
+and wants its own test, not a drive-by edit during a calibration.~~ **Shipped in `a272519` (2026-09-01):**
+`src/lib/llm/degeneration.ts` measures the deflate ratio of each output channel over 8,000 chars
+(reasoning always; content only for judgment calls) and `assertUsableContent` swaps the advice at
+≥ 5×, keeping `non_retryable` and stamping the measure on `ProviderError.repetition`. Plan:
+`docs/superpowers/plans/2026-09-01-repetition-loop-detector.md`.
+
+> **CORRECTION (2026-09-01).** Two statements above were checked with node `zlib.deflateSync` on
+> the same five rows before the threshold was pinned. (1) "It is cycling one clause verbatim … and
+> it is all five of them" — four of the five show verbatim cycling (deflate 6.3×, 7.1×, 10.8×,
+> 29.3×; repeated 80-char shingles throughout); the fifth (52,702 chars) deflates at 5.23× with **no
+> repeated 80-character window** — long-range redundancy, not a verbatim loop. It clears the 5×
+> threshold, but only just. (2) "8.23× vs 2.63×" is pglz, not deflate; deflate on the same rows
+> reads 5.2–29× (failed) against 3.0–4.1× (five completed rows of the same run) and a population
+> max of 5.38× over all 18 completed granite4.2 judgments with ≥ 8k reasoning chars. The
+> separation holds for run 9's own rows; the margin between the loosest loop and the most verbose
+> completion is thinner than the pglz numbers suggested.
 
 #### What it says about the judge
 

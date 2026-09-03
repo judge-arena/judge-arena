@@ -344,7 +344,9 @@ what a leaderboard actually needs.
    `score.ts` already derives it in prose, and nothing displays it. Without it a leaderboard cannot
    distinguish "learned a little" from "stamps A". Must be computed **per denominator** (§2).
 3. **Distinguish a repetition loop from a genuine truncation** (§5.2). The guard's advice is
-   actively harmful in the loop case.
+   actively harmful in the loop case. **Shipped in `a272519`** — `src/lib/llm/degeneration.ts`,
+   deflate ≥ 5× over ≥ 8,000 chars per channel; see the CORRECTION in spec §5.4.2 for what the
+   deflate re-measurement changed about "all five".
 
 ### Correctness, unfixed
 

@@ -595,7 +595,7 @@ to capture.
 
 `registry.ts`'s `execute()` refuses to hand a truncated or empty response to a parser at all. One
 chokepoint, called immediately after the backend call and **before any parse**, so pointwise,
-pairwise and respond all inherit it (`assertUsableContent`, `src/lib/llm/registry.ts:507-580`).
+pairwise and respond all inherit it (`assertUsableContent` in `src/lib/llm/registry.ts`).
 `finish_reason: 'length'` (OpenAI-compatible) or `stop_reason: 'max_tokens'` (Anthropic), or an
 empty content channel, throws `ProviderError` with `kind: 'non_retryable'`.
 
@@ -618,8 +618,21 @@ breaker shared with every healthy call on the same endpoint+model.
 It **fails on `'length'` unconditionally, even when the content happens to parse**: a model cut off
 mid-reasoning is not a completed judgment for a calibration corpus, however well-formed the prefix
 it managed to emit. The error message carries every number needed to size the fix (`max_tokens`,
-`completion_tokens`, `reasoning_tokens`, surviving content length) and names the lever —
-`samplingDefaults.max_tokens` on the `JudgeModelVersion`.
+`completion_tokens`, `reasoning_tokens`, surviving content length) and then **says which of two
+things happened**. `src/lib/llm/degeneration.ts` deflates each output channel over 8,000 characters
+(reasoning always; content only for judgment calls) and, at a ratio of 5× or more, names the
+output a **DEGENERATE REPETITION** loop — for which the advice is a repetition penalty, a different
+temperature or a different judge, because a larger budget buys a longer loop. Otherwise the lever
+is `samplingDefaults.max_tokens` on a **new ordinal** of the `JudgeModelVersion` (the field is a
+provenance pin; it is never edited in place). The measure rides on the error as
+`ProviderError.repetition`.
+
+> **CORRECTION (2026-09-01).** This section used to end "names the lever —
+> `samplingDefaults.max_tokens` on the `JudgeModelVersion`", and the message said exactly that,
+> unconditionally. On calibration run 9 (granite4.2:3b) all five `'length'` failures were a
+> repetition loop — 26k–56k reasoning characters deflating at 5.2–29× against 3.0–4.1× for the
+> judgments that finished — and that advice would have made them worse. The distinction is now
+> measured, not assumed.
 
 **The one deliberate exemption** is `verify.ts`'s connection test, which sets no `mode`: it sends
 `max_tokens: 1` on purpose and reads nothing but `servedModelId`, so a healthy provider answers it
