@@ -86,3 +86,63 @@ export function constantVerdictBaseline(
     denominator,
   };
 }
+
+/** Four decimals, the same rendering as `fmt` in scripts/calibration/run.ts.
+ *  Local and null-free: the guard in the formatter has already excluded null,
+ *  and run.ts keeps its own `fmt` for the ACCURACY and kappa lines, which do
+ *  print `n/a`. */
+const fmt4 = (n: number): string => n.toFixed(4);
+
+/**
+ * The lines the CLI prints for the floor: the `constant` line, and the `⚠`
+ * when the judge is AT OR BELOW it. `[]` when nothing was scored — a line
+ * reading `n/a` would suggest a floor exists and could not be rendered.
+ *
+ * WHY THE RENDERING IS HERE AND NOT IN THE SCRIPT. `scripts/calibration/**` is
+ * outside every coverage include (vitest.config.ts:37) and has no test harness,
+ * so a template literal built there is permanently unguarded — and the
+ * load-bearing part is the `<=`: relaxing it to `<` silences the warning on
+ * exactly the judge it exists for, the one that lands ON the floor by stamping.
+ * Here `tests/lib/calibration-baseline.test.ts` pins it. Same reasoning, and
+ * the same shape, as `describeSamplingSnapshot` in sampling-drift.ts (v2k).
+ *
+ * The parameter is a structural literal rather than `Pick<CalibrationScore,
+ * …>` because score.ts imports THIS module; a type import back would close an
+ * import cycle. A whole `CalibrationScore` satisfies it, which is how run.ts
+ * calls it.
+ *
+ * The guard names all three fields even though, coming from `score.ts`, they
+ * are null TOGETHER (`accuracy` is null iff verdictCount is 0; the floor is
+ * null iff its denominator is, and `keyCounts[expected] += 1` sits past the
+ * same gate as `verdictCount += 1`). It names them because the parameter is
+ * structural, so TypeScript narrows each field independently and the two
+ * arithmetic uses below would otherwise be `number | null`. That is a type
+ * requirement, not a defensive clamp — and it does mean the `||` chain
+ * short-circuits on the one null fixture, so operands two and three never
+ * reach their TRUE outcome in any test. Do not claim "100% branches" for this
+ * file from that shape; read the printed coverage row (Task 3 Step 13).
+ */
+export function formatConstantBaselineLines(score: {
+  accuracy: number | null;
+  constantBaseline: ConstantBaseline | null;
+  marginOverConstant: number | null;
+}): string[] {
+  const floor = score.constantBaseline;
+  if (floor === null || score.accuracy === null || score.marginOverConstant === null) return [];
+
+  // `preferences` lists EVERY top class when the key ties; the count printed is
+  // the first one's, and they are equal by construction (that is what a tie
+  // among top classes means), so the pair stays honest under either label.
+  const stamped = floor.keyCounts[floor.preferences[0]];
+  const sign = score.marginOverConstant >= 0 ? '+' : '';
+  const lines = [
+    `  constant   ${fmt4(floor.accuracy)}   (a judge stamping '${floor.preferences.join('/')}' on every SCORED item: ` +
+      `${stamped}/${floor.denominator})   margin ${sign}${fmt4(score.marginOverConstant)}`,
+  ];
+  if (score.accuracy <= floor.accuracy) {
+    lines.push(
+      '  ⚠ accuracy is at or below the constant floor — on this subset the judge is not distinguishable from a stamp.'
+    );
+  }
+  return lines;
+}

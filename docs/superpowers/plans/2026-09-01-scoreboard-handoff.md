@@ -17,6 +17,14 @@ Three judges have been scored against a frozen golden set. **The best is 0.8667;
 than a rubber stamp**, and the report does not say so because the degenerate baseline is never
 computed.
 
+> **CORRECTION (2026-09-02, v2l).** "the report does not say so because the degenerate baseline is
+> never computed" was true when this was written and is no longer: `scripts/calibration/run.ts` now
+> prints `constant <floor> … margin <±m>` beside ACCURACY and a `⚠ accuracy is at or below the
+> constant floor` line when it is, the floor is computed per SCORED subset by
+> `src/lib/calibration/baseline.ts`, and it is stored as `CalibrationRun.constantBaselineAccuracy`
+> (v2l). The headline itself stands: the worst judge is still worse than a rubber stamp. Rows scored
+> before v2l hold NULL for the column until re-scored with `--score-only`.
+
 And the two corrections, because they are the shape of what goes wrong here:
 
 1. **A feature shipped into 1 of 3 call sites and looked live in production** for an hour. The
@@ -80,8 +88,15 @@ Golden set `cmt057hd001g17y01lhjzgfuj` — *JudgeBenchSample — 30 random*, pai
 |---|---|---|---|---|---|
 | **Qwen3.6-35B-A3B** (llama.cpp) | **12288** | **0.8667** | 0.7285 | 30/30 | **+0.30** |
 | Qwen3.6-35B-A3B | 8192 | 0.8333 | 0.6575 | 30/30 | +0.27 |
-| granite4.2:3b (Ollama) | 12288 | 0.6000 | 0.2355 | **15/25** | **+0.04** |
+| granite4.2:3b (Ollama) | 12288 | 0.6000 | 0.2355 | **25/30** | **+0.04** |
 | granite4.1:3b (Ollama) | 4096 | 0.5000 | 0.1296 | 30/30 | **−0.07** |
+
+> **CORRECTION (2026-09-02).** The granite4.2 row read `15/25` under *verdicts* until v2l landed.
+> That is correct/verdictCount (0.6000 × 25 = 15); every other row is verdictCount/items, under which
+> run 9 is **25/30**. The spec's §1 ledger carried the same slip and is corrected there. The
+> *vs. constant stamp* column is now computed and stored, not hand-worked: `scripts/calibration/run.ts`
+> prints `constant <floor> … margin <±m>` (per scored subset) and `CalibrationRun.constantBaselineAccuracy`
+> holds the floor; the values here were produced by hand before that existed and agree with it.
 
 **The comparison column is the point.** A judge that stamps `A>B` on every item scores **0.5667** on
 this set — 17/30. Read against 0.5, `granite4.1`'s 0.5000 looks like a weak signal; read against
@@ -343,6 +358,13 @@ what a leaderboard actually needs.
 2. **Emit the degenerate baseline beside the accuracy.** It is computable from the answer key,
    `score.ts` already derives it in prose, and nothing displays it. Without it a leaderboard cannot
    distinguish "learned a little" from "stamps A". Must be computed **per denominator** (§2).
+
+   > **DONE (v2l, 2026-09-02).** `src/lib/calibration/baseline.ts` computes it per scored subset;
+   > `scoreCalibrationRun` returns `constantBaseline` + `marginOverConstant` and stores the floor as
+   > `CalibrationRun.constantBaselineAccuracy` in the same overwrite as `rawAgreement`; the CLI prints
+   > `constant … margin` and a `⚠` when accuracy ≤ floor. The 9 existing rows hold NULL until re-scored
+   > with `--score-only` on an image carrying v2l — an operator write, not a migration step. "Computable
+   > from the answer key" above was only half right: from the key **restricted to the scored rows**.
 3. **Distinguish a repetition loop from a genuine truncation** (§5.2). The guard's advice is
    actively harmful in the loop case. **Shipped in `a272519`** — `src/lib/llm/degeneration.ts`,
    deflate ≥ 5× over ≥ 8,000 chars per channel; see the CORRECTION in spec §5.4.2 for what the
@@ -414,8 +436,9 @@ kubectl -n tenant-public logs deploy/judge-arena-worker --tail=20 | grep 'judge 
 #    nested DISTINCT is only the fallback for the 9 rows launched before v2k,
 #    which are NULL by design — and it ERRORS with "more than one row" on a
 #    run whose config moved mid-run, which is the right outcome.)
+#    floor = CalibrationRun.constantBaselineAccuracy (v2l): NULL until a row is re-scored on a v2l image.
 kubectl -n tenant-public exec judge-arena-pg-1 -c postgres -- psql -U postgres -d judge_arena -c "
-  SELECT jm.name, cr.\"rawAgreement\" AS acc, cr.kappa, cr.\"verdictCount\",
+  SELECT jm.name, cr.\"rawAgreement\" AS acc, cr.\"constantBaselineAccuracy\" AS floor, cr.kappa, cr.\"verdictCount\",
          COALESCE(cr.\"samplingParams\"->>'max_tokens',
            (SELECT DISTINCT mj.\"samplingParams\"->>'max_tokens'
               FROM \"ModelJudgment\" mj JOIN \"EvaluationRun\" er ON er.id = mj.\"runId\"

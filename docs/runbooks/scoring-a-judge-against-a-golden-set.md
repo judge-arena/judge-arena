@@ -282,13 +282,45 @@ fresh run against the same set is a **new** `CalibrationRun` row, not a repair o
 ### 7.1 Accuracy, with its denominator — first, and never alone
 
 ```
-ACCURACY   0.8333   (25/30 items with a verdict)
-kappa      0.6575   method {"variant":"cohen","weighting":"none"}
-itemCount 30   missingVerdicts 0
+# Reconstructed from the stored row for run 9 — re-paste this block verbatim
+# from a real --score-only on an image carrying v2l.
+ACCURACY   0.6000   (15/25 items with a verdict)
+constant   0.5600   (a judge stamping 'A>B' on every SCORED item: 14/25)   margin +0.0400
+kappa      0.2355   method {"statistic":"cohen","weighting":"none","annotatorCount":2,"itemCount":25,"categories":["A>B","B>A","tie"]}
+itemCount 25   missingVerdicts 5
+⚠ 5 item(s) produced no verdict — the accuracy above is over the rest, not the set.
 ```
 
-- **`(25/30)` is part of the number.** A score over a partial set is a claim about a different, and
-  self-selected, population. Never quote the left-hand figure without the parenthesis.
+> **CORRECTION (2026-09-02, v2l).** The block above used to show run 2 (`0.8333 (25/30)`) with a
+> `method {"variant":"cohen","weighting":"none"}` line that the script has never printed — `method`
+> is `JSON.stringify(score.method)`, whose shape is `{statistic, weighting, annotatorCount, itemCount,
+> categories}`. It now shows run 9 (`cmtircx0x`, granite4.2:3b at `max_tokens` 12288), the run whose
+> partial denominator is the reason the `constant` line exists. **It is a RECONSTRUCTION, not a
+> capture** — no image in existence can print it yet, because production's `constantBaselineAccuracy`
+> is NULL until each row is re-scored on a v2l image. The numbers are the stored row and the scored
+> subset's key, confirmed read-only against production before this note was written (14 `A>B` /
+> 11 `B>A` over 25 completed non-null verdicts; `rawAgreement` 0.6, `verdictCount` 25); `categories`
+> includes `"tie"` because the raw verdict distribution over those 25 completed judgments held two
+> `tie` answers (confirmed by the same read-only query — `mj.verdict` grouped: `A` 15, `B` 8, `tie` 2),
+> so the judge's own derived preferences union in a `tie` class even though the KEY has none. The
+> block is the print template applied to them, in the order `run.ts` prints. Re-paste it verbatim —
+> and drop the two `#` label lines at the top of the fence — after the first `--score-only` on an
+> image carrying v2l.
+
+- **The parenthesis is part of the number, and it is `correct/verdicts` — not `verdicts/items`.**
+  `(15/25)` says 15 of the 25 items that produced a verdict were right. The fact that this run is
+  over a PARTIAL, self-selected population is the *next* line down — `itemCount 25 missingVerdicts 5`
+  — and the `⚠` under it. Read the two together; never quote `0.6000` without both.
+- **`constant` is the floor, over the SAME denominator.** It is what a judge stamping the key's
+  plurality class on every *scored* item would score — `max(key class) / verdictCount` — and it
+  moves with the denominator: 17/30 = 0.5667 on the full set, 14/25 = 0.5600 on run 9's 25 scored
+  items. Only the subset floor is printed, on purpose; the full-set floor would flatter a partial
+  run. `margin` is accuracy minus floor. **A `⚠ accuracy is at or below the constant floor` line
+  means the judge is not distinguishable from a stamp on this subset** — that is granite4.1:3b's
+  0.5000 against 0.5667, and until v2l nothing on screen said so. The floor is also stored as
+  `CalibrationRun.constantBaselineAccuracy` (NULL on runs not scored since v2l), so the handoff §8
+  scoreboard query shows it beside `rawAgreement`. When the key's top classes tie the line names all
+  of them (`'A>B/B>A'`).
 - **`missingVerdicts > 0` prints its own warning line** — `the accuracy above is over the rest, not
   the set`. Believe the field over arithmetic you have to do yourself; it exists because the first
   version of this report printed `missingVerdicts 0` under a denominator of 26 (fixed in `cb2fc37`).
@@ -308,9 +340,10 @@ raw verdict distribution (position bias lives here, not in derived preferences):
 ```
 
 Read it **against the key's own marginal**, which is a property of the set (17 `A>B` / 13 `B>A` on
-the 30-item set). A judge that answers `A>B` every time scores **0.5667** accuracy on that set —
-"better than chance" to the naked eye — and **0.0000** kappa. **A distribution far more skewed than
-the key's is the cheapest possible warning that you are looking at position bias rather than skill.**
+the 30-item set). A judge that answers `A>B` every time scores the `constant` line's number — **0.5667**
+on the full set, **0.5600** on run 9's 25-item subset — and **0.0000** kappa; since v2l that floor is
+printed beside the accuracy rather than recited here. **A distribution far more skewed than the key's
+is the cheapest possible warning that you are looking at position bias rather than skill.**
 
 It is a *tell*, not a measurement: every judgment here is `pairOrder AB`, and only the B/A sweep can
 separate bias from a set that genuinely leans one way. `positionBias` is still NULL by design.

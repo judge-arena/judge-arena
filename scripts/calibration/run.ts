@@ -13,6 +13,12 @@
  * WHAT IT PRINTS, and why each part is here rather than just the accuracy:
  *   - accuracy first, WITH its denominator, because a number over 14 of 30
  *     items and a number over 30 are different claims;
+ *   - the CONSTANT FLOOR beside it, over the SAME denominator: what a judge
+ *     stamping the key's plurality class on every scored item would score, and
+ *     the margin above it. It moves with the denominator (17/30 = 0.5667 on
+ *     the full set, 14/25 = 0.5600 on run 9's scored subset), so it is
+ *     computed per run and never cached — and only the subset floor is
+ *     printed, because two floors on one screen get the wrong one quoted;
  *   - kappa BESIDE it, labelled with its method, never instead of it: ground
  *     truth is an answer key, not a peer rater, so chance-correcting on its
  *     marginal is a category error, and kappa is not comparable across sets —
@@ -51,6 +57,7 @@ import {
   type LatencyBaseline,
 } from '@/lib/calibration/latency';
 import { formatReasoningLengthLine, summarizeReasoningLength } from '@/lib/calibration/reasoning-length';
+import { formatConstantBaselineLines } from '@/lib/calibration/baseline';
 import { scoreCalibrationRun } from '@/lib/calibration/score';
 import { canonicalJson, describeSamplingSnapshot, detectSamplingDrift } from '@/lib/calibration/sampling-drift';
 import { accountTokens, formatTokenAccountingLines } from '@/lib/calibration/token-accounting';
@@ -277,6 +284,12 @@ async function main(): Promise<void> {
 
   console.log('\n── Result ─────────────────────────────────────────────────');
   console.log(`  ACCURACY   ${fmt(score.accuracy)}   (${score.correctCount}/${score.verdictCount} items with a verdict)`);
+  // The floor over the SAME denominator as the line above — never the whole
+  // set's. Zero lines when nothing was scored. The rendering (including the
+  // `<=` that decides the ⚠) is in src/lib/calibration/baseline.ts, where the
+  // unit suite pins it: this file is outside every coverage include and has no
+  // harness, so a template built here would ship untested.
+  for (const line of formatConstantBaselineLines(score)) console.log(line);
   console.log(`  kappa      ${fmt(score.kappa)}   method ${JSON.stringify(score.method)}`);
   console.log(`  itemCount ${score.itemCount}   missingVerdicts ${score.missingVerdicts}`);
   if (score.missingVerdicts > 0) {

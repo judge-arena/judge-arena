@@ -32,6 +32,13 @@ nothing in the report says so, because the floor is never computed. That is now 
 it is a display bug with real consequence: the leaderboard's whole job is to rank, and it currently
 cannot tell "learned a little" from "learned nothing and guesses A".
 
+> **CORRECTION (2026-09-02, v2l).** "the floor is never computed" and "it currently cannot tell" were
+> true when written. The floor is now computed per SCORED subset (`src/lib/calibration/baseline.ts`),
+> stored (`CalibrationRun.constantBaselineAccuracy`) and printed beside the accuracy with a `⚠` when
+> the judge is at or below it; §5.6 #7 is marked DONE below. The headline stands — `granite4.1:3b`'s
+> 0.5000 really is below the 0.5667 stamp — and one detail is refined there: the floor belongs to the
+> answer key **over the rows a run actually scored**, so a partial run gets its own.
+
 **The best recorded result is Qwen3.6-35B-A3B at `max_tokens: 12288` — accuracy 0.8667, κ 0.7285,
 30/30.** Raising the budget from 8192 both eliminated truncation *and* improved accuracy, which is
 the ordinary result that a reasoning model given headroom uses it. On 30 items that is one extra
@@ -440,6 +447,11 @@ Full record: [`docs/superpowers/specs/2026-09-01-judge-scoreboard-and-model-enve
    displayed anywhere — so a reader compares 0.5000 against an imagined 0.50 coin flip and concludes
    "weak but real". `score.ts`'s header already derives the 0.5667 figure in prose. **Emit it beside
    the accuracy.**
+
+   > **DONE (v2l, 2026-09-02).** Emitted, stored and printed — `constantBaseline` on the score,
+   > `CalibrationRun.constantBaselineAccuracy` on the row, a `constant … margin` line and a `⚠` in the
+   > CLI. One refinement to the text above: the floor is a property of the answer key **over the scored
+   > subset**, not of the set — run 9's 25 scored items were keyed 14/11 (0.5600), not 17/13.
 
 8. **Two limits are stacked and only one is visible.** Fixing truncation by raising `max_tokens`
    exposed a timeout ceiling underneath it (`max_tokens / tok_per_s` must fit the hard cap). Nothing

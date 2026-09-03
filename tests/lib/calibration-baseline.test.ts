@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { constantVerdictBaseline } from '@/lib/calibration/baseline';
+import { constantVerdictBaseline, formatConstantBaselineLines } from '@/lib/calibration/baseline';
 
 /**
  * The constant-verdict floor: what a judge that stamps the key's plurality
@@ -88,5 +88,66 @@ describe('constantVerdictBaseline — the floor is max(key class) / denominator'
     expect(() =>
       constantVerdictBaseline({ 'A>B': 17, 'B>A': 13 } as unknown as Record<'A>B' | 'B>A' | 'tie', number>)
     ).toThrow(/non-negative integer/);
+  });
+});
+
+describe('formatConstantBaselineLines — the two CLI lines, pinned where a test can reach them', () => {
+  /** scripts/calibration/** is outside every coverage include (vitest.config.ts:37)
+   *  and has no harness, so a template literal built inside run.ts would ship
+   *  with no permanent guard. These are the exact strings run.ts prints. */
+  it('AT the floor: margin +0.0000 AND the ⚠ — equality is precisely the stamping judge', () => {
+    const constantBaseline = constantVerdictBaseline({ 'A>B': 14, 'B>A': 11, tie: 0 });
+    const lines = formatConstantBaselineLines({
+      accuracy: 14 / 25,
+      constantBaseline,
+      marginOverConstant: 0,
+    });
+    expect(lines).toEqual([
+      "  constant   0.5600   (a judge stamping 'A>B' on every SCORED item: 14/25)   margin +0.0000",
+      '  ⚠ accuracy is at or below the constant floor — on this subset the judge is not distinguishable from a stamp.',
+    ]);
+  });
+
+  it('ABOVE the floor: one line, a signed + margin, no warning — run 9 as it will actually print', () => {
+    const constantBaseline = constantVerdictBaseline({ 'A>B': 14, 'B>A': 11, tie: 0 });
+    const lines = formatConstantBaselineLines({
+      accuracy: 0.6,
+      constantBaseline,
+      marginOverConstant: 0.6 - 14 / 25,
+    });
+    expect(lines).toEqual([
+      "  constant   0.5600   (a judge stamping 'A>B' on every SCORED item: 14/25)   margin +0.0400",
+    ]);
+  });
+
+  it("BELOW the floor: `sign` stays empty, the minus comes from toFixed, and the ⚠ is there — granite4.1:3b's case", () => {
+    const constantBaseline = constantVerdictBaseline({ 'A>B': 2, 'B>A': 1, tie: 0 });
+    const lines = formatConstantBaselineLines({
+      accuracy: 1 / 3,
+      constantBaseline,
+      marginOverConstant: 1 / 3 - 2 / 3,
+    });
+    expect(lines).toEqual([
+      "  constant   0.6667   (a judge stamping 'A>B' on every SCORED item: 2/3)   margin -0.3333",
+      '  ⚠ accuracy is at or below the constant floor — on this subset the judge is not distinguishable from a stamp.',
+    ]);
+  });
+
+  it('a two-way tie names BOTH classes and counts the FIRST one, so stamped/denominator stays honest', () => {
+    const constantBaseline = constantVerdictBaseline({ 'A>B': 12, 'B>A': 12, tie: 6 });
+    const lines = formatConstantBaselineLines({
+      accuracy: 0.5,
+      constantBaseline,
+      marginOverConstant: 0.5 - 0.4,
+    });
+    expect(lines).toEqual([
+      "  constant   0.4000   (a judge stamping 'A>B/B>A' on every SCORED item: 12/30)   margin +0.1000",
+    ]);
+  });
+
+  it('nothing scored → no lines at all, rather than a line reading n/a', () => {
+    expect(
+      formatConstantBaselineLines({ accuracy: null, constantBaseline: null, marginOverConstant: null })
+    ).toEqual([]);
   });
 });

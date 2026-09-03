@@ -46,7 +46,10 @@ from the version row, for the reason in §4.1.
 | 6 | `cmtimssel` | Qwen3.6-35B-A3B | llamacpp | 8192 | 0.7931 | 0.6000 | 29/30 | 1 | ⚠ one item truncated |
 | 7 | `cmtiplr3x` | granite4.2:3b | ollama | 4096 | 0.6667 | 0.3182 | **15/30** | **15** | ⛔ **VOID** — half the set truncated |
 | 8 | `cmtipm1nb` | Qwen3.6-35B-A3B | llamacpp | **12288** | **0.8667** | **0.7285** | 30/30 | 0 | ✅ **best recorded** |
-| 9 | `cmtircx0x` | granite4.2:3b | ollama | **12288** | 0.6000 | 0.2355 | **15/25** | **5** | ⛔ 5 items lost to a REPETITION LOOP — §5.4.2 |
+| 9 | `cmtircx0x` | granite4.2:3b | ollama | **12288** | 0.6000 | 0.2355 | **25/30** | **5** | ⛔ 5 items lost to a REPETITION LOOP — §5.4.2 |
+
+> **CORRECTION (2026-09-02).** Row 9's *n* read `15/25` until v2l — correct/verdictCount, where every
+> other row is verdictCount/items. Under the table's own convention it is **25/30** (`verdictCount` 25).
 
 **Reference lines for reading that column:**
 
@@ -64,6 +67,13 @@ items, and that subset's key is 14 `A>B` / 11 `B>A` — a constant-`A>B` baselin
 0.5667. granite4.2 scored 0.6000 against it: **+0.04 over a constant stamp, for 82 minutes of
 compute.** Comparing a partial run against the whole set's floor would have flattered it, which is
 the second reason (after §4.1) that a leaderboard cannot compute this number once and cache it.
+
+> **Landed (v2l, 2026-09-02).** The floor is no longer hand-worked: `src/lib/calibration/baseline.ts`
+> computes `max(key class) / verdictCount` over the scored subset, `scoreCalibrationRun` returns it as
+> `constantBaseline` (with every top class named when the key ties) and stores it as
+> `CalibrationRun.constantBaselineAccuracy` beside `rawAgreement`, and `scripts/calibration/run.ts`
+> prints `constant <floor> (… 14/25) margin +0.0400` with a `⚠` when accuracy is at or below it. Rows
+> not re-scored since v2l hold NULL. Only the subset floor is ever printed or stored.
 
 ### 1.1 What changed between the two Qwen configurations
 
