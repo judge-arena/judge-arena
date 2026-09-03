@@ -52,6 +52,7 @@ import {
 } from '@/lib/calibration/latency';
 import { scoreCalibrationRun } from '@/lib/calibration/score';
 import { canonicalJson, describeSamplingSnapshot, detectSamplingDrift } from '@/lib/calibration/sampling-drift';
+import { accountTokens, formatTokenAccountingLines } from '@/lib/calibration/token-accounting';
 // The alert wording and the budgets it thresholds on live with the timeout
 // policy, not here — see `reportOverdue`.
 import { buildInitialBudgetAlert, resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
@@ -402,12 +403,34 @@ async function main(): Promise<void> {
     );
   }
 
+  // ── Token accounting (DERIVED) ────────────────────────────────────────────
+  // `outputTokens` is `usage.completion_tokens` verbatim, and whether that
+  // number includes the reasoning channel varies PER MODEL: granite4.2:3b and
+  // qwen3.5:9b are both Ollama, both report `reasoningSource: 'reasoning'`,
+  // and they disagree. This block is the only thing in the report that can see
+  // a judgment sitting at 82% of its budget while `outputTokens` says 115 —
+  // which happened, at `finishReason: 'stop'`, and cost a voided run.
+  // The rules live in src/lib and are unit-tested there; this script prints
+  // them and owns none of them (CONTRIBUTING.md:247, "put every rule that can
+  // be silently wrong into src/lib/** so that it can be unit-tested").
+  console.log('\n── Token accounting — DERIVED; outputTokens stays the provider count ──');
+  const accountingRows = judgments.map((j) => ({
+    goldenItemIndex: j.run.goldenItem?.index ?? null,
+    status: j.status,
+    outputTokens: j.outputTokens,
+    reasoningContent: j.reasoningContent,
+    samplingParams: j.samplingParams,
+  }));
+  for (const line of formatTokenAccountingLines(accountingRows, headerSampling)) console.log(line);
+
   const first = judgments.find((j) => j.status === 'completed');
   if (first) {
     console.log(`\n── One judgment in full (item ${first.run.goldenItem?.index}) ──────────────`);
     console.log(`  expected ${first.run.goldenItem?.expected}   verdict ${first.verdict}   pairOrder ${first.pairOrder}`);
     console.log(`  servedModelId ${first.servedModelId}   finishReason ${first.finishReason}   parseMode ${first.parseMode}`);
     console.log(`  tokens in=${first.inputTokens} out=${first.outputTokens} reasoning=${first.reasoningTokens}   latency ${first.latencyMs}ms`);
+    const firstAccounting = accountTokens(first);
+    console.log(`  DERIVED  accounting=${firstAccounting.accounting}   estimatedGeneratedTokens=${firstAccounting.estimatedGeneratedTokens ?? 'n/a'}   (out= above is what the provider reported, unchanged)`);
     console.log(`  systemPrompt ${cap(first.systemPrompt)}   userPrompt ${cap(first.userPrompt)} (truncated=${first.promptTruncated}, sha256=${first.userPromptSha256?.slice(0, 12)}…)`);
     console.log(`  rawResponse ${cap(first.rawResponse)}   reasoningContent ${cap(first.reasoningContent)} [source=${first.reasoningSource}]`);
     console.log(`\n  --- reasoningContent (first 700 chars) ---\n${(first.reasoningContent ?? '(none)').slice(0, 700)}`);

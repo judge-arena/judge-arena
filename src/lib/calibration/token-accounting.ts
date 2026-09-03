@@ -191,3 +191,240 @@ export function accountTokens(input: {
     estimatedGeneratedTokens: outputTokens,
   };
 }
+
+/**
+ * Warn when a judgment's estimated generation reaches this fraction of the
+ * `max_tokens` it ran under.
+ *
+ * WHY 0.80, with the counts. Measured 2026-09-02 over all 263 completed
+ * judgments with a usable token count, this threshold fires on exactly TWO:
+ *
+ *   item at 88.8%  Qwen3.6 @ 8192,  outputTokens 7272 — one long item from truncating
+ *   item at 82.4%  qwen3.5:9b @ 6144, outputTokens 115 — the run that had to be voided
+ *
+ * and stays silent on the other 261, including every one of the 40
+ * granite4.2:3b judgments, whose widest is 74.7% (3058 of 4096). So it is not
+ * an "every long item warns" threshold.
+ *
+ * WHY NOT HIGHER, and why not lower. The estimator's measured residual against
+ * the provider's own count is +7.1% / +7.6% (see CHARS_PER_TOKEN), so an item
+ * truly at 87% or above always reads at or above 80% and cannot hide; pushing
+ * the threshold to 0.90 would surrender that margin. Dropping it to 0.70 would
+ * add FIVE more items — three granite4.2 @ 4096 (widest 74.7%), one
+ * granite4.2 @ 12288 (74.5%) and one Qwen3.6 @ 8192 — all healthy, which is
+ * how an operator is trained to ignore the line.
+ *
+ * IT IS A WARNING, NOT A VERDICT, and the direction of the right response is
+ * not obvious: `finish_reason: 'length'` is ambiguous between "ran out of
+ * room" and "never going to stop" (handoff §5.2 — five looping items burned 41
+ * of one run's 82 minutes for zero verdicts), so the line points at runbook
+ * §8.2 rather than telling anyone to raise the budget. It also prints
+ * `outputTokens` and the raw character count beside every estimate, so the
+ * number can be re-derived under a different constant without re-running.
+ *
+ * ONE ASSUMPTION, STATED BECAUSE NOTHING HERE TESTS IT. The fraction below
+ * assumes `max_tokens` bounds the WHOLE generated stream, reasoning included,
+ * even on a model whose `completion_tokens` excludes it. That is confirmed
+ * only where the count INCLUDES reasoning: measured 2026-09-02, all 21
+ * `finishReason: 'length'` judgments in the corpus (20 granite4.2:3b, 1
+ * Qwen3.6) carry `outputTokens` exactly equal to their budget — 4096, 8192,
+ * 12288. On qwen3.5:9b — the only judge where the count EXCLUDES reasoning,
+ * and therefore the only judge whose fraction this module changes at all —
+ * `finishReason: 'length'` has NEVER been observed, across 18 completed
+ * judgments at two budgets. So the budget's scope on that path is INFERRED,
+ * not measured. It is consistent with every row in the corpus (no item's
+ * estimate has ever exceeded its budget) and it is the conservative reading,
+ * but if it is false the fraction on an `excludes_reasoning` row is an
+ * overstatement. That is why the line prints `outputTokens` and the raw
+ * character count beside every estimate, and why it points at runbook §8.2
+ * instead of advising a bigger budget.
+ */
+export const TRUNCATION_PROXIMITY_WARN = 0.8;
+
+export interface MaxTokensResolution {
+  maxTokens: number;
+  source: 'judgment' | 'run_header';
+}
+
+/** `max_tokens` off a `SamplingParams`-shaped JSONB value, or `null`. Total
+ * over everything a `Json?` column can hold; a non-number or a non-positive
+ * number is not a budget. */
+function readMaxTokens(value: unknown): number | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const raw = (value as Record<string, unknown>).max_tokens;
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : null;
+}
+
+/**
+ * The `max_tokens` a judgment actually ran under.
+ *
+ * ORDER MATTERS. `ModelJudgment.samplingParams` is EXECUTION truth and wins;
+ * `CalibrationRun.samplingParams` (v2k) is the LAUNCH snapshot and is the
+ * fallback, because `markJudgmentError` (src/worker/judgment-consumer.ts
+ * :645-671) does not write `samplingParams` — so the errored rows, which are
+ * exactly the truncation cases, have none of their own. The two agree by
+ * construction unless the version row was edited mid-run, and
+ * `detectSamplingDrift` already warns about that separately.
+ *
+ * `null` is returned rather than falling through to
+ * `JUDGE_DEFAULT_SAMPLING_PARAMS` (src/lib/llm/sampling.ts:43, max_tokens
+ * 4096). A registry default is a guess; presenting one as the budget a run
+ * used is the lie `describeSamplingSnapshot` exists to avoid.
+ */
+export function resolveMaxTokens(
+  judgmentSampling: unknown,
+  headerSampling: unknown
+): MaxTokensResolution | null {
+  const fromJudgment = readMaxTokens(judgmentSampling);
+  if (fromJudgment !== null) return { maxTokens: fromJudgment, source: 'judgment' };
+  const fromHeader = readMaxTokens(headerSampling);
+  if (fromHeader !== null) return { maxTokens: fromHeader, source: 'run_header' };
+  return null;
+}
+
+export interface TruncationProximity {
+  estimatedGeneratedTokens: number;
+  maxTokens: number;
+  maxTokensSource: 'judgment' | 'run_header';
+  fraction: number;
+  near: boolean;
+}
+
+/** `null` when either half is missing — never a 0% that would read as "this
+ * judgment generated nothing", and never a fraction against a guessed budget. */
+export function truncationProximity(
+  accounting: TokenAccounting,
+  maxTokens: MaxTokensResolution | null
+): TruncationProximity | null {
+  if (accounting.estimatedGeneratedTokens === null || maxTokens === null) return null;
+  const fraction = accounting.estimatedGeneratedTokens / maxTokens.maxTokens;
+  return {
+    estimatedGeneratedTokens: accounting.estimatedGeneratedTokens,
+    maxTokens: maxTokens.maxTokens,
+    maxTokensSource: maxTokens.source,
+    fraction,
+    near: fraction >= TRUNCATION_PROXIMITY_WARN,
+  };
+}
+
+/**
+ * One judgment as the report reads it. EVERY FIELD IS REQUIRED on purpose:
+ * `scripts/calibration/run.ts` maps its Prisma rows into this shape field by
+ * field, and an explicit mapping that silently drops a field is failure mode
+ * 14 — a partial rollout with tsc green. Required fields make the drop a type
+ * error instead.
+ */
+export interface TokenAccountingRow {
+  goldenItemIndex: number | null;
+  status: string;
+  outputTokens: number | null;
+  reasoningContent: string | null;
+  samplingParams: unknown;
+}
+
+function pct(fraction: number): string {
+  return `${(fraction * 100).toFixed(1)}%`;
+}
+
+/**
+ * The Token-accounting block of the calibration capture report.
+ *
+ * The STRINGS live here rather than in the script because `scripts/**` is
+ * outside every coverage `include` (vitest.config.ts:37) and has no harness,
+ * and the `>= 0.80` boundary is exactly the rule that must stay tested
+ * (CONTRIBUTING.md:247 — "Put every rule that can be silently wrong into
+ * `src/lib/**` so that it *can* be unit-tested" — the same argument
+ * `sampling-drift.ts` was extracted under).
+ *
+ * Nothing is ever dropped silently: judgments with no usable `outputTokens`
+ * and judgments with no resolvable `max_tokens` are excluded from the ratios
+ * and the fractions, and the count of each is printed. A partial denominator
+ * that looks like a whole one is this repo's most expensive recurring defect.
+ */
+export function formatTokenAccountingLines(
+  rows: ReadonlyArray<TokenAccountingRow>,
+  headerSampling: unknown
+): string[] {
+  const counts: Record<ReasoningAccounting, number> = {
+    includes_reasoning: 0,
+    excludes_reasoning: 0,
+    no_reasoning_channel: 0,
+    unmeasurable: 0,
+  };
+  const ratios: number[] = [];
+  const near: Array<{ row: TokenAccountingRow; prox: TruncationProximity }> = [];
+  let widest: TruncationProximity | null = null;
+  let sized = 0;
+  let noMaxTokens = 0;
+
+  for (const row of rows) {
+    const acc = accountTokens(row);
+    counts[acc.accounting] += 1;
+
+    // A 0.00 from a judge with no thinking channel at all (granite4.1:3b)
+    // would drag the printed range down and read as a suspiciously dense
+    // tokenizer rather than as an absent channel.
+    if (acc.charsPerOutputToken !== null && acc.reasoningChars > 0) {
+      ratios.push(acc.charsPerOutputToken);
+    }
+
+    const prox = truncationProximity(acc, resolveMaxTokens(row.samplingParams, headerSampling));
+    if (prox === null) {
+      if (acc.estimatedGeneratedTokens !== null) noMaxTokens += 1;
+      continue;
+    }
+    sized += 1;
+    if (widest === null || prox.fraction > widest.fraction) widest = prox;
+    if (prox.near) near.push({ row, prox });
+  }
+
+  const lines: string[] = [
+    `  accounting          includes_reasoning ${counts.includes_reasoning}   ` +
+      `excludes_reasoning ${counts.excludes_reasoning}   ` +
+      `no_reasoning_channel ${counts.no_reasoning_channel}   ` +
+      `unmeasurable ${counts.unmeasurable}`,
+  ];
+
+  lines.push(
+    ratios.length > 0
+      ? `  chars/outputToken   ${Math.min(...ratios).toFixed(2)} … ${Math.max(...ratios).toFixed(2)} ` +
+          `over ${ratios.length} judgment(s) with a reasoning channel   ` +
+          `(> ${REASONING_EXCLUDED_RATIO} ⇒ the provider's count EXCLUDES reasoning)`
+      : '  chars/outputToken   no judgment carried both a reasoning channel and an outputTokens count'
+  );
+
+  lines.push(
+    widest !== null
+      ? `  est. generation     closest to budget: ${widest.estimatedGeneratedTokens} tok = ${pct(widest.fraction)} ` +
+          `of max_tokens ${widest.maxTokens}   (DERIVED at ${CHARS_PER_TOKEN} chars/token, ±10%)`
+      : '  est. generation     no judgment had both an outputTokens count and a max_tokens — nothing to size against'
+  );
+
+  if (near.length > 0) {
+    lines.push(
+      `  ⚠ ${near.length} of ${sized} sized judgment(s) estimate at or above ` +
+        `${pct(TRUNCATION_PROXIMITY_WARN)} of max_tokens. Size the next run from the ESTIMATE, ` +
+        'not from outputTokens — but read runbook §8.2 first: a large estimate can be a ' +
+        'repetition loop, which a bigger budget makes worse.'
+    );
+    // Capped at ten, matching the Failures block below it in the report.
+    for (const { row, prox } of near.slice(0, 10)) {
+      lines.push(
+        `       item ${row.goldenItemIndex ?? '?'}  ${row.status}  ` +
+          `est ${prox.estimatedGeneratedTokens} = ${pct(prox.fraction)} of ${prox.maxTokens} ` +
+          `(max_tokens from the ${prox.maxTokensSource === 'judgment' ? 'judgment' : 'run header'})  ` +
+          `[outputTokens ${row.outputTokens ?? 'NULL'}, reasoning ${row.reasoningContent?.length ?? 0} chars]`
+      );
+    }
+  }
+
+  if (counts.unmeasurable > 0 || noMaxTokens > 0) {
+    lines.push(
+      `  ⓘ ${counts.unmeasurable} judgment(s) had no usable outputTokens and ${noMaxTokens} had ` +
+        'no max_tokens on the judgment or the run header — excluded from every number above, ' +
+        'never counted as zero.'
+    );
+  }
+
+  return lines;
+}
