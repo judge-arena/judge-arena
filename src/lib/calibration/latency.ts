@@ -33,6 +33,23 @@
  *     calibration CLI's overdue alert cannot drift into describing the same
  *     state with two different sentences.
  *
+ *   judgeThroughputEstimate(judgeModelVersionId, client?)
+ *       -> Promise<ThroughputEstimate | null>
+ *
+ *     `{ tokPerSec, n }` POOLED over the COMPLETED judgments of one judge
+ *     (`Σ accountTokens(row).estimatedGeneratedTokens / Σ (latencyMs / 1000)`,
+ *     via `accountTokens` from `@/lib/calibration/token-accounting` —
+ *     **never** raw `Σ outputTokens / Σ latencyMs`: `outputTokens` is
+ *     `usage.completion_tokens` verbatim and OMITS the reasoning channel on
+ *     some models when the request carries `response_format: json_schema`,
+ *     which the judge path always sends — see token-accounting.ts's module
+ *     doc), or **`null` when none carried a usable estimate** — the same
+ *     null-not-zero contract as the baseline, for the same reason: zero
+ *     tok/s reads as "emits nothing" and a caller dividing max_tokens by it
+ *     gets Infinity. It cannot come from the endpoint verify probe, which
+ *     sends `max_tokens: 1`. This is the input to the stacked-limits check
+ *     (runbook §8.6) that `launchCalibrationRun` runs.
+ *
  *   timeToComputeByTuple(scope, client?) -> Promise<TimeToCompute[]>
  *
  *     The (dataset, item, model) projection. COMPUTED ON READ, per A2.3's rule
@@ -81,6 +98,7 @@
  * down silently; summing them as-is yields NaN.
  */
 
+import { accountTokens } from '@/lib/calibration/token-accounting';
 import { prisma } from '@/lib/db';
 import type { PrismaClient } from '@prisma/client';
 
@@ -174,6 +192,125 @@ export async function judgeLatencyBaseline(
   // The null-latency filter lives in `summarizeLatencies`, NOT in the WHERE
   // above, so it is exercised by the unit suite instead of by Postgres.
   return summarizeLatencies(rows.map((r) => r.latencyMs));
+}
+
+// ─── Throughput: the input to the stacked-limits check ──────────────────────
+
+/** A judge's measured output throughput, pooled over its COMPLETED judgments.
+ *  Only ever produced for a NON-EMPTY sample — the empty case is `null`, for
+ *  the same reason `LatencyBaseline`'s is (module doc): a zero here would read
+ *  as "this judge produces nothing", and `max_tokens / 0` is Infinity. */
+export interface ThroughputEstimate {
+  /** Σ `accountTokens(row).estimatedGeneratedTokens` / Σ (latencyMs / 1000)
+   *  over the rows that carried both. POOLED, not a mean of per-judgment
+   *  rates: a mean of rates weights a 109-token verdict the same as a
+   *  7,000-token one, and the number a budget is sized against is "how fast
+   *  does this judge emit tokens", not "what is the average of its per-call
+   *  speeds". NEVER raw `outputTokens` — see `summarizeThroughput`'s doc for
+   *  why. */
+  tokPerSec: number;
+  /** How many completed judgments carried a usable estimate — the
+   *  denominator, stated, because a rate over 1 judgment and over 30 are
+   *  different claims. */
+  n: number;
+}
+
+/** The columns the estimate reads, as a plain shape so the arithmetic is a
+ *  pure function of rows the caller chose (the `RunningJudgmentRow` /
+ *  `selectOverdue` pattern below). `reasoningContent` is read by
+ *  `accountTokens`, not by this module, to tell whether `outputTokens`
+ *  already counted it. */
+export interface ThroughputRow {
+  outputTokens: number | null;
+  latencyMs: number | null;
+  reasoningContent: string | null;
+}
+
+/**
+ * Pool DERIVED generated-token counts over wall-clock seconds.
+ *
+ * Reads `estimatedGeneratedTokens` from `accountTokens()`
+ * (`@/lib/calibration/token-accounting`), NOT the raw `outputTokens` column.
+ * `ModelJudgment.outputTokens` is `usage.completion_tokens` verbatim, and on
+ * some models it does not count the reasoning channel at all when the
+ * request carried `response_format: json_schema` — which the judge path
+ * always does. `accountTokens` is the already-landed, already-tested
+ * primitive that tells the two cases apart per row
+ * (`REASONING_EXCLUDED_RATIO`); this function's own job is only to pool what
+ * `accountTokens` already classified, and to guard `latencyMs`, which
+ * `accountTokens` does not touch at all.
+ *
+ * Drops any row whose `latencyMs` is missing, non-positive or non-finite (0
+ * would divide by zero), and any row whose `accountTokens(row)
+ * .estimatedGeneratedTokens` is not a finite number. That already covers a
+ * v1-imported judgment (`outputTokens: null`, scripts/importer/runs.ts:494)
+ * and a completed judgment that emitted nothing (`outputTokens <= 0`):
+ * `accountTokens` returns `estimatedGeneratedTokens: null` for both, per its
+ * own "an absent or non-positive provider count is an ABSENCE" contract —
+ * `summarizeThroughput` does not reimplement that decision, only propagates
+ * it. `ThroughputRow` is exported, so a caller can still hand in a NaN
+ * `outputTokens` with no reasoning channel: `accountTokens` does NOT reject
+ * that value (`NaN <= 0` is `false`, so its own early-return guard does not
+ * fire, and with no reasoning channel it returns the NaN straight back as
+ * `estimatedGeneratedTokens`) — caught here by `Number.isFinite`, not by
+ * `accountTokens`. Returns `null` when nothing survives — the same contract
+ * as `summarizeLatencies`.
+ * Pure, so the arithmetic is testable without a database anywhere near it —
+ * `accountTokens` is a leaf module (zero imports) for the same reason.
+ */
+export function summarizeThroughput(rows: readonly ThroughputRow[]): ThroughputEstimate | null {
+  let tokens = 0;
+  let ms = 0;
+  let n = 0;
+  for (const row of rows) {
+    if (typeof row.latencyMs !== 'number' || !Number.isFinite(row.latencyMs) || row.latencyMs <= 0) continue;
+    const estimatedGeneratedTokens = accountTokens(row).estimatedGeneratedTokens;
+    if (typeof estimatedGeneratedTokens !== 'number' || !Number.isFinite(estimatedGeneratedTokens)) continue;
+    tokens += estimatedGeneratedTokens;
+    ms += row.latencyMs;
+    n += 1;
+  }
+  if (n === 0) return null;
+  return { tokPerSec: tokens / (ms / 1000), n };
+}
+
+/**
+ * How fast this judge has historically emitted output tokens, DERIVED via
+ * `accountTokens` (never the raw `outputTokens` column — see
+ * `summarizeThroughput`'s doc), or `null` if it has never completed a
+ * judgment that produced a usable estimate.
+ *
+ * Same scope and same status filter as `judgeLatencyBaseline`, for the same
+ * reason: a call that timed out is evidence that the judge did not answer,
+ * not evidence about its speed. And it cannot come from the endpoint verify
+ * probe — `src/lib/llm/verify.ts` sends `max_tokens: 1`, and one token is
+ * not a rate.
+ *
+ * Consumed by `launchCalibrationRun` (src/lib/calibration/launch.ts) for the
+ * stacked-limits warning: `max_tokens / tokPerSec` must fit under the hard
+ * cap, or a judgment that needs its whole budget is aborted rather than
+ * truncated (runbook §8.6; register §5.6/8).
+ */
+export async function judgeThroughputEstimate(
+  judgeModelVersionId: string,
+  client: JudgeLatencyClient = prisma
+): Promise<ThroughputEstimate | null> {
+  const rows = await client.modelJudgment.findMany({
+    // Same WHERE as the baseline, served by the same index
+    // (ModelJudgment_judgeModelVersionId_idx). Runs once per launch.
+    where: { judgeModelVersionId, status: 'completed' },
+    // `reasoningContent` alongside the two columns the raw formula used —
+    // `accountTokens` needs it to tell whether `outputTokens` already
+    // counted the reasoning channel. There is deliberately no stored
+    // "reasoningChars" column (token-accounting.ts's module doc): the
+    // character count is derived at read time from the column already here.
+    select: { outputTokens: true, latencyMs: true, reasoningContent: true },
+  });
+
+  // The null/zero/non-finite filter lives in `summarizeThroughput`, NOT in
+  // the WHERE above, so it is exercised by the unit suite instead of by
+  // Postgres.
+  return summarizeThroughput(rows);
 }
 
 /**

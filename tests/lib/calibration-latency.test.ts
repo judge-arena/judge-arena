@@ -50,8 +50,10 @@ import {
   describeBaseline,
   formatDurationMs,
   judgeLatencyBaseline,
+  judgeThroughputEstimate,
   selectOverdue,
   summarizeLatencies,
+  summarizeThroughput,
   timeToComputeByTuple,
   type JudgeLatencyClient,
   type TimeToComputeClient,
@@ -66,7 +68,20 @@ type FakeJudgment = {
   status: string;
   latencyMs: number | null;
   judgeModelVersionId: string | null;
+  /** Read only by the throughput estimate. The baseline fixtures leave it
+   *  out and the fake maps that to `null`, which is what the schema allows
+   *  (`ModelJudgment.outputTokens Int?`). */
+  outputTokens?: number | null;
+  /** Also read only by the throughput estimate — `accountTokens()` needs it
+   *  to tell whether `outputTokens` already counted the reasoning channel.
+   *  The baseline and plain-outputTokens fixtures leave it out and the fake
+   *  maps that to `null` ("no reasoning channel"), which makes
+   *  `estimatedGeneratedTokens` equal `outputTokens` exactly — the fixtures
+   *  that predate this task are unaffected by adding this field. */
+  reasoningContent?: string | null;
 };
+
+const chars = (n: number): string => 'x'.repeat(n);
 
 /**
  * A `modelJudgment.findMany` stand-in that HONOURS the two filters the
@@ -92,7 +107,11 @@ function fakeJudgeClient(rows: readonly FakeJudgment[]): JudgeLatencyClient & { 
         return rows
           .filter((r) => wantJudge === undefined || r.judgeModelVersionId === wantJudge)
           .filter((r) => wantStatus === undefined || r.status === wantStatus)
-          .map((r) => ({ latencyMs: r.latencyMs }));
+          .map((r) => ({
+            latencyMs: r.latencyMs,
+            outputTokens: r.outputTokens ?? null,
+            reasoningContent: r.reasoningContent ?? null,
+          }));
       },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see above
     } as any,
@@ -309,6 +328,166 @@ describe('judgeLatencyBaseline', () => {
     expect(client.calls[0]).toMatchObject({
       where: { judgeModelVersionId: JUDGE, status: 'completed' },
       select: { latencyMs: true },
+    });
+  });
+});
+
+// ─── the stacked-limits input: how fast does this judge emit tokens ─────────
+
+describe('summarizeThroughput', () => {
+  it('returns null — never zero — for an empty sample', () => {
+    // Zero tok/s reads as "this judge emits nothing"; a caller dividing
+    // max_tokens by it gets Infinity. Same contract as summarizeLatencies.
+    expect(summarizeThroughput([])).toBeNull();
+  });
+
+  it('POOLS tokens over seconds rather than averaging per-judgment rates', () => {
+    // 1000 tokens in 10 s (100 tok/s) and 3000 tokens in 60 s (50 tok/s).
+    // Pooled: 4000 / 70 s = 57.14 tok/s. The mean of the two rates is 75 —
+    // the fixture is asymmetric precisely so the two answers differ, because
+    // a mean of rates weights a 109-token verdict the same as a 7,000-token
+    // one and that is not the number a budget is sized against.
+    // `reasoningContent: null` on both rows — no reasoning channel — so
+    // `accountTokens` returns `estimatedGeneratedTokens === outputTokens`
+    // exactly, keeping this test's numbers isolated to the pooling logic.
+    const estimate = summarizeThroughput([
+      { outputTokens: 1000, latencyMs: 10_000, reasoningContent: null },
+      { outputTokens: 3000, latencyMs: 60_000, reasoningContent: null },
+    ]);
+    expect(estimate?.n).toBe(2);
+    expect(estimate?.tokPerSec).toBeCloseTo(57.14, 1);
+  });
+
+  it('excludes a row with no outputTokens — or none, or a non-finite count — rather than counting it as zero', () => {
+    // A v1-imported judgment carries no token counts; a completed row that
+    // emitted 0 tokens is not a measurement of speed either. `accountTokens`
+    // already returns `estimatedGeneratedTokens: null` for both (its own
+    // "an absent or non-positive provider count is an ABSENCE" contract,
+    // pinned in tests/lib/calibration-token-accounting.test.ts) — this test
+    // is the INTEGRATION check that `summarizeThroughput` correctly drops
+    // what `accountTokens` marks unmeasurable, rather than pooling it as
+    // zero. The NaN row is NOT decoration: `ThroughputRow` is exported
+    // public surface, so a caller can hand one in, and `accountTokens`
+    // itself does NOT reject it (`NaN <= 0` is `false`, so its own
+    // early-return guard does not fire; with no reasoning channel it returns
+    // `estimatedGeneratedTokens: NaN`) — only `summarizeThroughput`'s own
+    // `Number.isFinite` guard on the DERIVED value stops it. Without this
+    // row that guard is never the deciding clause in any test
+    // (CONTRIBUTING.md's "unreachable guard" class). All four rows carry
+    // `reasoningContent: null` so this stays isolated to the
+    // outputTokens/NaN exclusion, not the reasoning-channel arithmetic.
+    const estimate = summarizeThroughput([
+      { outputTokens: null, latencyMs: 10_000, reasoningContent: null },
+      { outputTokens: 0, latencyMs: 10_000, reasoningContent: null },
+      { outputTokens: Number.NaN, latencyMs: 10_000, reasoningContent: null },
+      { outputTokens: 1000, latencyMs: 10_000, reasoningContent: null },
+    ]);
+    expect(estimate).toEqual({ tokPerSec: 100, n: 1 });
+  });
+
+  it('excludes a zero, missing or non-finite latencyMs instead of dividing by it', () => {
+    // Same reasoning for the latency guard: `Infinity <= 0` is false, so only
+    // the isFinite arm rejects it, and an included Infinity would silently
+    // drive the pooled rate to 0 rather than to null. This guard is entirely
+    // `summarizeThroughput`'s own — `accountTokens` never touches `latencyMs`.
+    expect(
+      summarizeThroughput([
+        { outputTokens: 1000, latencyMs: 0, reasoningContent: null },
+        { outputTokens: 1000, latencyMs: null, reasoningContent: null },
+        { outputTokens: 1000, latencyMs: Number.POSITIVE_INFINITY, reasoningContent: null },
+      ])
+    ).toBeNull();
+  });
+});
+
+describe('judgeThroughputEstimate', () => {
+  it('returns null when this judge has never completed a judgment', async () => {
+    const client = fakeJudgeClient([
+      { status: 'running', latencyMs: null, judgeModelVersionId: JUDGE, outputTokens: null, reasoningContent: null },
+      // A timed-out call with a recorded runtime is NOT a rate: it says the
+      // judge did not answer, not how fast it answers. Same reasoning as the
+      // latency baseline's status filter. No reasoning channel on this row,
+      // so if the status filter were dropped it would score as a rate of
+      // outputTokens / latencyMs exactly (see the "asks the database" test
+      // and Break (4) below) — this row is deliberately the SIMPLE case.
+      { status: 'error', latencyMs: 900_000, judgeModelVersionId: JUDGE, outputTokens: 12_288, reasoningContent: null },
+    ]);
+    expect(await judgeThroughputEstimate(JUDGE, client)).toBeNull();
+  });
+
+  it('pools only the COMPLETED judgments of THIS judge', async () => {
+    // Qwen3.6's measured envelope: 2869 output tokens in 49.0 s = 58.55 tok/s
+    // — a judge whose provider count already INCLUDES the reasoning channel
+    // (token-accounting.ts's `includes_reasoning` band), so `reasoningContent:
+    // null` here keeps `estimatedGeneratedTokens === outputTokens` and this
+    // test isolated to the STATUS/JUDGE scoping, not the reasoning-channel
+    // arithmetic (that gets its own test below).
+    const client = fakeJudgeClient([
+      { ...done(secs(49)), outputTokens: 2869, reasoningContent: null },
+      { ...done(secs(49)), outputTokens: 2869, reasoningContent: null },
+      { status: 'error', latencyMs: 900_000, judgeModelVersionId: JUDGE, outputTokens: 12_288, reasoningContent: null },
+      // A different judge on a different server. Its speed says nothing
+      // about this one.
+      { ...done(secs(1), OTHER_JUDGE), outputTokens: 5000, reasoningContent: null },
+    ]);
+    const estimate = await judgeThroughputEstimate(JUDGE, client);
+    expect(estimate?.n).toBe(2);
+    expect(estimate?.tokPerSec).toBeCloseTo(58.55, 1);
+  });
+
+  it('pools via accountTokens, not raw outputTokens — the qwen3.5:9b shape (small outputTokens, large reasoningContent)', async () => {
+    // THE DEFECT THIS TASK EXISTS TO PREVENT. qwen3.5:9b's judge path always
+    // sends response_format: json_schema (ollamaStructuredRequestFields /
+    // openai-compatible.ts:210-212), and on this model `outputTokens`
+    // (usage.completion_tokens) EXCLUDES the reasoning channel entirely —
+    // measured 2026-09-02 against judge-arena-pg-1, length(reasoningContent)
+    // / outputTokens ranges 36.7…156.7 over every completed judgment of the
+    // currently-registered version, all classified `excludes_reasoning` by
+    // REASONING_EXCLUDED_RATIO (= 8, token-accounting.ts). The two rows below
+    // are the SAME fixtures tests/lib/calibration-token-accounting.test.ts
+    // uses (`Q35_MIN_RATIO`, `Q35_THE_INCIDENT`), so `estimatedGeneratedTokens`
+    // cross-checks against that file's own pinned values: 1683 and 5065
+    // (148 + round(5589/3.64) = 1683; 115 + round(18019/3.64) = 5065).
+    const client = fakeJudgeClient([
+      { ...done(secs(200)), outputTokens: 148, reasoningContent: chars(5589) },
+      { ...done(secs(350)), outputTokens: 115, reasoningContent: chars(18019) },
+    ]);
+    const estimate = await judgeThroughputEstimate(JUDGE, client);
+    expect(estimate?.n).toBe(2);
+    // Pooled: (1683 + 5065) / (200 + 350) = 6748 / 550 = 12.269... tok/s.
+    // NOT a mean of the two rows' own rates (1683/200=8.415, 5065/350=14.471,
+    // mean 11.44) — same pooling argument as the "POOLS tokens" test above.
+    // The number this task exists to get right: Σ outputTokens / Σ latencyMs
+    // over these SAME two rows is (148+115) / 550 = 0.478 tok/s — the exact
+    // ~20x-too-slow defect `token-accounting` (e438da2/0bd6b6b/db5bff9) fixed
+    // elsewhere in this codebase, which this test proves is NOT reintroduced
+    // here. See Break (8) below for the injection that reintroduces it.
+    expect(estimate?.tokPerSec).toBeCloseTo(12.27, 1);
+    expect(estimate?.tokPerSec).toBeGreaterThan(12);
+    expect(estimate?.tokPerSec).toBeLessThan(13);
+  });
+
+  it('asks the database for this judge, this status and ONLY those three columns', async () => {
+    // Belt to the fake's braces, as the baseline's own query-shape test is:
+    // a full-table read here would run on every calibration launch.
+    const client = fakeJudgeClient([{ ...done(1000), outputTokens: 100, reasoningContent: null }]);
+    await judgeThroughputEstimate(JUDGE, client);
+    expect(client.calls[0]).toMatchObject({
+      where: { judgeModelVersionId: JUDGE, status: 'completed' },
+    });
+    // `toEqual`, NOT the surrounding `toMatchObject`, and this is the whole
+    // point of the assertion. `fakeJudgeClient` ignores `select` entirely —
+    // it always projects all three columns — so a subset match cannot tell
+    // `{ outputTokens, latencyMs, reasoningContent }` from that plus
+    // `rawResponse, systemPrompt, userPrompt`, i.e. from the full-table read
+    // this test exists to prevent. `toEqual` fails on the extra key.
+    // (The existing `judgeLatencyBaseline` query-shape test at :303-313 has
+    // the subset limitation; it is not in scope to change here, but do not
+    // copy its shape.)
+    expect((client.calls[0] as { select?: unknown }).select).toEqual({
+      outputTokens: true,
+      latencyMs: true,
+      reasoningContent: true,
     });
   });
 });
