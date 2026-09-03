@@ -539,6 +539,43 @@ describe('worker claim idempotency (src/worker/claim.ts, judgment-consumer.ts, r
     expect(publishedIds).toEqual(judgments.map((j) => j.id).sort());
   });
 
+  it('run.create expansion creates the run with deadlineAt NULL — the execution deadline is stamped later, at first dequeue', async () => {
+    const fixture = await createEvaluationOnlyFixture();
+    const modelConfig = await mkModelConfig(fixture.user.id);
+
+    const { confirmChannel } = await getRabbit();
+    await assertTopology(confirmChannel);
+    await purgeExecuteQueues(confirmChannel);
+
+    const runCreateConsumer = createRunCreateConsumer();
+    const msg: RunCreateMsg = {
+      evaluationId: fixture.evaluation.id,
+      runSpec: {
+        rubricId: fixture.rubric.id,
+        modelSelections: [{ judgeModelVersionId: fixture.version.id, modelConfigId: modelConfig.id }],
+        triggeredById: fixture.user.id,
+        protocol: 'pointwise',
+      },
+    };
+
+    await runCreateConsumer.handle(fakeMessage(msg), fakeChannel());
+
+    const run = await prisma.evaluationRun.findFirstOrThrow({ where: { evaluationId: fixture.evaluation.id } });
+    createdRunIds.push(run.id);
+
+    // 2026-09-03: this consumer used to compute its own creation-time
+    // deadline, independently of run-launch.ts's (also now-deleted)
+    // formula — the third of three call sites. It no longer computes one
+    // at all; see the (now-deleted) DEADLINE_SLACK_MS const's former
+    // location in run-create-consumer.ts.
+    expect(run.deadlineAt).toBeNull();
+
+    // Drain what this run published so it doesn't leak into a later
+    // test's queue assertions in this same persistent-DB suite.
+    const lane = await laneQueueFor(null, fixture.version.id);
+    await drainQueue(confirmChannel, lane);
+  });
+
   it('run.create expansion failure (no modelSelections to expand) records an errored EvaluationRun rather than silently dropping the message', async () => {
     const fixture = await createEvaluationOnlyFixture();
     const runCreateConsumer = createRunCreateConsumer();

@@ -95,16 +95,9 @@ import type { RunProtocol } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { logger, serializeError } from '@/lib/logger';
 import { publishJudgmentExecute, resolveDestinationQueue, type RunCreateMsg } from '@/lib/queue/publish';
-import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
 import { LANE_FALLBACK_QUEUE } from '@/lib/queue/lanes';
 import { resolveEndpointsForVersions } from '@/lib/endpoint-resolution';
 import { deriveRunMode } from '@/lib/run-mode';
-
-/** Slack added on top of `judgmentCount * EVALUATION_MODEL_TIMEOUT_MS` when
- * computing `EvaluationRun.deadlineAt` — covers DB round trips, queue
- * publish latency, and finalization overhead that isn't part of any single
- * provider call's own timeout budget. */
-const DEADLINE_SLACK_MS = 60_000;
 
 const ACTIVE_RUN_STATUSES = ['pending', 'judging'] as const;
 
@@ -245,13 +238,15 @@ export function createRunCreateConsumer(): RunCreateConsumer {
         throw new Error('runSpec.modelSelections is empty — nothing to expand');
       }
 
-      const deadlineAt = new Date(
-        // Hard cap, mirroring run-launch.ts: a judgment may legally run to the
-        // cap, so a deadline sized on the initial budget would let the reaper
-        // abandon work that is still executing.
-        Date.now() + modelSelections.length * resolveTimeoutBudgets().hardCapMs + DEADLINE_SLACK_MS
-      );
-
+      // 2026-09-03: deadlineAt is deliberately OMITTED here — it defaults
+      // to null and stays null until src/worker/claim.ts's
+      // stampRunStartedAtFirstDequeue sets it at FIRST DEQUEUE, sized on
+      // THIS run's own judgment count and measured from the moment a
+      // worker actually claims it. This consumer used to compute its own
+      // creation-time deadline here, independently of run-launch.ts's
+      // (now-also-deleted) formula — the THIRD of three call sites that
+      // all had to agree, and the one most likely to be missed exactly
+      // because it lived in a different file from the other two.
       const run = await prisma.$transaction(async (tx) => {
         const createdRun = await tx.evaluationRun.create({
           data: {
@@ -259,7 +254,6 @@ export function createRunCreateConsumer(): RunCreateConsumer {
             rubricId: msg.runSpec.rubricId ?? null,
             protocol: msg.runSpec.protocol,
             status: 'pending',
-            deadlineAt,
             triggeredById: msg.runSpec.triggeredById,
           },
         });
