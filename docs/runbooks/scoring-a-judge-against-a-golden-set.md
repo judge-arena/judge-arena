@@ -581,6 +581,42 @@ raw `outputTokens` and character counts it was derived from. The recorded envelo
 scored so far are in
 [`docs/superpowers/specs/2026-09-01-judge-scoreboard-and-model-envelopes.md`](../superpowers/specs/2026-09-01-judge-scoreboard-and-model-envelopes.md) §2.
 
+**As of `c5e84f3` the launch runs the FIRST of the two formulas above for you — and it runs the same
+`accountTokens()`-derived version this section already describes, not a raw `outputTokens` count.**
+`launchCalibrationRun` pools the judge's throughput over its *completed* judgments
+(`Σ accountTokens(row).estimatedGeneratedTokens / Σ (latencyMs / 1000)`, via `accountTokens` —
+`judgeThroughputEstimate` in `src/lib/calibration/latency.ts`) and,
+when `time_to_exhaust_budget` exceeds the hard cap, logs a warning and returns it as
+`CalibrationLaunchResult.budgetWarning`; `npm run calibration:run` prints it as `⚠ BUDGET …` directly
+under the launch line. **It warns and never refuses.** The second formula (`max_safe_tokens =
+timeout_s × tok_per_s`) is deliberately NOT automated: per §8.7 the 300 s initial budget now warns
+and keeps waiting rather than aborting, so it is no longer a ceiling a launch can fail against.
+
+**Four things "no warning" does not mean.** (1) A first-ever judge has no completed judgment, so it
+gets silence by construction — do the arithmetic above by hand for a judge's first run. (2) The rule
+compares the *optimistic* flat-rate estimate, and §5.4.1 of the scoreboard spec measures that model
+as ~51% optimistic at 12k tokens; a judge whose estimate lands above roughly two-thirds of the cap
+can still abort at it unwarned, so treat anything over ~600 s of estimate as needing the manual
+check. The figure the warning prints is a **lower bound** on duration, never an estimate. (3) The
+cap it compares against is the **launcher's** `EVALUATION_MODEL_HARD_CAP_MS` — the environment of
+the process running `npm run calibration:run` — while the abort happens in the *worker* pod, which
+reads its own. Confirm the two match before trusting a silent result (the launch's batch deadline
+already makes the same assumption). (4) It runs at **calibration launch only**: `--score-only`
+re-scores an already-launched run and does not check, and ordinary or bulk runs launched through the
+API are not covered at all.
+
+It is measured at launch, not at endpoint verification — the verify probe sends `max_tokens: 1`,
+which cannot yield a rate.
+
+> **CORRECTION (added with `c5e84f3`).** The narrative at the top of this §8.6 records granite4.2
+> stalling on the **300 s provider timeout** at 12288 tokens. That wall no longer aborts (§8.7), and
+> the automated check above would have been *silent* on granite: 35 tok/s × 12288 ≈ 351 s, which
+> fits the 900 s hard cap. The check guards the hard cap, which is the only remaining abort. The
+> case it does catch is qwen3.5:9b — the judge whose `outputTokens` excludes the reasoning channel
+> entirely, per this section's `accountTokens()` discussion above — measured against
+> `judge-arena-pg-1` on 2026-09-02 at 12.0 tok/s (pooled over its completed judgments):
+> 12288 / 12.0 ≈ 1024 s.
+
 > **CORRECTION (2026-09-02, `0bd6b6b`).** This paragraph used to read:
 > *"Get `tok_per_s` from a single scored item — `ModelJudgment.outputTokens / (latencyMs/1000)`."*
 > **Both halves were wrong.**

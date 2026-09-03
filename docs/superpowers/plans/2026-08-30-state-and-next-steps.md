@@ -458,6 +458,24 @@ Full record: [`docs/superpowers/specs/2026-09-01-judge-scoreboard-and-model-enve
    validates that relationship at registration, though both inputs are known: the endpoint verify step
    could measure `tok_per_s` on its probe call and refuse — or warn on — a budget the timeout cannot
    afford. Runbook §8.6 documents the manual check; **the check wants to be code.**
+   **DONE `2026-09-03`, `c5e84f3`** — `launchCalibrationRun` pools the judge's throughput over its
+   completed judgments (`judgeThroughputEstimate`, `src/lib/calibration/latency.ts`) and, when
+   `max_tokens / tok_per_s` exceeds `EVALUATION_MODEL_HARD_CAP_MS`, logs a warning and returns it as
+   `CalibrationLaunchResult.budgetWarning`; `npm run calibration:run` prints it under the launch line.
+   Warns, never refuses (a first-ever judge has no history). **CORRECTION** to the sentence above:
+   the endpoint verify step can NOT measure `tok_per_s` on its probe call — `verify.ts` probes with
+   `max_tokens: 1`, and one token is not a rate — so the check lives at launch over
+   `ModelJudgment.outputTokens` / `latencyMs` / `reasoningContent` history, read through
+   `accountTokens()` (`src/lib/calibration/token-accounting.ts`) rather than off raw `outputTokens` —
+   which does not count the reasoning channel on every model — and the linear figure is stated as a
+   LOWER bound on duration (spec §5.4.1: throughput decays with output length). **Scope, so this DONE
+   marker is not read wider than it is:** it guards the 900 s HARD CAP — the only wall that still
+   aborts after §8.7 made the 300 s budget an alert — and it runs at calibration launch only. It would
+   have been silent on the granite4.2 case that prompted this item (35 tok/s × 12288 ≈ 351 s, inside
+   900 s); the case it catches is qwen3.5:9b, whose `outputTokens` excludes the reasoning channel
+   entirely, at 12.0 tok/s (≈ 1024 s). `--score-only` and the API's single/bulk run launches are NOT
+   covered, and an estimate under but near the cap is silent because the flat-rate model understates
+   the tail. Runbook §8.6 states all four limits.
 
 9. **`reasoningTokens` from Ollama — now answerable.** Item 2 above asked what Ollama sends. It sends
    nothing either: the column is NULL across all granite runs, same as llama.cpp. So the field is
