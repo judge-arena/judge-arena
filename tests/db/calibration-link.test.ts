@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import type { Prisma } from '@prisma/client';
 import { db, truncateAll, mkUser, mkRubric } from './helpers';
 import { prisma } from '@/lib/db';
+import { logger } from '@/lib/logger';
 import { isGoldenSetFrozen } from '@/lib/golden-sets';
 import { effectiveSamplingParams } from '@/lib/llm/sampling';
 import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
@@ -182,8 +183,48 @@ function launchParamsFrom(world: Awaited<ReturnType<typeof mkWorld>>) {
   };
 }
 
+/**
+ * One judgment in this judge's HISTORY, carrying the two columns the
+ * throughput estimate reads. Hung off its own ordinary Evaluation/Run so it
+ * is history, not part of the calibration under test. `status` defaults to
+ * completed; pass 'error' to plant a row that must NOT count.
+ *
+ * Deliberately does NOT set `reasoningContent` (defaults to `null`). Since
+ * `token-accounting`, `judgeThroughputEstimate` reads it too and pools
+ * `accountTokens(row).estimatedGeneratedTokens`, not raw `outputTokens` —
+ * but with `reasoningContent: null`, `accountTokens` classifies every row
+ * here `no_reasoning_channel` and returns `estimatedGeneratedTokens ===
+ * outputTokens` exactly. So the four fixtures below (2 tok/s against
+ * 6144/300000, etc.) are UNCHANGED by that plan: this file tests the WIRING
+ * (does `launchCalibrationRun` call the right functions with the right
+ * values), and Task 1's own unit test is what pins the reasoning-channel
+ * arithmetic — duplicating it here would only be a slower copy of that test.
+ */
+async function mkHistoryJudgment(
+  world: Awaited<ReturnType<typeof mkWorld>>,
+  measure: { outputTokens: number | null; latencyMs: number | null; status?: 'completed' | 'error' }
+) {
+  const evaluation = await db.evaluation.create({
+    data: { projectId: world.project.id, userId: world.user.id, inputText: 'history' },
+  });
+  const run = await db.evaluationRun.create({ data: { evaluationId: evaluation.id } });
+  return db.modelJudgment.create({
+    data: {
+      runId: run.id,
+      judgeModelVersionId: world.version.id,
+      status: measure.status ?? 'completed',
+      outputTokens: measure.outputTokens,
+      latencyMs: measure.latencyMs,
+    },
+  });
+}
+
 describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', () => {
   beforeEach(async () => {
+    // No `restoreMocks` in vitest.db.config.ts. The budget-warning test spies
+    // on logger.warn; a spy that survived a mid-test failure would silence
+    // every later warn in this file.
+    vi.restoreAllMocks();
     await truncateAll();
     // A pairwise launch resolves the `v1-pairwise` PromptTemplate row, and
     // truncateAll drops it with everything else.
@@ -600,5 +641,143 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
     // Full pair on the header; the version's own field is still partial.
     expect(header.samplingParams).toEqual({ temperature: 0.3, max_tokens: 12288 });
     expect(world.version.samplingDefaults).toEqual({ max_tokens: 12288 });
+  });
+
+  // ── (5) The stacked-limits warning (runbook §8.6; register §5.6/8) ───────
+  // (Block (4) is the v2k sampling snapshot, added by calibration-sampling-snapshot.)
+  //
+  // `max_tokens / tok_per_s` must fit under the HARD CAP, or a judgment that
+  // needs its whole budget is ABORTED rather than truncated. Which wall,
+  // precisely: NOT the 300 s provider timeout granite4.2 stalled on in
+  // runbook §8.6 — 35 tok/s × 12288 is ~351 s, over 300 s but well under
+  // 900 s, so this rule is correctly SILENT on granite and is not the check
+  // that would have caught it. §8.7 made 300 s an alert that keeps waiting;
+  // the hard cap is now the only wall that aborts. The live case is
+  // qwen3.5:9b: its judge path always sends response_format: json_schema,
+  // and outputTokens excludes the reasoning channel on this model, so the
+  // rate has to be `judgeThroughputEstimate`'s accountTokens-derived pooled
+  // figure, never raw outputTokens — measured against judge-arena-pg-1 on
+  // 2026-09-02 at 12.0 tok/s (pooled over its 15 completed judgments):
+  // 12288 / 12.0 = 1024 s against 900 s. (The db fixtures below use plainer
+  // round numbers — 2 tok/s against 6144/300000 — chosen for the wiring
+  // this task tests, not to reproduce that live figure; Task 1's own
+  // `pools via accountTokens` unit test is what pins this arithmetic.) The
+  // launch computes it from the judge's COMPLETED history and the RESOLVED
+  // snapshot (`samplingParams`, v2k) and WARNS. It never refuses: the first
+  // calibration of any judge has no history to measure.
+
+  it('warns when the effective max_tokens cannot be produced inside the hard cap — and still launches', async () => {
+    // `logger` is a plain object (`src/lib/logger.ts:104`), so a spy needs no
+    // `vi.mock` and no hoisting — the same shape `tests/lib/backends.test.ts`
+    // :263 / :294 uses. `vitest.db.config.ts` sets no `restoreMocks`, which is
+    // why Step 3(f) adds `vi.restoreAllMocks()` to this file's `beforeEach`
+    // (:186-191): a spy left installed by a mid-test failure would otherwise
+    // swallow every later warn in the file and turn one red into a cascade.
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const world = await mkWorld({ items: 1, samplingDefaults: { temperature: 0.3, max_tokens: 12288 } });
+    // 600 tokens in 300 s = 2.0 tok/s, so 12288 tokens take 6144 s, which
+    // formatDurationMs renders `102m24s` (it has no hours unit).
+    // Chosen far above the 900 s default and above MAX_HARD_CAP_MS (1170 s,
+    // the value env.ts refuses at boot), so no hard cap this deployment can
+    // legally run under makes 12288 tokens fit.
+    await mkHistoryJudgment(world, { outputTokens: 600, latencyMs: 300_000 });
+
+    const result = await launchCalibrationRun(launchParamsFrom(world), { publish: noopPublish });
+
+    // NOT `.not.toBeNull()`: before the property exists, `budgetWarning` is
+    // `undefined`, and `expect(undefined).not.toBeNull()` PASSES — an
+    // assertion that cannot fail for the case it is guarding (CONTRIBUTING.md
+    // :227-230, "a green test can be impossible to fail"). `typeof` goes red
+    // for both `null` and `undefined`.
+    expect(typeof result.budgetWarning).toBe('string');
+    // The EFFECTIVE budget from the snapshot, not the registry default 4096.
+    expect(result.budgetWarning).toMatch(/max_tokens 12288/);
+    expect(result.budgetWarning).toMatch(/2\.0 tok\/s/);
+    // `/n=1/` alone would also match `n=10`, `n=12`, `n=100` (failure mode 3,
+    // the substring class). Pin the rendered CLAUSE so the sample size is
+    // asserted in its role.
+    expect(result.budgetWarning).toMatch(/n=1 completed judgment/);
+    expect(result.budgetWarning).toMatch(/LOWER bound/);
+    // A warning, not a refusal: the run launched.
+    expect(result.accepted).toEqual([world.items[0].id]);
+    expect(result.failed).toEqual([]);
+
+    // ── The LOG, which is the only DURABLE record of this warning ─────────
+    // The CLI print is transient stdout; `CalibrationLaunchResult` is gone
+    // the moment the caller returns. Without this assertion the wrong
+    // implementation that survives every other gate is: delete the whole
+    // `if (budgetWarning !== null) { logger.warn(...) }` block, or ship it
+    // with a mis-keyed payload. Three docs (the Architecture paragraph, the
+    // runbook and the register DONE marker) claim this log exists, so it
+    // gets an assertion and an injection like any other behaviour.
+    // `toHaveBeenCalledTimes(1)`, and it is NOT brittle — the other three
+    // `logger.warn` calls reachable from this path are all provably silent
+    // here: launch.ts:212 fires only over MAX_CALIBRATION_ITEMS (this world
+    // has 1 item), launch.ts:447 only when `failed` is non-empty (asserted
+    // empty above), and run-launch.ts:661 only when `publish()` throws
+    // (`noopPublish` cannot). If this count ever reads 2, something new is
+    // warning on the happy path and that is worth knowing, not worth
+    // loosening the assertion for.
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const [msg, payload] = warnSpy.mock.calls[0] as [string, Record<string, unknown>];
+    expect(msg).toMatch(/cannot be produced inside the hard cap/);
+    expect(payload).toMatchObject({
+      calibrationRunId: result.calibrationRunId,
+      judgeModelVersionId: world.version.id,
+      maxTokens: 12288,
+      warning: result.budgetWarning,
+    });
+    warnSpy.mockRestore();
+  });
+
+  it('a judge with no COMPLETED judgment gets no warning — first-ever judges must launch', async () => {
+    const world = await mkWorld({ items: 1, samplingDefaults: { temperature: 0.3, max_tokens: 12288 } });
+    // An ERRORED judgment with terrible numbers is present and must NOT
+    // count: a call that timed out says the judge did not answer, not how
+    // fast it answers.
+    await mkHistoryJudgment(world, { outputTokens: 600, latencyMs: 300_000, status: 'error' });
+
+    const result = await launchCalibrationRun(launchParamsFrom(world), { publish: noopPublish });
+
+    expect(result.budgetWarning).toBeNull();
+    expect(result.accepted).toEqual([world.items[0].id]);
+  });
+
+  it('a judge fast enough for its budget gets no warning', async () => {
+    // Kept deliberately, though it looks redundant beside the errored-history
+    // test: it is the ONLY test here that would go red if `hardCapMs` were
+    // mis-wired (e.g. a hard-coded 0, or `resolveTimeoutBudgets()` dropped).
+    // With hardCapMs = 0 the over-cap and RESOLVED-budget tests still warn
+    // and the errored-history test still returns null — only a judge that
+    // genuinely FITS discriminates. It is also the only end-to-end guard
+    // against a false-positive warning on a healthy judge, which is the
+    // failure mode an operator would actually notice.
+    //
+    // Qwen's measured envelope: 2869 output tokens in 49.0 s = 58.5 tok/s;
+    // the registry-default 4096 budget exhausts in ~70 s against the cap
+    // (900 s by default — this assumes the cap is not configured below 70 s).
+    const world = await mkWorld({ items: 1 });
+    await mkHistoryJudgment(world, { outputTokens: 2869, latencyMs: 49_000 });
+
+    const result = await launchCalibrationRun(launchParamsFrom(world), { publish: noopPublish });
+
+    expect(result.budgetWarning).toBeNull();
+    expect(result.accepted).toEqual([world.items[0].id]);
+  });
+
+  it('reads the RESOLVED budget: a version pinning only temperature inherits max_tokens 4096 and is warned on it', async () => {
+    // The raw samplingDefaults has NO max_tokens here. Only the resolver
+    // (effectiveSamplingParams, per-field merge with the registry default
+    // { temperature: 0.3, max_tokens: 4096 }) produces a number; a raw read
+    // of `samplingDefaults.max_tokens` is `undefined`, the division is NaN,
+    // and `!(NaN > cap)` is silence. 4096 / 2.0 tok/s = 2048 s, over any
+    // cap this deployment can legally run under (MAX_HARD_CAP_MS is 1170 s).
+    const world = await mkWorld({ items: 1, samplingDefaults: { temperature: 0.3 } });
+    await mkHistoryJudgment(world, { outputTokens: 600, latencyMs: 300_000 });
+
+    const result = await launchCalibrationRun(launchParamsFrom(world), { publish: noopPublish });
+
+    expect(result.budgetWarning).toMatch(/max_tokens 4096/);
+    expect(result.accepted).toEqual([world.items[0].id]);
   });
 });

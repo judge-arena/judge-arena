@@ -238,6 +238,10 @@ async function main(): Promise<void> {
     console.log(`  sampling  ${canonicalJson(launched.samplingParams)}  (snapshot on CalibrationRun.samplingParams — resolved, immutable)`);
     console.log(`  accepted ${launched.accepted.length}   failed ${launched.failed.length}`);
     for (const f of launched.failed) console.log(`    ✗ ${f.goldenItemId}: ${f.reason}`);
+    // The stacked-limits warning (runbook §8.6). Printed under the launch
+    // line, where the operator is looking: a warning that exists only in the
+    // worker log is one nobody reads until the run has already stalled.
+    if (launched.budgetWarning) console.log(`  ⚠ BUDGET  ${launched.budgetWarning}`);
     if (launched.accepted.length === 0) throw new Error('Nothing was accepted — stopping before the poll.');
   }
 

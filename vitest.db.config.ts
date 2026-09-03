@@ -38,6 +38,19 @@ export default defineConfig({
         'src/**/*.test.ts',
         'src/lib/env.ts',
         'src/lib/logger.ts',
+        // This DB run only LOADS src/lib/calibration/latency.ts transitively
+        // (launch.ts imports judgeThroughputEstimate/budgetWarningFor for the
+        // stacked-limits warning) and exercises only a handful of its
+        // branches through that wiring — the db tests here drive "does
+        // launch.ts call the right functions with the right values", not the
+        // arithmetic in latency.ts itself. Its real gate is the unit run
+        // (vitest.config.ts), where it measures 100% lines / 100% branches
+        // (166/166 lines, 67/67 branches, 10/10 functions —
+        // coverage/lcov.info, measured 2026-09-02 on 58139bb). Excluding it
+        // here keeps this DB run's report honest about what it actually
+        // exercises, the same class of entry as src/lib/auth.ts /
+        // src/lib/audit.ts above.
+        'src/lib/calibration/latency.ts',
       ],
       // ── THRESHOLD POLICY (2026-08-12) ──────────────────────────────────
       // Floors sit BELOW the measured actual rather than at it: -2pp for the

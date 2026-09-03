@@ -40,6 +40,7 @@ import type { GoldenCandidate, Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { logger } from '@/lib/logger';
 import { goldenItemLifecycleWhere, isGoldenSetFrozen } from '@/lib/golden-sets';
+import { budgetWarningFor, judgeThroughputEstimate } from '@/lib/calibration/latency';
 import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
 // The LEAF module, deliberately — not registry.ts and not the `@/lib/llm`
 // barrel. This file is bundled into the image's calibration-run.js by esbuild
@@ -107,6 +108,15 @@ export interface CalibrationLaunchResult {
    * launched under without re-reading the row.
    */
   samplingParams: SamplingParams;
+  /**
+   * The stacked-limits warning (runbook §8.6), or `null` when the effective
+   * `max_tokens` fits under the hard cap at this judge's measured throughput
+   * — OR when the judge has no completed judgment to measure. A WARNING,
+   * never a refusal: the run has launched either way. Callers fronting a
+   * human should print it; the launch has already logged it. The figure in
+   * it is a LOWER bound on duration (throughput decays with output length).
+   */
+  budgetWarning: string | null;
 }
 
 function reasonOf(error: unknown): string {
@@ -313,6 +323,29 @@ export async function launchCalibrationRun(
     Date.now() + items.length * resolveTimeoutBudgets().hardCapMs + DEADLINE_SLACK_MS
   );
 
+  // ── The stacked-limits check, part 1 of 2: the measurement ────────────────
+  // BEFORE the header write, and the placement is load-bearing. This module's
+  // rule is stated at :33-37 — "EVERYTHING KNOWABLE UP FRONT IS CHECKED BEFORE
+  // THE FREEZE … writing it is irreversible". Every `await` between the header
+  // commit and the item loop is a new way for the function to throw with the
+  // golden set frozen, the CalibrationRun header committed and ZERO items
+  // launched; a purely ADVISORY warning must never be able to do that. This
+  // query needs nothing from the transaction (only `judgeModelVersionId`), so
+  // it belongs here, where a connection blip fails the launch exactly the way
+  // the `$transaction` a few lines below would have failed it anyway — before
+  // anything irreversible exists.
+  //
+  // `resolveTimeoutBudgets()` is called a second time here (the batch deadline
+  // at :312-314 is the first). Deliberate and cheap: it reads `env` and does
+  // arithmetic, and hoisting one shared const across the deadline comment
+  // block would put an unrelated edit in the middle of THE REAPER FIX.
+  //
+  // The rate cannot come from the endpoint verify probe (verify.ts sends
+  // max_tokens 1, and one token is not a rate) — only from this judge's own
+  // completed history.
+  const throughput = await judgeThroughputEstimate(judgeModelVersionId);
+  const hardCapMs = resolveTimeoutBudgets().hardCapMs;
+
   // ── The irreversible write ───────────────────────────────────────────────
   // The count and the create share one transaction because that is the shape
   // `isGoldenSetFrozen` requires: it takes a transaction client so a freeze
@@ -377,6 +410,35 @@ export async function launchCalibrationRun(
     frozeGoldenSet: !wasAlreadyFrozen,
     samplingParams,
   });
+
+  // ── The stacked-limits check, part 2 of 2: the rule (runbook §8.6) ────────
+  // Pure, so it adds no failure point past the freeze. It reads the RESOLVED
+  // `samplingParams` the transaction just snapshotted — the effective
+  // max_tokens every judgment of this run will execute under — not the raw,
+  // nullable samplingDefaults. A warning and never a refusal: a first-ever
+  // judge has no completed judgment to measure, and refusing would make the
+  // first calibration of every judge impossible.
+  const budgetWarning = budgetWarningFor({ maxTokens: samplingParams.max_tokens, throughput, hardCapMs });
+  if (budgetWarning !== null) {
+    logger.warn("launchCalibrationRun: max_tokens cannot be produced inside the hard cap at this judge's measured throughput", {
+      goldenSetId,
+      calibrationRunId: calibrationRun.id,
+      judgeModelVersionId,
+      maxTokens: samplingParams.max_tokens,
+      // The WHOLE estimate as one key, NOT `tokPerSec: throughput?.tokPerSec`
+      // / `n: throughput?.n`. `budgetWarning !== null` already implies
+      // `throughput !== null` — `budgetWarningFor` returns null on its first
+      // line when the throughput is null — so each `?.` would contribute a
+      // branch arm that NO test can ever make the deciding clause. launch.ts
+      // is in the db coverage denominator (BRF:31 today), so those two dead
+      // arms would be permanently-uncovered branches in the one task whose
+      // coverage gate is knife-edge, and they are exactly the "unreachable
+      // guard" class this plan invokes in Task 1 to justify its NaN row.
+      throughput,
+      hardCapMs,
+      warning: budgetWarning,
+    });
+  }
 
   // ── One item, one launch ─────────────────────────────────────────────────
 
@@ -458,5 +520,6 @@ export async function launchCalibrationRun(
     failed,
     frozeGoldenSet: !wasAlreadyFrozen,
     samplingParams,
+    budgetWarning,
   };
 }
