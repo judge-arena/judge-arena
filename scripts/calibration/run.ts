@@ -51,6 +51,7 @@ import {
   type LatencyBaseline,
 } from '@/lib/calibration/latency';
 import { scoreCalibrationRun } from '@/lib/calibration/score';
+import { canonicalJson, describeSamplingSnapshot, detectSamplingDrift } from '@/lib/calibration/sampling-drift';
 // The alert wording and the budgets it thresholds on live with the timeout
 // policy, not here — see `reportOverdue`.
 import { buildInitialBudgetAlert, resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
@@ -154,10 +155,20 @@ async function main(): Promise<void> {
   const pollTimeoutSec = Number(arg('poll-timeout') ?? '3600');
 
   let calibrationRunId: string;
+  // The header's launch-time snapshot (v2k, CalibrationRun.samplingParams).
+  // `null` means launched before the column existed — see describeSamplingSnapshot.
+  let headerSampling: unknown;
 
   if (scoreOnly) {
     calibrationRunId = scoreOnly;
     console.log(`Scoring existing calibration run ${calibrationRunId} (no launch).`);
+    const header = await prisma.calibrationRun.findUnique({
+      where: { id: calibrationRunId },
+      select: { samplingParams: true },
+    });
+    if (!header) throw new Error(`No CalibrationRun ${calibrationRunId}.`);
+    headerSampling = header.samplingParams;
+    console.log(`  sampling  ${describeSamplingSnapshot(headerSampling)}`);
   } else {
     if (!goldenSetId || !judgeModelVersionId) {
       throw new Error('Need --golden-set=<id> and --judge-version=<id>, or --score-only=<id>.');
@@ -196,7 +207,10 @@ async function main(): Promise<void> {
 
     console.log('── Launching ──────────────────────────────────────────────');
     console.log(`  judge     ${version.judgeModel.name}  (${version.servingBackend}, baseModel=${version.judgeModel.baseModel})`);
-    console.log(`  sampling  ${JSON.stringify(version.samplingDefaults)}`);
+    console.log(
+      `  sampling  ${JSON.stringify(version.samplingDefaults)}  ` +
+        '(version.samplingDefaults — RAW and MUTABLE; the run\'s resolved snapshot is printed after launch)'
+    );
     console.log(`  rubric    ${rubric.name} (${rubric.criteria.length} criteria)`);
     console.log(`  project   ${project.name}`);
     console.log(`  as        ${owner.name}`);
@@ -211,6 +225,8 @@ async function main(): Promise<void> {
     });
     calibrationRunId = launched.calibrationRunId;
     console.log(`  calibrationRunId ${calibrationRunId}`);
+    headerSampling = launched.samplingParams;
+    console.log(`  sampling  ${canonicalJson(launched.samplingParams)}  (snapshot on CalibrationRun.samplingParams — resolved, immutable)`);
     console.log(`  accepted ${launched.accepted.length}   failed ${launched.failed.length}`);
     for (const f of launched.failed) console.log(`    ✗ ${f.goldenItemId}: ${f.reason}`);
     if (launched.accepted.length === 0) throw new Error('Nothing was accepted — stopping before the poll.');
@@ -278,6 +294,9 @@ async function main(): Promise<void> {
       reasoning: true, reasoningContent: true, reasoningSource: true, reasoningTokens: true,
       rawResponse: true, systemPrompt: true, userPrompt: true, userPromptSha256: true, promptTruncated: true,
       inputTokens: true, outputTokens: true, latencyMs: true, servedModelId: true, finishReason: true, parseMode: true,
+      // What each judgment was EXECUTED under — compared against the header
+      // snapshot below (v2k).
+      samplingParams: true,
       // The model leg of the (dataset, item, model) tuple. Read here so the
       // time-to-compute block can print a per-judge baseline in --score-only
       // mode too, where no judge id was passed on the command line.
@@ -286,6 +305,20 @@ async function main(): Promise<void> {
     },
     orderBy: { createdAt: 'asc' },
   });
+
+  // ── Sampling drift (v2k) ─────────────────────────────────────────────────
+  // Header = what the run was LAUNCHED under; each completed judgment = what
+  // it was EXECUTED under. Equal by construction unless the version row was
+  // edited while the run drained — runbook §8.8's "mixture of two
+  // experiments". The comparison lives in src/lib (JSONB reorders keys).
+  const drift = detectSamplingDrift(headerSampling, judgments);
+  if (drift.kind === 'moved_mid_run') {
+    console.log(`\n  ⚠ sampling config MOVED MID-RUN — completed judgments ran under ${drift.executedUnder.join('  and  ')}.`);
+    console.log('    This run is a mixture of two experiments (runbook §8.8): void it and re-run whole under a NEW version ordinal.');
+  } else if (drift.kind === 'differs_from_header') {
+    console.log(`\n  ⚠ sampling config differs from the launch snapshot — header ${drift.header}, judgments ${drift.executedUnder}.`);
+    console.log('    The version row was edited between launch and execution; the header is what was intended, the judgments are what ran.');
+  }
 
   console.log(`\n── Capture completeness (${judgments.length} judgments) ────────────────`);
   const fields: Array<[string, (j: (typeof judgments)[number]) => unknown]> = [

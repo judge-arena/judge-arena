@@ -36,11 +36,18 @@
  * LAST, after every refusal that does not require touching an item, because
  * writing it is irreversible.
  */
-import type { GoldenCandidate } from '@prisma/client';
+import type { GoldenCandidate, Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { logger } from '@/lib/logger';
 import { goldenItemLifecycleWhere, isGoldenSetFrozen } from '@/lib/golden-sets';
 import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
+// The LEAF module, deliberately — not registry.ts and not the `@/lib/llm`
+// barrel. This file is bundled into the image's calibration-run.js by esbuild
+// (Dockerfile, only @prisma/client external); importing registry.ts would
+// ship every provider SDK, and the barrel would add the redis client on top,
+// into a CLI that never calls a provider. tests/lib/sampling.test.ts keeps
+// sampling.ts a leaf.
+import { effectiveSamplingParams, type SamplingParams } from '@/lib/llm/sampling';
 import {
   DEADLINE_SLACK_MS,
   launchSingleRun,
@@ -93,6 +100,13 @@ export interface CalibrationLaunchResult {
    * is not worth a warning.
    */
   frozeGoldenSet: boolean;
+  /**
+   * The EFFECTIVE `{ temperature, max_tokens }` snapshotted on the header
+   * (`CalibrationRun.samplingParams`, v2k) — resolved, never the version's raw
+   * `samplingDefaults`. Returned so a caller can print what the run was
+   * launched under without re-reading the row.
+   */
+  samplingParams: SamplingParams;
 }
 
 function reasonOf(error: unknown): string {
@@ -313,8 +327,29 @@ export async function launchCalibrationRun(
   // a second CalibrationRun on one set is legitimate: a different judge), so it
   // is left as it stands rather than paying for a `SELECT ... FOR UPDATE` on
   // the set to sharpen a flag whose only consumer is a human-facing prompt.
-  const { calibrationRun, wasAlreadyFrozen } = await prisma.$transaction(async (tx) => {
+  const { calibrationRun, wasAlreadyFrozen, samplingParams } = await prisma.$transaction(async (tx) => {
     const alreadyFrozen = await isGoldenSetFrozen(tx, goldenSetId);
+    // Read in the SAME transaction as the header write so the snapshot and
+    // the irreversible header commit together. `requireOwnedActiveEndpoints`
+    // above already refused (400) any version the caller cannot reach, so
+    // this null arm guards against a concurrent delete; it is not a refusal
+    // an operator will see.
+    const version = await tx.judgeModelVersion.findUnique({
+      where: { id: judgeModelVersionId },
+      select: { samplingDefaults: true },
+    });
+    if (!version) throw new RunLaunchError(404, 'Judge model version not found');
+    // RESOLVED, NOT RAW: the same `effectiveSamplingParams` the worker's
+    // pairwise seam resolves per call (registry.ts prepareJudgmentCall; the
+    // consumer's pairwise seam passes no overrides), so this equals every
+    // ModelJudgment.samplingParams of the run unless the version row moves
+    // mid-run — header ≠ judgment is the detector. (One latent third case:
+    // judgment-consumer.ts's `result.samplingParamsUsed ?? version
+    // .samplingDefaults` fallback persists the RAW field, which can never
+    // equal a resolved header. It exists for pre-Task-10 fixtures and no
+    // in-tree caller reaches it.) The raw field would store NULL for a
+    // version without defaults, and NULL must mean only "pre-v2k".
+    const resolved = effectiveSamplingParams(version.samplingDefaults);
     const created = await tx.calibrationRun.create({
       data: {
         goldenSetId,
@@ -324,10 +359,15 @@ export async function launchCalibrationRun(
         // rubric Y. Recorded on the header so the number is interpretable
         // without joining through a run.
         rubricId,
+        // Pinned for the same reason as rubricId: `samplingDefaults` is
+        // mutable, and a join through the version reports today's config for
+        // a historical run (scoreboard spec §4.1; seed-core.ts:223-229 states
+        // the invariant the production SQL edits broke).
+        samplingParams: resolved as unknown as Prisma.InputJsonValue,
       },
       select: { id: true },
     });
-    return { calibrationRun: created, wasAlreadyFrozen: alreadyFrozen };
+    return { calibrationRun: created, wasAlreadyFrozen: alreadyFrozen, samplingParams: resolved };
   });
 
   logger.info('launchCalibrationRun: golden set is now frozen (irreversible)', {
@@ -335,6 +375,7 @@ export async function launchCalibrationRun(
     calibrationRunId: calibrationRun.id,
     items: items.length,
     frozeGoldenSet: !wasAlreadyFrozen,
+    samplingParams,
   });
 
   // ── One item, one launch ─────────────────────────────────────────────────
@@ -416,5 +457,6 @@ export async function launchCalibrationRun(
     accepted,
     failed,
     frozeGoldenSet: !wasAlreadyFrozen,
+    samplingParams,
   };
 }

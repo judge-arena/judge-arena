@@ -422,6 +422,12 @@ Full record: [`docs/superpowers/specs/2026-09-01-judge-scoreboard-and-model-enve
    that will do the wrong join. `rubricId`, `kappaVariant` and `passThreshold` are already pinned on
    the run for precisely this reason; `samplingDefaults` was missed. Additive, one column.
 
+   > **DONE / CORRECTION (v2k, 2026-09-01).** Landed as `CalibrationRun.samplingParams` — resolved
+   > at launch inside the launch transaction, NULL only on the 9 pre-v2k rows (no backfill), printed
+   > and drift-checked by `scripts/calibration/run.ts`. And "`passThreshold` … already pinned" above
+   > was wrong: `passThreshold`/`passed` have no writer anywhere in `src/` or `scripts/`; only
+   > `rubricId` (launch) and `kappaVariant`/`kappaWeighting`/`thresholdMetric` (score) are pinned.
+
 7. **`granite4.1:3b` scores BELOW the degenerate baseline and nothing on screen says so.** It scored
    0.5000 where a judge that stamps `A>B` on every item scores **0.5667** on this set. The floor is a
    property of the answer key (17/13) and is computable at score time, but it is not computed or

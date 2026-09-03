@@ -235,6 +235,27 @@ internally comparable.
 > and was missed. Until then, every reader must know to go one level deeper, and readers do not
 > reliably know things.
 
+> **Landed (v2k, 2026-09-01) — with a CORRECTION.** `CalibrationRun.samplingParams` now snapshots
+> the RESOLVED config at launch (`effectiveSamplingParams(samplingDefaults)`, a full
+> `{ temperature, max_tokens }`, never the raw JSON), so the header itself is now the right answer:
+>
+> ```sql
+> -- RIGHT, since v2k. NULL only on the 9 runs launched before the column existed —
+> -- for those, and only those, fall through to the per-judgment query above.
+> SELECT cr.id, cr."samplingParams"->>'max_tokens' AS max_tokens, cr."samplingParams" IS NULL AS pre_v2k
+> FROM "CalibrationRun" cr;
+> ```
+>
+> The note above says the run "already snapshots `rubricId`, `kappaVariant` and
+> `passThreshold`". **That is wrong about `passThreshold`**: `CalibrationRun.passed` and
+> `CalibrationRun.passThreshold` are declared in `prisma/schema.prisma` and nothing writes them.
+> `rubricId` is pinned at launch;
+> `kappaVariant`/`kappaWeighting`/`thresholdMetric` at score time. The header is a snapshot, not a
+> lock — the worker still reads the version row per judgment — so a judge whose config must change
+> gets a **new version ordinal** (`prisma/seed-core.ts:223-229` states the invariant) or, at the very
+> minimum, is never edited mid-run; `scripts/calibration/run.ts` prints a ⚠ when a run's judgments
+> disagree with the header or with each other, comparing with keys canonicalised (JSONB reorders them).
+
 ### 4.2 Kappa is not comparable across sets — and the scoreboard is cross-set by design
 
 `score.ts` states this at length and it bears repeating *here*, because a scoreboard is exactly the

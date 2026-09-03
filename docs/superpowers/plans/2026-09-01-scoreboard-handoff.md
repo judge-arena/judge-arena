@@ -328,6 +328,18 @@ what a leaderboard actually needs.
    silently rewrote what that query says about the earlier run, with nothing logged. Truth is one
    level deeper on `ModelJudgment.samplingParams`. `rubricId`, `kappaVariant` and `passThreshold` are
    already pinned for exactly this reason; this was missed. **Additive, one column.**
+
+   > **CORRECTION (2026-09-01, v2k).** Landed as `CalibrationRun.samplingParams` — the RESOLVED
+   > `{ temperature, max_tokens }` (`effectiveSamplingParams(samplingDefaults)`, never the raw JSON)
+   > written inside the launch transaction in `src/lib/calibration/launch.ts`; NULL only on the 9
+   > runs launched before v2k, deliberately not backfilled. The sentence above also said
+   > `passThreshold` is "already pinned". **It is not**: `CalibrationRun.passed` and
+   > `CalibrationRun.passThreshold` are declared in `prisma/schema.prisma` and NOTHING in `src/` or
+   > `scripts/` writes them. What is
+   > actually pinned is `rubricId` at launch and `kappaVariant`/`kappaWeighting`/`thresholdMetric` at
+   > score time (`score.ts`). The same wrong sentence appeared in the scoreboard spec §4.1 and the
+   > register §5.6 #6 and is corrected in both. `scripts/calibration/run.ts` now prints the snapshot
+   > and warns when a run's judgments disagree with its header or with each other.
 2. **Emit the degenerate baseline beside the accuracy.** It is computable from the answer key,
    `score.ts` already derives it in prose, and nothing displays it. Without it a leaderboard cannot
    distinguish "learned a little" from "stamps A". Must be computed **per denominator** (§2).
@@ -377,12 +389,18 @@ kubectl -n tenant-public get deploy judge-arena-web judge-arena-worker \
 kubectl -n tenant-public logs deploy/judge-arena-worker --tail=20 | grep 'judge worker started'
 
 # 3. The scoreboard as the database holds it — never from a doc, and never
-#    joining to JudgeModelVersion.samplingDefaults for the config. (open #1)
+#    joining to JudgeModelVersion.samplingDefaults for the config. (open #1,
+#    landed as v2k: cr."samplingParams" is the launch-time snapshot. The
+#    nested DISTINCT is only the fallback for the 9 rows launched before v2k,
+#    which are NULL by design — and it ERRORS with "more than one row" on a
+#    run whose config moved mid-run, which is the right outcome.)
 kubectl -n tenant-public exec judge-arena-pg-1 -c postgres -- psql -U postgres -d judge_arena -c "
   SELECT jm.name, cr.\"rawAgreement\" AS acc, cr.kappa, cr.\"verdictCount\",
-         (SELECT DISTINCT mj.\"samplingParams\"->>'max_tokens'
-            FROM \"ModelJudgment\" mj JOIN \"EvaluationRun\" er ON er.id = mj.\"runId\"
-           WHERE er.\"calibrationRunId\" = cr.id AND mj.\"samplingParams\" IS NOT NULL) AS maxtok
+         COALESCE(cr.\"samplingParams\"->>'max_tokens',
+           (SELECT DISTINCT mj.\"samplingParams\"->>'max_tokens'
+              FROM \"ModelJudgment\" mj JOIN \"EvaluationRun\" er ON er.id = mj.\"runId\"
+             WHERE er.\"calibrationRunId\" = cr.id AND mj.\"samplingParams\" IS NOT NULL)) AS maxtok,
+         (cr.\"samplingParams\" IS NULL) AS pre_v2k
     FROM \"CalibrationRun\" cr
     JOIN \"JudgeModelVersion\" jmv ON jmv.id = cr.\"judgeModelVersionId\"
     JOIN \"JudgeModel\" jm ON jm.id = jmv.\"judgeModelId\"

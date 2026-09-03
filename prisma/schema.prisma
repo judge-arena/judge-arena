@@ -918,6 +918,23 @@ model CalibrationRun {
   /// cannot say which it used.
   rubricId            String?
   rubric              Rubric?           @relation(fields: [rubricId], references: [id], onDelete: Restrict)
+  /// The EFFECTIVE sampling params this calibration was LAUNCHED under:
+  /// `effectiveSamplingParams(JudgeModelVersion.samplingDefaults)` resolved
+  /// inside the launch transaction (src/lib/calibration/launch.ts) — a fully
+  /// populated `{ temperature, max_tokens }`, never the raw, nullable, possibly
+  /// partial `samplingDefaults`. Same shape and meaning as
+  /// `ModelJudgment.samplingParams`, which every judgment of this run should
+  /// equal; a judgment that differs means the version row was edited mid-run
+  /// (scoreboard spec §4.1; runbook §8.8). Pinned for the same reason
+  /// `rubricId` is: `samplingDefaults` is MUTABLE — three writers
+  /// (scripts/admin/add-judge.ts, scripts/importer/judges.ts,
+  /// prisma/seed-core.ts), no history — so a join through the version reports
+  /// TODAY's config for a historical run, even though prisma/seed-core.ts:223-229
+  /// declares a version immutable under a judgment ("a version that needs
+  /// different values is a new ordinal"). The production 4096 -> 12288 edits
+  /// broke that invariant; this column is the defence. NULL means exactly one
+  /// thing: launched before v2k (9 production rows; no backfill).
+  samplingParams      Json?
   evaluationRuns      EvaluationRun[]
   verdictCount        Int               @default(0)
   passed              Boolean?

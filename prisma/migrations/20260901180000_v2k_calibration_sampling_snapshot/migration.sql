@@ -1,0 +1,34 @@
+-- v2k — CalibrationRun snapshots the sampling config it ran under
+--
+-- CalibrationRun pinned WHICH judge version ran (judgeModelVersionId) and which
+-- rubric (rubricId, v2i) — but not what sampling config the version carried at
+-- the time. JudgeModelVersion.samplingDefaults is a plain JSONB with no history
+-- and three in-tree writers, so the obvious join (run -> version ->
+-- samplingDefaults) reports TODAY's config for a historical run: raising
+-- granite4.2 from 4096 to 12288 for calibration run #9 silently rewrote what
+-- that join says about run #7, with nothing updated and nothing logged.
+-- prisma/seed-core.ts already declares a version immutable under a judgment
+-- ("a version that needs different values is a new ordinal"); the production
+-- edits violated that invariant and nothing noticed. This column is the
+-- defence: the truth used to survive only one level deeper, on
+-- ModelJudgment.samplingParams, and readers do not reliably go one level deeper.
+--
+-- THE EFFECTIVE PARAMS, NOT THE RAW JSON. The column holds
+-- effectiveSamplingParams(samplingDefaults) resolved at launch, inside the
+-- launch transaction — a full { temperature, max_tokens } — so it is
+-- comparable field-for-field with ModelJudgment.samplingParams (the per-call
+-- truth), and a judgment that differs from its header is the mid-run-edit tell.
+-- Snapshotting the raw field would store NULL for every version without
+-- defaults and could not be compared to anything.
+--
+-- ENTIRELY ADDITIVE, ZERO HAND EDITS: one nullable JSONB column, exactly what
+-- `prisma migrate diff` emitted; CONTRIBUTING's pseudo-drift table stays at
+-- EIGHT rows. NO BACKFILL: production holds 9 CalibrationRun rows and they stay
+-- NULL. NULL means "launched before v2k — derive from ModelJudgment.samplingParams"
+-- and nothing else; a backfill would present an after-the-fact derivation as a
+-- launch-time snapshot, and every reader must render NULL as pre-v2k, never as
+-- a config.
+
+-- AlterTable
+ALTER TABLE "CalibrationRun" ADD COLUMN     "samplingParams" JSONB;
+

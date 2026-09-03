@@ -543,7 +543,12 @@ Both feel like "editing the config while it runs", and they are not the same act
 Run `cmtircx0x` is the worked example: 11 items completed under the flat 300 s wall, the remaining 19
 under the escalating policy, and the run is internally comparable because the model's own
 configuration never moved. The tell that a run *is* contaminated is §4.1 of the scoreboard spec —
-`SELECT DISTINCT mj."samplingParams"->>'max_tokens'` returning more than one row.
+`SELECT DISTINCT mj."samplingParams"->>'max_tokens'` returning more than one row — and, since v2k,
+any judgment's `samplingParams` differing from the header's `CalibrationRun."samplingParams"` (the
+launch-time snapshot; NULL on runs launched before v2k). `scripts/calibration/run.ts` checks both in
+its Result block and prints a ⚠ naming the configs. A judge that needs a different `max_tokens` is a
+**new version ordinal** (`prisma/seed-core.ts:223-229` states the invariant: a version is immutable
+under a judgment) — or, at the very minimum, is never edited while a run is draining.
 
 
 ---

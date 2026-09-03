@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import type { Prisma } from '@prisma/client';
 import { db, truncateAll, mkUser, mkRubric } from './helpers';
 import { prisma } from '@/lib/db';
 import { isGoldenSetFrozen } from '@/lib/golden-sets';
+import { effectiveSamplingParams } from '@/lib/llm/sampling';
 import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
 import { launchCalibrationRun, MAX_CALIBRATION_ITEMS } from '@/lib/calibration/launch';
 import { DEADLINE_SLACK_MS } from '@/lib/run-launch';
@@ -9,7 +11,7 @@ import { seedPromptTemplates } from '../../prisma/seed-prompt-templates';
 
 // ─── The calibration ⇄ golden-item link (A2.1, v2i) ────────────────────────
 //
-// Two things are pinned here and they are pinned together on purpose:
+// Three things are pinned here and they are pinned together on purpose:
 //
 //   (1) THE MIGRATION'S OWN SEMANTICS —
 //       `@@unique([calibrationRunId, goldenItemId])` under Postgres' DEFAULT
@@ -27,6 +29,17 @@ import { seedPromptTemplates } from '../../prisma/seed-prompt-templates';
 //       (src/lib/calibration/launch.ts), including the batch-aware deadline
 //       that keeps `src/worker/reaper.ts` from force-finalizing the tail of a
 //       long batch as `'reaper: abandoned'`.
+//
+//   (3) THE LAUNCH-TIME SAMPLING SNAPSHOT (v2k) —
+//       `CalibrationRun.samplingParams`, the RESOLVED
+//       `effectiveSamplingParams(JudgeModelVersion.samplingDefaults)` written
+//       inside the SAME launch transaction as the header. It lives in this
+//       file for the same reason (2) does: `tests/db` is the only suite that
+//       executes `launchCalibrationRun`, so it is the only place that can
+//       prove launch.ts CALLS the resolver rather than storing the raw,
+//       mutable `samplingDefaults` — and the only place that can show the
+//       obvious join through the version reporting today's config for a
+//       historical run.
 //
 // `launchCalibrationRun` goes through the `prisma` singleton (`@/lib/db`,
 // DATABASE_URL) while the fixtures here go through `db` (TEST_DATABASE_URL) —
@@ -111,7 +124,10 @@ async function mkGoldenItem(
   });
 }
 
-async function mkJudgeVersionWithEndpoint(userId: string) {
+async function mkJudgeVersionWithEndpoint(
+  userId: string,
+  opts: { samplingDefaults?: Prisma.InputJsonValue } = {}
+) {
   const name = uniq('fixture-judge');
   const judgeModel = await db.judgeModel.create({
     data: { name, slug: name, judgeClass: 'prompted_api', scoringMechanism: 'critique_generative' },
@@ -122,6 +138,9 @@ async function mkJudgeVersionWithEndpoint(userId: string) {
       ordinal: 1,
       servingBackend: 'openai',
       protocolSupport: { pairwise: ['preference'] },
+      // UNSET by default (not null): every pre-v2k test below stays exactly
+      // what it was, and block (4) exercises the resolver's "no defaults" arm.
+      ...(opts.samplingDefaults !== undefined ? { samplingDefaults: opts.samplingDefaults } : {}),
     },
   });
   await db.modelEndpoint.create({
@@ -131,7 +150,9 @@ async function mkJudgeVersionWithEndpoint(userId: string) {
 }
 
 /** Everything a calibration launch needs, assembled once per test. */
-async function mkWorld(opts: { items?: number; protocol?: 'pairwise' | 'pointwise' } = {}) {
+async function mkWorld(
+  opts: { items?: number; protocol?: 'pairwise' | 'pointwise'; samplingDefaults?: Prisma.InputJsonValue } = {}
+) {
   const user = await mkUser();
   const project = await db.project.create({ data: { name: 'fixture-project', userId: user.id } });
   const rubric = await mkRubric(user.id);
@@ -142,7 +163,7 @@ async function mkWorld(opts: { items?: number; protocol?: 'pairwise' | 'pointwis
     // eslint-disable-next-line no-await-in-loop -- fixture setup; ordered so GoldenItem.index is deterministic
     items.push(await mkGoldenItem(goldenSet.id, dataset.id, index));
   }
-  const version = await mkJudgeVersionWithEndpoint(user.id);
+  const version = await mkJudgeVersionWithEndpoint(user.id, { samplingDefaults: opts.samplingDefaults });
   return { user, project, rubric, dataset, goldenSet, items, version };
 }
 
@@ -161,7 +182,7 @@ function launchParamsFrom(world: Awaited<ReturnType<typeof mkWorld>>) {
   };
 }
 
-describe('v2i calibration ⇄ golden item link (DB)', () => {
+describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', () => {
   beforeEach(async () => {
     await truncateAll();
     // A pairwise launch resolves the `v1-pairwise` PromptTemplate row, and
@@ -498,5 +519,86 @@ describe('v2i calibration ⇄ golden item link (DB)', () => {
     ).rejects.toThrow(/no live items/i);
 
     expect(await db.$transaction((tx) => isGoldenSetFrozen(tx, world.goldenSet.id))).toBe(false);
+  });
+
+  // ── (4) The sampling snapshot (v2k) ──────────────────────────────────────
+  //
+  // `JudgeModelVersion.samplingDefaults` is MUTABLE — no history, no
+  // updatedAt, three in-tree writers — so a join from a historical run through
+  // its version reports TODAY's config (scoreboard spec §4.1: raising
+  // granite4.2 from 4096 to 12288 for run #9 silently rewrote what that join
+  // says about run #7). prisma/seed-core.ts:223-229 already declares a version
+  // immutable under a judgment; nothing enforces it. The header therefore
+  // snapshots the RESOLVED params at launch, with the same
+  // `effectiveSamplingParams` the worker's pairwise seam resolves per call
+  // (registry.ts prepareJudgmentCall; judgment-consumer.ts's pairwise seam
+  // passes no overrides), so header == every ModelJudgment.samplingParams of
+  // the run unless the row moved mid-run — and header ≠ judgment is the tell.
+
+  it('snapshots the EFFECTIVE sampling params on the header at launch — the resolver the worker uses, not the raw JSON', async () => {
+    const world = await mkWorld({ items: 1, samplingDefaults: { temperature: 0.2, max_tokens: 12288 } });
+
+    const result = await launchCalibrationRun(launchParamsFrom(world), { publish: noopPublish });
+
+    const header = await db.calibrationRun.findUniqueOrThrow({ where: { id: result.calibrationRunId } });
+    expect(header.samplingParams).toEqual({ temperature: 0.2, max_tokens: 12288 });
+    // One resolver, not two: what the header says equals what the worker will
+    // persist on each judgment of this run.
+    expect(header.samplingParams).toEqual(effectiveSamplingParams(world.version.samplingDefaults));
+    // Returned to the caller too, so the CLI prints the snapshot without a re-read.
+    expect(result.samplingParams).toEqual({ temperature: 0.2, max_tokens: 12288 });
+  });
+
+  it('editing samplingDefaults AFTER the launch does not move the header — and the join through the version now lies', async () => {
+    const world = await mkWorld({ items: 1, samplingDefaults: { temperature: 0.3, max_tokens: 4096 } });
+    const result = await launchCalibrationRun(launchParamsFrom(world), { publish: noopPublish });
+
+    // The production edit, in shape: a raw update of the version row
+    // (spec §4.1, 4096 -> 12288 for a re-run).
+    await db.judgeModelVersion.update({
+      where: { id: world.version.id },
+      data: { samplingDefaults: { temperature: 0.3, max_tokens: 12288 } },
+    });
+
+    const header = await db.calibrationRun.findUniqueOrThrow({
+      where: { id: result.calibrationRunId },
+      include: { judgeModelVersion: { select: { samplingDefaults: true } } },
+    });
+    // The snapshot is what ran.
+    expect(header.samplingParams).toEqual({ temperature: 0.3, max_tokens: 4096 });
+    // LOAD-BEARING: the obvious join really does report today's config for
+    // the historical run. Without this the assertion above is a shape test
+    // of a column, not a behaviour test of the hazard the column exists for.
+    expect(header.judgeModelVersion.samplingDefaults).toEqual({ temperature: 0.3, max_tokens: 12288 });
+  });
+
+  it('a version with NO samplingDefaults snapshots the registry default — NULL means "launched before v2k" and nothing else', async () => {
+    const world = await mkWorld({ items: 1 }); // samplingDefaults unset
+
+    const result = await launchCalibrationRun(launchParamsFrom(world), { publish: noopPublish });
+
+    const header = await db.calibrationRun.findUniqueOrThrow({ where: { id: result.calibrationRunId } });
+    expect(header.samplingParams).not.toBeNull();
+    expect(header.samplingParams).toEqual({ temperature: 0.3, max_tokens: 4096 });
+  });
+
+  it('a PARTIAL samplingDefaults is resolved field-by-field before it is stored — the header is never a copy of the raw JSON', async () => {
+    // The production shape (spec §4.1): granite4.2's max_tokens was raised
+    // 4096 -> 12288 and `temperature` was never set. This is the ONLY test
+    // here that distinguishes the resolver from the obvious shortcut
+    // `version.samplingDefaults ?? JUDGE_DEFAULT_SAMPLING_PARAMS` — under that
+    // implementation the three tests above all still pass (their fixtures are
+    // full pairs or unset), and this one stores `{ max_tokens: 12288 }` with
+    // no temperature, breaking the schema comment's "never the raw, nullable,
+    // possibly partial samplingDefaults" and the field-for-field comparison
+    // with ModelJudgment.samplingParams that the drift detector rests on.
+    const world = await mkWorld({ items: 1, samplingDefaults: { max_tokens: 12288 } });
+
+    const result = await launchCalibrationRun(launchParamsFrom(world), { publish: noopPublish });
+
+    const header = await db.calibrationRun.findUniqueOrThrow({ where: { id: result.calibrationRunId } });
+    // Full pair on the header; the version's own field is still partial.
+    expect(header.samplingParams).toEqual({ temperature: 0.3, max_tokens: 12288 });
+    expect(world.version.samplingDefaults).toEqual({ max_tokens: 12288 });
   });
 });
