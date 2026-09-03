@@ -91,6 +91,7 @@ import { vllmStructuredRequestFields } from './backends/vllm';
 import { llamacppStructuredRequestFields } from './backends/llamacpp';
 import { ollamaStructuredRequestFields } from './backends/ollama';
 import { PAIRWISE_JUDGMENT_JSON_SCHEMA, tryParsePairwiseJudgment } from './judgment-schema';
+import { effectiveSamplingParams, RESPOND_DEFAULT_SAMPLING_PARAMS, type SamplingParams } from './sampling';
 
 // Re-exported so existing importers of `ProviderHeaderConfig` FROM
 // registry.ts (its original Task 10 home) keep working — the type itself
@@ -410,53 +411,16 @@ export function resolveApiKey(descriptor: ProviderDescriptor, endpoint: Endpoint
 }
 
 // ─── Sampling params ─────────────────────────────────────────────────────────
-
-export interface SamplingParams {
-  temperature: number;
-  max_tokens: number;
-}
-
-/**
- * Registry-level fallback sampling params — the hardcoded literals every
- * backend module used to declare independently (`anthropic.ts`/
- * `openai-compatible.ts` both used `{ temperature: 0.3, max_tokens: 4096 }`
- * for judge calls and `{ temperature: 0.4, max_tokens: 4096 }` for respond
- * calls — a deliberately HIGHER temperature for free-form generation than
- * for scoring). Now defined exactly ONCE per mode, here, and only ever used
- * as the LAST-RESORT fallback beneath a `JudgeModelVersion`'s own
- * `samplingDefaults` (which, being a single JSON field shared by both
- * modes — see `prisma/schema.prisma` — applies identically to judge and
- * respond calls once set; this mode split only matters when a version has
- * no `samplingDefaults` of its own at all).
- */
-const JUDGE_DEFAULT_SAMPLING_PARAMS: SamplingParams = { temperature: 0.3, max_tokens: 4096 };
-const RESPOND_DEFAULT_SAMPLING_PARAMS: SamplingParams = { temperature: 0.4, max_tokens: 4096 };
-
-function isPartialSamplingParams(value: unknown): value is Partial<SamplingParams> {
-  return typeof value === 'object' && value !== null;
-}
-
-/**
- * Effective sampling params = per-call override ?? the `JudgeModelVersion`'s
- * own `samplingDefaults` ?? `registryDefault` (mode-specific — see
- * `JUDGE_DEFAULT_SAMPLING_PARAMS`/`RESPOND_DEFAULT_SAMPLING_PARAMS` above) —
- * per-field, so a version that only pins `temperature` still inherits the
- * registry's `max_tokens`. This is the value recorded as
- * `samplingParamsUsed` on every `JudgmentResult`/`RespondResult` (persisted
- * as `ModelJudgment.samplingParams` — the ACTUAL params a call used, not a
- * re-derivation at persist time).
- */
-export function effectiveSamplingParams(
-  versionDefaults: unknown,
-  overrides?: Partial<SamplingParams>,
-  registryDefault: SamplingParams = JUDGE_DEFAULT_SAMPLING_PARAMS
-): SamplingParams {
-  const versionShape = isPartialSamplingParams(versionDefaults) ? versionDefaults : undefined;
-  return {
-    temperature: overrides?.temperature ?? versionShape?.temperature ?? registryDefault.temperature,
-    max_tokens: overrides?.max_tokens ?? versionShape?.max_tokens ?? registryDefault.max_tokens,
-  };
-}
+// `SamplingParams`, the two registry defaults and `effectiveSamplingParams`
+// live in `./sampling` — a LEAF module — so that
+// `src/lib/calibration/launch.ts` can resolve a version's effective params
+// (the v2k CalibrationRun snapshot) without value-importing this file, which
+// would drag every provider SDK and the redis client into the esbuild CLI
+// bundle (Dockerfile, `scripts/calibration/run.ts`). Re-exported here so every
+// pre-existing importer of registry.ts — and the `@/lib/llm` barrel, which
+// re-exports from here — is unchanged.
+export type { SamplingParams } from './sampling';
+export { effectiveSamplingParams } from './sampling';
 
 // ─── execute(): the low-level, single-attempt call primitive ───────────────
 
