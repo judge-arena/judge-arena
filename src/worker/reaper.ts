@@ -58,6 +58,23 @@
  *     chance on a later sweep, once those either complete or go stale
  *     themselves.
  *
+ * ── 2026-09-03: a THIRD condition feeds the same two-case disposition ──────
+ * `deadlineAt` is `null` from creation until `src/worker/claim.ts`'s
+ * `stampRunStartedAtFirstDequeue` sets it at FIRST DEQUEUE (see that
+ * function's doc). Under SQL's three-valued logic `NULL < now` is `NULL`,
+ * not true, so a null-deadline row was ALREADY invisible to the query
+ * above — harmlessly, back when every launch path always stamped a
+ * deadline at creation, but a run published and never claimed at all (dead
+ * consumer, lost message, purged queue) would otherwise be IMMORTAL:
+ * nothing would ever sweep it. `NEVER_STARTED_TIMEOUT_MS` is the safety
+ * net — the query now ALSO matches `deadlineAt: null AND createdAt < now -
+ * NEVER_STARTED_TIMEOUT_MS`, and the same two-case grace/abandon logic
+ * above applies, substituting `createdAt + NEVER_STARTED_TIMEOUT_MS` for
+ * `deadlineAt` as the threshold. See that constant's own doc for why it is
+ * orders of magnitude looser than the execution deadline it stands in for,
+ * what invariant that looseness assumes (one max-size batch per judge lane),
+ * and what it costs (a lost message is no longer republished in minutes).
+ *
  * Every per-item failure (a single republish, a single force-finalize) is
  * caught and logged individually so ONE bad row can't abort the rest of the
  * sweep — this is best-effort infrastructure healing, not a transaction.
@@ -101,6 +118,101 @@ const REAPER_LOCK_TTL_MS = 55_000;
  * No schema change (no per-run sweep counter) — a deadline-plus-wall-clock
  * heuristic equivalent, per the module doc. */
 const FORCE_FINALIZE_GRACE_MS = 3 * SWEEP_INTERVAL_MS;
+
+/**
+ * How long an `EvaluationRun` may sit `pending`/`judging` with ZERO
+ * judgments ever dequeued before the reaper treats it as abandoned, even
+ * though `deadlineAt` is still `null`.
+ *
+ * ── THE LEAK THIS CLOSES ─────────────────────────────────────────────────
+ * `sweepOverdueRuns`'s query used to be `deadlineAt: { lt: now }` alone.
+ * Under SQL's three-valued logic, `NULL < now` evaluates to `NULL`, which a
+ * `WHERE` clause treats as "no match" — so a row with `deadlineAt: null`
+ * was ALREADY, silently, invisible to this query, and the
+ * `run.deadlineAt !== null` guard that used to sit inside the loop below it
+ * was dead code protecting against a state that could never occur, because
+ * every launch path always stamped a deadline at creation. Once
+ * `src/lib/run-launch.ts`, `src/lib/calibration/launch.ts` and
+ * `src/worker/run-create-consumer.ts` stop doing that and leave
+ * `deadlineAt` null until `src/worker/claim.ts`'s
+ * `stampRunStartedAtFirstDequeue` sets it at FIRST DEQUEUE, that dormant
+ * state becomes reachable on every single run: a `judgment.execute`
+ * message that is published and then never claimed — a dead consumer at
+ * publish time, a message lost between the broker and a worker, a purged
+ * queue — leaves its `EvaluationRun` with `deadlineAt: null` FOREVER.
+ * Nothing would ever sweep it. It would sit `pending` indefinitely — for a
+ * calibration, permanently blocking that item from ever being scored, with
+ * no error, no alert, and no operator-visible signal that anything is
+ * wrong.
+ *
+ * ── WHY A SEPARATE, MUCH LARGER CONSTANT THAN THE EXECUTION DEADLINE ───────
+ * The execution deadline (`deadlineAt`, once stamped) bounds "how long has
+ * THIS run been executing since ITS OWN first dequeue" — a TIGHT bound,
+ * sized on the run's own judgment count (`runStartBudgetMs`, ~16 minutes
+ * for a calibration's one judgment). This constant bounds something
+ * categorically different: "how long has this run sat with ZERO progress
+ * since it was CREATED" — and unlike the execution deadline, it has NO way
+ * to size itself against the run's own work, because the run hasn't
+ * started any work yet. The only information available is queue depth — of
+ * every OTHER run competing for the same judge, launched by every other
+ * user — which is exactly the thing this whole task exists to stop
+ * depending on for the execution deadline. So this net is deliberately
+ * loose rather than tight: it must outlast the longest LEGITIMATE queue
+ * wait in the system, or it reintroduces the exact bug this task fixes,
+ * just relocated from "queue position" to "batch size".
+ *
+ * ── THE NUMBER, AND THE ARITHMETIC BEHIND IT ────────────────────────────
+ * Sized on what a batch may LEGALLY take, NOT on measured throughput — the
+ * same hard-cap-not-initial-budget discipline `runStartBudgetMs` uses. A
+ * calibration serialises through ONE judge's gate
+ * (`src/worker/judgment-consumer.ts`'s per-judge permit); each item may
+ * legally run to `hardCapMs` (900_000 ms) and may be delivered up to
+ * `MAX_ATTEMPTS` (3) times:
+ *
+ *   MAX_CALIBRATION_ITEMS (1000) x 3 x 900_000 ms = 750 h = 31.25 days.
+ *
+ * 45 days rounds that up. Measured throughput (5.03 min/item, so 3.49 days
+ * for 1000 items — see the plan's Measurements table) is the EXPECTATION,
+ * and sizing a force-finalize threshold on an expectation is exactly what
+ * killed 4 of 30 items in the first place. The relationship, not the
+ * literal, is pinned by a test in
+ * `tests/integration/finalization.test.ts`, so raising
+ * `MAX_CALIBRATION_ITEMS` again without revisiting this constant goes red.
+ *
+ * ── WHAT THIS NUMBER IS NOT ───────────────────────────────────────────────
+ * It is NOT immune to queue depth. Unlike the execution deadline, this net
+ * measures wall clock from `createdAt`, so N batches queued on the SAME
+ * judge lane SUM: two back-to-back 1000-item batches are 62.5 days of legal
+ * worst case against this 45-day bound. THE INVARIANT THIS CONSTANT
+ * ASSUMES, stated so it can be checked: at most ONE calibration anywhere
+ * near `MAX_CALIBRATION_ITEMS` in flight per judge lane at a time. If that
+ * stops holding, raise THIS constant, not `MAX_CALIBRATION_ITEMS`.
+ *
+ * ── THE COST, STATED RATHER THAN HIDDEN ───────────────────────────────────
+ * This net is the ONLY thing that republishes a never-dequeued run, and it
+ * does so at 45 days. Before this change, a lost `judgment.execute` message
+ * on an ordinary run was republished within `N x hardCapMs + slack` of
+ * CREATION — ~16 minutes — and abandoned ~3 minutes later. That self-heal
+ * is gone: a lost message now costs 45 days of silence, during which
+ * `src/worker/run-create-consumer.ts:182` dedupes away every subsequent
+ * `run.create` for that evaluation ("active run already exists — deduping"),
+ * so the evaluation is silently un-runnable through the bulk path for the
+ * whole period. This is an ACCEPTED trade, not an oversight: a tight net
+ * cannot tell a lost message from a healthy queued batch, and killing the
+ * healthy batch is the failure this whole change exists to remove. The
+ * operator's real detector is unchanged — `scripts/calibration/run.ts`'s
+ * `--poll-timeout` notices a stuck run in minutes, long before this fires.
+ *
+ * ── A SECOND, NON-LAUNCH SOURCE OF NULL-DEADLINE ROWS ─────────────────────
+ * `scripts/importer/runs.ts:384` writes `deadlineAt: null` explicitly, with
+ * the v1 run's own `createdAt` (`:387`) and a `status` (`:369`) that is
+ * `'pending'`/`'judging'` unless the v1 row was stranded (24 h,
+ * `runs.ts:204`). Such a row is older than this net on the day it is
+ * imported, so this arm republishes its judgments onto a live judge lane and
+ * then force-finalizes them. Production had ZERO such rows when this landed
+ * (read-only check, 2026-09-03); re-run that check before any future import.
+ */
+export const NEVER_STARTED_TIMEOUT_MS = 45 * 24 * 60 * 60 * 1000;
 
 async function acquireLock(): Promise<boolean> {
   try {
@@ -300,17 +412,38 @@ async function republishPendingForRun(runId: string, triggeredById: string | nul
 
 async function sweepOverdueRuns(): Promise<void> {
   const now = Date.now();
+  const neverStartedBefore = new Date(now - NEVER_STARTED_TIMEOUT_MS);
 
   const overdueRuns = await prisma.evaluationRun.findMany({
-    where: { status: { in: ['pending', 'judging'] }, deadlineAt: { lt: new Date(now) } },
+    where: {
+      status: { in: ['pending', 'judging'] },
+      OR: [
+        { deadlineAt: { lt: new Date(now) } },
+        // THE LEAK, closed: a null deadline is invisible to the first arm
+        // (SQL's `NULL < now` is `NULL`, not true — see
+        // NEVER_STARTED_TIMEOUT_MS's own doc). This second arm is the ONLY
+        // thing that can ever catch a run that was published and never
+        // dequeued.
+        { deadlineAt: null, createdAt: { lt: neverStartedBefore } },
+      ],
+    },
     // v2j: triggeredById is the owner half of the endpoint identity a lane is
     // resolved from. Selected here, on a query that was already reading these
     // rows, so `republishPendingForRun` needs no extra round trip for it.
-    select: { id: true, deadlineAt: true, triggeredById: true },
+    select: { id: true, deadlineAt: true, createdAt: true, triggeredById: true },
   });
 
   for (const run of overdueRuns) {
-    const abandoned = run.deadlineAt !== null && run.deadlineAt.getTime() < now - FORCE_FINALIZE_GRACE_MS;
+    // `run.deadlineAt` is set for every row that matched the query's FIRST
+    // arm (a run that has begun executing — see claim.ts's
+    // `stampRunStartedAtFirstDequeue`): the EXECUTION deadline governs,
+    // exactly as before this task. `run.deadlineAt === null` means this
+    // row only matched the SECOND arm — never dequeued, sitting since
+    // `createdAt` past NEVER_STARTED_TIMEOUT_MS — so the never-started
+    // net's own threshold stands in for the execution deadline this run
+    // never got.
+    const threshold = run.deadlineAt ?? new Date(run.createdAt.getTime() + NEVER_STARTED_TIMEOUT_MS);
+    const abandoned = threshold.getTime() < now - FORCE_FINALIZE_GRACE_MS;
 
     if (abandoned) {
       // eslint-disable-next-line no-await-in-loop -- sequential per-run handling; overdue runs are expected to be rare

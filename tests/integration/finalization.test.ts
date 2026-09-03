@@ -7,7 +7,9 @@ import { LANE_FALLBACK_QUEUE, LANE_QUEUES, laneQueueFor } from '@/lib/queue/lane
 import type { JudgmentExecuteMsg } from '@/lib/queue/publish';
 import { getConnectedRedis } from '@/lib/redis';
 import { maybeFinalizeRun, markRunCompleted } from '@/lib/run-finalizer';
-import { runReaperSweep, REAPER_LOCK_KEY } from '@/worker/reaper';
+import { runReaperSweep, REAPER_LOCK_KEY, NEVER_STARTED_TIMEOUT_MS } from '@/worker/reaper';
+import { MAX_CALIBRATION_ITEMS } from '@/lib/calibration/launch';
+import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
 import { LEASE_MS } from '@/worker/claim';
 import { createJudgmentConsumer, type ProviderFn, type RunProviderJudgmentInput } from '@/worker/judgment-consumer';
 import { seedPromptTemplates } from '../../prisma/seed-prompt-templates';
@@ -198,6 +200,7 @@ async function mkEvaluationRun(
     status: 'pending' | 'judging' | 'needs_human' | 'completed' | 'error';
     deadlineAt: Date | null;
     finalizedAt: Date | null;
+    createdAt: Date;
   }> = {}
 ) {
   const run = await prisma.evaluationRun.create({
@@ -603,6 +606,160 @@ describe('reaper (src/worker/reaper.ts): overdue-run handling', () => {
       (m) => (JSON.parse(m.content.toString()) as JudgmentExecuteMsg).judgmentId === judgment.id
     );
     expect(relevant).toHaveLength(0);
+  });
+});
+
+describe('reaper (src/worker/reaper.ts): the never-started safety net (deadlineAt IS NULL)', () => {
+  it('NEVER_STARTED_TIMEOUT_MS is 45 days', () => {
+    expect(NEVER_STARTED_TIMEOUT_MS).toBe(45 * 24 * 60 * 60 * 1000);
+  });
+
+  it('the never-started net outlasts the LEGAL drain time of a full-cap calibration batch', () => {
+    // The RELATIONSHIP, not a second literal — this repo's own idiom (cf.
+    // tests/lib/timeout-policy.test.ts:320, `LEASE_MS > hardCapMs`). A
+    // calibration serialises through ONE judge's gate; each item may legally
+    // run to hardCapMs and be delivered MAX_ATTEMPTS (3) times. If someone
+    // raises MAX_CALIBRATION_ITEMS again without revisiting this net, this
+    // goes red instead of silently re-arming the bug the net exists to
+    // prevent — a batch force-finalized while still healthily queued.
+    // The 3 mirrors judgment-consumer.ts:199's MAX_ATTEMPTS (not exported).
+    // Raising that number invalidates NEVER_STARTED_TIMEOUT_MS and must
+    // move this literal too.
+    const legalWorstCaseMs = MAX_CALIBRATION_ITEMS * 3 * resolveTimeoutBudgets().hardCapMs;
+    expect(NEVER_STARTED_TIMEOUT_MS).toBeGreaterThan(legalWorstCaseMs);
+  });
+
+  it('a run created long before NEVER_STARTED_TIMEOUT_MS, never dequeued, past the grace period is force-finalized', async () => {
+    const base = await createBaseFixture();
+    const evaluation = await mkEvaluation(base.project.id, base.user.id);
+    // Never started: deadlineAt stays null (nothing has claimed a
+    // judgment), createdAt is far enough in the past that even
+    // NEVER_STARTED_TIMEOUT_MS + the 180s grace has elapsed.
+    const createdAt = new Date(Date.now() - NEVER_STARTED_TIMEOUT_MS - 200_000);
+    const run = await mkEvaluationRun(evaluation.id, base.user.id, base.rubric.id, {
+      status: 'pending',
+      deadlineAt: null,
+      createdAt,
+    });
+    const judgment = await mkJudgment(run.id, base.version.id, base.promptTemplateId, { status: 'pending' });
+
+    const { confirmChannel } = await getRabbit();
+    await assertTopology(confirmChannel);
+    await purgeExecuteQueues(confirmChannel);
+
+    await runReaperSweep();
+
+    const afterSweep = await prisma.modelJudgment.findUniqueOrThrow({ where: { id: judgment.id } });
+    expect(afterSweep.status).toBe('error');
+    expect(afterSweep.error).toBe('reaper: abandoned');
+
+    const persistedRun = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(persistedRun.status).toBe('error');
+    expect(persistedRun.finalizedAt).not.toBeNull();
+  });
+
+  it('a run created recently, never dequeued, is left alone — this is the queued-but-healthy case the whole task exists to protect', async () => {
+    const base = await createBaseFixture();
+    const evaluation = await mkEvaluation(base.project.id, base.user.id);
+    const run = await mkEvaluationRun(evaluation.id, base.user.id, base.rubric.id, {
+      status: 'pending',
+      deadlineAt: null,
+      // createdAt defaults to now() — well inside NEVER_STARTED_TIMEOUT_MS.
+    });
+    const judgment = await mkJudgment(run.id, base.version.id, base.promptTemplateId, { status: 'pending' });
+
+    const { confirmChannel } = await getRabbit();
+    await assertTopology(confirmChannel);
+    await purgeExecuteQueues(confirmChannel);
+
+    await runReaperSweep();
+
+    const afterSweep = await prisma.modelJudgment.findUniqueOrThrow({ where: { id: judgment.id } });
+    expect(afterSweep.status).toBe('pending'); // untouched — not even swept
+
+    const persistedRun = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(persistedRun.status).toBe('pending'); // untouched
+
+    // Not even a republish — this row was never in the sweep's candidate
+    // set at all (the query's OR excludes it).
+    const published = await drainExecuteQueues(confirmChannel, 200);
+    const relevant = published.filter(
+      (m) => (JSON.parse(m.content.toString()) as JudgmentExecuteMsg).judgmentId === judgment.id
+    );
+    expect(relevant).toHaveLength(0);
+  });
+
+  it('a STARTED run (deadlineAt set, in the future) with an ancient createdAt is governed by its execution deadline, not the never-started net', async () => {
+    const base = await createBaseFixture();
+    const evaluation = await mkEvaluation(base.project.id, base.user.id);
+    // deadlineAt is set and comfortably in the FUTURE — this run has begun
+    // executing and is well within its own budget — even though createdAt
+    // is older than NEVER_STARTED_TIMEOUT_MS. A wrong implementation that
+    // ORs on createdAt unconditionally (forgetting the `deadlineAt: null`
+    // guard on the second arm) would catch and republish for this run;
+    // the real one must not touch it at all.
+    const run = await mkEvaluationRun(evaluation.id, base.user.id, base.rubric.id, {
+      status: 'judging',
+      deadlineAt: new Date(Date.now() + 10 * 60_000),
+      createdAt: new Date(Date.now() - NEVER_STARTED_TIMEOUT_MS - 200_000),
+    });
+    const judgment = await mkJudgment(run.id, base.version.id, base.promptTemplateId, { status: 'pending' });
+
+    const { confirmChannel } = await getRabbit();
+    await assertTopology(confirmChannel);
+    await purgeExecuteQueues(confirmChannel);
+
+    await runReaperSweep();
+
+    const afterSweep = await prisma.modelJudgment.findUniqueOrThrow({ where: { id: judgment.id } });
+    expect(afterSweep.status).toBe('pending'); // not force-errored
+
+    const persistedRun = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(persistedRun.status).toBe('judging'); // untouched — deadlineAt is in the future
+
+    const published = await drainExecuteQueues(confirmChannel, 200);
+    const relevant = published.filter(
+      (m) => (JSON.parse(m.content.toString()) as JudgmentExecuteMsg).judgmentId === judgment.id
+    );
+    expect(relevant).toHaveLength(0); // not even a republish — outside the sweep's candidate set
+  });
+
+  it('a never-started run just PAST the net but inside the grace period is REPUBLISHED, not force-finalized', async () => {
+    const base = await createBaseFixture();
+    const evaluation = await mkEvaluation(base.project.id, base.user.id);
+    // Past NEVER_STARTED_TIMEOUT_MS by 30s — so the second arm matches — but
+    // well inside FORCE_FINALIZE_GRACE_MS (180s), so the gentler branch must
+    // run. This is the ONLY test that pins WHICH branch the substituted
+    // threshold selects: `run.deadlineAt ?? new Date(0)` (force-finalize
+    // everything the second arm catches, never republish) passes every other
+    // test in this block and the whole pre-existing suite.
+    const createdAt = new Date(Date.now() - NEVER_STARTED_TIMEOUT_MS - 30_000);
+    const run = await mkEvaluationRun(evaluation.id, base.user.id, base.rubric.id, {
+      status: 'pending',
+      deadlineAt: null,
+      createdAt,
+    });
+    const judgment = await mkJudgment(run.id, base.version.id, base.promptTemplateId, { status: 'pending' });
+
+    const { confirmChannel } = await getRabbit();
+    await assertTopology(confirmChannel);
+    await purgeExecuteQueues(confirmChannel);
+
+    await runReaperSweep();
+
+    const afterSweep = await prisma.modelJudgment.findUniqueOrThrow({ where: { id: judgment.id } });
+    expect(afterSweep.status).toBe('pending'); // NOT 'reaper: abandoned'
+    expect(afterSweep.error).toBeNull();
+
+    const persistedRun = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: run.id } });
+    expect(persistedRun.status).toBe('pending');
+    expect(persistedRun.finalizedAt).toBeNull();
+
+    const published = await drainExecuteQueues(confirmChannel, 200);
+    const relevant = published.filter(
+      (m) => (JSON.parse(m.content.toString()) as JudgmentExecuteMsg).judgmentId === judgment.id
+    );
+    expect(relevant).toHaveLength(1); // republished exactly once
   });
 });
 
