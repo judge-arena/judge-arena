@@ -531,9 +531,47 @@ time_to_exhaust_budget = max_tokens / tok_per_s      # must fit under the 900 s 
 max_safe_tokens        = timeout_s  × tok_per_s      # the ceiling your timeout can actually afford
 ```
 
-Get `tok_per_s` from a single scored item — `ModelJudgment.outputTokens / (latencyMs/1000)`. The
-recorded envelopes for every judge scored so far are in
+Get `tok_per_s` from the **estimated generation**, pooled over the judge's completed judgments — not
+from `outputTokens`, and not from one item:
+
+```
+tok_per_s = Σ estimatedGeneratedTokens / Σ (latencyMs / 1000)
+```
+
+`estimatedGeneratedTokens` is `accountTokens()` in `src/lib/calibration/token-accounting.ts`, and
+`npm run calibration:run` prints it in the **Token accounting** block of every report, beside the
+raw `outputTokens` and character counts it was derived from. The recorded envelopes for every judge
+scored so far are in
 [`docs/superpowers/specs/2026-09-01-judge-scoreboard-and-model-envelopes.md`](../superpowers/specs/2026-09-01-judge-scoreboard-and-model-envelopes.md) §2.
+
+> **CORRECTION (2026-09-02, `0bd6b6b`).** This paragraph used to read:
+> *"Get `tok_per_s` from a single scored item — `ModelJudgment.outputTokens / (latencyMs/1000)`."*
+> **Both halves were wrong.**
+>
+> **`outputTokens` is `usage.completion_tokens` verbatim, and whether it includes the reasoning
+> channel varies per MODEL** — not per backend, and not per `reasoningSource`. Measured 2026-09-02
+> over every completed judgment, `Σ length(reasoningContent) / Σ outputTokens` is **3.52** on
+> Qwen3.6-35B-A3B and **3.76** on granite4.2:3b — at or below the tokenizer's own chars-per-token,
+> which is only possible if the reasoning tokens are already inside `completion_tokens` — and
+> **68.46** on qwen3.5:9b — measured over the nine completed judgments of the voided `max_tokens
+> 6144` run — where `completion_tokens` is the JSON verdict alone. On that judge the old formula
+> returns **0.6 tok/s against 11.1 tok/s of real generation, an 18x error**, in the number this
+> section tells you to size `max_tokens` with.
+>
+> Two identical requests to Ollama 0.32.15 differing only by `response_format` isolate the cause:
+> plain returns `completion_tokens 1069` for 2583 chars of reasoning + 530 of content;
+> `response_format: {type:'json_schema'}` returns **196** for 2304 + 598. **The judge path always
+> sends the schema** (`ollamaStructuredRequestFields`, `llamacppStructuredRequestFields`), so the
+> judge path is the affected one. `reasoningTokens` cannot rescue this — it is NULL on every
+> self-hosted backend (§7.4).
+>
+> **And "a single scored item" was never safe**, even on a judge that counts reasoning: throughput
+> decays with output length (scoreboard spec §5.4.1), so one item's rate is not the run's, and the
+> flat-rate estimate is a lower bound on duration rather than an estimate of it.
+>
+> **What did NOT change:** the two formulas above, and the published rates for Qwen3.6, granite4.2
+> and granite4.1 — for those judges `outputTokens` already counted the thinking, so the naive figure
+> was already right.
 
 **Recognising which limit you hit:** truncation gives `finishReason: 'length'` with `completion_tokens`
 exactly equal to `max_tokens`, on *every* long item, deterministically. A timeout gives no

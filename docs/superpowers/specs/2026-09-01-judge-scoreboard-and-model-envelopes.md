@@ -97,8 +97,41 @@ Measured over every `status='completed'` judgment attached to a calibration run.
 | granite4.2:3b | 12288 | 11* | 3310 | 7305 | 94.5 s | 250.2 s | **35.0** | 2072 |
 | granite4.2:3b | 4096 | 15 | 1950 | 3058 | 52.3 s | 99.8 s | 37.3 | 1650 |
 | granite4.1:3b | 4096 | 60 | 109 | 163 | 3.6 s | 16.8 s | 30.2 | 1660 |
+| qwen3.5:9b † | 6144 | 9 | 147 | 184 | 261.3 s | 477.7 s | 0.6 ⚠⚠ → **11.1** | 4582 |
 
 \* partial — run #9 was still draining when this table was built.
+
+† **`outputTokens` on this judge does not include the reasoning channel, so the naive 0.6 tok/s is
+wrong by 18x.** The bolded 11.1 is `Σ estimatedGeneratedTokens / Σ latency` — see the CORRECTION
+below. Every other cell in this row is a direct measurement and needs no correction.
+
+> **CORRECTION (2026-09-02, `0bd6b6b`) — the `tok/s` column is `outputTokens / latency`, and
+> `outputTokens` does not mean the same thing on every model.**
+>
+> **All five original rows are CORRECT and unchanged.** Measured 2026-09-02 over every completed
+> judgment, `length(reasoningContent) / outputTokens` runs **2.31 … 4.73** on Qwen3.6-35B-A3B,
+> granite4.2:3b and granite4.1:3b — at or below the tokenizer's own chars-per-token, which is only
+> possible if the reasoning tokens are already inside `completion_tokens`. **The same ratio on
+> qwen3.5:9b is 37.76 … 156.69** over the nine judgments of the `6144` run in row 6 (36.73 … 156.69
+> pooled over both of that judge's budgets): there `completion_tokens` is the JSON verdict alone,
+> the naive column reads 0.6 tok/s, and the real figure is 11.1.
+>
+> Nothing on the wire distinguishes the two cases, and **the split is per MODEL, not per backend**:
+> granite4.2:3b and qwen3.5:9b are both Ollama and both report `reasoningSource: 'reasoning'`. The
+> only in-tree discriminator is the ratio itself, pinned as `accountTokens()` in
+> `src/lib/calibration/token-accounting.ts` and printed by `npm run calibration:run`.
+>
+> **Do not add a row to this table from `outputTokens` alone.** Use `estimatedGeneratedTokens`.
+>
+> **A number this note does NOT endorse.** An earlier reconstruction circulated as *"Qwen3.6
+> 31.3 → 67.4, granite4.2 35.1 → 78.3"*. `31.3` and `35.1` are the pooled-across-`max_tokens` naive
+> rates — this table is split BY `max_tokens`, which is why neither appears in it — and `67.4`/`78.3`
+> come from adding a chars-derived reasoning estimate to an `outputTokens` that **already contains
+> it**, a double count. Measured, neither judge's rate moves.
+>
+> **One dated refresh, not a defect in the number as published:** the granite4.2 `12288` row was
+> marked `11*` partial and that run has since drained. Re-measured 2026-09-02 it is `n=25`, mean out
+> 3493, mean lat 101.7 s, **34.4** tok/s. The other four rows reproduce exactly.
 
 **The 8192 row's 27.3 tok/s is polluted and must not be quoted as Qwen's speed.** It pools run #1,
 which was over-subscribed (prefetch 8 against `total_slots: 2`), so its latencies include time spent
