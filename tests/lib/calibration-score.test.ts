@@ -298,6 +298,255 @@ describe('scoreCalibrationRun — the denominator is items with a verdict', () =
   });
 });
 
+describe('scoreCalibrationRun — the constant-verdict floor, per denominator', () => {
+  /** Minimal stand-in for hand-built rows — the `calibration()` builder cannot
+   *  express a 'tie' KEY or a hand-picked key balance. It ENFORCES the two
+   *  filters the query relies on (`where.calibrationRunId` and the nested
+   *  `status: 'completed'` on modelJudgments) for the same reason `fakeClient`
+   *  above does (its docblock, :54-67): enforcing them here means a scorer that
+   *  drops one fails a BEHAVIOUR test, where a fake that ignored them would let
+   *  these three cases pass a shape test. `orderBy` is deliberately NOT honoured
+   *  — every fixture below is handed in index order, and the ordering clause is
+   *  already pinned by `fakeClient`'s own test. Captures every update's data. */
+  type FindManyArgs = {
+    where?: { calibrationRunId?: string };
+    select?: { modelJudgments?: { where?: { status?: string } } };
+  };
+  type RowJudgment = {
+    verdict: string | null;
+    pairOrder: string;
+    judgeModelVersionId: string;
+    status: string;
+  };
+  type Row = {
+    id: string;
+    goldenItem: { id: string; index: number; expected: string };
+    modelJudgments: RowJudgment[];
+  };
+  function rowsClient(
+    calibrationRunId: string,
+    runs: Row[]
+  ): CalibrationScoreClient & { updates: Array<Record<string, unknown>> } {
+    const updates: Array<Record<string, unknown>> = [];
+    return {
+      updates,
+      evaluationRun: {
+        findMany: async (args: FindManyArgs) => {
+          if (args?.where?.calibrationRunId !== calibrationRunId) return [];
+          const wanted = args?.select?.modelJudgments?.where?.status;
+          return runs.map((r) => ({
+            ...r,
+            modelJudgments:
+              wanted === undefined
+                ? r.modelJudgments
+                : r.modelJudgments.filter((j) => j.status === wanted),
+          }));
+        },
+      },
+      calibrationRun: {
+        update: async (args: { data: Record<string, unknown> }) => {
+          updates.push(args.data);
+          return {};
+        },
+      },
+    } as unknown as CalibrationScoreClient & { updates: Array<Record<string, unknown>> };
+  }
+  /** `status: 'completed'` is not decoration: without it `rowsClient`'s nested
+   *  filter drops every judgment and all three cases below score nothing. */
+  const item = (id: string, index: number, expected: string, verdict: string | null): Row => ({
+    id: `run-${id}`,
+    goldenItem: { id, index, expected },
+    modelJudgments: [{ verdict, pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'completed' }],
+  });
+
+  it('the always-A>B judge scores EXACTLY the floor — margin 0, and the floor names it', async () => {
+    // The assertion that the emitted floor is the RIGHT floor: the judge
+    // that defines it must land on it to the last bit.
+    const alwaysAB = GROUND_TRUTH.map(() => 'A>B' as const);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, fakeClient(calibration(alwaysAB)));
+
+    expect(score.constantBaseline).toEqual({
+      accuracy: 17 / 30,
+      preferences: ['A>B'],
+      keyCounts: { 'A>B': 17, 'B>A': 13, tie: 0 },
+      denominator: 30,
+    });
+    expect(score.accuracy).toBe(score.constantBaseline?.accuracy);
+    expect(score.marginOverConstant).toBeCloseTo(0, 10);
+  });
+
+  it('a judge that matches the key on all 30 clears the floor by 13/30 — the margin has a SIGN', async () => {
+    // Every other margin in this block is 0 by construction (a judge that IS
+    // the stamp), and a margin of 0 is symmetric: with no signed oracle,
+    // swapping the subtraction to floor − accuracy leaves the suite green
+    // while the CLI prints Qwen's +0.30 as −0.30.
+    const score = await scoreCalibrationRun(CALIBRATION_ID, fakeClient(calibration(GROUND_TRUTH)));
+
+    expect(score.accuracy).toBe(1);
+    expect(score.constantBaseline?.accuracy).toBeCloseTo(17 / 30, 10);
+    expect(score.marginOverConstant).toBeCloseTo(1 - 17 / 30, 10);
+    expect(score.marginOverConstant).toBeGreaterThan(0);
+  });
+
+  it("a judge BELOW the floor reports a NEGATIVE margin — granite4.1:3b's case, the reason the line exists", async () => {
+    // 3 items keyed 2 'A>B' / 1 'B>A'; the judge answers 'B' every time, so it
+    // is right once: accuracy 1/3 against a floor of 2/3. The motivating case
+    // of the whole feature is a NEGATIVE margin, and nothing else here has one.
+    const client = rowsClient('cal-below', [
+      item('i1', 0, 'A>B', 'B'),
+      item('i2', 1, 'A>B', 'B'),
+      item('i3', 2, 'B>A', 'B'),
+    ]);
+    const score = await scoreCalibrationRun('cal-below', client);
+
+    expect(score.accuracy).toBeCloseTo(1 / 3, 10);
+    expect(score.constantBaseline).toEqual({
+      accuracy: 2 / 3,
+      preferences: ['A>B'],
+      keyCounts: { 'A>B': 2, 'B>A': 1, tie: 0 },
+      denominator: 3,
+    });
+    expect(score.marginOverConstant).toBeCloseTo(1 / 3 - 2 / 3, 10);
+    expect(score.marginOverConstant).toBeLessThan(0);
+    // The relation the CLI's ⚠ branch tests, pinned at the score level.
+    expect(score.accuracy).toBeLessThan(score.constantBaseline?.accuracy ?? 0);
+  });
+
+  it("the floor is over the SCORED subset: 25 of 30 keyed 14/11 gives 0.5600, not the full set's 0.5667", async () => {
+    // GROUND_TRUTH is 'A>B' at indices 0-16 and 'B>A' at 17-29. Holding back
+    // three of the first group and two of the second leaves 14/11 over 25 —
+    // run 9's exact shape (granite4.2:3b, five items lost to a repetition loop).
+    const score = await scoreCalibrationRun(
+      CALIBRATION_ID,
+      fakeClient(calibration(GROUND_TRUTH, { pendingAt: [0, 1, 2, 17, 18] }))
+    );
+
+    expect(score.verdictCount).toBe(25);
+    expect(score.constantBaseline?.keyCounts).toEqual({ 'A>B': 14, 'B>A': 11, tie: 0 });
+    expect(score.constantBaseline?.denominator).toBe(25);
+    expect(score.constantBaseline?.accuracy).toBeCloseTo(0.56, 10);
+    expect(Math.abs((score.constantBaseline?.accuracy ?? 0) - 17 / 30)).toBeGreaterThan(0.005);
+  });
+
+  it("a COMPLETED judgment with a null verdict is outside the floor's denominator too", async () => {
+    // Same five items, but these rows REACH the scoring loop (status
+    // completed, verdict null) instead of being filtered out by the query.
+    // This is the discriminating case: counting the key BEFORE the
+    // null-verdict gate leaves the pendingAt test green and turns this red.
+    const score = await scoreCalibrationRun(
+      CALIBRATION_ID,
+      fakeClient(calibration(GROUND_TRUTH, { missingAt: [0, 1, 2, 17, 18] }))
+    );
+
+    expect(score.missingVerdicts).toBe(5);
+    expect(score.verdictCount).toBe(25);
+    expect(score.constantBaseline).toEqual({
+      accuracy: 14 / 25,
+      preferences: ['A>B'],
+      keyCounts: { 'A>B': 14, 'B>A': 11, tie: 0 },
+      denominator: 25,
+    });
+  });
+
+  it('keyCounts agree with the confusion matrix row sums, and the denominator IS verdictCount', async () => {
+    // Two independent accumulators for one fact, pinned to each other. An
+    // implementation that DERIVES one from the other passes this by
+    // construction — the discriminating injection for keyCounts is the
+    // null-verdict case above, not this one.
+    const score = await scoreCalibrationRun(
+      CALIBRATION_ID,
+      fakeClient(calibration(withFlips(3), { missingAt: [4, 21] }))
+    );
+    const floor = score.constantBaseline;
+    expect(floor).not.toBeNull();
+    for (const expected of ['A>B', 'B>A', 'tie'] as const) {
+      const rowSum = Object.values(score.confusion[expected]).reduce((a, b) => a + b, 0);
+      expect(floor?.keyCounts[expected]).toBe(rowSum);
+    }
+    expect(floor?.denominator).toBe(score.verdictCount);
+  });
+
+  it('the floor is a property of the KEY: identical at pairOrder BA', async () => {
+    const model = withFlips(3);
+    const ab = await scoreCalibrationRun(CALIBRATION_ID, fakeClient(calibration(model, { order: 'AB' })));
+    const ba = await scoreCalibrationRun(CALIBRATION_ID, fakeClient(calibration(model, { order: 'BA' })));
+
+    // An absolute oracle first: comparing two absent fields to each other
+    // passes in the red state (`expect(undefined).toEqual(undefined)`), which
+    // would make this case decoration rather than a test.
+    expect(ab.constantBaseline).toEqual({
+      accuracy: 17 / 30,
+      preferences: ['A>B'],
+      keyCounts: { 'A>B': 17, 'B>A': 13, tie: 0 },
+      denominator: 30,
+    });
+    expect(ba.constantBaseline).toEqual(ab.constantBaseline);
+    expect(ba.marginOverConstant).toBe(ab.marginOverConstant);
+  });
+
+  it('a tie-containing KEY is scored, a tie verdict against it is a HIT, and the floor can be tie', async () => {
+    // FIRST test in the repo of a 'tie' answer key. Reachable in production:
+    // PATCH /api/golden-sets/[id]/items writes `expected` with no vocabulary
+    // check on an unfrozen set, and readings.ts accepts 'tie' as ground truth.
+    const client = rowsClient('cal-tie', [
+      item('i1', 0, 'A>B', 'A'),
+      item('i2', 1, 'tie', 'tie'),
+      item('i3', 2, 'tie', 'A'),
+    ]);
+    const score = await scoreCalibrationRun('cal-tie', client);
+
+    expect(score.verdictCount).toBe(3);
+    expect(score.correctCount).toBe(2);
+    expect(score.confusion.tie.tie).toBe(1);
+    expect(score.constantBaseline).toEqual({
+      accuracy: 2 / 3,
+      preferences: ['tie'],
+      keyCounts: { 'A>B': 1, 'B>A': 0, tie: 2 },
+      denominator: 3,
+    });
+    expect(score.marginOverConstant).toBeCloseTo(0, 10);
+  });
+
+  it('a two-way tie of top key classes reports BOTH, in PREFERENCES order, never broken', async () => {
+    const client = rowsClient('cal-even', [
+      item('i1', 0, 'B>A', 'B'),
+      item('i2', 1, 'A>B', 'A'),
+      item('i3', 2, 'B>A', 'A'),
+      item('i4', 3, 'A>B', 'B'),
+    ]);
+    const score = await scoreCalibrationRun('cal-even', client);
+
+    expect(score.constantBaseline?.preferences).toEqual(['A>B', 'B>A']);
+    expect(score.constantBaseline?.accuracy).toBe(0.5);
+    expect(score.accuracy).toBe(0.5);
+    expect(score.marginOverConstant).toBe(0);
+  });
+
+  it('nothing scored → no floor, no margin, and NULL (not 0) lands on the row', async () => {
+    const client = fakeClient([]);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+
+    expect(score.constantBaseline).toBeNull();
+    expect(score.marginOverConstant).toBeNull();
+    expect(client.updates[0].constantBaselineAccuracy).toBeNull();
+  });
+
+  it('the row carries the floor beside rawAgreement — same overwrite, same denominator', async () => {
+    // The §8 scoreboard SQL reads CalibrationRun directly; without this the
+    // query cannot show the floor beside the number it floors. Written in the
+    // SAME full-overwrite update as rawAgreement/verdictCount, so re-scoring
+    // after a drain moves all three together.
+    const client = fakeClient(calibration(withFlips(3), { pendingAt: [0, 1, 2, 17, 18] }));
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+    const data = client.updates[0];
+
+    expect(data.constantBaselineAccuracy).toBe(score.constantBaseline?.accuracy);
+    expect(data.constantBaselineAccuracy).toBeCloseTo(0.56, 10);
+    expect(data.rawAgreement).toBe(score.accuracy);
+    expect(data.verdictCount).toBe(25);
+  });
+});
+
 describe('scoreCalibrationRun — what lands on the CalibrationRun row', () => {
   it('writes rawAgreement === accuracy, plus the labels that make kappa readable', async () => {
     const client = fakeClient(calibration(withFlips(3)));

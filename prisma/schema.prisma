@@ -942,6 +942,17 @@ model CalibrationRun {
   goldenSet           GoldenSet         @relation(fields: [goldenSetId], references: [id], onDelete: Restrict)
   kappa               Float?
   rawAgreement        Float?
+  /// The constant-verdict floor beside the number it floors (v2l): the hit
+  /// rate of a judge stamping the answer key's plurality class on every
+  /// SCORED item — max(key class)/verdictCount over the scored subset, never
+  /// over the whole set (run 9 scored 25 of 30 keyed 14/11: 0.5600, not the
+  /// full key's 0.5667). Written by score.ts in the same full-overwrite update
+  /// as rawAgreement so re-scoring after a drain moves both together; the pure
+  /// function in src/lib/calibration/baseline.ts is the source of truth and
+  /// this is its stored copy for readers that never load the module (the
+  /// handoff §8 scoreboard SQL). NULL means "not scored since v2l" — the 9
+  /// production rows stay NULL until each is re-scored with --score-only.
+  constantBaselineAccuracy Float?
   testRetest          Float?
   positionBias        Float?
   biasSensitivityRate Float?

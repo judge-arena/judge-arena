@@ -272,6 +272,25 @@ describe('meta-eval tables (GoldenSet/GoldenItem/GoldenLabel/CalibrationRun)', (
     expect(run.finishedAt).toBeNull();
   });
 
+  it('CalibrationRun.constantBaselineAccuracy (v2l) defaults to NULL and round-trips a double', async () => {
+    // NULL means "not scored since v2l" — never 0, which would read as "the
+    // stamp was never right". No tests/db fixture drives scoreCalibrationRun
+    // against a real Postgres (the unit suite pins the write through the fake
+    // client's captured update data); this pins the column and its type.
+    const goldenSet = await mkGoldenSet();
+    const judgeModelVersion = await mkJudgeModelVersion();
+    const run = await db.calibrationRun.create({
+      data: { judgeModelVersionId: judgeModelVersion.id, goldenSetId: goldenSet.id },
+    });
+    expect(run.constantBaselineAccuracy).toBeNull();
+
+    const scored = await db.calibrationRun.update({
+      where: { id: run.id },
+      data: { constantBaselineAccuracy: 14 / 25 },
+    });
+    expect(scored.constantBaselineAccuracy).toBeCloseTo(0.56, 12);
+  });
+
   it('GoldenSet_ownerId_slug_key is NULLS NOT DISTINCT: two OWNERLESS sets cannot share a slug', async () => {
     // The hand edit in 20260812190000_v2d_golden_substrate. Prisma's DSL
     // cannot declare it, so the migration's raw SQL is its only record and

@@ -25,20 +25,42 @@
  *    that moves when the set changes and the judge does not.
  *
  * SO WHY COMPUTE IT AT ALL? Because accuracy alone cannot tell a judge that
- * learned something from a judge that answers 'A>B' every time. On the target
- * set that degenerate judge scores 0.5667 — comfortably "better than chance"
- * to the naked eye — and kappa scores it 0.0000, which is exactly right. The
- * two numbers fail in opposite directions, so both are stored, and
- * `kappaVariant`/`kappaWeighting` record what produced the second one. A
- * kappa with no stated method is a number nobody can check a year from now.
+ * learned something from a judge that answers 'A>B' every time. Kappa scores
+ * that judge 0.0000, which is exactly right; the two numbers fail in opposite
+ * directions, so both are stored, and `kappaVariant`/`kappaWeighting` record
+ * what produced the second one. A kappa with no stated method is a number
+ * nobody can check a year from now.
+ *
+ * ── THE CONSTANT FLOOR IS COMPUTED, NOT RECITED ────────────────────────────
+ *
+ * Until v2l this header SAID that the always-'A>B' judge scores 0.5667
+ * on the target set, and nothing computed it — so granite4.1:3b's 0.5000 was
+ * read as a weak signal when it was worse than a stamp. `constantBaseline`
+ * (src/lib/calibration/baseline.ts) is now emitted beside `accuracy`, with
+ * `marginOverConstant` = accuracy − floor, and the floor's accuracy is stored
+ * as `CalibrationRun.constantBaselineAccuracy` (v2l) in the same overwrite as
+ * `rawAgreement`, so the scoreboard SQL reads both from one row.
+ *
+ * THE FLOOR MOVES WITH THE DENOMINATOR. It is max(key class)/verdictCount over
+ * the SCORED subset, not over the set: the full key is 17/13 (0.5667), but
+ * run 9 scored 25 of 30 items whose key was 14/11 — a floor of 0.5600.
+ * Comparing a partial run against the whole set's floor flatters it, which is
+ * why `keyCounts` below is accumulated past the same null-verdict gate as
+ * `verdictCount`, and why a leaderboard cannot compute this number once and
+ * cache it.
  *
  * ── WHAT COUNTS AND WHAT DOES NOT ──────────────────────────────────────────
  *
- * A 'tie' IS A MISS. The corpus has no ties (`GoldenItem.expected` is 'A>B'
- * or 'B>A' — golden-sets.ts rejects anything else at import), so there is no
- * item a tie could be right about. Crediting it as a partial hit, or dropping
- * it from the denominator, would both let a judge raise its score by refusing
- * to answer.
+ * A 'tie' IS A MISS ON THIS CORPUS. The target set has no ties
+ * (`GoldenItem.expected` is 'A>B' or 'B>A' — golden-sets.ts rejects anything
+ * else at import), so there is no item a tie could be right about. Crediting
+ * it as a partial hit, or dropping it from the denominator, would both let a
+ * judge raise its score by refusing to answer. A tie KEY is nonetheless
+ * reachable — PATCH /api/golden-sets/[id]/items writes `expected` with no
+ * vocabulary check on an unfrozen set, and readings.ts accepts 'tie' — and
+ * against such an item a 'tie' verdict is a hit by the same `actual ===
+ * expected` rule below. The constant floor treats 'tie' as a class like the
+ * other two for the same reason; do not "fix" either.
  *
  * A JUDGMENT THAT NEVER COMPLETED IS NOT A WRONG ANSWER. Only
  * `status: 'completed'` judgments are loaded, so an in-flight calibration
@@ -59,6 +81,7 @@
  */
 
 import { agreement, type AgreementMethod } from '@/lib/agreement';
+import { constantVerdictBaseline, type ConstantBaseline } from '@/lib/calibration/baseline';
 import {
   groundTruthReadings,
   preferenceFromVerdict,
@@ -121,6 +144,16 @@ export type CalibrationScore = {
    *  later, and this is what gets mirrored onto the row's `kappaVariant` /
    *  `kappaWeighting`. */
   method: AgreementMethod;
+  /** The best constant verdict's hit rate over the SAME denominator as
+   *  `accuracy` — max(key class)/verdictCount over the scored subset. `null`
+   *  exactly when `accuracy` is. Computed per scoring because the floor moves
+   *  with the denominator (17/30 = 0.5667 on the full set; 14/25 = 0.5600 on
+   *  run 9's scored subset). Its `accuracy` is mirrored onto the row's
+   *  `constantBaselineAccuracy`. */
+  constantBaseline: ConstantBaseline | null;
+  /** accuracy − constantBaseline.accuracy. Negative means the judge did worse
+   *  than stamping. `null` when either side is. */
+  marginOverConstant: number | null;
 };
 
 type LoadedJudgment = {
@@ -217,6 +250,12 @@ export async function scoreCalibrationRun(
     confusion[expected] = {};
     for (const judged of PREFERENCES) confusion[expected][judged] = 0;
   }
+  // The answer key's marginal over the SCORED subset — incremented past the
+  // same null-verdict gate as `verdictCount`, so its sum IS `verdictCount`.
+  // A separate accumulator rather than the confusion row sums, in this file's
+  // own style (see the loop comment below): the test pins the two equal, and
+  // a regression in either is a failure rather than one shared wrong answer.
+  const keyCounts: Record<Preference, number> = { 'A>B': 0, 'B>A': 0, tie: 0 };
 
   const disagreements: CalibrationDisagreement[] = [];
   let correctCount = 0;
@@ -239,6 +278,7 @@ export async function scoreCalibrationRun(
 
     const actual = preferenceFromVerdict(row.verdict as Verdict, row.pairOrder as PairOrder);
     const expected = row.expected as Preference;
+    keyCounts[expected] += 1;
     confusion[expected][actual] += 1;
 
     if (actual === expected) {
@@ -258,6 +298,10 @@ export async function scoreCalibrationRun(
 
   const accuracy = verdictCount === 0 ? null : correctCount / verdictCount;
   const result = agreement(projection.readings);
+  // Null exactly when `accuracy` is: both share the denominator.
+  const constantBaseline = constantVerdictBaseline(keyCounts);
+  const marginOverConstant =
+    accuracy !== null && constantBaseline !== null ? accuracy - constantBaseline.accuracy : null;
 
   const score: CalibrationScore = {
     calibrationRunId,
@@ -273,6 +317,8 @@ export async function scoreCalibrationRun(
     verdictDistribution,
     confusion,
     disagreements,
+    constantBaseline,
+    marginOverConstant,
     method: {
       statistic: result.statistic,
       weighting: result.weighting,
@@ -291,6 +337,11 @@ export async function scoreCalibrationRun(
       rawAgreement: accuracy,
       kappa: result.value,
       verdictCount,
+      // The floor beside the number it floors, on the row the §8 scoreboard
+      // SQL reads. Same full-overwrite rule as everything here: re-scoring
+      // after a drain moves verdictCount and this moves with it. baseline.ts
+      // is the source of truth; this is its stored copy.
+      constantBaselineAccuracy: constantBaseline === null ? null : constantBaseline.accuracy,
       // Mirrored from the method `agreement()` actually USED rather than
       // written as literals. Both are 'cohen'/'none' by construction here —
       // exactly two raters, and preferences carry no distance so any

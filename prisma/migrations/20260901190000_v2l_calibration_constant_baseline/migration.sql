@@ -1,0 +1,38 @@
+-- v2l — CalibrationRun stores the constant-verdict floor beside rawAgreement
+--
+-- rawAgreement IS accuracy (the column predates A2.1 and the name is inherited).
+-- Read on its own it cannot tell a judge that learned something from a judge
+-- that stamps the same preference on every item: on the target set that stamp
+-- scores 17/30 = 0.5667, and granite4.1:3b's 0.5000 was read as a faint signal
+-- when it was WORSE than not thinking. The floor was stated in prose (score.ts,
+-- the runbook, the scoreboard spec) and computed nowhere.
+--
+-- WHY A COLUMN AND NOT A PROJECTION. The floor's inputs are immutable once a
+-- run drains (the key is frozen with the set; a completed verdict is never
+-- rewritten), so it IS reconstructible on read — but so are rawAgreement and
+-- kappa, and both are stored here because this header is what the board reads.
+-- The only scoreboard that exists today is SQL against this table (handoff §8
+-- step 3), and without a column that query cannot put the floor beside the
+-- number it floors, which is the entire point. score.ts writes it in the SAME
+-- full-overwrite update as rawAgreement/verdictCount, so re-scoring after a
+-- drain moves all three together; src/lib/calibration/baseline.ts stays the
+-- source of truth.
+--
+-- PER DENOMINATOR, NOT PER SET. max(key class)/verdictCount over the SCORED
+-- subset: run 9 scored 25 of 30 items keyed 14/11 — a floor of 0.5600, not the
+-- full key's 0.5667. A value computed once per set and cached would flatter
+-- every partial run.
+--
+-- ZERO HAND EDITS: what follows is byte-for-byte what `prisma migrate diff`
+-- emitted (diffed against the test database at v2k). CONTRIBUTING's
+-- pseudo-drift table stays at EIGHT rows.
+--
+-- ENTIRELY ADDITIVE: one nullable DOUBLE PRECISION column, no DROP, no DELETE,
+-- no default, no backfill. NULL means "not scored since v2l": the 9 production
+-- rows stay NULL until each is re-scored with --score-only on an image that
+-- carries this migration — a deliberate operator action, never a migration
+-- step, because scoring writes rawAgreement/kappa/finishedAt as well.
+
+-- AlterTable
+ALTER TABLE "CalibrationRun" ADD COLUMN     "constantBaselineAccuracy" DOUBLE PRECISION;
+
