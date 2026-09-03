@@ -11,9 +11,11 @@ import {
 import { LANE_FALLBACK_QUEUE, LANE_QUEUES, laneQueueFor } from '@/lib/queue/lanes';
 import { type DlqEnvelope, type JudgmentExecuteMsg, type RunCreateMsg } from '@/lib/queue/publish';
 import { ProviderError } from '@/lib/llm/errors';
+import { resolveTimeoutBudgets, runStartBudgetMs } from '@/lib/llm/timeout-policy';
 import {
   claimJudgment,
   LEASE_MS,
+  stampRunStartedAtFirstDequeue,
 } from '@/worker/claim';
 import {
   createJudgmentConsumer,
@@ -826,5 +828,177 @@ describe('worker claim idempotency (src/worker/claim.ts, judgment-consumer.ts, r
     const republished = JSON.parse(published[0].content.toString()) as JudgmentExecuteMsg;
     expect(republished.judgmentId).toBe(judgment.id);
     expect(republished.attempt).toBe(1); // unchanged — a delayed re-check, not a new attempt
+  });
+});
+
+describe('claim.ts: stampRunStartedAtFirstDequeue — the run deadline is set at FIRST DEQUEUE, not at creation (2026-09-03 fix)', () => {
+  it('the run is created with deadlineAt null, and the FIRST claim stamps it to roughly now + judgmentCount * hardCapMs + slack', async () => {
+    const fixture = await createFixture();
+    const bystander = await createFixture(); // never claimed
+    const judgment = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId);
+
+    const beforeClaim = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: fixture.run.id } });
+    // This fixture's run comes from mkEvaluationRun (this file, :201-207),
+    // which has NEVER set deadlineAt — so this assertion is green today,
+    // before any change, and stays green even if all three launch paths
+    // keep stamping at creation. It is the PRECONDITION for the stamp
+    // below, not evidence about launchSingleRun; Task 4's
+    // tests/db/calibration-link.test.ts and Task 5's run.create test are
+    // what pin the launch-time claim, because they drive real launch paths.
+    expect(beforeClaim.deadlineAt).toBeNull();
+
+    const claimedAt = Date.now();
+    const calls: RunProviderJudgmentInput[] = [];
+    const consumer = createJudgmentConsumer({ provider: fakeProvider(calls) });
+    const msg: JudgmentExecuteMsg = { judgmentId: judgment.id, runId: fixture.run.id, attempt: 1 };
+    await consumer.handle(fakeMessage(msg), fakeChannel());
+
+    const afterClaim = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: fixture.run.id } });
+    expect(afterClaim.deadlineAt).not.toBeNull();
+
+    // This run has exactly ONE judgment (the calibration shape) — the
+    // budget is 1 hard cap + slack, roughly 16 minutes at the defaults,
+    // measured from CLAIM time, not from whenever the run was created.
+    const budgets = resolveTimeoutBudgets();
+    const expectedMs = runStartBudgetMs(1, budgets);
+    const actualMs = afterClaim.deadlineAt!.getTime() - claimedAt;
+    expect(actualMs).toBeGreaterThan(expectedMs - 5_000);
+    expect(actualMs).toBeLessThan(expectedMs + 5_000);
+
+    // The stamp's guard must be scoped to THIS run's id — a
+    // `where: { deadlineAt: null }` with the `id` filter dropped would
+    // stamp EVERY never-started run in the system, including this
+    // bystander's, and would pass every other assertion above.
+    const bystanderAfter = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: bystander.run.id } });
+    expect(bystanderAfter.deadlineAt).toBeNull(); // the stamp is scoped to runId
+  });
+
+  it('two judgments of the SAME run claimed one after another stamp ONE deadline, sized on BOTH judgments — the second claim does not clobber it', async () => {
+    const fixture = await createFixture();
+    const judgmentA = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId);
+    // A SECOND judge version, not a second judgment on the same one.
+    // ModelJudgment's unique index is (runId, judgeModelVersionId, pairOrder)
+    // NULLS NOT DISTINCT (hand-edited in
+    // prisma/migrations/20260728215410_v2b_idempotency_tighten/migration.sql,
+    // verified live), and mkJudgment (this file, :256) leaves pairOrder null —
+    // so two judgments on ONE run must differ in judge version or the second
+    // create raises P2002 before any assertion in this test ever runs.
+    const { version: versionB } = await mkJudgeModelVersion();
+    await mkEndpoint(fixture.user.id, versionB.id);
+    const judgmentB = await mkJudgment(fixture.run.id, versionB.id, fixture.promptTemplateId);
+
+    const calls: RunProviderJudgmentInput[] = [];
+    const consumer = createJudgmentConsumer({ provider: fakeProvider(calls) });
+
+    const claimedAt = Date.now();
+    await consumer.handle(
+      fakeMessage({ judgmentId: judgmentA.id, runId: fixture.run.id, attempt: 1 } satisfies JudgmentExecuteMsg),
+      fakeChannel()
+    );
+    const afterFirst = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: fixture.run.id } });
+    expect(afterFirst.deadlineAt).not.toBeNull();
+    const stampedAt = afterFirst.deadlineAt!.getTime();
+
+    // Sized on THIS run's OWN judgment count — TWO, not one. Without this
+    // assertion the entire reason runStartBudgetMs takes a judgmentCount is
+    // unguarded: a hardcoded `runStartBudgetMs(1, budgets)`, or a count
+    // filtered on `status: 'pending'` (which under-counts the moment the
+    // first judgment goes 'running' — the natural typo, since every other
+    // query in claim.ts filters on status), passes every other assertion in
+    // this block.
+    const budgets = resolveTimeoutBudgets();
+    const expectedMs = runStartBudgetMs(2, budgets);
+    const actualMs = stampedAt - claimedAt;
+    expect(actualMs).toBeGreaterThan(expectedMs - 10_000);
+    expect(actualMs).toBeLessThan(expectedMs + 10_000);
+
+    await consumer.handle(
+      fakeMessage({ judgmentId: judgmentB.id, runId: fixture.run.id, attempt: 1 } satisfies JudgmentExecuteMsg),
+      fakeChannel()
+    );
+    const afterSecond = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: fixture.run.id } });
+
+    // Unchanged, to the millisecond — a wrong implementation that stamps
+    // unconditionally on every claim (no `deadlineAt: null` guard) would
+    // move this forward on the second claim; this proves it does not.
+    expect(afterSecond.deadlineAt!.getTime()).toBe(stampedAt);
+  });
+
+  it('reclaiming a STALE judgment on a run that has already started does not re-stamp the deadline', async () => {
+    const fixture = await createFixture();
+    const judgment = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId);
+
+    // claimJudgment() alone does NOT stamp the run — see claim.ts's own doc
+    // ("CALLED FROM EXACTLY ONE PLACE"): the stamp is a separate call
+    // judgment-consumer.ts's executeClaimed makes. Drive both directly here
+    // rather than through handle(), which would also run a fake provider
+    // call this test does not need.
+    const first = await claimJudgment(judgment.id);
+    expect(first).toBe('claimed');
+    await stampRunStartedAtFirstDequeue(fixture.run.id);
+    const afterFirst = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: fixture.run.id } });
+    const stampedAt = afterFirst.deadlineAt!.getTime();
+
+    // Force the row stale (past LEASE_MS) and reclaim the SAME judgment —
+    // claim.ts's own 'stale_running' path.
+    await prisma.$executeRaw`UPDATE "ModelJudgment" SET "updatedAt" = ${new Date(Date.now() - LEASE_MS - 5_000)} WHERE id = ${judgment.id}`;
+    const reclaimed = await claimJudgment(judgment.id);
+    expect(reclaimed).toBe('stale_running');
+    await stampRunStartedAtFirstDequeue(fixture.run.id);
+
+    const afterReclaim = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: fixture.run.id } });
+    expect(afterReclaim.deadlineAt!.getTime()).toBe(stampedAt); // unchanged
+  });
+
+  it('a retryable provider failure CLEARS the run deadline — a requeued judgment is queued work, not executing work', async () => {
+    const fixture = await createFixture();
+    const judgment = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId);
+
+    const { confirmChannel } = await getRabbit();
+    await assertTopology(confirmChannel);
+    await confirmChannel.purgeQueue(QUEUE_JUDGMENT_RETRY_30S);
+
+    const consumer = createJudgmentConsumer({
+      provider: async () => {
+        throw new ProviderError('temporary provider hiccup', { kind: 'retryable', provider: 'openai', status: 503 });
+      },
+    });
+    const msg: JudgmentExecuteMsg = { judgmentId: judgment.id, runId: fixture.run.id, attempt: 1 };
+
+    // A SECOND, unrelated run that HAS started — the clear must be scoped to
+    // msg.runId. `where: {}` (id filter dropped) nulls every run in the DB
+    // and passes every other assertion in this file.
+    const bystander = await createFixture();
+    const bystanderJudgment = await mkJudgment(bystander.run.id, bystander.version.id, bystander.promptTemplateId);
+    await claimJudgment(bystanderJudgment.id);
+    await stampRunStartedAtFirstDequeue(bystander.run.id);
+
+    await consumer.handle(fakeMessage(msg), fakeChannel());
+
+    // The claim inside handle() DID stamp a deadline — the run started
+    // executing. The retry disposition then reset the judgment to 'pending'
+    // and republished it onto the BACK of its own lane (pinned by the
+    // pre-existing test at :647 of this file). It is queued again, so the
+    // run is not executing any more and must not keep a one-hard-cap budget
+    // while its retry waits out the whole queue: src/worker/reaper.ts
+    // force-finalizes a still-'pending' judgment 3 sweeps past the deadline
+    // and stamps it `error: 'reaper: abandoned'`, which is exactly the
+    // healthy-queued-tail kill this plan exists to remove.
+    //
+    // deadlineAt null here is DISCRIMINATING, not trivially true: mkJudgment
+    // + handle() go through the stamp first, so an implementation that
+    // stamps and never clears leaves a non-null value.
+    const afterRetry = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: fixture.run.id } });
+    expect(afterRetry.deadlineAt).toBeNull();
+
+    // The clear must be scoped to msg.runId — a `where: {}` (id filter
+    // dropped) would null this bystander's deadline too, and every other
+    // assertion in this file would still pass.
+    const bystanderAfter = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: bystander.run.id } });
+    expect(bystanderAfter.deadlineAt).not.toBeNull();
+
+    // Drain so the republished message does not leak into a later test's
+    // queue assertions in this same persistent-DB suite.
+    await drainQueue(confirmChannel, QUEUE_JUDGMENT_RETRY_30S);
   });
 });

@@ -181,7 +181,7 @@ import type {
 } from '@/lib/llm';
 import { maybeFinalizeRun } from '@/lib/run-finalizer';
 import { deriveRunMode } from '@/lib/run-mode';
-import { claimJudgment } from './claim';
+import { claimJudgment, clearRunDeadlineOnRequeue, stampRunStartedAtFirstDequeue } from './claim';
 import { judgeLatencyBaseline, type LatencyBaseline } from '@/lib/calibration/latency';
 import {
   GATE_WAIT_TIMEOUT_MS,
@@ -1114,6 +1114,20 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
     }
     // claim === 'claimed' | 'stale_running' — this delivery owns the row now.
 
+    // THE REAPER FIX (see claim.ts's own doc): stamp the run's execution
+    // deadline at FIRST DEQUEUE, not at creation. Best-effort and isolated
+    // — a failure here must never fail the judgment this delivery is about
+    // to execute; src/worker/reaper.ts's NEVER_STARTED_TIMEOUT_MS is the
+    // safety net covering a run whose deadline never gets stamped at all.
+    try {
+      await stampRunStartedAtFirstDequeue(msg.runId);
+    } catch (error) {
+      logger.error(
+        'stampRunStartedAtFirstDequeue failed — continuing (the never-started safety net covers this run instead)',
+        { runId: msg.runId, judgmentId: msg.judgmentId, error: serializeError(error) }
+      );
+    }
+
     const context = await judgmentContextQuery(msg.judgmentId);
     const judgeModelVersion = context?.judgeModelVersion ?? null;
 
@@ -1297,6 +1311,22 @@ export function createJudgmentConsumer(options: JudgmentConsumerOptions = {}): J
         where: { id: msg.judgmentId },
         data: { status: 'pending', error: providerError.message },
       });
+
+      // The judgment is going back on the lane BEHIND everything already
+      // queued — it is not executing any more, so neither is the run. See
+      // claim.ts's clearRunDeadlineOnRequeue doc: without this the run keeps
+      // a one-hard-cap budget while its retry waits out the whole queue, and
+      // src/worker/reaper.ts force-finalizes healthy queued work as
+      // 'reaper: abandoned'. Best-effort, same as the stamp above.
+      try {
+        await clearRunDeadlineOnRequeue(msg.runId);
+      } catch (error) {
+        logger.error('clearRunDeadlineOnRequeue failed — the run keeps a stale execution deadline', {
+          runId: msg.runId,
+          judgmentId: msg.judgmentId,
+          error: serializeError(error),
+        });
+      }
 
       const nextMsg: JudgmentExecuteMsg = { ...msg, attempt: effectiveAttempt + 1 };
       await publishJudgmentRetryPreservingLane(

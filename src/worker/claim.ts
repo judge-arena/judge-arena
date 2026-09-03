@@ -38,7 +38,7 @@
  */
 
 import { prisma } from '@/lib/db';
-import { leaseMsFor, resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
+import { leaseMsFor, resolveTimeoutBudgets, runStartBudgetMs } from '@/lib/llm/timeout-policy';
 
 /**
  * Claim lease: how long a `running` judgment is presumed still in-flight
@@ -143,4 +143,147 @@ export async function claimJudgment(judgmentId: string): Promise<ClaimResult> {
   // resumed and touched the row again just in time) — treat as a live claim
   // this call doesn't own.
   return 'in_progress';
+}
+
+/**
+ * ─── Stamp `EvaluationRun.deadlineAt` at FIRST DEQUEUE ─────────────────────
+ *
+ * THE FIX documented (and deliberately deferred) in `src/lib/run-launch.ts`'s
+ * now-deleted `deadlineAt` JSDoc: every launch path used to stamp
+ * `EvaluationRun.deadlineAt` at CREATION, sized on "judgments queued ahead of
+ * this one" — a property of the WHOLE SYSTEM's queue depth at launch time,
+ * not of this run's own work. `src/worker/reaper.ts` sweeps
+ * `deadlineAt < now` and force-finalizes 3 sweeps later; a run created late
+ * in a large batch could have its still-healthy, still-queued judgments
+ * stamped `error: 'reaper: abandoned'` before a worker ever looked at them —
+ * this cost 4 of 30 items on a real calibration and is the reason
+ * `MAX_CALIBRATION_ITEMS` was capped at 100 (`src/lib/calibration/launch.ts`).
+ *
+ * This function stamps the deadline instead at the moment a worker actually
+ * claims the run's FIRST judgment — `runStartBudgetMs(judgmentCount, budgets)`
+ * milliseconds from THAT moment, not from creation. The deadline is now
+ * about THIS run's own work and is immune to how many other runs, batches
+ * or users were queued ahead of THIS run's FIRST claim.
+ *
+ * The limit of that guarantee, stated so it is not over-read: a
+ * MULTI-judgment run's budget is `judgmentCount * hardCapMs`, which assumes
+ * its judgments execute CONCURRENTLY across their judges' lanes. A run whose
+ * judgments span a fast lane and a congested one still has its clock started
+ * by the fast one while the slow one waits (lanes are keyed on server
+ * ORIGIN, not model — `src/lib/queue/lanes.ts`). That is not a regression:
+ * the creation-time deadline it replaces started the same clock strictly
+ * EARLIER, at creation. It is the reason `clearRunDeadlineOnRequeue` below
+ * exists, and the reason the never-started net in `src/worker/reaper.ts` is
+ * sized loosely rather than tightly.
+ *
+ * ── CALLED FROM EXACTLY ONE PLACE ────────────────────────────────────────
+ * `src/worker/judgment-consumer.ts`'s `executeClaimed`, immediately after
+ * `claimJudgment()` resolves to `'claimed'` or `'stale_running'` — i.e.
+ * every time THIS delivery actually owns the judgment row and is about to
+ * execute it. Not folded into `claimJudgment()` itself: that function's
+ * contract (`ClaimResult`, its five-way return) is unrelated to which RUN
+ * the judgment belongs to and is exercised by its own well-established
+ * tests; this is an independent, separately-testable concern that happens
+ * to be triggered by the same event. Any FUTURE caller of `claimJudgment()`
+ * must also call this on a `'claimed'`/`'stale_running'` result — there is
+ * exactly one caller today, so that obligation costs nothing to satisfy,
+ * but it is not enforced by the type system and is recorded here so it
+ * isn't missed.
+ *
+ * ── ATOMICITY: WHY A CONCURRENT CLAIM CANNOT RE-STAMP OR CLOBBER ───────────
+ * A single conditional `updateMany` — `WHERE id = $1 AND "deadlineAt" IS
+ * NULL` — is the entire guard, the same idiom `claimJudgment`'s own
+ * `pending -> running` transition uses a few lines above it, and the same
+ * idiom `run-finalizer.ts`'s `markRunCompleted` uses for its
+ * `needs_human -> completed` guard. Two judgments of the SAME run claimed
+ * concurrently by two different workers both call this function; both read
+ * the SAME `judgmentCount` (an `EvaluationRun`'s judgment rows are fixed at
+ * creation — nothing in this codebase ever adds one afterwards — so the
+ * value cannot itself be racing), and both issue the UPDATE. Postgres locks
+ * the row for whichever UPDATE reaches it first; the SECOND UPDATE blocks
+ * on that lock, and once it acquires it, re-evaluates its OWN `WHERE`
+ * clause against the row AS IT NOW STANDS — already committed, already
+ * non-null — and therefore matches ZERO rows. `updateMany` returns
+ * `{ count: 0 }` and this function returns without touching anything.
+ * Exactly one caller's write survives; the other is a correctly-recognized
+ * no-op, not a lost update masked by a last-writer-wins race — there is no
+ * window in which both writes are "in flight" against the same row,
+ * because the second one's WHERE clause is evaluated AFTER the lock, not
+ * against a stale snapshot taken before it. (`default_transaction_isolation`
+ * on the production database is `read committed`, measured 2026-09-03;
+ * Postgres's EvalPlanQual re-check is what makes the post-lock re-evaluation
+ * true rather than hopeful.)
+ *
+ * HONESTY ABOUT WHAT IS TESTED: the tests in
+ * `tests/integration/worker-claims.test.ts` drive two claims SEQUENTIALLY,
+ * so they prove idempotence, not the concurrent case. The concurrent claim
+ * above is Postgres semantics plus the same idiom `claimJudgment` already
+ * ships, not something this plan's tests demonstrate. A deliberately
+ * non-discriminating test was NOT added for it: the observable difference
+ * between this guarded UPDATE and a read-then-write under a real race is a
+ * few milliseconds of `deadlineAt`, which no assertion can separate from
+ * scheduling noise.
+ *
+ * Best-effort by design: the caller wraps this in a try/catch and logs
+ * rather than fails the judgment on error (see judgment-consumer.ts's
+ * `executeClaimed`). A run whose deadline never gets stamped (this call
+ * throws, or is never reached because the process dies between claim and
+ * this line) is covered — but SLOWLY: `src/worker/reaper.ts`'s
+ * `NEVER_STARTED_TIMEOUT_MS` treats a null-deadline row as "never started"
+ * and sweeps it at 45 DAYS, where the creation-time deadline this replaces
+ * would have republished it in ~16 minutes. A crash between the claim and
+ * this line is the better-covered case: the judgment is `running`, so
+ * `reclaimStaleJudgments` picks it up at `LEASE_MS`, not at the net.
+ */
+export async function stampRunStartedAtFirstDequeue(runId: string): Promise<void> {
+  const judgmentCount = await prisma.modelJudgment.count({ where: { runId } });
+  const budgets = resolveTimeoutBudgets();
+  const deadlineAt = new Date(Date.now() + runStartBudgetMs(judgmentCount, budgets));
+
+  await prisma.evaluationRun.updateMany({
+    where: { id: runId, deadlineAt: null },
+    data: { deadlineAt },
+  });
+}
+
+/**
+ * ─── The other half of the same invariant ─────────────────────────────────
+ *
+ * `deadlineAt` is non-null EXACTLY WHILE the run has a claimed judgment in
+ * flight. `stampRunStartedAtFirstDequeue` sets it when execution starts;
+ * this clears it when execution stops without the run finishing.
+ *
+ * ── WHY THIS IS NOT OPTIONAL ──────────────────────────────────────────────
+ * `src/worker/judgment-consumer.ts`'s retryable-error disposition resets a
+ * failed judgment to `status: 'pending'` and republishes it through the
+ * 30s/5m delay exchange, which delivers it to the BACK of the same
+ * single-consumer judge lane. That judgment is queued work again, not
+ * executing work. Leave the run's deadline in place and it still says "one
+ * hard cap from the FIRST claim" (~16 minutes for a calibration run's single
+ * judgment) while the retry waits out every item ahead of it — hours for a
+ * 30-item batch, DAYS at `MAX_CALIBRATION_ITEMS = 1000`. `src/worker/reaper.ts`
+ * force-finalizes 3 sweeps past the deadline by stamping every still-`pending`
+ * judgment `error: 'reaper: abandoned'`, so the healthy queued retry is
+ * killed and recorded as an abandonment: bit-for-bit the 4-of-30 failure this
+ * whole change exists to remove, relocated from the launch path to the retry
+ * path. It would have been a REGRESSION, not a pre-existing hole — the
+ * creation-time formula this plan deletes gave a 30-item calibration batch
+ * `launch + 30 x hardCapMs`, i.e. 7.5 hours, which covered the requeue.
+ *
+ * Clearing restores the "not started" state the stamp's own guard tests for,
+ * so the NEXT claim re-stamps a FRESH budget measured from when the work
+ * actually resumes. Between the clear and that next claim the run is bounded
+ * by `src/worker/reaper.ts`'s `NEVER_STARTED_TIMEOUT_MS`, and any SIBLING
+ * judgment still genuinely `running` is bounded by `reclaimStaleJudgments`
+ * at `LEASE_MS`, so clearing does not make a run immortal.
+ *
+ * Unconditional, not guarded: the run is being put back in the queue whatever
+ * its current deadline says. Best-effort, exactly like the stamp — a failure
+ * here must never fail the disposition it is part of.
+ */
+export async function clearRunDeadlineOnRequeue(runId: string): Promise<void> {
+  await prisma.evaluationRun.updateMany({
+    where: { id: runId },
+    data: { deadlineAt: null },
+  });
 }
