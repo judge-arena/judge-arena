@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { legitLong, loopAfterPrefix, loopPure } from './reasoning-fixtures';
 
 /**
  * A2.1 v2i — THE TRUNCATION + EMPTY-CONTENT GUARD, and the rendered-prompt
@@ -103,7 +104,13 @@ const pairwiseInput = {
 };
 
 /** The live-proven truncated shape: content EMPTY, 1164 chars of
- * reasoning_content, finish_reason 'length', at max_tokens 300. */
+ * reasoning_content, finish_reason 'length', at max_tokens 300.
+ *
+ * 1164 chars of 'x' deflates at 64x — far above the loop detector's 5x — and
+ * this fixture is what keeps the detector's 8,000-char FLOOR honest: the
+ * assertions below that the message names `samplingDefaults.max_tokens` are
+ * the floor's regression guard. Lengthening this fixture past 8,000 chars
+ * would flip them (tests/lib/degeneration.test.ts pins the boundary). */
 function truncatedResponse(content = '') {
   return {
     model: 'qwen3-32b',
@@ -526,5 +533,196 @@ describe('markJudgmentError records the runtime of the attempt that failed', () 
   it('clamps a skewed clock to zero rather than writing a negative runtime', async () => {
     await markJudgmentError('j-skew', 'boom', undefined, new Date(Date.now() + 5_000));
     expect(judgmentUpdateMock.mock.calls[0][0].data.latencyMs).toBe(0);
+  });
+});
+
+// ─── a repetition loop at the budget is named as a loop ─────────────────────
+
+/**
+ * Handoff 2026-09-01 §5.2. granite4.2:3b failed 5 of 30 calibration items
+ * with finish_reason 'length' at max_tokens 12288; the guard's message said
+ * "raise samplingDefaults.max_tokens". All five were degenerate repetition
+ * (26k-56k reasoning chars, one clause cycling; deflate 5.2-29x against
+ * 3.0-4.1x for the judgments that finished), and a larger budget buys a
+ * longer loop. The advice is inverted here, and the measure rides on the
+ * error so the decision is auditable — the same reason `timeout` and
+ * `attempt` are on it.
+ *
+ * Every case below goes through the REAL execute() → callOpenAICompatible /
+ * callAnthropic → assertUsableContent path under the client-level SDK mocks
+ * this file already installs.
+ */
+describe('execute(): a repetition loop at the token budget is named as a loop, not as a max_tokens problem', () => {
+  const at12288 = { ...baseVllmCall, samplingParams: { temperature: 0.3, max_tokens: 12288 } };
+
+  const loopResponse = (message: Record<string, unknown>, finish_reason = 'length') => ({
+    model: 'qwen3-32b',
+    choices: [{ message: { role: 'assistant', content: '', ...message }, finish_reason }],
+    usage: { prompt_tokens: 900, completion_tokens: 12288 },
+  });
+
+  it('PRODUCTION SHAPE — Ollama `reasoning` key, empty content, finish_reason "length": names the loop and does not say raise max_tokens', async () => {
+    // Every one of run 9's five failed rows carries reasoningSource
+    // 'reasoning' (verified on judge-arena-pg-1, 2026-09-01).
+    const reasoning = loopAfterPrefix();
+    openaiCreateMock.mockResolvedValue(loopResponse({ reasoning }));
+
+    const error = await execute(getDescriptor('ollama'), { ...at12288, baseUrl: 'http://ollama.internal:11434/v1', modelId: 'granite4.2:3b' }).catch((e) => e);
+
+    expect(error).toMatchObject({ name: 'ProviderError', kind: 'non_retryable' });
+    expect(error.message).toContain('was CUT OFF at the token budget');
+    // `facts` is byte-identical to the truncation message — the numbers an
+    // operator sizes anything by must not move.
+    expect(error.message).toContain('max_tokens 12288');
+    expect(error.message).toContain('completion_tokens 12288');
+    expect(error.message).toContain('reasoning_tokens unknown');
+    expect(error.message).toContain('content length 0 chars');
+    expect(error.message).toContain('DEGENERATE REPETITION');
+    expect(error.message).toContain('deflate ratio');
+    expect(error.message).toContain(`over ${reasoning.length} reasoning chars`);
+    expect(error.message).not.toContain('raise samplingDefaults.max_tokens');
+    expect(error.message).not.toContain('NEW ordinal');
+    expect(error.repetition).toMatchObject({ channel: 'reasoning', chars: reasoning.length });
+    expect(error.repetition.ratio).toBeGreaterThanOrEqual(5);
+    expect(error.callResult).toMatchObject({ reasoningSource: 'reasoning', finishReason: 'length', text: '' });
+    expect(error.callResult.reasoningText).toBe(reasoning);
+  });
+
+  it('vLLM/llama.cpp `reasoning_content` key: same', async () => {
+    openaiCreateMock.mockResolvedValue(loopResponse({ reasoning_content: loopAfterPrefix() }));
+
+    const error = await execute(getDescriptor('vllm'), at12288).catch((e) => e);
+
+    expect(error.message).toContain('DEGENERATE REPETITION');
+    expect(error.repetition.channel).toBe('reasoning');
+    expect(error.callResult.reasoningSource).toBe('reasoning_content');
+  });
+
+  it('Anthropic thinking block at stop_reason "max_tokens": same', async () => {
+    const thinking = loopAfterPrefix();
+    anthropicCreateMock.mockResolvedValue({
+      model: 'claude-sonnet-4-5',
+      content: [{ type: 'thinking', thinking, signature: 'sig' }],
+      stop_reason: 'max_tokens',
+      usage: { input_tokens: 10, output_tokens: 12288 },
+    });
+
+    const error = await execute(getDescriptor('anthropic'), { ...at12288, baseUrl: undefined, modelId: 'claude-sonnet-4-5' }).catch((e) => e);
+
+    expect(error).toMatchObject({ kind: 'non_retryable' });
+    expect(error.message).toContain('finish_reason "max_tokens"');
+    expect(error.message).toContain('DEGENERATE REPETITION');
+    expect(error.repetition).toMatchObject({ channel: 'reasoning', chars: thinking.length });
+    expect(error.callResult.reasoningSource).toBe('anthropic_thinking');
+  });
+
+  it('a MULTI-BYTE reasoning channel reports CHARS in the message, never bytes', async () => {
+    // Every other fixture in this file is pure ASCII, so chars === bytes and
+    // an implementation that rendered `${loop.bytes} ${loop.channel} chars`
+    // — both fields are on the same object, and the module deliberately
+    // measures BYTES — would pass all of them. 10,000 CJK chars are 30,000
+    // UTF-8 bytes (297x). The message must name the figure an operator can
+    // compare against `length(ModelJudgment."reasoningContent")`.
+    const reasoning = '漢字の判定'.repeat(2_000);
+    openaiCreateMock.mockResolvedValue(loopResponse({ reasoning_content: reasoning }));
+
+    const error = await execute(getDescriptor('vllm'), at12288).catch((e) => e);
+
+    expect(error.message).toContain('DEGENERATE REPETITION');
+    expect(error.message).toContain('over 10000 reasoning chars');
+    expect(error.message).not.toContain('over 30000');
+    expect(error.repetition).toMatchObject({ channel: 'reasoning', chars: 10_000, bytes: 30_000 });
+  });
+
+  it('a non-reasoning judge looping in CONTENT at "length" is caught on the content channel', async () => {
+    const content = loopPure();
+    openaiCreateMock.mockResolvedValue(loopResponse({ content }));
+
+    const error = await execute(getDescriptor('vllm'), at12288).catch((e) => e);
+
+    expect(error.message).toContain('DEGENERATE REPETITION');
+    expect(error.message).toContain(`over ${content.length} content chars`);
+    expect(error.repetition.channel).toBe('content');
+    expect(error.callResult.text).toBe(content);
+  });
+
+  it('RESPOND mode never measures content: a long structured answer cut at the budget keeps the raise-max_tokens advice', async () => {
+    openaiCreateMock.mockResolvedValue(loopResponse({ content: loopPure() }));
+
+    const error = await executeRespondCall(
+      prepareRespondCall({
+        judgeVersion: { ...judgeVersion, samplingDefaults: { temperature: 0.3, max_tokens: 12288 } },
+        endpoint,
+        submission: { promptText: 'list every step' },
+      })
+    ).catch((e) => e);
+
+    expect(error).toMatchObject({ kind: 'non_retryable' });
+    expect(error.message).not.toContain('DEGENERATE REPETITION');
+    expect(error.message).toContain('raise samplingDefaults.max_tokens');
+    expect(error.repetition).toBeUndefined();
+  });
+
+  it('the EMPTY branch (finish_reason "stop", looping reasoning) drops the max_tokens advice too', async () => {
+    openaiCreateMock.mockResolvedValue(loopResponse({ reasoning_content: loopAfterPrefix() }, 'stop'));
+
+    const error = await execute(getDescriptor('vllm'), at12288).catch((e) => e);
+
+    expect(error.message).toContain('returned an EMPTY content channel');
+    expect(error.message).toContain('DEGENERATE REPETITION');
+    expect(error.message).not.toContain('raise samplingDefaults.max_tokens');
+  });
+
+  it('REGRESSION: long-but-legitimate reasoning at "length" keeps the raise-max_tokens advice, now pointing at a NEW ordinal', async () => {
+    openaiCreateMock.mockResolvedValue(loopResponse({ reasoning_content: legitLong(20_000) }));
+
+    const error = await execute(getDescriptor('vllm'), at12288).catch((e) => e);
+
+    expect(error).toMatchObject({ kind: 'non_retryable' });
+    expect(error.message).not.toContain('DEGENERATE REPETITION');
+    expect(error.message).toContain('A response cut off mid-reasoning is not a completed judgment');
+    expect(error.message).toContain('raise samplingDefaults.max_tokens on a NEW ordinal of the JudgeModelVersion');
+    expect(error.message).toContain('never edit samplingDefaults mid-run');
+    expect(error.repetition).toBeUndefined();
+  });
+
+  it('never runs on a healthy call: 44k of compressible CONTENT at finish_reason "stop" is returned, not failed', async () => {
+    // The detector is consulted ONLY after the guard has decided to fail.
+    // The existing "leaves a healthy call completely alone" case uses 31
+    // chars of content — under the floor — so it would not notice an
+    // implementation that measures every call and throws on a hit.
+    const content = loopPure();
+    openaiCreateMock.mockResolvedValue(loopResponse({ content }, 'stop'));
+
+    const result = await execute(getDescriptor('vllm'), at12288);
+
+    expect(result.text).toBe(content);
+  });
+
+  it('classify() returns the loop error untouched, repetition intact', async () => {
+    openaiCreateMock.mockResolvedValue(loopResponse({ reasoning_content: loopAfterPrefix() }));
+
+    const error = await execute(getDescriptor('vllm'), at12288).catch((e) => e);
+    const classified = classify(error, 'vllm');
+
+    expect(classified).toBe(error);
+    expect(classified.kind).toBe('non_retryable');
+    expect((classified as typeof error).repetition.channel).toBe('reasoning');
+  });
+
+  it('markJudgmentError persists the tagged message and the loop verbatim, so the row stays inspectable', async () => {
+    const reasoning = loopAfterPrefix();
+    openaiCreateMock.mockResolvedValue(loopResponse({ reasoning_content: reasoning }));
+
+    const error = await execute(getDescriptor('vllm'), at12288).catch((e) => e);
+    await markJudgmentError('judgment-loop', error.message, error.callResult);
+
+    const { data } = judgmentUpdateMock.mock.calls[0][0];
+    expect(data.status).toBe('error');
+    expect(data.error).toContain('DEGENERATE REPETITION');
+    expect(data.finishReason).toBe('length');
+    expect(data.rawResponse).toBe('');
+    expect(data.reasoningContent).toBe(reasoning);
+    expect(data.reasoningSource).toBe('reasoning_content');
   });
 });

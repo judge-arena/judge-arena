@@ -35,6 +35,7 @@ import {
 // import cycle with `./provider`, which imports `ProviderError` from here
 // as a value.
 import type { ProviderCallResult } from './provider';
+import type { RepetitionMeasure } from './degeneration';
 
 export type ProviderErrorKind = 'retryable' | 'non_retryable' | 'rate_limited';
 
@@ -98,6 +99,17 @@ export interface ProviderErrorOptions {
    * response in hand.
    */
   callResult?: ProviderCallResult;
+  /**
+   * Set by `registry.ts`'s `assertUsableContent` when the output that
+   * caused a truncation/empty-content failure measured as a DEGENERATE
+   * REPETITION LOOP (`./degeneration.ts`: a channel over 8,000 chars that
+   * deflates ≥ 5x). Carried so the decision is AUDITABLE — the message says
+   * "loop" and this says by how much, over which channel, in numbers a later
+   * policy (a per-judge loop count, a retry-with-penalty) can branch on
+   * without parsing text. Never set by `classify()`; only by the code that
+   * had the output in hand. Absent on every ordinary truncation.
+   */
+  repetition?: RepetitionMeasure;
   /** The original error, preserved via the standard `Error.cause` chain. */
   cause?: unknown;
 }
@@ -112,6 +124,7 @@ export class ProviderError extends Error {
   readonly timeout?: boolean;
   readonly attempt?: number;
   readonly callResult?: ProviderCallResult;
+  readonly repetition?: RepetitionMeasure;
 
   constructor(message: string, opts: ProviderErrorOptions) {
     super(message, opts.cause !== undefined ? { cause: opts.cause } : undefined);
@@ -123,6 +136,7 @@ export class ProviderError extends Error {
     this.timeout = opts.timeout;
     this.attempt = opts.attempt;
     this.callResult = opts.callResult;
+    this.repetition = opts.repetition;
   }
 }
 

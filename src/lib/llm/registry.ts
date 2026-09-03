@@ -73,6 +73,7 @@ import type { CriteriaScore } from '@/types';
 import { decryptSafe } from '@/lib/crypto';
 import { logger, serializeError } from '@/lib/logger';
 import { ProviderError } from './errors';
+import { detectRepetitionLoop } from './degeneration';
 import {
   armEscalatingTimeout,
   buildInitialBudgetAlert,
@@ -602,6 +603,25 @@ function capturePrompts(
  * FAILS ON 'length' UNCONDITIONALLY, even when the content happens to parse:
  * a model cut off mid-reasoning is not a completed judgment for a
  * calibration corpus, however well-formed the prefix it managed to emit.
+ *
+ * ── CORRECTED 2026-09-01 ────────────────────────────────────────────────
+ * This guard used to end EVERY message with "raise samplingDefaults.max_tokens
+ * on the JudgeModelVersion for this judge", with total confidence. That advice
+ * was given in writing, before measuring, on calibration run 9
+ * (granite4.2:3b, max_tokens 12288) — and it was wrong for all five failures:
+ * they were a DEGENERATE REPETITION LOOP (26k-56k reasoning chars of one
+ * clause cycling, deflate 5.2-29x against 3.0-4.1x for the judgments that
+ * finished), and a larger budget buys a longer loop. Those five consumed 41
+ * of the run's 82 minutes for zero verdicts. Run 8 (max_tokens 4096) had
+ * already shown an 11,680-char loop at 15.7x; raising the budget, as the
+ * message said to, is what produced run 9. `finish_reason: 'length'` is
+ * ambiguous between "ran out of room" and "never going to stop"; the guard
+ * now asks `./degeneration.ts` which, and only then chooses the advice.
+ *
+ * Also corrected: the surviving advice names a NEW ordinal. A version's
+ * `samplingDefaults` is an immutable provenance pin (prisma/seed-core.ts:
+ * 223-229 — "no update code path may exist"); editing it mid-run rewrites
+ * what every earlier judgment of the run claims to have been produced by.
  */
 function assertUsableContent(
   descriptor: ProviderDescriptor,
@@ -613,6 +633,12 @@ function assertUsableContent(
   const truncated = result.finishReason !== undefined && TRUNCATED_FINISH_REASONS.has(result.finishReason);
   const empty = result.text.trim() === '';
   if (!truncated && !empty) return;
+
+  // Only on the failure path — deflate over <= ~60k chars (~0.07 ms on a
+  // loop, ~1 ms on incompressible prose) is paid once per failed call and
+  // never on a healthy one. The mode gates the content channel: see
+  // degeneration.ts.
+  const loop = detectRepetitionLoop(result, request.mode);
 
   // Every number an operator needs to size the fix, in the message itself:
   // the ceiling that was hit, how the spend split between thinking and
@@ -632,18 +658,32 @@ function assertUsableContent(
     ? 'A response cut off mid-reasoning is not a completed judgment'
     : 'The model spent its output budget on the reasoning channel and never emitted an answer';
 
-  throw new ProviderError(
-    `Provider call to "${descriptor.id}" (${request.modelId}) ${what}: ${facts}. ` +
-      `${why} — raise samplingDefaults.max_tokens on the JudgeModelVersion for this judge.`,
-    {
-      kind: 'non_retryable',
-      provider: descriptor.id,
-      // Carries the reasoning channel, the token split and the rendered
-      // prompt onto the failure itself, so `markJudgmentError` can persist
-      // the evidence instead of only the message.
-      callResult: result,
-    }
-  );
+  // The advice is the part that was wrong (see the CORRECTED block above):
+  // for a loop, the one lever the old message named makes it worse.
+  const advice = loop
+    ? `The output looks like DEGENERATE REPETITION (deflate ratio ${loop.ratio.toFixed(1)}x over ` +
+      `${loop.chars} ${loop.channel} chars; ordinary prose compresses ~2-4x) — raising ` +
+      `samplingDefaults.max_tokens buys a longer loop, not a verdict. Try a repetition/frequency ` +
+      `penalty, a different temperature, or a different judge.`
+    : `${why} — raise samplingDefaults.max_tokens on a NEW ordinal of the JudgeModelVersion for this ` +
+      `judge (never edit samplingDefaults mid-run: a version is an immutable provenance pin, ` +
+      `prisma/seed-core.ts:223-229).`;
+
+  throw new ProviderError(`Provider call to "${descriptor.id}" (${request.modelId}) ${what}: ${facts}. ${advice}`, {
+    // Still non_retryable for a loop: the kind is a property of the request
+    // (same budget, same sampling → same trajectory), a retry would burn a
+    // second hard-cap attempt for the same nothing, and the consumer's
+    // non_retryable branch already persists the reasoning channel so the
+    // loop stays inspectable. `repetition` is on the error precisely so a
+    // later policy can branch on it without re-deciding this here.
+    kind: 'non_retryable',
+    provider: descriptor.id,
+    // Carries the reasoning channel, the token split and the rendered
+    // prompt onto the failure itself, so `markJudgmentError` can persist
+    // the evidence instead of only the message.
+    callResult: result,
+    ...(loop !== undefined ? { repetition: loop } : {}),
+  });
 }
 
 /** The A2.1 v2i capture fields, in the DB's own spelling
