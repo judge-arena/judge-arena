@@ -255,6 +255,32 @@ describe('calibration/baseline: formatSelectiveAccuracyLines', () => {
     ]);
   });
 
+  it('the UNDEFINED line reports the REAL committedCount, not a hardcoded 0', () => {
+    // The parameter is a structural literal by design (baseline.ts documents
+    // that in three places), so `selectiveAccuracy: null` with a NON-zero
+    // committedCount is a reachable shape even though score.ts never builds
+    // one — it makes the three selective fields null together. A `0` baked
+    // into the warning string prints a count this row does not have, which is
+    // the one number a reader would use to check the claim. This pins the
+    // count against the argument rather than against the sentence.
+    const lines = formatSelectiveAccuracyLines({
+      verdictCount: 10,
+      committedCount: 5,
+      abstainedCount: 5,
+      committedCorrectCount: 0,
+      coverage: 0.5,
+      selectiveAccuracy: null,
+      selectiveBaseline: null,
+      selectiveMarginOverConstant: null,
+      constantBaseline: null,
+    });
+    expect(lines).toEqual([
+      "  coverage   0.5000   (5/10 scored items the judge COMMITTED on; 5 abstained with 'tie')",
+      '  ⚠ the judge committed on NOTHING (5/10) — selective accuracy is UNDEFINED, not 0 and not 1.',
+    ]);
+    expect(lines[1]).not.toContain('(0/10)');
+  });
+
   it('nothing scored → no lines at all, rather than a line reading n/a', () => {
     // Same contract as formatConstantBaselineLines: a line reading n/a suggests
     // a number exists and could not be rendered.

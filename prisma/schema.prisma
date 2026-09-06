@@ -968,10 +968,15 @@ model CalibrationRun {
   scoringVersion      Int?
   /// Items this judge COMMITTED on — a raw verdict other than 'tie' (v2n). The
   /// denominator of `selectiveAccuracy`, and the numerator of coverage, which is
-  /// `committedCount::float / verdictCount` and is deliberately NOT stored: both
-  /// operands are on this row, and a derived duplicate drifts when a re-score
-  /// moves verdictCount. NULL means "not scored since v2n", never "committed to
-  /// nothing" — that case is committedCount = 0 with selectiveAccuracy NULL.
+  /// `committedCount::float / NULLIF("verdictCount", 0)` and is deliberately NOT
+  /// stored: both operands are on this row, and a derived duplicate drifts when
+  /// a re-score moves verdictCount. The NULLIF is load-bearing, not decoration:
+  /// a scored-but-empty run is real (production row cmton7ip500012lyjubiqohy8),
+  /// and unguarded the division RAISES division_by_zero rather than yielding
+  /// NULL — while the NULL the guard does yield is the correct "no coverage to
+  /// report", so never COALESCE it to 0. NULL means "not scored since v2n",
+  /// never "committed to nothing" — that case is committedCount = 0 with
+  /// selectiveAccuracy NULL.
   committedCount      Int?
   /// How often the judge was right WHEN IT ANSWERED: correct-among-committed /
   /// committedCount (v2n). The golden key is forced choice (336 'A>B' / 284

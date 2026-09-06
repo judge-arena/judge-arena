@@ -223,8 +223,13 @@ export function formatSelectiveAccuracyLines(score: {
     score.selectiveBaseline === null ||
     score.selectiveMarginOverConstant === null
   ) {
+    // `score.committedCount`, never a literal 0. From score.ts the two are the
+    // same number — this arm is reached only at zero coverage — but the
+    // parameter is a STRUCTURAL literal (see the note above), so a caller can
+    // hand this arm a non-zero committedCount, and a hardcoded 0 would then
+    // print a count the row does not have.
     lines.push(
-      `  ⚠ the judge committed on NOTHING (0/${score.verdictCount}) — selective accuracy is UNDEFINED, not 0 and not 1.`
+      `  ⚠ the judge committed on NOTHING (${score.committedCount}/${score.verdictCount}) — selective accuracy is UNDEFINED, not 0 and not 1.`
     );
   } else {
     const floor = score.selectiveBaseline;

@@ -47,9 +47,14 @@
  * BUMP THIS WHENEVER A STORED FIELD'S DEFINITION CHANGES — not when a bug is
  * fixed in something that was already right, and not when a field is added that
  * no previous generation could have written (an all-NULL column is already
- * self-describing). Add the changelog entry in the SAME commit; the test pins
- * the two together precisely because bumping one and forgetting the other
- * leaves this build calling its own output UNKNOWN.
+ * self-describing) — UNLESS that added column's NULL is AMBIGUOUS, meaning
+ * "never scored under these rules" and a real zero-denominator MEASUREMENT read
+ * identically on it (`selectiveAccuracy`, per the header above), in which case
+ * the column is precisely NOT self-describing and the bump IS required: that
+ * carve-out, not a changed definition, is what makes generation 2 below a bump.
+ * Add the changelog entry in the SAME commit; the test pins the two together
+ * precisely because bumping one and forgetting the other leaves this build
+ * calling its own output UNKNOWN.
  */
 export const SCORING_RULES_VERSION = 2;
 
@@ -78,8 +83,11 @@ export const SCORING_RULES_CHANGELOG: readonly ScoringRulesGeneration[] = [
     migration: 'v2n',
     rules:
       'generation 1 UNCHANGED (rawAgreement and kappa keep their exact meaning), plus ' +
-      "committedCount = items whose raw verdict is not 'tie'; selectiveAccuracy = " +
-      'correct-among-committed / committedCount, NULL at zero coverage; and ' +
+      "committedCount = items whose raw verdict is not 'tie'; coverage = " +
+      'committedCount/verdictCount, so its DENOMINATOR IS ITEMS THAT PRODUCED A ' +
+      'VERDICT, not items dispatched, and it is returned but not stored; ' +
+      'selectiveAccuracy = correct-among-committed / committedCount, NULL at ' +
+      'zero coverage; and ' +
       'selectiveBaselineAccuracy = max(committed key class)/committedCount, which is ' +
       'a DIFFERENT floor from constantBaselineAccuracy and can name a different class; ' +
       'and noVerdictRate = missingVerdicts/dispatchedItemCount, a FLEET property ' +
