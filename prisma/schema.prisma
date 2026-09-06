@@ -953,6 +953,46 @@ model CalibrationRun {
   /// handoff §8 scoreboard SQL). NULL means "not scored since v2l" — the 9
   /// production rows stay NULL until each is re-scored with --score-only.
   constantBaselineAccuracy Float?
+  /// Which generation of the SCORING RULES produced every scored field on this
+  /// row (v2m). Scoring is ex post — a score is a pure function over stored
+  /// judgments and `--score-only` re-derives it without executing a model — so
+  /// the rules can improve while the data does not, and two rows scored under
+  /// different generations on one scoreboard compare two different questions.
+  /// `src/lib/calibration/scoring-version.ts` is the source of truth
+  /// (SCORING_RULES_VERSION + its changelog); score.ts stamps it in the same
+  /// full-overwrite update as rawAgreement, so the numbers and the stamp cannot
+  /// move independently. NULL means exactly one thing: "scored before v2m, rule
+  /// generation unrecorded". It is NOT 0 and NOT version 1 — all 20 production
+  /// rows read NULL until each is re-scored. A scoreboard query FILTERS on an
+  /// explicit version and never COALESCEs this column.
+  scoringVersion      Int?
+  /// Items this judge COMMITTED on — a raw verdict other than 'tie' (v2n). The
+  /// denominator of `selectiveAccuracy`, and the numerator of coverage, which is
+  /// `committedCount::float / verdictCount` and is deliberately NOT stored: both
+  /// operands are on this row, and a derived duplicate drifts when a re-score
+  /// moves verdictCount. NULL means "not scored since v2n", never "committed to
+  /// nothing" — that case is committedCount = 0 with selectiveAccuracy NULL.
+  committedCount      Int?
+  /// How often the judge was right WHEN IT ANSWERED: correct-among-committed /
+  /// committedCount (v2n). The golden key is forced choice (336 'A>B' / 284
+  /// 'B>A', no ties), so a 'tie' can never be correct and `rawAgreement`
+  /// multiplies two independent quantities — how often the judge commits, and
+  /// how often it is right when it does. Measured 2026-09-06: lfm2.5:8b and
+  /// lfm2.5-thinking differ 5.3x on rawAgreement (0.0929 vs 0.4887) and are
+  /// indistinguishable on this column (0.5437 vs 0.5363). NULL at ZERO coverage
+  /// — never 0, never 1, never NaN — because "it was never right when it
+  /// answered" is a measurement and "it never answered" is not.
+  selectiveAccuracy   Float?
+  /// The constant-verdict floor over the COMMITTED SUBSET (v2n) — max(key
+  /// class)/committedCount, the floor `selectiveAccuracy` must clear. NOT
+  /// `constantBaselineAccuracy`, which is over every scored item: comparing
+  /// selective accuracy against THAT is precisely the error v2l exists to
+  /// prevent, one level down, and on production data it flips the margin's sign
+  /// for two of four judges (lfm2.5-thinking 0.5363 selective is +0.0071 over
+  /// its committed floor of 0.5292 and -0.0056 against the full 0.5419).
+  /// src/lib/calibration/baseline.ts is the source of truth; this is its stored
+  /// copy for readers that never load the module.
+  selectiveBaselineAccuracy Float?
   testRetest          Float?
   positionBias        Float?
   biasSensitivityRate Float?

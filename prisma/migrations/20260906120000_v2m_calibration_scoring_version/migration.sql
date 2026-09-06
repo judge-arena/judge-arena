@@ -1,0 +1,45 @@
+-- v2m — CalibrationRun records WHICH GENERATION OF THE SCORING RULES made its numbers
+--
+-- SCORING IS EX POST, AND THAT IS WHY THIS COLUMN HAS TO EXIST. A judge's
+-- complete output is on disk — systemPrompt, userPrompt, userPromptSha256,
+-- promptTemplateId, rawResponse, reasoningContent, reasoningSource, verdict,
+-- samplingParams, parseMode and servedModelId are all non-null on all 619
+-- judgments of calibration run cmtozu76f00012l5w4llb4pae (measured 2026-09-06)
+-- — so a score is a PURE FUNCTION over stored rows, `--score-only` re-derives
+-- it at any time, and the evaluation framework can improve WITHOUT re-executing
+-- a single model. That property is the point of the whole design. Its one cost
+-- is paid here: if the rules can change while the data does not, then a stored
+-- number is meaningless unless you know which rules produced it, and two runs
+-- scored under different generations on one scoreboard are not a noisy
+-- comparison but a comparison of two different questions.
+--
+-- WHY NOT DERIVE IT. finishedAt is rewritten by every --score-only, so it dates
+-- the pass and not the rules. "Which columns are non-NULL" cannot work either:
+-- v2n's selectiveAccuracy is LEGITIMATELY NULL at zero coverage, so "not scored
+-- under the new rules" and "the judge committed to nothing" would be the same
+-- observation — the null-not-zero failure with one more step in it.
+--
+-- WHY Int AND NOT AN ENUM. A generation only ever needs to be compared and
+-- ordered, and an Int renders honestly when a NEWER image has scored a row: the
+-- value is out of range for this build and describeScoringVersion says so, where
+-- an enum value would simply fail to parse.
+--
+-- WHAT NULL MEANS, AND IT MEANS EXACTLY ONE THING: "scored before v2m; the rule
+-- generation was not recorded." All 20 production CalibrationRun rows read NULL
+-- the moment this applies. NULL IS NOT 0 AND IS NOT VERSION 1 — the pre-v2m
+-- rules happen to be what src/lib/calibration/scoring-version.ts calls
+-- generation 1, but a row that was never stamped cannot prove it was scored
+-- under them, and treating NULL as 1 would certify 20 rows nobody checked. A
+-- scoreboard query FILTERS on an explicit version; it never COALESCEs this
+-- column, because coalescing it to 0 sorts every un-backfilled judge to the top
+-- or the bottom of a leaderboard as a fabricated measurement.
+--
+-- ZERO HAND EDITS: what follows is byte-for-byte what `prisma migrate diff`
+-- emitted for this one field. ENTIRELY ADDITIVE: one nullable INTEGER, no DROP,
+-- no DELETE, no default, NO BACKFILL. Re-scoring is a deliberate operator action
+-- (`--score-only`) and never a migration step, because scoring also rewrites
+-- rawAgreement, kappa and finishedAt.
+
+-- AlterTable
+ALTER TABLE "CalibrationRun" ADD COLUMN     "scoringVersion" INTEGER;
+

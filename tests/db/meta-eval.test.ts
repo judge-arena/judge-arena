@@ -291,6 +291,39 @@ describe('meta-eval tables (GoldenSet/GoldenItem/GoldenLabel/CalibrationRun)', (
     expect(scored.constantBaselineAccuracy).toBeCloseTo(0.56, 12);
   });
 
+  it('CalibrationRun v2m/v2n columns default to NULL and round-trip their SQL types', async () => {
+    // The v2l precedent above, one migration on, and for the same reason. The
+    // migration SQL is generated, but a hand edit below the narrative header
+    // putting INTEGER where DOUBLE PRECISION belongs passes `prisma migrate
+    // reset`, passes `tsc` (the client type comes from schema.prisma, not from
+    // the SQL) and passes every unit test, which scores through a fake client.
+    // Only a real round-trip can see it: 5/7 stored in an INTEGER column comes
+    // back 1. NULL here means "scored before v2m/v2n", never 0.
+    const goldenSet = await mkGoldenSet();
+    const judgeModelVersion = await mkJudgeModelVersion();
+    const run = await db.calibrationRun.create({
+      data: { judgeModelVersionId: judgeModelVersion.id, goldenSetId: goldenSet.id },
+    });
+    expect(run.scoringVersion).toBeNull();
+    expect(run.committedCount).toBeNull();
+    expect(run.selectiveAccuracy).toBeNull();
+    expect(run.selectiveBaselineAccuracy).toBeNull();
+
+    const scored = await db.calibrationRun.update({
+      where: { id: run.id },
+      data: {
+        scoringVersion: 2,
+        committedCount: 7,
+        selectiveAccuracy: 5 / 7,
+        selectiveBaselineAccuracy: 4 / 7,
+      },
+    });
+    expect(scored.scoringVersion).toBe(2);
+    expect(scored.committedCount).toBe(7);
+    expect(scored.selectiveAccuracy).toBeCloseTo(0.7142857142857143, 12);
+    expect(scored.selectiveBaselineAccuracy).toBeCloseTo(0.5714285714285714, 12);
+  });
+
   it('GoldenSet_ownerId_slug_key is NULLS NOT DISTINCT: two OWNERLESS sets cannot share a slug', async () => {
     // The hand edit in 20260812190000_v2d_golden_substrate. Prisma's DSL
     // cannot declare it, so the migration's raw SQL is its only record and

@@ -1,0 +1,60 @@
+-- v2n — CalibrationRun separates HOW OFTEN A JUDGE COMMITS from HOW OFTEN IT IS RIGHT
+--
+-- The golden key is FORCED CHOICE. GoldenSet cmt057h5d00097y01ymubpre5 is 620
+-- items, 336 'A>B' and 284 'B>A', with ZERO ties (verified 2026-09-06). A 'tie'
+-- verdict can therefore never be correct, and rawAgreement — which is accuracy,
+-- and counts a tie as a miss — silently multiplies two independent quantities:
+-- coverage, and accuracy given coverage.
+--
+-- WHAT THAT HIDES, measured on that set:
+--     judge                  coverage  selective   rawAgreement
+--     Qwen3.6-35B-A3B          0.9855     0.9000         0.8869
+--     lfm2.5-thinking:1.2b     0.9113     0.5363         0.4887
+--     lfm2.5:8b                0.1708     0.5437         0.0929
+-- The two lfm rows differ 5.3x on rawAgreement — which reads as "mediocre
+-- versus broken" — and are statistically identical on selective accuracy. Same
+-- discriminative ability; they differ only in how they express uncertainty, and
+-- nothing stored before this migration could say so.
+--
+-- THE FLOOR MOVES WITH THE DENOMINATOR, AND THIS IS THE SECOND ONE. v2l added
+-- constantBaselineAccuracy = max(key class)/verdictCount over the SCORED subset.
+-- selectiveAccuracy has a DIFFERENT denominator — the committed subset — and
+-- therefore a different floor, which is what selectiveBaselineAccuracy holds.
+-- Comparing selective accuracy against v2l's full-subset floor is exactly the
+-- error v2l exists to prevent, one level down, and on production data it FLIPS
+-- THE SIGN of the margin for two of four judges: lfm2.5-thinking's 0.5363 is
+-- +0.0071 over its committed floor of 0.5292 and -0.0056 against the full
+-- subset's 0.5419; lfm2.5:8b's 0.5437 is +0.0194 over 0.5243 and -0.0019
+-- against 0.5456. Neither margin is a strong claim, but the SIGN is what a
+-- reader takes away and it is decided entirely by which floor is quoted.
+--
+-- WHY NO `coverage` COLUMN. It is exactly committedCount::float / verdictCount
+-- and BOTH operands are on this row, written in the same overwrite. A stored
+-- copy is a derived duplicate, and a partial re-score moves verdictCount, so a
+-- stale copy would leave a row whose three numbers cannot all be true.
+-- abstainedCount is omitted for the same reason (verdictCount - committedCount).
+-- committedCount IS stored because it is a count and is reconstructible from
+-- nothing else here; selectiveAccuracy is stored because its numerator
+-- (correct-among-committed) is not on the row at all, exactly as rawAgreement
+-- stores a ratio rather than a numerator.
+--
+-- NULL-NOT-ZERO, on both new Float columns. selectiveAccuracy is NULL at ZERO
+-- coverage — never 0, never 1, never NaN — because "it was never right when it
+-- answered" is a measurement and "it never answered" is not. That case is real:
+-- production row cmton7ip500012lyjubiqohy8 has 16 completed judgments of which
+-- the judge committed on ONE.
+--
+-- rawAgreement AND kappa ARE UNCHANGED. Every historical number and every
+-- document quoting one depends on them; this migration only ADDS.
+--
+-- ZERO HAND EDITS below this header: byte-for-byte what `prisma migrate diff`
+-- emitted. ENTIRELY ADDITIVE: three nullable columns, no DROP, no DELETE, no
+-- default, NO BACKFILL. NULL means "not scored since v2n" and the 20 production
+-- rows stay NULL until an operator re-scores each with --score-only on an image
+-- that carries this migration.
+
+-- AlterTable
+ALTER TABLE "CalibrationRun" ADD COLUMN     "committedCount" INTEGER,
+ADD COLUMN     "selectiveAccuracy" DOUBLE PRECISION,
+ADD COLUMN     "selectiveBaselineAccuracy" DOUBLE PRECISION;
+
