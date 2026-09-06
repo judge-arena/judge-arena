@@ -3,6 +3,7 @@ import {
   scoreCalibrationRun,
   type CalibrationScoreClient,
 } from '@/lib/calibration/score';
+import { SCORING_RULES_VERSION } from '@/lib/calibration/scoring-version';
 import type { PairOrder, Preference } from '@/lib/calibration/readings';
 
 /**
@@ -781,5 +782,442 @@ describe('scoreCalibrationRun — items that produced NOTHING', () => {
     const score = await scoreCalibrationRun('cal-2', client);
     expect(score.missingVerdicts).toBe(0);
     expect(score.verdictCount).toBe(2);
+  });
+});
+
+describe('scoreCalibrationRun — coverage and selective accuracy', () => {
+  /** Hand-built rows, the same stand-in shape and for the same reason as the
+   *  constant-floor block above: `calibration()` cannot express a hand-picked
+   *  key balance or a 'tie' KEY, and both are load-bearing here. It ENFORCES
+   *  the `calibrationRunId` filter and the nested `status: 'completed'` filter
+   *  so a scorer that drops one fails a BEHAVIOUR test. `orderBy` is not
+   *  honoured; every fixture below is handed in index order and the ordering
+   *  clause is pinned by `fakeClient`'s own test. */
+  type CoverageArgs = {
+    where?: { calibrationRunId?: string };
+    select?: { modelJudgments?: { where?: { status?: string } } };
+  };
+  type CoverageRow = {
+    id: string;
+    goldenItem: { id: string; index: number; expected: string };
+    modelJudgments: Array<{
+      verdict: string | null;
+      pairOrder: string;
+      judgeModelVersionId: string;
+      status: string;
+    }>;
+  };
+  function coverageClient(
+    calibrationRunId: string,
+    rows: CoverageRow[]
+  ): CalibrationScoreClient & { updates: Array<Record<string, unknown>> } {
+    const updates: Array<Record<string, unknown>> = [];
+    return {
+      updates,
+      evaluationRun: {
+        findMany: async (args: CoverageArgs) => {
+          if (args?.where?.calibrationRunId !== calibrationRunId) return [];
+          const wanted = args?.select?.modelJudgments?.where?.status;
+          return rows.map((r) => ({
+            ...r,
+            modelJudgments:
+              wanted === undefined
+                ? r.modelJudgments
+                : r.modelJudgments.filter((j) => j.status === wanted),
+          }));
+        },
+      },
+      calibrationRun: {
+        update: async (args: { data: Record<string, unknown> }) => {
+          updates.push(args.data);
+          return {};
+        },
+      },
+    } as unknown as CalibrationScoreClient & { updates: Array<Record<string, unknown>> };
+  }
+  const row = (index: number, expected: string, verdict: string | null): CoverageRow => ({
+    id: `run-${index}`,
+    goldenItem: { id: `item-${index}`, index, expected },
+    modelJudgments: [{ verdict, pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'completed' }],
+  });
+  // `coverageClient`/`row` duplicate `rowsClient`/`item` in the constant-floor
+  // describe above almost exactly. That is a DELIBERATE choice, not an oversight:
+  // hoisting the existing pair to module scope would move ~50 lines of a passing
+  // block in the same commit that adds eight tests, and one concern per commit
+  // wins. The cost is real and is written down here so the next reader does not
+  // have to rediscover it — a change to the query shape has to be made twice, and
+  // the copy that is not updated keeps passing. Fold them together in a
+  // follow-up commit that touches nothing else.
+
+  it('a judge that never abstains has coverage 1 and selective accuracy EQUAL to accuracy', async () => {
+    // The degenerate case, and the one that proves the new fields do not
+    // silently redefine the old one: with no ties the two denominators are the
+    // same set, so every number must coincide.
+    const score = await scoreCalibrationRun(CALIBRATION_ID, fakeClient(calibration(withFlips(3))));
+
+    expect(score.coverage).toBe(1);
+    expect(score.committedCount).toBe(30);
+    expect(score.abstainedCount).toBe(0);
+    expect(score.committedCorrectCount).toBe(score.correctCount);
+    expect(score.selectiveAccuracy).toBe(score.accuracy);
+    expect(score.selectiveBaseline).toEqual(score.constantBaseline);
+  });
+
+  it('three ties: ACCURACY stays 0.9000 and selective accuracy is 1.0 — the split the metric exists for', async () => {
+    // Fixture S2. The accuracy assertion is copied from the pre-existing test
+    // at :222 deliberately: this is the pin that rawAgreement's MEANING did not
+    // move when coverage landed beside it.
+    const withTies = [...GROUND_TRUTH] as Preference[];
+    withTies[0] = 'tie';
+    withTies[1] = 'tie';
+    withTies[2] = 'tie';
+    const client = fakeClient(calibration(withTies));
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+
+    expect(score.accuracy).toBeCloseTo(0.9, 10);
+    expect(score.correctCount).toBe(27);
+    expect(score.verdictCount).toBe(30);
+    expect(score.coverage).toBeCloseTo(0.9, 10);
+    expect(score.committedCount).toBe(27);
+    expect(score.abstainedCount).toBe(3);
+    expect(score.committedCorrectCount).toBe(27);
+    expect(score.selectiveAccuracy).toBe(1);
+    // Committed key is 14 'A>B' / 13 'B>A' — the three abstentions came off the
+    // 'A>B' side, so the floor MOVES from 17/30 to 14/27.
+    expect(score.selectiveBaseline?.accuracy).toBeCloseTo(14 / 27, 10);
+    expect(score.constantBaseline?.accuracy).toBeCloseTo(17 / 30, 10);
+    expect(score.selectiveMarginOverConstant).toBeCloseTo(1 - 14 / 27, 10);
+
+    // rawAgreement MUST NOT CHANGE, pinned HERE because accuracy (0.9) and
+    // selective accuracy (1.0) DIFFER on this fixture. Every PRE-EXISTING
+    // rawAgreement assertion — :296 (both null), :545, :560 and :594 — runs on a
+    // `withFlips(3)` fixture, and `withFlips` (:141-155) only swaps 'A>B'<->'B>A'
+    // and emits no 'tie', so on all of them the two numbers are IDENTICALLY equal
+    // and none can see "selective accuracy is the better metric, store it in the
+    // column that already exists". This assertion and the `cal-s3` row test below
+    // are the only two places in the file where that swap is visible.
+    expect(score.selectiveAccuracy).not.toBe(score.accuracy);
+    expect(client.updates[0].rawAgreement).toBe(score.accuracy);
+    expect(client.updates[0].rawAgreement).toBeCloseTo(0.9, 10);
+  });
+
+  it('the selective floor is over the COMMITTED subset — and here it names a DIFFERENT class', async () => {
+    // Fixture S3, and the only assertion in this file that can catch
+    // `constantVerdictBaseline(keyCounts)` written where
+    // `constantVerdictBaseline(committedKeyCounts)` belongs. The two floors
+    // differ in their TOP CLASS, not just in a decimal: the judge abstained on
+    // three 'A>B' items, which flips the plurality of what remains.
+    const score = await scoreCalibrationRun(
+      'cal-s3',
+      coverageClient('cal-s3', [
+        row(0, 'A>B', 'tie'),
+        row(1, 'A>B', 'tie'),
+        row(2, 'A>B', 'tie'),
+        row(3, 'A>B', 'A'),
+        row(4, 'A>B', 'A'),
+        row(5, 'A>B', 'B'),
+        row(6, 'B>A', 'B'),
+        row(7, 'B>A', 'B'),
+        row(8, 'B>A', 'B'),
+        row(9, 'B>A', 'A'),
+      ])
+    );
+
+    expect(score.verdictCount).toBe(10);
+    expect(score.correctCount).toBe(5);
+    expect(score.accuracy).toBe(0.5);
+    expect(score.coverage).toBeCloseTo(0.7, 10);
+    expect(score.committedCount).toBe(7);
+    expect(score.committedCorrectCount).toBe(5);
+    expect(score.selectiveAccuracy).toBeCloseTo(5 / 7, 10);
+
+    expect(score.constantBaseline).toEqual({
+      accuracy: 0.6,
+      preferences: ['A>B'],
+      keyCounts: { 'A>B': 6, 'B>A': 4, tie: 0 },
+      denominator: 10,
+    });
+    expect(score.selectiveBaseline).toEqual({
+      accuracy: 4 / 7,
+      preferences: ['B>A'],
+      keyCounts: { 'A>B': 3, 'B>A': 4, tie: 0 },
+      denominator: 7,
+    });
+    expect(score.selectiveMarginOverConstant).toBeCloseTo(5 / 7 - 4 / 7, 10);
+  });
+
+  it('a CORRECT tie against a tie KEY is not a commitment — selective accuracy cannot exceed 1', async () => {
+    // Fixture S4. A tie key is reachable (PATCH /api/golden-sets/[id]/items
+    // writes `expected` with no vocabulary check on an unfrozen set) and a tie
+    // verdict against it is a HIT, which score.ts:54-63 preserves on purpose.
+    // Reusing `correctCount` as the selective numerator over a denominator that
+    // excluded those hits gives 3/2 = 1.5.
+    const score = await scoreCalibrationRun(
+      'cal-s4',
+      coverageClient('cal-s4', [
+        row(0, 'tie', 'tie'),
+        row(1, 'tie', 'tie'),
+        row(2, 'A>B', 'A'),
+        row(3, 'A>B', 'B'),
+      ])
+    );
+
+    expect(score.correctCount).toBe(3);
+    expect(score.committedCount).toBe(2);
+    expect(score.committedCorrectCount).toBe(1);
+    expect(score.selectiveAccuracy).toBe(0.5);
+    expect(score.selectiveAccuracy).toBeLessThanOrEqual(1);
+  });
+
+  it('a judge that committed to NOTHING reports selectiveAccuracy null — not 0, not 1, not NaN', async () => {
+    // Fixture S5, and a real production shape: cmton7ip500012lyjubiqohy8 has 16
+    // completed judgments and committed on ONE.
+    const score = await scoreCalibrationRun(
+      'cal-s5',
+      coverageClient('cal-s5', [row(0, 'A>B', 'tie'), row(1, 'A>B', 'tie'), row(2, 'A>B', 'tie')])
+    );
+
+    expect(score.verdictCount).toBe(3);
+    expect(score.committedCount).toBe(0);
+    expect(score.abstainedCount).toBe(3);
+    // Coverage 0 IS a measurement: the judge answered three times and committed
+    // to none of them. Selective accuracy is not.
+    expect(score.coverage).toBe(0);
+    expect(score.selectiveAccuracy).toBeNull();
+    expect(score.selectiveBaseline).toBeNull();
+    expect(score.selectiveMarginOverConstant).toBeNull();
+    expect(Number.isNaN(score.selectiveAccuracy as unknown as number)).toBe(false);
+  });
+
+  it('nothing scored at all: coverage is null too, and the counts are 0', async () => {
+    const score = await scoreCalibrationRun('cal-empty', coverageClient('cal-empty', []));
+
+    expect(score.verdictCount).toBe(0);
+    expect(score.coverage).toBeNull();
+    expect(score.selectiveAccuracy).toBeNull();
+    expect(score.committedCount).toBe(0);
+    expect(score.abstainedCount).toBe(0);
+    expect(score.committedCorrectCount).toBe(0);
+  });
+
+  it('the row carries committedCount, selectiveAccuracy, its floor AND the scoring version', async () => {
+    // One full overwrite: the numbers and the stamp that says which rules made
+    // them cannot move independently.
+    const client = coverageClient('cal-s3', [
+      row(0, 'A>B', 'tie'),
+      row(1, 'A>B', 'tie'),
+      row(2, 'A>B', 'tie'),
+      row(3, 'A>B', 'A'),
+      row(4, 'A>B', 'A'),
+      row(5, 'A>B', 'B'),
+      row(6, 'B>A', 'B'),
+      row(7, 'B>A', 'B'),
+      row(8, 'B>A', 'B'),
+      row(9, 'B>A', 'A'),
+    ]);
+    await scoreCalibrationRun('cal-s3', client);
+
+    expect(client.updates).toHaveLength(1);
+    const data = client.updates[0];
+    expect(data.rawAgreement).toBe(0.5);
+    expect(data.committedCount).toBe(7);
+    expect(data.selectiveAccuracy).toBeCloseTo(5 / 7, 10);
+    expect(data.selectiveBaselineAccuracy).toBeCloseTo(4 / 7, 10);
+    // Written from the CONSTANT, and asserted against BOTH the constant and the
+    // literal 2. The constant alone cannot tell a hardcoded literal from a
+    // reference (they are equal today); the literal alone would not fail when
+    // the constant is bumped without the write following it.
+    expect(data.scoringVersion).toBe(SCORING_RULES_VERSION);
+    expect(data.scoringVersion).toBe(2);
+    // The floor over ALL scored items is a DIFFERENT column and a different
+    // number — 0.6 against 4/7. Two floors on one row, and the wrong one is the
+    // one that gets quoted.
+    expect(data.constantBaselineAccuracy).toBe(0.6);
+  });
+
+  it('re-scoring is idempotent on the new fields too — nothing accumulates', async () => {
+    const rows = [row(0, 'A>B', 'tie'), row(1, 'A>B', 'A'), row(2, 'B>A', 'B')];
+    const client = coverageClient('cal-idem', rows);
+    const first = await scoreCalibrationRun('cal-idem', client);
+    const second = await scoreCalibrationRun('cal-idem', client);
+
+    expect(second.committedCount).toBe(first.committedCount);
+    expect(second.abstainedCount).toBe(first.abstainedCount);
+    expect(second.committedCorrectCount).toBe(first.committedCorrectCount);
+    expect(second.coverage).toBe(first.coverage);
+    expect(second.selectiveAccuracy).toBe(first.selectiveAccuracy);
+    expect(client.updates[1].committedCount).toBe(2);
+  });
+});
+
+describe('scoreCalibrationRun — noVerdictRate: a FLEET property, never abstention', () => {
+  /** Rows that can be SHAPED, which is what this block is about: an item the
+   *  judge was asked and that produced nothing at all. Two shapes reach the
+   *  scorer differently and both are exercised — a COMPLETED judgment whose
+   *  verdict is null, and a run with no completed judgment (the query's
+   *  `status: 'completed'` filter, honoured here, hands the scorer an empty
+   *  array). A THIRD shape, an EvaluationRun with no goldenItem, was never
+   *  asked about anything and must be counted in neither. */
+  type FleetRow = {
+    id: string;
+    goldenItem: { id: string; index: number; expected: string } | null;
+    modelJudgments: Array<{
+      verdict: string | null;
+      pairOrder: string;
+      judgeModelVersionId: string;
+      status: string;
+    }>;
+  };
+  type FleetArgs = {
+    where?: { calibrationRunId?: string };
+    select?: { modelJudgments?: { where?: { status?: string } } };
+  };
+  function fleetClient(calibrationRunId: string, rows: FleetRow[]): CalibrationScoreClient {
+    return {
+      evaluationRun: {
+        findMany: async (args: FleetArgs) => {
+          if (args?.where?.calibrationRunId !== calibrationRunId) return [];
+          const wanted = args?.select?.modelJudgments?.where?.status;
+          return rows.map((r) => ({
+            ...r,
+            modelJudgments:
+              wanted === undefined
+                ? r.modelJudgments
+                : r.modelJudgments.filter((j) => j.status === wanted),
+          }));
+        },
+      },
+      calibrationRun: { update: async () => ({}) },
+    } as unknown as CalibrationScoreClient;
+  }
+  const judgment = (verdict: string | null, status: string) => ({
+    verdict,
+    pairOrder: 'AB',
+    judgeModelVersionId: 'v1',
+    status,
+  });
+  /** `answered` items are keyed 'A>B' and answered 'A', so the run is also a
+   *  perfect judge — deliberately, so that nothing below can be read off
+   *  accuracy or coverage by accident. */
+  function fleet(counts: {
+    answered: number;
+    truncated: number;
+    dead: number;
+    orphaned?: number;
+  }): FleetRow[] {
+    const rows: FleetRow[] = [];
+    let i = 0;
+    const item = (index: number) => ({ id: `item-${index}`, index, expected: 'A>B' });
+    for (let n = 0; n < counts.answered; n++, i++)
+      rows.push({ id: `run-${i}`, goldenItem: item(i), modelJudgments: [judgment('A', 'completed')] });
+    // finishReason='length': the request came back and carried no usable verdict.
+    for (let n = 0; n < counts.truncated; n++, i++)
+      rows.push({ id: `run-${i}`, goldenItem: item(i), modelJudgments: [judgment(null, 'completed')] });
+    // A dead request: nothing ever COMPLETED, so the status filter leaves the
+    // scorer an empty array and only `unjudgedItems` can see it.
+    for (let n = 0; n < counts.dead; n++, i++)
+      rows.push({ id: `run-${i}`, goldenItem: item(i), modelJudgments: [judgment(null, 'error')] });
+    for (let n = 0; n < (counts.orphaned ?? 0); n++, i++)
+      rows.push({ id: `run-${i}`, goldenItem: null, modelJudgments: [judgment('A', 'completed')] });
+    return rows;
+  }
+
+  it('N1 — lfm2.5:8b: 17 of 620 asked items produced nothing, over BOTH shapes', async () => {
+    // cmtondblm…, the production shape this metric exists for. 603 verdicts is
+    // what rawAgreement was scored over; 620 is what the judge was ASKED.
+    const score = await scoreCalibrationRun(
+      'cal-n1',
+      fleetClient('cal-n1', fleet({ answered: 603, truncated: 9, dead: 8 }))
+    );
+
+    expect(score.dispatchedItemCount).toBe(620);
+    expect(score.verdictCount).toBe(603);
+    expect(score.missingVerdicts).toBe(17);
+    expect(score.noVerdictRate).toBeCloseTo(17 / 620, 10);
+    expect(score.noVerdictRate?.toFixed(4)).toBe('0.0274');
+    // The identity that holds in phase 1 — one judgment per run. It is ASSERTED
+    // rather than assumed because a BA sweep breaking it is the thing the
+    // separate accumulator exists to make visible.
+    expect(score.dispatchedItemCount).toBe(score.verdictCount + score.missingVerdicts);
+  });
+
+  it('N2 — Qwen3.6: a HEALTHY run is not zero, it is 1/620', async () => {
+    const score = await scoreCalibrationRun(
+      'cal-n2',
+      fleetClient('cal-n2', fleet({ answered: 619, truncated: 1, dead: 0 }))
+    );
+
+    expect(score.dispatchedItemCount).toBe(620);
+    expect(score.verdictCount).toBe(619);
+    expect(score.noVerdictRate).toBeCloseTo(1 / 620, 10);
+    expect(score.noVerdictRate?.toFixed(4)).toBe('0.0016');
+  });
+
+  it('N3 — lfm2.5-thinking: everything answered reports 0, NEVER null', async () => {
+    // "Nothing was lost" is a measurement. Paired with N4's `toBeNull()` on
+    // purpose: a single `toBeFalsy()` would pass on both and pin neither.
+    const score = await scoreCalibrationRun(
+      'cal-n3',
+      fleetClient('cal-n3', fleet({ answered: 620, truncated: 0, dead: 0 }))
+    );
+
+    expect(score.dispatchedItemCount).toBe(620);
+    expect(score.missingVerdicts).toBe(0);
+    expect(score.noVerdictRate).toBe(0);
+    expect(score.noVerdictRate).not.toBeNull();
+  });
+
+  it('N4 — nothing dispatched reports null, not 0 and not NaN from 0/0', async () => {
+    const score = await scoreCalibrationRun('cal-n4', fleetClient('cal-n4', []));
+
+    expect(score.dispatchedItemCount).toBe(0);
+    expect(score.missingVerdicts).toBe(0);
+    expect(score.noVerdictRate).toBeNull();
+    expect(Number.isNaN(score.noVerdictRate as unknown as number)).toBe(false);
+  });
+
+  it('N5 — the DISCRIMINATOR: the denominator is DISPATCHED, not verdictCount', async () => {
+    // 8 of 10 asked items produced nothing. Over `verdictCount` this is 8/2 =
+    // 4.0 — above 1, which no rate can be. N1/N2/N6 cannot separate the two
+    // denominators sharply enough to be evidence; this one can.
+    const score = await scoreCalibrationRun(
+      'cal-n5',
+      fleetClient('cal-n5', fleet({ answered: 2, truncated: 3, dead: 5 }))
+    );
+
+    expect(score.dispatchedItemCount).toBe(10);
+    expect(score.verdictCount).toBe(2);
+    expect(score.missingVerdicts).toBe(8);
+    expect(score.noVerdictRate).toBeCloseTo(0.8, 10);
+    expect(score.noVerdictRate).toBeLessThanOrEqual(1);
+  });
+
+  it('N6 — the VOID run reads as abandoned, not as a judge that answered 16 times', async () => {
+    // cmton7ip5…: 604 of 620 asked items produced nothing. rawAgreement over
+    // the surviving 16 says nothing about the run, and this line says so.
+    const score = await scoreCalibrationRun(
+      'cal-n6',
+      fleetClient('cal-n6', fleet({ answered: 16, truncated: 0, dead: 604 }))
+    );
+
+    expect(score.dispatchedItemCount).toBe(620);
+    expect(score.verdictCount).toBe(16);
+    expect(score.missingVerdicts).toBe(604);
+    expect(score.noVerdictRate?.toFixed(4)).toBe('0.9742');
+  });
+
+  it('an EvaluationRun with NO golden item was never ASKED — it is dispatched to nothing', async () => {
+    // `dispatchedItemCount` sits past the same `goldenItem === null` gate as
+    // every other count: a row that cannot be scored against anything did not
+    // ask a question either, and counting it would invent a denominator.
+    const score = await scoreCalibrationRun(
+      'cal-orphan',
+      fleetClient('cal-orphan', fleet({ answered: 5, truncated: 0, dead: 0, orphaned: 3 }))
+    );
+
+    expect(score.dispatchedItemCount).toBe(5);
+    expect(score.verdictCount).toBe(5);
+    expect(score.missingVerdicts).toBe(0);
+    expect(score.noVerdictRate).toBe(0);
   });
 });

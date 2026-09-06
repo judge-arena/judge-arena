@@ -51,7 +51,7 @@
  * the two together precisely because bumping one and forgetting the other
  * leaves this build calling its own output UNKNOWN.
  */
-export const SCORING_RULES_VERSION = 1;
+export const SCORING_RULES_VERSION = 2;
 
 export type ScoringRulesGeneration = {
   /** Monotone, contiguous from 1. Ordered, so "newer than" is decidable. */
@@ -72,6 +72,18 @@ export const SCORING_RULES_CHANGELOG: readonly ScoringRulesGeneration[] = [
       "rawAgreement = correctCount/verdictCount with a 'tie' counted as a miss; " +
       'Cohen kappa over the three preference categories; constantBaselineAccuracy = ' +
       'max(key class)/verdictCount over the SCORED subset',
+  },
+  {
+    version: 2,
+    migration: 'v2n',
+    rules:
+      'generation 1 UNCHANGED (rawAgreement and kappa keep their exact meaning), plus ' +
+      "committedCount = items whose raw verdict is not 'tie'; selectiveAccuracy = " +
+      'correct-among-committed / committedCount, NULL at zero coverage; and ' +
+      'selectiveBaselineAccuracy = max(committed key class)/committedCount, which is ' +
+      'a DIFFERENT floor from constantBaselineAccuracy and can name a different class; ' +
+      'and noVerdictRate = missingVerdicts/dispatchedItemCount, a FLEET property ' +
+      '(truncation or dead request) that is NOT abstention and is not stored',
   },
 ];
 

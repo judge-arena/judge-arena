@@ -146,3 +146,144 @@ export function formatConstantBaselineLines(score: {
   }
   return lines;
 }
+
+/**
+ * The COVERAGE block: how often the judge answered, how often it was right when
+ * it did, and the floor that second number has to clear.
+ *
+ * WHY THESE TWO NUMBERS AND NOT ONE. The golden key is FORCED CHOICE — 620
+ * items, 336 'A>B' / 284 'B>A', no ties — so a 'tie' verdict can never be
+ * correct and `rawAgreement` is the PRODUCT of two independent quantities:
+ * coverage, and accuracy given coverage. Measured 2026-09-06 on that set,
+ * lfm2.5:8b and lfm2.5-thinking:1.2b differ 5.3x on rawAgreement (0.0929 vs
+ * 0.4887) — which reads as "broken vs mediocre" — and are statistically
+ * indistinguishable on selective accuracy (0.5437 vs 0.5363). Same
+ * discriminative ability; they differ only in how they express uncertainty.
+ *
+ * THE FLOOR HERE IS THE ONE OVER THE COMMITTED SUBSET, AND THAT IS THE WHOLE
+ * POINT. `formatConstantBaselineLines` above prints the floor over every SCORED
+ * item; this one prints the floor over the items the judge COMMITTED to.
+ * Quoting the first beside selective accuracy is precisely the error v2l exists
+ * to prevent, one level down, and on production data it FLIPS THE SIGN of the
+ * margin for two of four judges (lfm2.5-thinking: +0.0071 over its committed
+ * floor of 0.5292, −0.0056 against the full subset's 0.5419). The two can even
+ * name different top classes, which is what the unit test pins.
+ *
+ * NULL-NOT-ZERO, and the two nulls mean different things. `coverage` is null
+ * only when nothing was scored; coverage 0.0000 over a non-zero denominator IS
+ * a measurement — the judge replied and committed to none of them.
+ * `selectiveAccuracy` is null whenever coverage is 0, and the line says
+ * UNDEFINED rather than printing 0.0000, which would read as "never right".
+ *
+ * A TIE-CONTAINING KEY GETS A CAVEAT RATHER THAN A SUPPRESSION. "A tie is an
+ * abstention" is a property of a forced-choice key. Both live golden sets are
+ * tie-free, but PATCH /api/golden-sets/[id]/items writes `expected` with no
+ * vocabulary check on an unfrozen set, so the shape is reachable — and when it
+ * is, these two lines are still arithmetically correct and no longer mean what
+ * their labels say. The `ⓘ` says so on the same screen rather than leaving the
+ * reader to work it out.
+ *
+ * The parameter is a structural literal rather than `Pick<CalibrationScore, …>`
+ * for the same reason `formatConstantBaselineLines`'s is: score.ts imports THIS
+ * module, and a type import back would close an import cycle. A whole
+ * `CalibrationScore` satisfies it, which is how run.ts calls it. TypeScript
+ * therefore narrows each field independently, which is why the guard below
+ * names all three of the selective fields even though score.ts makes them null
+ * together. The same structural requirement produces one arm that NO caller can
+ * take: `coverage` is null only when `verdictCount` is 0, which the first guard
+ * has already returned on, so the `'n/a'` in the coverage line is unreachable
+ * from `score.ts` and exists purely to narrow `number | null` to `number`. That
+ * is exactly the shape `formatConstantBaselineLines` documents above about its
+ * `||` chain, and it carries the same instruction: **do not claim "100%
+ * branches" for this file; read the printed coverage row** (Task 3 Step 15).
+ */
+export function formatSelectiveAccuracyLines(score: {
+  verdictCount: number;
+  committedCount: number;
+  abstainedCount: number;
+  committedCorrectCount: number;
+  coverage: number | null;
+  selectiveAccuracy: number | null;
+  selectiveBaseline: ConstantBaseline | null;
+  selectiveMarginOverConstant: number | null;
+  constantBaseline: ConstantBaseline | null;
+}): string[] {
+  // Nothing scored: no lines at all. A line reading `n/a` would suggest a
+  // number exists and could not be rendered — the same contract as above.
+  if (score.verdictCount === 0) return [];
+
+  const lines = [
+    `  coverage   ${score.coverage === null ? 'n/a' : fmt4(score.coverage)}   ` +
+      `(${score.committedCount}/${score.verdictCount} scored items the judge COMMITTED on; ` +
+      `${score.abstainedCount} abstained with 'tie')`,
+  ];
+
+  if (
+    score.selectiveAccuracy === null ||
+    score.selectiveBaseline === null ||
+    score.selectiveMarginOverConstant === null
+  ) {
+    lines.push(
+      `  ⚠ the judge committed on NOTHING (0/${score.verdictCount}) — selective accuracy is UNDEFINED, not 0 and not 1.`
+    );
+  } else {
+    const floor = score.selectiveBaseline;
+    // `preferences` lists EVERY top class when the committed key ties; the count
+    // printed is the first one's, and they are equal by construction, so the
+    // pair stays honest under either label — same as above.
+    const stamped = floor.keyCounts[floor.preferences[0]];
+    const sign = score.selectiveMarginOverConstant >= 0 ? '+' : '';
+    lines.push(
+      `  selective  ${fmt4(score.selectiveAccuracy)}   ` +
+        `(${score.committedCorrectCount}/${score.committedCount} right where it COMMITTED)   ` +
+        `floor ${fmt4(floor.accuracy)} ('${floor.preferences.join('/')}': ${stamped}/${floor.denominator})   ` +
+        `margin ${sign}${fmt4(score.selectiveMarginOverConstant)}`
+    );
+    // `<=`, not `<`: the judge this warning exists for is the one that lands ON
+    // the floor by stamping whenever it does commit.
+    if (score.selectiveAccuracy <= floor.accuracy) {
+      lines.push(
+        '  ⚠ selective accuracy is at or below the floor OVER THE COMMITTED SUBSET — where it answers, the judge is not distinguishable from a stamp.'
+      );
+    }
+  }
+
+  if (score.constantBaseline !== null && score.constantBaseline.keyCounts.tie > 0) {
+    lines.push(
+      `  ⓘ this answer key CONTAINS ties (${score.constantBaseline.keyCounts.tie} of ${score.constantBaseline.denominator} scored items), ` +
+        "so a 'tie' verdict is a real ANSWER here, " +
+        'not an abstention — the two lines above do not measure abstention on this set.'
+    );
+  }
+  return lines;
+}
+
+/** The no-verdict rate on its own line, under its own label, deliberately NOT
+ *  inside the coverage block. Coverage is what the JUDGE did; this is what the
+ *  FLEET did. Rendering them as one block is the exact conflation M6 rejects —
+ *  a reader who sees them adjacent under one heading will read a truncation as
+ *  an abstention. Returns [] when the rate is null: a NULL is not a 0.0000.
+ *
+ *  THE GUARD IS ON THE RATE, NOT ON `dispatchedItemCount`. The two coincide
+ *  coming from score.ts (the rate is null exactly when nothing was dispatched),
+ *  but the parameter is a structural literal for the same reason the two
+ *  formatters above take one — score.ts imports THIS module, so a type import
+ *  back would close an import cycle — and TypeScript narrows each field
+ *  independently. Keying the empty return on the denominator would render
+ *  `null` or `NaN` on any other shape, which is precisely what "a NULL is not a
+ *  0.0000" forbids.
+ *
+ *  A RATE OF 0 IS PRINTED, not suppressed. "Nothing was lost" is a measurement,
+ *  and a silent line does not say the denominator was checked. */
+export function formatNoVerdictRateLine(score: {
+  noVerdictRate: number | null;
+  missingVerdicts: number;
+  dispatchedItemCount: number;
+}): string[] {
+  if (score.noVerdictRate === null) return [];
+  return [
+    `  no verdict ${fmt4(score.noVerdictRate)}   ` +
+      `${score.missingVerdicts} of ${score.dispatchedItemCount} asked items produced none — ` +
+      'FLEET property (truncation/dead request), NOT abstention',
+  ];
+}

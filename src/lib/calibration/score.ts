@@ -91,6 +91,7 @@ import {
   type Preference,
   type Verdict,
 } from '@/lib/calibration/readings';
+import { SCORING_RULES_VERSION } from '@/lib/calibration/scoring-version';
 import { prisma } from '@/lib/db';
 import type { PrismaClient } from '@prisma/client';
 
@@ -154,6 +155,70 @@ export type CalibrationScore = {
   /** accuracy − constantBaseline.accuracy. Negative means the judge did worse
    *  than stamping. `null` when either side is. */
   marginOverConstant: number | null;
+  /** `EvaluationRun` rows for this calibration run that carry a `goldenItem` —
+   *  the items the judge was ASKED. OBSERVED, never derived. Equal to
+   *  `verdictCount + missingVerdicts` in phase 1 (one judgment per run); carried
+   *  separately so a future BA sweep breaking that identity is VISIBLE rather
+   *  than assumed away, exactly as `itemCount` is carried beside `verdictCount`. */
+  dispatchedItemCount: number;
+  /** `missingVerdicts / dispatchedItemCount` — the share of asked items that
+   *  produced no verdict at all. `null` — never 0, never NaN — when nothing was
+   *  dispatched; `0` (not null) when everything answered, because "nothing was
+   *  lost" is a measurement.
+   *
+   *  THIS IS A PROPERTY OF THE FLEET, NOT OF THE JUDGE, AND MUST NOT BE READ AS
+   *  ABSTENTION. Measured 2026-09-06 over the four completed runs on the 620-item
+   *  set (n = 2,480 item-rows): judge-behaviour refusals 0, prose-not-JSON 0,
+   *  token-budget truncations 18, infrastructure 0. Every no-verdict row is a
+   *  `finishReason='length'` truncation or a dead request. A judge that declines
+   *  says `tie` — the enum has no other channel (M6 Result 1) — and that lands in
+   *  `coverage`, not here. It exists because `rawAgreement`'s denominator
+   *  otherwise varies silently per judge: 619, 620 and 603 on the SAME set, so
+   *  lfm2.5:8b is scored over a strictly easier-to-reach subset than its peers
+   *  with nothing on the scoreboard saying so (M6 Result 6). */
+  noVerdictRate: number | null;
+  /** Items the judge COMMITTED on — a raw verdict other than 'tie'. The
+   *  denominator of `selectiveAccuracy`. */
+  committedCount: number;
+  /** Items the judge ABSTAINED on — raw verdict 'tie'. Equal to
+   *  `verdictCount − committedCount` by construction; carried separately so the
+   *  two being unequal is visible rather than assumed away, the same rule
+   *  `itemCount` follows. */
+  abstainedCount: number;
+  /** Correct answers among the COMMITTED ones. EQUAL to `correctCount` on a
+   *  forced-choice key and strictly smaller on a key that contains ties, where a
+   *  'tie' verdict can itself be a hit. Reusing `correctCount` as the selective
+   *  numerator over this denominator yields a "selective accuracy" above 1. */
+  committedCorrectCount: number;
+  /** committedCount / verdictCount — how often the judge COMMITTED, **CONDITIONAL
+   *  ON HAVING ANSWERED AT ALL**. Not "how often it answered": a 'tie' IS an
+   *  answer, and both operands here count only completed non-null verdicts, so an
+   *  item that errored, dead-lettered or truncated is in NEITHER of them. A judge
+   *  that fails outright therefore reads as HIGHER-coverage than one that ties —
+   *  lfm2.5:8b's 500 ties give 0.1708, and the same 500 as truncations would give
+   *  1.0000 over a verdictCount of 103. Always read this beside `missingVerdicts`.
+   *  `null` — never 0 — when nothing was scored. Coverage 0 with a non-zero
+   *  verdictCount IS a measurement: the judge replied and committed to none of
+   *  them. And it is monotonically improvable by abstaining on your own errors,
+   *  so `selectiveAccuracy` is never a ranking key without a coverage guard
+   *  (Task 1 Step 1's scoreboard query). */
+  coverage: number | null;
+  /** committedCorrectCount / committedCount — how often the judge was RIGHT
+   *  WHEN IT ANSWERED. `null` — never 0, never 1, never NaN — at zero coverage,
+   *  because "it was never right when it answered" is a claim about answers
+   *  that do not exist. `rawAgreement` is `coverage × selectiveAccuracy` and
+   *  multiplying the two is exactly what hides a stamper: lfm2.5:8b and
+   *  lfm2.5-thinking differ 5.3x on rawAgreement (0.0929 / 0.4887) and are
+   *  indistinguishable here (0.5437 / 0.5363). */
+  selectiveAccuracy: number | null;
+  /** The constant floor over the COMMITTED subset — max(committed key
+   *  class)/committedCount. NOT `constantBaseline`, which is over every scored
+   *  item: comparing selective accuracy against THAT is the error v2l exists to
+   *  prevent, one level down, and on production data it flips the margin's sign
+   *  for two of four judges. The two can even name different top classes. */
+  selectiveBaseline: ConstantBaseline | null;
+  /** selectiveAccuracy − selectiveBaseline.accuracy. `null` when either is. */
+  selectiveMarginOverConstant: number | null;
 };
 
 type LoadedJudgment = {
@@ -214,6 +279,10 @@ export async function scoreCalibrationRun(
   // 26. A reader is entitled to trust the field named "how many are missing"
   // over arithmetic they have to do themselves, and that reading was wrong.
   let unjudgedItems = 0;
+  // Items the judge was ASKED — counted here, past the same `goldenItem === null`
+  // gate as everything else, so a row that cannot be scored against anything is
+  // not counted as having been asked either.
+  let dispatchedItemCount = 0;
 
   for (const run of runs) {
     // A calibration EvaluationRun without a goldenItem cannot be scored
@@ -222,6 +291,7 @@ export async function scoreCalibrationRun(
     // skipping beats crashing a whole calibration over it, and it cannot go
     // unnoticed because the run contributes to no count.
     if (run.goldenItem === null) continue;
+    dispatchedItemCount += 1;
     if (run.modelJudgments.length === 0) {
       unjudgedItems += 1;
       continue;
@@ -256,9 +326,22 @@ export async function scoreCalibrationRun(
   // own style (see the loop comment below): the test pins the two equal, and
   // a regression in either is a failure rather than one shared wrong answer.
   const keyCounts: Record<Preference, number> = { 'A>B': 0, 'B>A': 0, tie: 0 };
+  // The SAME marginal, restricted to the items the judge COMMITTED on. It is
+  // the selective floor's denominator, and it is not derivable from `keyCounts`
+  // — the abstentions do not fall evenly across the key. On production data the
+  // two floors can name DIFFERENT top classes, and quoting the wrong one is a
+  // wrong number under a wrong label on the line a reader uses to decide
+  // whether a judge beat a stamp.
+  const committedKeyCounts: Record<Preference, number> = { 'A>B': 0, 'B>A': 0, tie: 0 };
 
   const disagreements: CalibrationDisagreement[] = [];
   let correctCount = 0;
+  // Correct answers among the COMMITTED ones only. A 'tie' verdict against a
+  // tie-KEYED item is a hit (score.ts's header, and constantVerdictBaseline
+  // treats 'tie' as a class for the same reason), so `correctCount` can contain
+  // hits that `committedCount` excluded — and 3/2 is a selective accuracy of
+  // 1.5. Separate accumulator, past the same gate.
+  let committedCorrectCount = 0;
   let verdictCount = 0;
 
   rows.forEach((row, i) => {
@@ -280,9 +363,16 @@ export async function scoreCalibrationRun(
     const expected = row.expected as Preference;
     keyCounts[expected] += 1;
     confusion[expected][actual] += 1;
+    // ABSTENTION IS THE RAW VERDICT 'tie', NOT THE DERIVED PREFERENCE. The two
+    // agree here — `preferenceFromVerdict` maps 'tie' to 'tie' and maps nothing
+    // else to it — but the raw letter is what the judge SAID, and this split
+    // has to keep meaning the same thing under phase 2's BA sweep, which swaps
+    // 'A'/'B' and leaves 'tie' alone.
+    if (row.verdict !== 'tie') committedKeyCounts[expected] += 1;
 
     if (actual === expected) {
       correctCount += 1;
+      if (row.verdict !== 'tie') committedCorrectCount += 1;
       return;
     }
     disagreements.push({
@@ -303,22 +393,56 @@ export async function scoreCalibrationRun(
   const marginOverConstant =
     accuracy !== null && constantBaseline !== null ? accuracy - constantBaseline.accuracy : null;
 
+  // ── Coverage and selective accuracy ──────────────────────────────────────
+  // The SAME pure function, over a DIFFERENT denominator. `denominator` is read
+  // back off the baseline rather than accumulated a third time: it is the sum
+  // of `committedKeyCounts` by construction, and a second counter that could
+  // disagree with the floor's own denominator is two numbers for one thing.
+  const selectiveBaseline = constantVerdictBaseline(committedKeyCounts);
+  const committedCount = selectiveBaseline === null ? 0 : selectiveBaseline.denominator;
+  const abstainedCount = verdictCount - committedCount;
+  const coverage = verdictCount === 0 ? null : committedCount / verdictCount;
+  // NULL, not 0 and not NaN. `0/0` is NaN and would flow into JSON and into the
+  // column as null anyway — but by accident, and `committedCorrectCount / 0`
+  // with a non-zero numerator is Infinity. Neither is a measurement.
+  const selectiveAccuracy = committedCount === 0 ? null : committedCorrectCount / committedCount;
+  const selectiveMarginOverConstant =
+    selectiveAccuracy !== null && selectiveBaseline !== null
+      ? selectiveAccuracy - selectiveBaseline.accuracy
+      : null;
+
+  // Both shapes of "this item produced no answer": a row whose verdict is null
+  // (judged, but the judge said nothing usable) and a run with no completed
+  // judgment at all (errored, dead-lettered, or still running). Lifted to a
+  // const because `noVerdictRate` below divides it — computing the sum twice is
+  // how the stored count and the printed rate drift apart.
+  const missingVerdicts = projection.missingVerdicts + unjudgedItems;
+  // Null at zero dispatched, 0 when everything answered. See the field's doc:
+  // this is a fleet property and is not part of coverage.
+  const noVerdictRate = dispatchedItemCount === 0 ? null : missingVerdicts / dispatchedItemCount;
+
   const score: CalibrationScore = {
     calibrationRunId,
     accuracy,
     kappa: result.value,
     verdictCount,
     itemCount: projection.itemCount,
-    // Both shapes of "this item produced no answer": a row whose verdict is
-    // null (judged, but the judge said nothing usable) and a run with no
-    // completed judgment at all (errored, dead-lettered, or still running).
-    missingVerdicts: projection.missingVerdicts + unjudgedItems,
+    missingVerdicts,
     correctCount,
     verdictDistribution,
     confusion,
     disagreements,
     constantBaseline,
     marginOverConstant,
+    dispatchedItemCount,
+    noVerdictRate,
+    committedCount,
+    abstainedCount,
+    committedCorrectCount,
+    coverage,
+    selectiveAccuracy,
+    selectiveBaseline,
+    selectiveMarginOverConstant,
     method: {
       statistic: result.statistic,
       weighting: result.weighting,
@@ -342,6 +466,17 @@ export async function scoreCalibrationRun(
       // after a drain moves verdictCount and this moves with it. baseline.ts
       // is the source of truth; this is its stored copy.
       constantBaselineAccuracy: constantBaseline === null ? null : constantBaseline.accuracy,
+      // v2n. `coverage` is deliberately NOT written: it is committedCount /
+      // verdictCount and both operands are on this row, so a stored copy is a
+      // derived duplicate that a partial re-score would leave stale.
+      committedCount,
+      selectiveAccuracy,
+      selectiveBaselineAccuracy: selectiveBaseline === null ? null : selectiveBaseline.accuracy,
+      // v2m. Scoring is ex post and re-runnable, so the numbers above are
+      // uninterpretable without the generation that produced them. Written from
+      // the CONSTANT, never a literal, in the same full overwrite: the stamp and
+      // the numbers cannot move independently.
+      scoringVersion: SCORING_RULES_VERSION,
       // Mirrored from the method `agreement()` actually USED rather than
       // written as literals. Both are 'cohen'/'none' by construction here —
       // exactly two raters, and preferences carry no distance so any

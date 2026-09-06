@@ -57,8 +57,9 @@ import {
   type LatencyBaseline,
 } from '@/lib/calibration/latency';
 import { formatReasoningLengthLine, summarizeReasoningLength } from '@/lib/calibration/reasoning-length';
-import { formatConstantBaselineLines } from '@/lib/calibration/baseline';
+import { formatConstantBaselineLines, formatSelectiveAccuracyLines, formatNoVerdictRateLine } from '@/lib/calibration/baseline';
 import { scoreCalibrationRun } from '@/lib/calibration/score';
+import { SCORING_RULES_VERSION, describeScoringVersion } from '@/lib/calibration/scoring-version';
 import { canonicalJson, describeSamplingSnapshot, detectSamplingDrift } from '@/lib/calibration/sampling-drift';
 import { accountTokens, formatTokenAccountingLines } from '@/lib/calibration/token-accounting';
 // The alert wording and the budgets it thresholds on live with the timeout
@@ -294,8 +295,24 @@ async function main(): Promise<void> {
   // unit suite pins it: this file is outside every coverage include and has no
   // harness, so a template built here would ship untested.
   for (const line of formatConstantBaselineLines(score)) console.log(line);
+  // Coverage and selective accuracy, with the floor over the COMMITTED subset —
+  // never the full one. On this corpus that choice flips the margin's SIGN for
+  // two of four judges, which is the same class of error v2l exists to prevent.
+  // The rendering, including the `<=` that decides the ⚠ and the CHOICE of
+  // floor, is in src/lib/calibration/baseline.ts where the unit suite pins it.
+  for (const line of formatSelectiveAccuracyLines(score)) console.log(line);
   console.log(`  kappa      ${fmt(score.kappa)}   method ${JSON.stringify(score.method)}`);
   console.log(`  itemCount ${score.itemCount}   missingVerdicts ${score.missingVerdicts}`);
+  // The DENOMINATOR those missing verdicts are missing FROM, and their rate.
+  // Its own line, under its own label, outside the coverage block on purpose:
+  // coverage is what the JUDGE did, this is what the FLEET did, and a reader
+  // who sees them under one heading reads a truncation as an abstention.
+  for (const line of formatNoVerdictRateLine(score)) console.log(line);
+  // WHICH RULES produced every number above. Scoring is ex post and re-runnable,
+  // so a stored figure is uninterpretable without its generation — and this is
+  // the generation the row was just stamped with, read from the constant rather
+  // than written as a literal.
+  console.log(`  scoring    ${describeScoringVersion(SCORING_RULES_VERSION)}`);
   if (score.missingVerdicts > 0) {
     console.log(`  ⚠ ${score.missingVerdicts} item(s) produced no verdict — the accuracy above is over the rest, not the set.`);
   }
