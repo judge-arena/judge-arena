@@ -1129,7 +1129,7 @@ describe('scoreCalibrationRun — coverage and selective accuracy', () => {
     // reference (they are equal today); the literal alone would not fail when
     // the constant is bumped without the write following it.
     expect(data.scoringVersion).toBe(SCORING_RULES_VERSION);
-    expect(data.scoringVersion).toBe(2);
+    expect(data.scoringVersion).toBe(3);
     // The floor over ALL scored items is a DIFFERENT column and a different
     // number — 0.6 against 4/7. Two floors on one row, and the wrong one is the
     // one that gets quoted.

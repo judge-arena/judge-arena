@@ -166,11 +166,22 @@ async function main(): Promise<void> {
   const pollTimeoutSec = Number(arg('poll-timeout') ?? '3600');
 
   // A2: which candidate orders to launch each item under. Comma-separated,
-  // e.g. `--orders=AB,BA` for a paired sweep; defaults to `['AB']` so every
-  // existing invocation is unchanged.
+  // e.g. `--orders=AB,BA` for a paired sweep; the FLAG OMITTED entirely
+  // defaults to `['AB']` so every existing invocation is unchanged.
+  //
+  // F3 (review round 1): `--orders=` (present, empty value) is NOT the same
+  // as omitting the flag, and must not be treated as one — `arg()` returns
+  // `''` for it, and `'' ? ... : ['AB']` is falsy, so the old `ordersArg ?
+  // ordersArg.split(',') : ['AB']` silently fell back to `['AB']` for BOTH
+  // cases, and `''.split(',')` never produces a zero-length array either
+  // (`['']`, length 1) — which is why the `orders.length === 0` arm below
+  // was dead code: nothing could ever reach it. Distinguishing `undefined`
+  // (omitted) from `''` (typed, empty) up front is what makes that arm
+  // reachable, for a genuinely empty list (impossible to construct any other
+  // way, since split on a non-empty string always yields >= 1 element).
   const ordersArg = arg('orders');
-  const orders = (ordersArg ? ordersArg.split(',') : ['AB']).map((o) => o.trim());
-  if (!orders.every(isPairOrder) || orders.length === 0) {
+  const orders = ordersArg === undefined ? ['AB'] : ordersArg.split(',').map((o) => o.trim());
+  if (orders.length === 0 || !orders.every(isPairOrder)) {
     throw new Error(`--orders must be a comma-separated list of AB and/or BA; got ${JSON.stringify(ordersArg)}`);
   }
 

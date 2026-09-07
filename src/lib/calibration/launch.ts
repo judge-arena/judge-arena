@@ -253,6 +253,21 @@ export async function launchCalibrationRun(
 
   // ── Pre-flight (see the doc block: all of this precedes the freeze) ──────
 
+  // F3 (review round 1): a duplicate order (e.g. `['AB', 'AB']`) passes every
+  // OTHER pre-flight check, freezes the golden set, and then fails EVERY
+  // single item at `launchSingleRun`'s nested `modelJudgments.create` on the
+  // `@@unique([runId, judgeModelVersionId, pairOrder])` constraint —
+  // knowable up front, from the params alone, with no DB read at all, so it
+  // is checked FIRST, before anything that costs a query.
+  if (new Set(orders).size !== orders.length) {
+    throw new RunLaunchError(
+      400,
+      `orders must not contain duplicates — got [${orders.join(', ')}]. A repeated order would launch every ` +
+        "item, freeze the golden set, and then fail all of them on ModelJudgment's " +
+        '@@unique([runId, judgeModelVersionId, pairOrder]).'
+    );
+  }
+
   const goldenSet = await prisma.goldenSet.findUnique({
     where: { id: goldenSetId },
     select: { id: true, name: true, protocol: true, tombstonedAt: true },
@@ -521,10 +536,22 @@ export async function launchCalibrationRun(
       );
 
       if (launch.publishFailed) {
-        // The run exists and `launchSingleRun` has already compensated it to
-        // `status: 'error'`; nothing will ever execute it. Reported as a
-        // failure rather than silently counted as accepted — a caller that
-        // treated it as launched would wait forever for a verdict.
+        // F4 (review round 1): the run has been compensated to `status:
+        // 'error'`, but that is a RUN-LEVEL status write, not a judgment-level
+        // one — `launchSingleRun`'s publish loop is sequential and stops at
+        // the FIRST failure, so for a paired (2-order) run it is possible for
+        // AB to have published successfully before BA's publish throws. AB's
+        // `judgment.execute` message is live on the broker regardless of the
+        // run's now-'error' status, and `claimJudgment` has NO run-status
+        // guard (deliberately — see that function's own doc), so a worker
+        // WILL claim and execute it. It is NOT scored as a loss: an
+        // unpaired verdict simply has no BA counterpart to decide against,
+        // so it drops out of `pairedDecisiveCount` rather than counting
+        // against `positionBias`/`orderFlipRate`. Recovery is a RELAUNCH of
+        // this item — there is no code path that retries just the missing
+        // order. Reported as a failure rather than silently counted as
+        // accepted either way — a caller that treated this as launched would
+        // still wait forever for BA's verdict, which was never published.
         failed.push({
           goldenItemId: item.id,
           reason: launch.publishError ?? 'judgment.execute publish failed',

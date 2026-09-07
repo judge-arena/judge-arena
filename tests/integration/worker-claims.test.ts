@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Channel, ConsumeMessage } from 'amqplib';
 import { prisma } from '@/lib/db';
 import { closeRabbit, getRabbit } from '@/lib/queue/connection';
@@ -10,10 +10,12 @@ import {
 } from '@/lib/queue/topology';
 import { LANE_FALLBACK_QUEUE, LANE_QUEUES, laneQueueFor } from '@/lib/queue/lanes';
 import { type DlqEnvelope, type JudgmentExecuteMsg, type RunCreateMsg } from '@/lib/queue/publish';
+import { getConnectedRedis } from '@/lib/redis';
 import { ProviderError } from '@/lib/llm/errors';
 import { resolveTimeoutBudgets, runStartBudgetMs } from '@/lib/llm/timeout-policy';
 import {
   claimJudgment,
+  clearRunDeadlineOnRequeue,
   LEASE_MS,
   stampRunStartedAtFirstDequeue,
 } from '@/worker/claim';
@@ -23,6 +25,7 @@ import {
   type RunProviderJudgmentInput,
 } from '@/worker/judgment-consumer';
 import { createRunCreateConsumer } from '@/worker/run-create-consumer';
+import { runReaperSweep, REAPER_LOCK_KEY } from '@/worker/reaper';
 import { seedPromptTemplates } from '../../prisma/seed-prompt-templates';
 
 // Integration suite — needs a live Postgres (see .env.test's DATABASE_URL,
@@ -258,10 +261,18 @@ async function mkEndpoint(userId: string, judgeModelVersionId: string) {
 async function mkJudgment(
   runId: string,
   judgeModelVersionId: string,
-  promptTemplateId: string
+  promptTemplateId: string,
+  // F1 regression (round 1 fix): optional so all 18 pre-existing call sites
+  // are unaffected (undefined -> Prisma's own null default). A paired-run
+  // test needs two judgments on the SAME judgeModelVersionId, which the
+  // @@unique([runId, judgeModelVersionId, pairOrder]) index (NULLS NOT
+  // DISTINCT) would otherwise collide on — distinct pairOrder values are
+  // what make that legal, mirroring how launchSingleRun actually creates a
+  // paired run's two rows.
+  pairOrder?: 'AB' | 'BA'
 ) {
   return prisma.modelJudgment.create({
-    data: { runId, judgeModelVersionId, promptTemplateId, status: 'pending' },
+    data: { runId, judgeModelVersionId, promptTemplateId, status: 'pending', pairOrder },
   });
 }
 
@@ -306,6 +317,20 @@ async function createFixture(): Promise<Fixture> {
   return { ...base, run };
 }
 
+/** F1 regression (round 1 fix): the reaper's cluster-wide lock is a Redis
+ * SET NX with a TTL — cleared between tests (mirrors
+ * tests/integration/finalization.test.ts's own `clearReaperLock`) so
+ * `runReaperSweep()` in this file's paired-deadline test isn't skipped by a
+ * lock a prior test (or a prior run of this same test) still holds. */
+async function clearReaperLock(): Promise<void> {
+  const client = await getConnectedRedis();
+  await client.del(REAPER_LOCK_KEY);
+}
+
+beforeEach(async () => {
+  await clearReaperLock();
+});
+
 afterAll(async () => {
   // FK-safe order:
   //  1. Runs first (cascades ModelJudgment) — unblocks Rubric's Restrict
@@ -324,6 +349,7 @@ afterAll(async () => {
   await prisma.judgeModelVersion.deleteMany({ where: { id: { in: createdVersionIds } } });
   await prisma.judgeModel.deleteMany({ where: { id: { in: createdJudgeModelIds } } });
 
+  await clearReaperLock();
   await closeRabbit();
   await prisma.$disconnect();
 });
@@ -1038,4 +1064,99 @@ describe('claim.ts: stampRunStartedAtFirstDequeue — the run deadline is set at
     // queue assertions in this same persistent-DB suite.
     await drainQueue(confirmChannel, QUEUE_JUDGMENT_RETRY_30S);
   });
+
+  // ── F1 regression (review round 1, CRITICAL) ───────────────────────────
+  //
+  // Reproduces the exact trace the review described: AB claimed, fails
+  // retryably and requeues while its sibling BA is still non-terminal, BA
+  // claims next — and AB must NOT become abandonable as a result. Before
+  // this fix, `clearRunDeadlineOnRequeue` nulled UNCONDITIONALLY; BA's own
+  // `stampRunStartedAtFirstDequeue` call then found `deadlineAt IS NULL` and
+  // re-stamped a fresh ~31-minute budget with no memory of AB's
+  // already-established protection — a deadline sized for BOTH judgments to
+  // finish from THIS moment, while AB's requeued message can legally sit
+  // behind hundreds of other items on the same judge lane for days. A test
+  // asserting only the new predicate ("does clearRunDeadlineOnRequeue skip
+  // nulling when count > 1") would not have caught the ORIGINAL bug either —
+  // that predicate is new code, so of course it passes; the actual defect
+  // was in the OLD unconditional null, and only a test that drives the real
+  // claim -> fail -> requeue -> sibling-claim -> reaper sequence and checks
+  // the judgment's own fate exercises the code path the bug lived in.
+  it(
+    'F1: a paired run — AB fails and requeues while BA is still pending; BA claims next; ' +
+      'AB is not abandoned by an immediate reaper sweep',
+    async () => {
+      const fixture = await createFixture();
+      const ab = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId, 'AB');
+      const ba = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId, 'BA');
+
+      // AB's first (and only, in this test) claim — the run's true first
+      // dequeue.
+      expect(await claimJudgment(ab.id)).toBe('claimed');
+      await stampRunStartedAtFirstDequeue(fixture.run.id);
+      const afterAbClaim = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: fixture.run.id } });
+      expect(afterAbClaim.deadlineAt).not.toBeNull();
+      const firstDeadline = afterAbClaim.deadlineAt!.getTime();
+
+      // AB fails retryably: judgment-consumer.ts's own disposition resets it
+      // to 'pending' BEFORE calling clearRunDeadlineOnRequeue (mirrored here
+      // rather than driven through handle(), which would also need a real
+      // fake-provider round trip this test doesn't need — claim.ts's two
+      // functions are what is under test).
+      await prisma.modelJudgment.update({ where: { id: ab.id }, data: { status: 'pending' } });
+      await clearRunDeadlineOnRequeue(fixture.run.id);
+
+      // THE CORE FIX: BA is still 'pending' (2 non-terminal judgments), so
+      // the deadline must NOT have been nulled — and, being a re-stamp, must
+      // never be EARLIER than what AB's own claim already established.
+      const afterClear = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: fixture.run.id } });
+      expect(afterClear.deadlineAt).not.toBeNull();
+      expect(afterClear.deadlineAt!.getTime()).toBeGreaterThanOrEqual(firstDeadline);
+
+      // BA, next in the lane, claims.
+      expect(await claimJudgment(ba.id)).toBe('claimed');
+      await stampRunStartedAtFirstDequeue(fixture.run.id);
+      const afterBaClaim = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: fixture.run.id } });
+      expect(afterBaClaim.deadlineAt).not.toBeNull();
+      expect(afterBaClaim.deadlineAt!.getTime()).toBeGreaterThanOrEqual(afterClear.deadlineAt!.getTime());
+
+      // AB is STILL 'pending' (its requeued message has not been redelivered
+      // in this test — exactly the "sitting far back in the lane" state the
+      // bug exploited). Run the REAL reaper sweep right now: with the
+      // deadline preserved/extended rather than nulled-then-shortened, this
+      // run is not yet overdue and must not be touched.
+      await runReaperSweep();
+
+      const abAfterSweep = await prisma.modelJudgment.findUniqueOrThrow({ where: { id: ab.id } });
+      expect(abAfterSweep.status).toBe('pending');
+      expect(abAfterSweep.error).toBeNull();
+      const runAfterSweep = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: fixture.run.id } });
+      expect(runAfterSweep.status).not.toBe('error');
+    }
+  );
+
+  it(
+    'F1 complement: once BA has already gone terminal, a further AB retry DOES null the deadline — ' +
+      'falls back to the pre-A2 single-judgment behaviour (the 45-day net), unconditionally',
+    async () => {
+      const fixture = await createFixture();
+      const ab = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId, 'AB');
+      const ba = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId, 'BA');
+
+      expect(await claimJudgment(ab.id)).toBe('claimed');
+      await stampRunStartedAtFirstDequeue(fixture.run.id);
+
+      // BA already reached a TERMINAL state (completed) — only AB remains
+      // non-terminal. The condition that guards the A2 extend path
+      // (`nonTerminal > 1`) is therefore false: this must behave exactly
+      // like the ordinary single-judgment case.
+      await prisma.modelJudgment.update({ where: { id: ba.id }, data: { status: 'completed' } });
+
+      await prisma.modelJudgment.update({ where: { id: ab.id }, data: { status: 'pending' } });
+      await clearRunDeadlineOnRequeue(fixture.run.id);
+
+      const afterClear = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: fixture.run.id } });
+      expect(afterClear.deadlineAt).toBeNull();
+    }
+  );
 });
