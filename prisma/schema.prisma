@@ -1014,9 +1014,14 @@ model CalibrationRun {
   /// v2o. The denominator BOTH estimators share — items decisive in both
   /// orders. Never render either rate without it.
   pairedDecisiveCount Int?
-  /// v2o. Which orders this run ASKED for, e.g. 'AB' or 'AB,BA'. Without it a
-  /// BA half that launched and never drained would store identically to a run
-  /// that never had one, and a NULL estimator would be ambiguous.
+  /// v2o. Which orders this run ASKED for. COMMA-SEPARATED, written by
+  /// `src/lib/calibration/launch.ts` as `orders.join(',')` — e.g. 'AB' for an
+  /// unpaired run, 'AB,BA' for a paired one. THIS IS NOT AN ENUM: test
+  /// membership with `.includes('BA')`, never `=== 'BA'` — a later reader
+  /// comparing `ordersRequested === 'AB'` would read a paired run's 'AB,BA'
+  /// as unpaired and silently misclassify it. Without this column a BA half
+  /// that launched and never drained would store identically to a run that
+  /// never had one, and a NULL estimator would be ambiguous.
   ordersRequested     String?
   biasSensitivityRate Float?
   flipRateVsParent    Float?

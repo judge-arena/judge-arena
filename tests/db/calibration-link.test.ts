@@ -5,7 +5,8 @@ import { prisma } from '@/lib/db';
 import { logger } from '@/lib/logger';
 import { isGoldenSetFrozen } from '@/lib/golden-sets';
 import { effectiveSamplingParams } from '@/lib/llm/sampling';
-import { launchCalibrationRun, MAX_CALIBRATION_ITEMS } from '@/lib/calibration/launch';
+import { launchCalibrationRun, MAX_CALIBRATION_ITEMS, MAX_PAIRED_CALIBRATION_ITEMS } from '@/lib/calibration/launch';
+import { launchSingleRun } from '@/lib/run-launch';
 import { seedPromptTemplates } from '../../prisma/seed-prompt-templates';
 
 // ─── The calibration ⇄ golden-item link (A2.1, v2i) ────────────────────────
@@ -468,6 +469,114 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
     const runs = await db.evaluationRun.findMany({ where: { calibrationRunId: result.calibrationRunId } });
     expect(runs).toHaveLength(2);
     expect(runs.every((run) => run.status === 'error')).toBe(true);
+  });
+
+  // ── (2b) A2 (v2o BA sweep): launch emits one judgment per requested order ─
+  //
+  // Both `launchSingleRun.orders` and `launchCalibrationRun.orders` are
+  // threaded through the SAME nested `modelJudgments.create` inside
+  // `evaluationRun.create` that has always existed — see run-launch.ts's
+  // module doc. `claim.ts` stamps a run's `deadlineAt` exactly ONCE, from
+  // `judgmentCount`, at first dequeue; a judgment inserted after that point
+  // would inherit an already-expired deadline and be reaped
+  // (`src/worker/reaper.ts`). The one-transaction shape is what makes "one
+  // judgment per order, all pending, none late" true by construction — these
+  // tests pin the OBSERVABLE consequence (both rows exist, both `pending`,
+  // in one query) rather than the transaction boundary itself, which is not
+  // independently observable from outside `$transaction`.
+
+  it('launchSingleRun creates one judgment per requested order, all pending', async () => {
+    const world = await mkWorld({ items: 0 });
+    const evaluation = await db.evaluation.create({
+      data: { projectId: world.project.id, userId: world.user.id, rubricId: world.rubric.id, inputText: 'q' },
+    });
+
+    const launch = await launchSingleRun(
+      {
+        evaluationId: evaluation.id,
+        triggeredById: world.user.id,
+        judgeModelVersionIds: [world.version.id],
+        protocol: 'pairwise',
+        candidates: [
+          { position: 0, responseText: 'candidate A' },
+          { position: 1, responseText: 'candidate B' },
+        ],
+        orders: ['AB', 'BA'],
+      },
+      { publish: noopPublish }
+    );
+
+    const judgments = await prisma.modelJudgment.findMany({
+      where: { runId: launch.run.id },
+      orderBy: { pairOrder: 'asc' },
+    });
+    expect(judgments).toHaveLength(2);
+    expect(judgments.map((j) => j.pairOrder)).toEqual(['AB', 'BA']);
+    // Both must exist before the run is claimable: claim.ts stamps deadlineAt
+    // once from judgmentCount, so a late insert inherits an expired deadline.
+    expect(judgments.every((j) => j.status === 'pending')).toBe(true);
+  });
+
+  it('launchSingleRun still creates exactly one AB judgment when orders is omitted', async () => {
+    const world = await mkWorld({ items: 0 });
+    const evaluation = await db.evaluation.create({
+      data: { projectId: world.project.id, userId: world.user.id, rubricId: world.rubric.id, inputText: 'q' },
+    });
+
+    const launch = await launchSingleRun(
+      {
+        evaluationId: evaluation.id,
+        triggeredById: world.user.id,
+        judgeModelVersionIds: [world.version.id],
+        protocol: 'pairwise',
+        candidates: [
+          { position: 0, responseText: 'candidate A' },
+          { position: 1, responseText: 'candidate B' },
+        ],
+      },
+      { publish: noopPublish }
+    );
+    const judgments = await prisma.modelJudgment.findMany({ where: { runId: launch.run.id } });
+    expect(judgments).toHaveLength(1);
+    expect(judgments[0].pairOrder).toBe('AB');
+  });
+
+  it('MAX_PAIRED_CALIBRATION_ITEMS is 719 — the stricter, PAIRED item ceiling', () => {
+    expect(MAX_PAIRED_CALIBRATION_ITEMS).toBe(719);
+  });
+
+  it('launchCalibrationRun threads orders through every item and records ordersRequested on the header', async () => {
+    const world = await mkWorld({ items: 2 });
+
+    const result = await launchCalibrationRun(
+      { ...launchParamsFrom(world), orders: ['AB', 'BA'] },
+      { publish: noopPublish }
+    );
+
+    expect(result.failed).toEqual([]);
+    const runs = await db.evaluationRun.findMany({
+      where: { calibrationRunId: result.calibrationRunId },
+      include: { modelJudgments: true },
+    });
+    expect(runs).toHaveLength(2);
+    for (const run of runs) {
+      expect(run.modelJudgments).toHaveLength(2);
+      expect(new Set(run.modelJudgments.map((j) => j.pairOrder))).toEqual(new Set(['AB', 'BA']));
+    }
+
+    // v2o. COMMA-SEPARATED — membership is `.includes()`, not `===`; see
+    // schema.prisma's own doc on this column.
+    const header = await db.calibrationRun.findUniqueOrThrow({ where: { id: result.calibrationRunId } });
+    expect(header.ordersRequested).toBe('AB,BA');
+  });
+
+  it('launchCalibrationRun still records ordersRequested "AB" when orders is omitted', async () => {
+    const world = await mkWorld({ items: 1 });
+
+    const result = await launchCalibrationRun(launchParamsFrom(world), { publish: noopPublish });
+
+    const header = await db.calibrationRun.findUniqueOrThrow({ where: { id: result.calibrationRunId } });
+    expect(header.ordersRequested).toBe('AB');
   });
 
   // ── (3) The refusals, and what they must NOT leave behind ────────────────

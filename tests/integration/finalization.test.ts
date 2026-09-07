@@ -8,7 +8,7 @@ import type { JudgmentExecuteMsg } from '@/lib/queue/publish';
 import { getConnectedRedis } from '@/lib/redis';
 import { maybeFinalizeRun, markRunCompleted } from '@/lib/run-finalizer';
 import { runReaperSweep, REAPER_LOCK_KEY, NEVER_STARTED_TIMEOUT_MS } from '@/worker/reaper';
-import { MAX_CALIBRATION_ITEMS } from '@/lib/calibration/launch';
+import { MAX_PAIRED_CALIBRATION_ITEMS } from '@/lib/calibration/launch';
 import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
 import { LEASE_MS } from '@/worker/claim';
 import { createJudgmentConsumer, type ProviderFn, type RunProviderJudgmentInput } from '@/worker/judgment-consumer';
@@ -614,19 +614,25 @@ describe('reaper (src/worker/reaper.ts): the never-started safety net (deadlineA
     expect(NEVER_STARTED_TIMEOUT_MS).toBe(45 * 24 * 60 * 60 * 1000);
   });
 
-  it('the never-started net outlasts the LEGAL drain time of a full-cap calibration batch', () => {
+  it('the never-started net outlasts the LEGAL drain time of a full-cap PAIRED calibration batch', () => {
     // The RELATIONSHIP, not a second literal — this repo's own idiom (cf.
     // tests/lib/timeout-policy.test.ts:320, `LEASE_MS > hardCapMs`). A
     // calibration serialises through ONE judge's gate; each item may legally
     // run to hardCapMs and be delivered MAX_ATTEMPTS (3) times. If someone
-    // raises MAX_CALIBRATION_ITEMS again without revisiting this net, this
-    // goes red instead of silently re-arming the bug the net exists to
+    // raises MAX_PAIRED_CALIBRATION_ITEMS again without revisiting this net,
+    // this goes red instead of silently re-arming the bug the net exists to
     // prevent — a batch force-finalized while still healthily queued.
     // The 3 mirrors judgment-consumer.ts:199's MAX_ATTEMPTS (not exported).
     // Raising that number invalidates NEVER_STARTED_TIMEOUT_MS and must
     // move this literal too.
-    const legalWorstCaseMs = MAX_CALIBRATION_ITEMS * 3 * resolveTimeoutBudgets().hardCapMs;
-    expect(NEVER_STARTED_TIMEOUT_MS).toBeGreaterThan(legalWorstCaseMs);
+    //
+    // The orders factor was missing, so this assertion stayed GREEN while the
+    // real bound doubled. Resolve the cap rather than assuming the default:
+    // at MAX_HARD_CAP_MS even 620 paired items exceeds the 45-day net.
+    const ORDERS_PER_ITEM = 2;
+    const legalWorstCaseMs =
+      MAX_PAIRED_CALIBRATION_ITEMS * ORDERS_PER_ITEM * 3 * resolveTimeoutBudgets().hardCapMs;
+    expect(legalWorstCaseMs).toBeLessThan(NEVER_STARTED_TIMEOUT_MS);
   });
 
   it('a run created long before NEVER_STARTED_TIMEOUT_MS, never dequeued, past the grace period is force-finalized', async () => {

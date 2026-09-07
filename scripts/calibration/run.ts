@@ -47,6 +47,7 @@
  */
 import { prisma } from '@/lib/db';
 import { launchCalibrationRun } from '@/lib/calibration/launch';
+import { isPairOrder } from '@/lib/pair-order';
 import {
   describeBaseline,
   formatDurationMs,
@@ -164,6 +165,15 @@ async function main(): Promise<void> {
   const scoreOnly = arg('score-only');
   const pollTimeoutSec = Number(arg('poll-timeout') ?? '3600');
 
+  // A2: which candidate orders to launch each item under. Comma-separated,
+  // e.g. `--orders=AB,BA` for a paired sweep; defaults to `['AB']` so every
+  // existing invocation is unchanged.
+  const ordersArg = arg('orders');
+  const orders = (ordersArg ? ordersArg.split(',') : ['AB']).map((o) => o.trim());
+  if (!orders.every(isPairOrder) || orders.length === 0) {
+    throw new Error(`--orders must be a comma-separated list of AB and/or BA; got ${JSON.stringify(ordersArg)}`);
+  }
+
   let calibrationRunId: string;
   // The header's launch-time snapshot (v2k, CalibrationRun.samplingParams).
   // `null` means launched before the column existed — see describeSamplingSnapshot.
@@ -232,6 +242,7 @@ async function main(): Promise<void> {
       rubricId: rubric.id,
       projectId: project.id,
       triggeredById: owner.id,
+      orders,
     });
     calibrationRunId = launched.calibrationRunId;
     console.log(`  calibrationRunId ${calibrationRunId}`);

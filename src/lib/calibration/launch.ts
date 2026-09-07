@@ -49,6 +49,7 @@ import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
 // into a CLI that never calls a provider. tests/lib/sampling.test.ts keeps
 // sampling.ts a leaf.
 import { effectiveSamplingParams, type SamplingParams } from '@/lib/llm/sampling';
+import type { PairOrder } from '@/lib/pair-order';
 import {
   launchSingleRun,
   requireOwnedActiveEndpoints,
@@ -91,10 +92,13 @@ import {
  * items, seeded but previously unrunnable under the 100 cap — is 19.4 days
  * of legal occupancy and ~52 hours expected, inside both.
  *
- * `tests/integration/finalization.test.ts` pins the RELATIONSHIP
- * (`NEVER_STARTED_TIMEOUT_MS > MAX_CALIBRATION_ITEMS x 3 x hardCapMs`), not
- * a second literal, so raising this number again without revisiting the net
- * goes red rather than silently re-arming the bug.
+ * `tests/integration/finalization.test.ts` pins the RELATIONSHIP — since A2's
+ * BA sweep, over `MAX_PAIRED_CALIBRATION_ITEMS` (the stricter, PAIRED bound;
+ * see that constant's own doc), not a second literal — so raising either
+ * number again without revisiting the net goes red rather than silently
+ * re-arming the bug. This constant's own single-order arithmetic above
+ * (1000 x 1 x 3 x hardCapMs) is a looser bound than the paired one and is
+ * implied by it (1000 x 1 < 719 x 2), so it is not tested a second time.
  *
  * WHAT STILL BOUNDS THIS NUMBER, so it is not "raise it again next time
  * someone wants more": (1) `NEVER_STARTED_TIMEOUT_MS` — raising the item
@@ -113,6 +117,33 @@ import {
  */
 export const MAX_CALIBRATION_ITEMS = 1000;
 
+/**
+ * The item ceiling for a PAIRED run (`orders.length > 1`). The reaper's
+ * never-started net gives a launched judgment 45 days
+ * (`NEVER_STARTED_TIMEOUT_MS` = 3.888e9 ms, `src/worker/reaper.ts`), and the
+ * legal worst case for a calibration batch is
+ *
+ *     items x orders x MAX_ATTEMPTS(3) x resolveTimeoutBudgets().hardCapMs
+ *
+ * `MAX_CALIBRATION_ITEMS` (1000) was sized against that net assuming ONE
+ * order per item — `1000 x 1 x 3 x 900_000 = 2.7e9`, comfortably inside. A
+ * two-order (AB+BA) run DOUBLES the orders factor, and 1000 items at two
+ * orders is `1000 x 2 x 3 x 900_000 = 5.4e9` — over the net. At the resolved
+ * DEFAULT cap of 900_000 ms, two orders admits `floor(3.888e9 / (2 x 3 x
+ * 900_000)) = 720` items exactly (`720 x 2 x 3 x 900_000 = 3.888e9`, equal to
+ * the net, not strictly inside it); 719 keeps the bound strictly inside.
+ * `MAX_CALIBRATION_ITEMS` itself STAYS 1000 — it is the one-order ceiling and
+ * `tests/db/calibration-link.test.ts:488` pins it.
+ *
+ * CAVEAT `tests/integration/finalization.test.ts` must encode: the default
+ * hard cap is not the only LEGAL one. At the legal ceiling `MAX_HARD_CAP_MS`
+ * (1_170_000 ms, `src/lib/llm/timeout-policy.ts:94`) even 620 paired items —
+ * `620 x 2 x 3 x 1_170_000 = 4.3524e9` — exceeds the 45-day net. A test that
+ * hardcodes 900_000 instead of calling `resolveTimeoutBudgets().hardCapMs`
+ * would stay green through that. Resolve the cap; never assume the default.
+ */
+export const MAX_PAIRED_CALIBRATION_ITEMS = 719;
+
 export interface LaunchCalibrationRunParams {
   goldenSetId: string;
   judgeModelVersionId: string;
@@ -122,6 +153,11 @@ export interface LaunchCalibrationRunParams {
   /** The acting user: owns the endpoint the judge is reached through, and is
    * recorded as `EvaluationRun.triggeredById` on every run. */
   triggeredById: string;
+  /** Which candidate orders each item is judged in. Defaults to `['AB']`.
+   * `orders.length > 1` swaps the item ceiling from `MAX_CALIBRATION_ITEMS`
+   * to the stricter `MAX_PAIRED_CALIBRATION_ITEMS` — see that constant's doc
+   * for why the ceiling cannot stay the same number. */
+  orders?: PairOrder[];
 }
 
 export interface CalibrationItemFailure {
@@ -197,7 +233,8 @@ function toRunCandidates(candidates: GoldenCandidate[]): LaunchRunCandidateInput
  *
  * BECAUSE THAT WRITE IS IRREVERSIBLE, EVERYTHING KNOWABLE WITHOUT TOUCHING AN
  * ITEM IS CHECKED FIRST — the set exists, is not tombstoned, is pairwise, has
- * at least one live item and not more than `MAX_CALIBRATION_ITEMS`; the
+ * at least one live item and not more than `MAX_CALIBRATION_ITEMS` (or the
+ * stricter `MAX_PAIRED_CALIBRATION_ITEMS` when `orders.length > 1`); the
  * project and rubric exist; a pairwise `PromptTemplate` exists; and the caller
  * owns an active, verified `ModelEndpoint` for the judge version. Every one of
  * those would otherwise surface as a per-item failure DISCOVERED AFTER THE
@@ -212,6 +249,7 @@ export async function launchCalibrationRun(
   deps: LaunchSingleRunDeps = {}
 ): Promise<CalibrationLaunchResult> {
   const { goldenSetId, judgeModelVersionId, rubricId, projectId, triggeredById } = params;
+  const orders = params.orders ?? ['AB'];
 
   // ── Pre-flight (see the doc block: all of this precedes the freeze) ──────
 
@@ -260,18 +298,24 @@ export async function launchCalibrationRun(
       `Golden set ${goldenSetId} has no live items to calibrate against.`
     );
   }
-  if (items.length > MAX_CALIBRATION_ITEMS) {
-    // LOGGED, not truncated — see MAX_CALIBRATION_ITEMS' own doc.
-    logger.warn('launchCalibrationRun: refused a golden set over the phase-1 item cap', {
+  // A paired (2-order) run has a STRICTER ceiling than a single-order one —
+  // see MAX_PAIRED_CALIBRATION_ITEMS' own doc for the formula. Resolved here,
+  // before the freeze, same as every other pre-flight in this function.
+  const itemCeiling = orders.length > 1 ? MAX_PAIRED_CALIBRATION_ITEMS : MAX_CALIBRATION_ITEMS;
+  if (items.length > itemCeiling) {
+    // LOGGED, not truncated — see MAX_CALIBRATION_ITEMS'/MAX_PAIRED_CALIBRATION_ITEMS' own doc.
+    logger.warn('launchCalibrationRun: refused a golden set over the item cap', {
       goldenSetId,
       liveItems: items.length,
-      cap: MAX_CALIBRATION_ITEMS,
+      orders: orders.length,
+      cap: itemCeiling,
     });
     throw new RunLaunchError(
       400,
-      `Golden set ${goldenSetId} has ${items.length} live items, over the phase-1 cap of ` +
-        `${MAX_CALIBRATION_ITEMS}. Fork a smaller set rather than calibrating part of this one — ` +
-        'a kappa over a silently truncated subset is indistinguishable from one over the whole set.'
+      `Golden set ${goldenSetId} has ${items.length} live items x ${orders.length} orders, over the ` +
+        `${itemCeiling}-item ceiling for ${orders.length}-order runs. Fork a smaller set rather than ` +
+        'calibrating part of this one — a kappa over a silently truncated subset is indistinguishable ' +
+        'from one over the whole set. See MAX_PAIRED_CALIBRATION_ITEMS.'
     );
   }
 
@@ -388,6 +432,9 @@ export async function launchCalibrationRun(
         // a historical run (scoreboard spec §4.1; seed-core.ts:223-229 states
         // the invariant the production SQL edits broke).
         samplingParams: resolved as unknown as Prisma.InputJsonValue,
+        // v2o. COMMA-SEPARATED — see schema.prisma's own doc on this column
+        // for the contract (membership via `.includes()`, never `===`).
+        ordersRequested: orders.join(','),
       },
       select: { id: true },
     });
@@ -468,6 +515,7 @@ export async function launchCalibrationRun(
           candidates: toRunCandidates(item.candidates),
           goldenItemId: item.id,
           calibrationRunId: calibrationRun.id,
+          orders,
         },
         deps
       );

@@ -293,7 +293,14 @@ describe('a0 pairwise: launchSingleRun + judgment-consumer end to end', () => {
     const pairwiseTemplate = await prisma.promptTemplate.findUniqueOrThrow({
       where: { name_version: { name: 'v1-pairwise', version: 0 } },
     });
-    const created = await prisma.modelJudgment.findFirstOrThrow({ where: { runId: result.run.id } });
+    // pairOrder: 'AB' is EXPLICIT, not incidental — this launch does not pass
+    // `orders`, so it always produces exactly one row today, but `orders`
+    // defaults live in run-launch.ts, not here: a run with two judgments
+    // (one per order) would make an unfiltered findFirstOrThrow
+    // NONDETERMINISTIC (flaky, not red) rather than fail loudly.
+    const created = await prisma.modelJudgment.findFirstOrThrow({
+      where: { runId: result.run.id, pairOrder: 'AB' },
+    });
     expect(created.pairOrder).toBe('AB');
     expect(created.promptTemplateId).toBe(pairwiseTemplate.id);
     expect(created.verdict).toBeNull();

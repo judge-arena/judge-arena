@@ -124,6 +124,7 @@ import {
 import { LANE_FALLBACK_QUEUE } from '@/lib/queue/lanes';
 import { resolveEndpointsForVersions } from '@/lib/endpoint-resolution';
 import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
+import type { PairOrder } from '@/lib/pair-order';
 
 /** UNUSED since 2026-09-03: this module no longer computes a deadline at
  * creation (see the module doc's "EvaluationRun.deadlineAt is no longer
@@ -352,6 +353,16 @@ export interface LaunchSingleRunParams {
    * under `@@unique([calibrationRunId, goldenItemId])`, so one calibration
    * cannot measure the same item twice. */
   calibrationRunId?: string;
+  /** A2: which candidate orders to present. One `ModelJudgment` per order per
+   * selected judge version, ALL created in this transaction. Defaults to
+   * `['AB']` so every existing caller is unchanged. Ignored for pointwise,
+   * where `pairOrder` is NULL.
+   *
+   * They must be created together: `claim.ts:198-202` asserts a run's judgment
+   * rows are "fixed at creation", and `claim.ts:239-241` stamps `deadlineAt`
+   * once from `judgmentCount` — a judgment inserted later inherits an expired
+   * deadline and is reaped. */
+  orders?: PairOrder[];
 }
 
 export interface LaunchSingleRunDeps {
@@ -538,21 +549,46 @@ export async function launchSingleRun(
           create: selectedVersionIds.map((judgeModelVersionId) => ({ judgeModelVersionId })),
         },
         modelJudgments: {
-          create: selectedVersionIds.map((judgeModelVersionId) => ({
-            judgeModelVersionId, // modelConfigId intentionally left null — see module doc
-            promptTemplateId,
-            // pairOrder is written EXPLICITLY on every judgment, never left
-            // to a default: 'AB' for the single order A0 emits, NULL for
-            // pointwise, which is what the existing
-            // @@unique([runId, judgeModelVersionId, pairOrder]) —
-            // hand-edited NULLS NOT DISTINCT in
-            // 20260728215410_v2b_idempotency_tighten — assumes. That is
-            // what makes A2's BA sweep additive: a second judgment per pair,
-            // no migration, no backfill, and no ambiguity about what the
-            // existing rows measured.
-            pairOrder: protocol === 'pairwise' ? 'AB' : null,
-            status: 'pending' as const,
-          })),
+          // pairOrder is written EXPLICITLY on every judgment, never left to
+          // a default: one row per requested order (default just `['AB']`,
+          // A0's single order) for pairwise, NULL for pointwise, which is
+          // what the existing @@unique([runId, judgeModelVersionId,
+          // pairOrder]) — hand-edited NULLS NOT DISTINCT in
+          // 20260728215410_v2b_idempotency_tighten — assumes. That is what
+          // makes A2's BA sweep additive: a second judgment per pair, no
+          // migration, no backfill, and no ambiguity about what the existing
+          // rows measured. ALL judgments for ALL orders are created here, in
+          // this one `create`, inside the same transaction as the run — see
+          // `LaunchSingleRunParams.orders`' doc for why a later insert is not
+          // an option.
+          create: selectedVersionIds.flatMap(
+            (
+              judgeModelVersionId
+            ): Array<{
+              judgeModelVersionId: string;
+              promptTemplateId: string | null;
+              pairOrder: PairOrder | null;
+              status: 'pending';
+            }> =>
+              protocol === 'pairwise'
+                ? (params.orders ?? ['AB']).map((pairOrder) => ({
+                    judgeModelVersionId, // modelConfigId intentionally left null — see module doc
+                    promptTemplateId,
+                    pairOrder,
+                    status: 'pending' as const,
+                  }))
+                : [
+                    {
+                      judgeModelVersionId,
+                      promptTemplateId,
+                      // Pointwise has no order. NULL, and the
+                      // @@unique([runId, judgeModelVersionId, pairOrder]) is
+                      // NULLS NOT DISTINCT, so this stays one row per version.
+                      pairOrder: null,
+                      status: 'pending' as const,
+                    },
+                  ]
+          ),
         },
       } satisfies Prisma.EvaluationRunUncheckedCreateInput,
       // judgeModelVersionId comes back too (v2j): it is the key the lane is
