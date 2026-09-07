@@ -222,13 +222,35 @@ about build W, which this design forbids.
   manual assertion `group by "runId" having count(*)>1` returns 0 under one judgment per run. Track the
   file, add the order filter, re-key that check to `(calibrationRunId, goldenItemId, pairOrder)`.
 
-## 8. Open questions for the owner
+## 8. Decisions (owner, 2026-09-07)
 
-1. **Should the stored `rawAgreement` stay AB-only, or move to the pooled 1240?** This spec keeps AB-only
-   (comparability with 22 historical rows). Pooled is defensible now that the floor is stable — it would be
-   the more honest single number for a permuted run — but it breaks comparability. Kept as-is unless you
-   say otherwise.
-2. **Does a permuted run need its own opt-in per launch, or is it the default for calibration?** This spec
-   assumes an explicit flag; making it the default doubles every future run's cost.
-3. **T7's leaderboard filter: exclude BA, or exclude calibration runs outright?** The second is broader and
-   arguably more correct, but touches a surface outside this work.
+### D4 — the stored `rawAgreement` stays AB-only
+
+`rawAgreement`, `kappa`, `verdictCount`, `committedCount` and `selectiveAccuracy` are computed over the
+`'AB'` partition alone, exactly as today. All 22 historical rows stay bit-comparable to every new one, and
+`marginOverConstant` — the scoreboard's default sort key — keeps meaning precisely what it means now.
+
+Pooling was defensible once the floor was shown stable, and is REJECTED anyway: it would silently change
+what a stored number covers, and no column records which half it came from. The permutation's value lands
+in `positionBias` / `orderFlipRate` / `pairedDecisiveCount`, not in the accuracy.
+
+### D5 — a permuted run is OPT-IN PER LAUNCH
+
+Never the default. Permuting doubles a run's dispatched work — on the 620-item corpus that is ~18 min for
+smollm2 and ~17.1 h for Qwen3.6 — and most calibrations do not need a position-bias number.
+
+The flag is per launch, not per golden set and not per judge version: the same set and the same judge must
+be runnable both ways without a second artifact. `CalibrationRun.ordersRequested` (v2o, already landed)
+records what was asked for, so a stored row says whether it was permuted without inferring it from the
+`EvaluationRun` rows.
+
+### D6 — the leaderboard excludes permutation runs entirely
+
+The leaderboard reports golden-item results only. A permuted (`pairOrder = 'BA'`) `EvaluationRun` is an
+instrument reading, not a result, and must never reach it.
+
+This closes T7 by construction rather than by coincidence. Today the route is safe only because pairwise
+judgments carry `overallScore: null` and it filters on that — an accident that would break the moment a
+pointwise permuted protocol existed. The filter is explicit: exclude `pairOrder = 'BA'` from the
+`DISTINCT ON (er."evaluationId")` subquery, so the surviving row per `Evaluation` is always the original
+order rather than whichever run happened to be created later.
