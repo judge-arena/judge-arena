@@ -270,87 +270,18 @@ export async function stampRunStartedAtFirstDequeue(runId: string): Promise<void
  * creation-time formula this plan deletes gave a 30-item calibration batch
  * `launch + 30 x hardCapMs`, i.e. 7.5 hours, which covered the requeue.
  *
- * For a run with exactly ONE judgment (the ordinary, pre-A2 case), clearing
- * restores the "not started" state the stamp's own guard tests for, so the
- * NEXT claim re-stamps a FRESH budget measured from when the work actually
- * resumes. Between the clear and that next claim the run is bounded by
- * `src/worker/reaper.ts`'s `NEVER_STARTED_TIMEOUT_MS` (45 days) — a wide net,
- * but the run genuinely has nothing executing, so deferring to it is correct.
+ * Clearing restores the "not started" state the stamp's own guard tests for,
+ * so the NEXT claim re-stamps a FRESH budget measured from when the work
+ * actually resumes. Between the clear and that next claim the run is bounded
+ * by `src/worker/reaper.ts`'s `NEVER_STARTED_TIMEOUT_MS`, and any SIBLING
+ * judgment still genuinely `running` is bounded by `reclaimStaleJudgments`
+ * at `LEASE_MS`, so clearing does not make a run immortal.
  *
- * ── A2 (BA sweep): NULLING IS WRONG WHEN A SIBLING JUDGMENT IS STILL
- *    NON-TERMINAL ──────────────────────────────────────────────────────────
- * A paired calibration run carries TWO judgments (AB, BA) on the SAME judge
- * — the SAME single-consumer lane, at up to `MAX_PAIRED_CALIBRATION_ITEMS`
- * (719) items x 2 orders = 1438 messages deep. If AB fails retryably while BA
- * is still `pending`/`running`, nulling unconditionally is a lie: the run has
- * NOT gone idle, BA is still live work. The bug this produces: BA (next in
- * the lane, published immediately after AB) claims moments later, and its own
- * `stampRunStartedAtFirstDequeue` call finds `deadlineAt IS NULL` and
- * re-stamps a FRESH ~31-minute budget — sized on THIS moment, with no memory
- * of AB's already-established protection — while AB's requeued message sits
- * behind however many OTHER items are still queued on this judge, which can
- * legally take days. `src/worker/reaper.ts` then force-finalizes AB as
- * `'reaper: abandoned'` roughly 34 minutes later, while it is still healthily
- * (if slowly) queued — bit-for-bit the 4-of-30 failure this whole mechanism
- * exists to prevent, now reachable because A2 makes a deep, single-lane,
- * multi-judgment queue the NORMAL shape rather than a rare one.
- *
- * The fix: when MORE THAN ONE of this run's judgments is still non-terminal
- * (`pending` or `running`) at the moment of the clear — i.e. a sibling has
- * not yet reached a terminal state — do NOT null. Instead, MONOTONICALLY
- * extend the deadline: recompute what `stampRunStartedAtFirstDequeue` would
- * stamp from THIS moment (this requeue is itself evidence the run's clock
- * should restart) and write it only if it is LATER than what is already
- * there — never earlier. `updateMany`'s `deadlineAt: { lt: candidate }` guard
- * is what makes this safe against a concurrent sibling claim: whichever write
- * lands second re-evaluates its WHERE clause against the row as committed and
- * either extends further or no-ops, the same idiom `stampRunStartedAtFirstDequeue`
- * itself uses for its own guard.
- *
- * This does NOT solve the general case — a judgment that must wait LONGER
- * than one restart's worth of budget with ZERO claim activity anywhere on
- * the run (no retry, no sibling claim) can still see its deadline elapse
- * before its turn comes. Closing that fully would mean sizing the deadline
- * on which judgments are ACTUALLY in flight right now rather than on the
- * run's total `judgmentCount` — a change to `stampRunStartedAtFirstDequeue`'s
- * own formula (`src/lib/llm/timeout-policy.ts`'s `runStartBudgetMs`), out of
- * scope here: see the review round 1 fix report for why that redesign was
- * deliberately not attempted.
- *
- * With exactly one non-terminal judgment (BOTH the ordinary pre-A2 case, and
- * a paired run whose sibling has ALREADY completed/errored), this count is
- * 1, the condition is false, and behaviour is BYTE-FOR-BYTE the pre-A2 one:
- * null, unconditionally.
- *
- * Best-effort, exactly like the stamp — a failure here must never fail the
- * disposition it is part of (see the caller in judgment-consumer.ts).
+ * Unconditional, not guarded: the run is being put back in the queue whatever
+ * its current deadline says. Best-effort, exactly like the stamp — a failure
+ * here must never fail the disposition it is part of.
  */
 export async function clearRunDeadlineOnRequeue(runId: string): Promise<void> {
-  // `in: ['pending', 'running']` — the two JudgmentStatus values that are
-  // NOT terminal (schema.prisma's JudgmentStatus enum: pending, running,
-  // completed, error). The caller already reset THIS judgment to 'pending'
-  // before calling here (judgment-consumer.ts's retryable-error disposition),
-  // so it is counted like any other non-terminal row.
-  const nonTerminal = await prisma.modelJudgment.count({
-    where: { runId, status: { in: ['pending', 'running'] } },
-  });
-
-  if (nonTerminal > 1) {
-    const budgets = resolveTimeoutBudgets();
-    const judgmentCount = await prisma.modelJudgment.count({ where: { runId } });
-    const candidate = new Date(Date.now() + runStartBudgetMs(judgmentCount, budgets));
-    // Monotonic: `deadlineAt: { lt: candidate }` means this UPDATE only ever
-    // moves the deadline LATER (or leaves it alone) — it can never shorten
-    // an existing deadline a sibling's claim, or an earlier call to this same
-    // function, already established. A plain unconditional
-    // `data: { deadlineAt: candidate }` would not have this property.
-    await prisma.evaluationRun.updateMany({
-      where: { id: runId, deadlineAt: { lt: candidate } },
-      data: { deadlineAt: candidate },
-    });
-    return;
-  }
-
   await prisma.evaluationRun.updateMany({
     where: { id: runId },
     data: { deadlineAt: null },
