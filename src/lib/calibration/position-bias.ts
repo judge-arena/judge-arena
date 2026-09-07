@@ -78,9 +78,25 @@ function wilson(successes: number, n: number): Interval {
 }
 
 export function positionBiasFromPairs(rows: PairedVerdictRow[]): PositionBiasResult {
-  const byItem = new Map<string, { AB?: string; BA?: string }>();
+  // `AB`/`BA` are `string | null | undefined`: `undefined` means that order's
+  // row never arrived at all; `null` means the row arrived but carried no
+  // usable verdict (`ModelJudgment.verdict IS NULL`, e.g. an errored
+  // judgment). Both are "not a usable verdict in both orders" and both must
+  // route to `unpairedCount` below — neither may vanish from every counter,
+  // which is what happened before this was a distinct case from "no row".
+  //
+  // A duplicate (itemId, pairOrder) row is last-write-wins here. That is
+  // safe for the only wired caller: `ModelJudgment` is
+  // `@@unique([runId, judgeModelVersionId, pairOrder])` (schema.prisma:568),
+  // `EvaluationRun.runId` is `@@unique([calibrationRunId, goldenItemId])`
+  // (schema.prisma:432), and a `CalibrationRun` carries a single
+  // `judgeModelVersionId` (schema.prisma:939) — so within one calibration
+  // run, (goldenItemId, pairOrder) is unique by construction and duplicates
+  // can only arise from a caller mixing rows across runs, which is not this
+  // module's contract to police.
+  const byItem = new Map<string, { AB?: string | null; BA?: string | null }>();
   for (const row of rows) {
-    if (!isPairOrder(row.pairOrder) || row.verdict === null) continue;
+    if (!isPairOrder(row.pairOrder)) continue;
     const entry = byItem.get(row.itemId) ?? {};
     entry[row.pairOrder] = row.verdict;
     byItem.set(row.itemId, entry);
@@ -93,7 +109,7 @@ export function positionBiasFromPairs(rows: PairedVerdictRow[]): PositionBiasRes
   const slotACounts: number[] = [];
 
   for (const { AB, BA } of byItem.values()) {
-    if (AB === undefined || BA === undefined) {
+    if (AB === undefined || BA === undefined || AB === null || BA === null) {
       unpairedCount += 1;
       continue;
     }
@@ -128,10 +144,24 @@ export function positionBiasFromPairs(rows: PairedVerdictRow[]): PositionBiasRes
   // per-item counts in {0,1,2}. This reduces to the closed form
   // 1.96*sqrt(f/4n) in the symmetric case, which is where the design's
   // resolution table comes from.
-  const mean = slotATotal / n;
-  const variance =
-    n < 2 ? 0 : slotACounts.reduce((acc, c) => acc + (c - mean) * (c - mean), 0) / (n - 1);
-  const halfWidth = (Z * Math.sqrt(variance / n)) / 2;
+  //
+  // At n = 1 the between-item variance is not estimable — there is only one
+  // item to vary between — so the interval is `null` rather than collapsed
+  // to `[positionBias, positionBias]`. A point interval would assert zero
+  // uncertainty from a single observation: the same class of lie as
+  // returning 0.0 for "no data", which this module already refuses to do.
+  // The point estimate itself stays non-null at n = 1; only the interval
+  // around it is unknowable.
+  let positionBiasInterval: Interval | null = null;
+  if (n >= 2) {
+    const mean = slotATotal / n;
+    const variance = slotACounts.reduce((acc, c) => acc + (c - mean) * (c - mean), 0) / (n - 1);
+    const halfWidth = (Z * Math.sqrt(variance / n)) / 2;
+    positionBiasInterval = {
+      low: Math.max(0, positionBias - halfWidth),
+      high: Math.min(0.5, positionBias + halfWidth),
+    };
+  }
 
   return {
     positionBias,
@@ -139,10 +169,7 @@ export function positionBiasFromPairs(rows: PairedVerdictRow[]): PositionBiasRes
     pairedDecisiveCount: n,
     tieExcludedCount,
     unpairedCount,
-    positionBiasInterval: {
-      low: Math.max(0, positionBias - halfWidth),
-      high: Math.min(0.5, positionBias + halfWidth),
-    },
+    positionBiasInterval,
     orderFlipRateInterval: wilson(flips, n),
   };
 }

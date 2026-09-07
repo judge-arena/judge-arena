@@ -70,4 +70,26 @@ describe('positionBiasFromPairs', () => {
     const width = (i: { low: number; high: number } | null) => (i ? i.high - i.low : Infinity);
     expect(width(large.orderFlipRateInterval)).toBeLessThan(width(small.orderFlipRateInterval));
   });
+
+  it('has a point estimate but no paired interval at n = 1 (between-item variance is not estimable)', () => {
+    const r = positionBiasFromPairs(pairs(1, () => 'A', () => 'A'));
+    expect(r.pairedDecisiveCount).toBe(1);
+    expect(r.positionBias).toBeCloseTo(0.5, 10);
+    expect(r.positionBiasInterval).toBeNull();
+    // The Wilson side is unaffected by this — it stays honestly wide at n=1.
+    expect(r.orderFlipRateInterval).not.toBeNull();
+  });
+
+  it('counts an item with a null verdict in BOTH orders as unpaired, not vanished', () => {
+    const rows = [
+      { itemId: 'i1', verdict: null, pairOrder: 'AB' },
+      { itemId: 'i1', verdict: null, pairOrder: 'BA' },
+    ];
+    const r = positionBiasFromPairs(rows);
+    expect(r.unpairedCount).toBe(1);
+    expect(r.pairedDecisiveCount).toBe(0);
+    expect(r.tieExcludedCount).toBe(0);
+    expect(r.positionBias).toBeNull();
+    expect(r.orderFlipRate).toBeNull();
+  });
 });
