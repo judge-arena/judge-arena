@@ -102,7 +102,7 @@ import { publishJudgmentExecute, resolveDestinationQueue } from '@/lib/queue/pub
 import { LANE_FALLBACK_QUEUE } from '@/lib/queue/lanes';
 import { resolveEndpointsForPairs, resolveEndpointsForVersions } from '@/lib/endpoint-resolution';
 import { maybeFinalizeRun } from '@/lib/run-finalizer';
-import { LEASE_MS } from './claim';
+import { clearRunDeadlineOnRequeue, LEASE_MS } from './claim';
 
 /** How often each replica attempts a sweep (whether or not it wins the lock). */
 export const SWEEP_INTERVAL_MS = 60_000;
@@ -342,6 +342,36 @@ async function reclaimStaleJudgments(): Promise<void> {
       );
     } catch (error) {
       logger.error('reaper: failed to republish a reclaimed stale judgment', {
+        judgmentId: judgment.id,
+        runId: judgment.runId,
+        error: serializeError(error),
+      });
+      continue;
+    }
+
+    // The run's execution deadline was sized for a judgment that is no
+    // longer executing. Every OTHER running -> pending path clears it —
+    // judgment-consumer.ts:1346 on a retryable error — and claim.ts:252-254
+    // states the invariant this restores: "deadlineAt is non-null EXACTLY
+    // WHILE the run has a claimed judgment in flight."
+    //
+    // Without it this sweep kills the judgment it just rescued.
+    // LEASE_MS is hardCapMs + 30_000 and runStartBudgetMs(1) is
+    // hardCapMs + 60_000, so a stale reclaim lands 30s or more PAST the
+    // run's own deadline; sweepOverdueRuns then runs later in this SAME
+    // runReaperSweep() call, sees deadlineAt < now, and stamps every
+    // `pending` judgment on the run `reaper: abandoned` — including this
+    // one, which is `pending` because we just made it so. One production
+    // judgment (cmtluq5t5038x2l0s83p3h1aw) died exactly this way.
+    //
+    // AFTER the publish, never before: clearing first and then failing to
+    // publish leaves a `pending` judgment with no deadline AND no queue
+    // message, reachable only by the 45-day never-started net. Best-effort,
+    // like the consumer's call — a failure here must not fail the reclaim.
+    try {
+      await clearRunDeadlineOnRequeue(judgment.runId);
+    } catch (error) {
+      logger.error('reaper: failed to clear the run deadline after reclaiming a stale judgment', {
         judgmentId: judgment.id,
         runId: judgment.runId,
         error: serializeError(error),

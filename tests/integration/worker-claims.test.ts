@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import type { Channel, ConsumeMessage } from 'amqplib';
 import { prisma } from '@/lib/db';
 import { closeRabbit, getRabbit } from '@/lib/queue/connection';
+import { getConnectedRedis } from '@/lib/redis';
 import {
   assertTopology,
   QUEUE_DLQ,
@@ -23,6 +24,7 @@ import {
   type RunProviderJudgmentInput,
 } from '@/worker/judgment-consumer';
 import { createRunCreateConsumer } from '@/worker/run-create-consumer';
+import { REAPER_LOCK_KEY, runReaperSweep } from '@/worker/reaper';
 import { seedPromptTemplates } from '../../prisma/seed-prompt-templates';
 
 // Integration suite — needs a live Postgres (see .env.test's DATABASE_URL,
@@ -306,6 +308,34 @@ async function createFixture(): Promise<Fixture> {
   const base = await createEvaluationOnlyFixture();
   const run = await mkEvaluationRun(base.evaluation.id, base.user.id, base.rubric.id);
   return { ...base, run };
+}
+
+function minutesAgo(minutes: number): Date {
+  return new Date(Date.now() - minutes * 60_000);
+}
+
+/** Clears the reaper's cluster-wide Redis lock so `runReaperSweep()` in a
+ * test below is not skipped because another test file's sweep (this
+ * integration config runs files sequentially, sharing one Redis — see
+ * vitest.integration.config.ts's `fileParallelism: false`) is still holding
+ * it. Mirrors finalization.test.ts's own `clearReaperLock`. */
+async function clearReaperLock(): Promise<void> {
+  const client = await getConnectedRedis();
+  await client.del(REAPER_LOCK_KEY);
+}
+
+/** A judgment claimed and executing, on a freshly-stamped run — the state
+ * `judgment-consumer.ts`'s `executeClaimed` leaves behind right after a
+ * provider call starts: `status: 'running'`, and the run's `deadlineAt` set
+ * to `runStartBudgetMs(1)` from now (claim.ts's `stampRunStartedAtFirstDequeue`,
+ * called here exactly as the consumer calls it). */
+async function seedClaimedJudgment(): Promise<{ runId: string; judgmentId: string }> {
+  const fixture = await createFixture();
+  const judgment = await mkJudgment(fixture.run.id, fixture.version.id, fixture.promptTemplateId);
+  const claimed = await claimJudgment(judgment.id);
+  if (claimed !== 'claimed') throw new Error(`seedClaimedJudgment: expected 'claimed', got '${claimed}'`);
+  await stampRunStartedAtFirstDequeue(fixture.run.id);
+  return { runId: fixture.run.id, judgmentId: judgment.id };
 }
 
 afterAll(async () => {
@@ -1039,5 +1069,72 @@ describe('claim.ts: stampRunStartedAtFirstDequeue — the run deadline is set at
     // Drain so the republished message does not leak into a later test's
     // queue assertions in this same persistent-DB suite.
     await drainQueue(confirmChannel, QUEUE_JUDGMENT_RETRY_30S);
+  });
+
+  it('does NOT abandon a judgment the same sweep just reclaimed', async () => {
+    // The production trace, reproduced: cmtluq5t5038x2l0s83p3h1aw, the single
+    // `reaper: abandoned` row in 4200, inside calibration cmtluplg5.
+    // LEASE_MS (hardCap + 30s) expires 30s BEFORE runStartBudgetMs(1)
+    // (hardCap + 60s), so a stale reclaim always lands at or past the run's
+    // own deadline — and sweepOverdueRuns runs LATER IN THE SAME SWEEP than
+    // reclaimStaleJudgments.
+    await clearReaperLock();
+    const { runId, judgmentId } = await seedClaimedJudgment();
+    const { confirmChannel } = await getRabbit();
+    await assertTopology(confirmChannel);
+
+    // Lease expired, deadline already passed, past the force-finalize grace.
+    // `updatedAt` is `@updatedAt`-managed, so a plain `prisma...update()`
+    // would restamp it to "now" — defeating the staleness this test needs.
+    // Force it via raw SQL after, matching finalization.test.ts's `mkJudgment`.
+    await prisma.modelJudgment.update({
+      where: { id: judgmentId },
+      data: { status: 'running', startedAt: minutesAgo(40) },
+    });
+    await prisma.$executeRaw`UPDATE "ModelJudgment" SET "updatedAt" = ${minutesAgo(40)} WHERE id = ${judgmentId}`;
+    await prisma.evaluationRun.update({
+      where: { id: runId },
+      data: { deadlineAt: minutesAgo(20) },
+    });
+
+    await runReaperSweep();
+
+    const after = await prisma.modelJudgment.findUniqueOrThrow({ where: { id: judgmentId } });
+    expect(after.status).toBe('pending');
+    expect(after.error).toBeNull();
+    // and specifically NOT the corpse we are fixing
+    expect(after.error ?? '').not.toMatch(/reaper: abandoned/);
+
+    // Drain the reclaim's republish so it does not leak into a later test's
+    // queue assertions in this same persistent-DB suite.
+    const version = await prisma.modelJudgment
+      .findUniqueOrThrow({ where: { id: judgmentId } })
+      .then((j) => j.judgeModelVersionId as string);
+    const expectedLane = await laneQueueFor(null, version);
+    await drainQueue(confirmChannel, expectedLane);
+  });
+
+  it('clears the run deadline on a successful reclaim', async () => {
+    await clearReaperLock();
+    const { runId, judgmentId } = await seedClaimedJudgment();
+    const { confirmChannel } = await getRabbit();
+    await assertTopology(confirmChannel);
+
+    await prisma.modelJudgment.update({
+      where: { id: judgmentId },
+      data: { status: 'running', startedAt: minutesAgo(40) },
+    });
+    await prisma.$executeRaw`UPDATE "ModelJudgment" SET "updatedAt" = ${minutesAgo(40)} WHERE id = ${judgmentId}`;
+
+    await runReaperSweep();
+
+    const run = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: runId } });
+    expect(run.deadlineAt).toBeNull();
+
+    const version = await prisma.modelJudgment
+      .findUniqueOrThrow({ where: { id: judgmentId } })
+      .then((j) => j.judgeModelVersionId as string);
+    const expectedLane = await laneQueueFor(null, version);
+    await drainQueue(confirmChannel, expectedLane);
   });
 });
