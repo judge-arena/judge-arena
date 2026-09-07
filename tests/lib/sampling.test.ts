@@ -55,3 +55,22 @@ describe('llm/sampling: a leaf module', () => {
     });
   });
 });
+
+describe('llm/sampling: penalties', () => {
+  it('carries repeat_penalty from the version defaults', () => {
+    const params = effectiveSamplingParams({ temperature: 0.3, max_tokens: 8192, repeat_penalty: 1.15 });
+    expect(params.repeat_penalty).toBe(1.15);
+    expect(params.max_tokens).toBe(8192);
+  });
+
+  it('omits the penalties entirely when nothing sets them', () => {
+    const params = effectiveSamplingParams({ temperature: 0.3, max_tokens: 4096 });
+    expect('repeat_penalty' in params).toBe(false);
+    expect('frequency_penalty' in params).toBe(false);
+  });
+
+  it('lets a per-call override beat the version default', () => {
+    const params = effectiveSamplingParams({ repeat_penalty: 1.1 }, { repeat_penalty: 1.3 });
+    expect(params.repeat_penalty).toBe(1.3);
+  });
+});

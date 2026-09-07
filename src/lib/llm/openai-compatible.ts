@@ -207,6 +207,16 @@ export async function callOpenAICompatible(opts: ProviderCallOptions): Promise<P
     ],
   };
 
+  // Ollama maps `repeat_penalty` through its OpenAI-compatible shim;
+  // `frequency_penalty` is the native OpenAI dialect. Both are omitted unless
+  // set, so an unconfigured judge sends a byte-identical request to today's.
+  if (opts.samplingParams.repeat_penalty !== undefined) {
+    params.repeat_penalty = opts.samplingParams.repeat_penalty;
+  }
+  if (opts.samplingParams.frequency_penalty !== undefined) {
+    params.frequency_penalty = opts.samplingParams.frequency_penalty;
+  }
+
   const structuredOutputRequested = Boolean(
     opts.mode === 'judgment' && opts.descriptor && opts.descriptor.caps.structuredOutput !== 'none'
   );

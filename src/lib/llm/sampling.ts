@@ -25,6 +25,16 @@
 export interface SamplingParams {
   temperature: number;
   max_tokens: number;
+  /** Ollama/llama.cpp repetition penalty. OPTIONAL and OMITTED when unset —
+   * never defaulted to 1.0. A provider that receives an explicit 1.0 and one
+   * that receives nothing are the same call, but the STORED
+   * `ModelJudgment.samplingParams` would differ, and that field is the
+   * provenance record for a run. Absent means "not configured". */
+  repeat_penalty?: number;
+  /** OpenAI-dialect equivalent, for backends that speak it instead. Both are
+   * carried because the fleet is mixed; a version sets whichever its backend
+   * honours. */
+  frequency_penalty?: number;
 }
 
 /**
@@ -63,8 +73,17 @@ export function effectiveSamplingParams(
   registryDefault: SamplingParams = JUDGE_DEFAULT_SAMPLING_PARAMS
 ): SamplingParams {
   const versionShape = isPartialSamplingParams(versionDefaults) ? versionDefaults : undefined;
-  return {
+  const resolved: SamplingParams = {
     temperature: overrides?.temperature ?? versionShape?.temperature ?? registryDefault.temperature,
     max_tokens: overrides?.max_tokens ?? versionShape?.max_tokens ?? registryDefault.max_tokens,
   };
+  // Assigned conditionally, not spread with `?? undefined`: an explicit
+  // `repeat_penalty: undefined` key would serialise into
+  // `ModelJudgment.samplingParams` as a null and read as "configured to
+  // nothing" rather than "not configured".
+  const repeatPenalty = overrides?.repeat_penalty ?? versionShape?.repeat_penalty;
+  if (repeatPenalty !== undefined) resolved.repeat_penalty = repeatPenalty;
+  const frequencyPenalty = overrides?.frequency_penalty ?? versionShape?.frequency_penalty;
+  if (frequencyPenalty !== undefined) resolved.frequency_penalty = frequencyPenalty;
+  return resolved;
 }
