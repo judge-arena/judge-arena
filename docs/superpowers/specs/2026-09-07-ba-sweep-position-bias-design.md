@@ -50,11 +50,21 @@ They keep their current definitions, computed over the AB partition alone. The d
 in **new columns**. Consequences, all of them intended:
 
 - all 22 existing `CalibrationRun` rows stay bit-comparable to every new one;
-- `SCORING_RULES_VERSION` **stays 2**. Per `src/lib/calibration/scoring-version.ts:50-57` a new
-  all-NULL column is self-describing and needs no bump; the bump would only be mandatory if BA rows
-  entered the `rawAgreement`/`kappa` denominator, which D2 forbids;
+- **`SCORING_RULES_VERSION` bumps to 3**, with a changelog entry in the same commit. An earlier draft
+  claimed it could stay at 2 by citing `scoring-version.ts:50-57` as a self-describing exemption. That
+  reading is backwards: the exemption is `:47-50`, and **`:50-57` is the `UNLESS` carve-out that
+  mandates a bump** — whose condition is met here, because a NULL `positionBias` would otherwise mean
+  both "no BA half was ever requested" and "a paired run with no decisive pairs". The repo already
+  rejected the escape route at v2n: `committedCount` is a stored non-NULL companion stating the
+  identical discriminator (`schema.prisma:976-981`) and generation 2 was bumped anyway
+  (`scoring-version.ts:53-54`). Nothing in CI catches a missed bump —
+  `tests/lib/calibration-scoring-version.test.ts:20-41` pins only constant↔changelog consistency — so
+  this is a judgement the spec must make, not a check that will fail loudly;
 - `marginOverConstant`, the scoreboard's default sort key, keeps meaning precisely what it means
-  today.
+  today. **The bump is a provenance stamp, not a definition change** — that is exactly why D2 holds:
+  a generation-3 row's `rawAgreement` is computed by the same rules as a generation-2 row's, and the
+  two remain directly comparable. What generation 3 records is that *additional* quantities were
+  computed, not that the old ones moved.
 
 The rejected alternative is worth recording because it is superficially attractive. **Pooling both
 orders into one `rawAgreement` moves the number without moving the floor.** Measured on the live
@@ -71,12 +81,37 @@ disagree **exactly on the judges in this corpus**.
 
 | | definition | source | what it misses |
 |---|---|---|---|
-| `positionBias` | \|P(A wins) − 0.5\| over paired items | `docs/research/2026-07-judge-model-inventory.md:146-149` (threshold 0.10, reported jointly with `testRetest`) | a **symmetric flipper** scores 0.0 |
+| `positionBias` | \|(verdicts naming **slot A**, both orders) / 2n − 0.5\| — the **first-shown pick rate deviation**, computed on the RAW verdict letter **before** `preferenceFromVerdict` | `docs/research/2026-07-judge-model-inventory.md:146-149` (threshold 0.10, reported jointly with `testRetest`) | a **symmetric flipper** scores 0.0 |
 | `orderFlipRate` | fraction of paired items whose *preference* changes under swap | `/root/research/evaluation-harnesses/07-llm-as-judge-and-rubrics.md:590` (median 41.3% in the literature) | cannot separate "prefers slot 1" from "noisy under swap" |
 
-A judge that answers `A` in AB and `A` in BA on every item — i.e. always the first slot, entirely
-position-driven — scores **0.0 marginal and 1.0 flip**. Marginal alone would certify it unbiased.
-Storing one number and not the other is how that judge gets onto a leaderboard.
+**`positionBias` is the one number in this design computed BEFORE the order mapping.** That is what
+makes it immune to the key's 336/284 class imbalance: a correct judge picks slot A on the 336 `A>B`
+items in AB and on the 284 `B>A` items in BA, so its pooled slot-A rate is exactly 0.5 regardless of
+how lopsided the key is. Computing it from *preferences* instead — which is what an earlier draft of
+this spec specified — silently yields `|p_AB − p_BA|/2`, the **difference** of the slot rates. That is
+a content-discrimination statistic wearing a position-bias name, and it is **anticorrelated** with the
+quantity: measured against this corpus, a pure first-slot stamper scores **0.0000** and a perfect
+content judge scores **0.0419**. Every value in range, matrix square, no symptom. This paragraph
+exists because that error was made once already.
+
+The four archetypes, which the fixtures in §6 pin:
+
+| judge | `positionBias` | `orderFlipRate` |
+|---|---|---|
+| always picks the first slot (maximally position-driven) | **0.5** | 1.0 |
+| symmetric flipper (names the same slot both times, no net side) | **0.0** | 1.0 |
+| perfect content judge | **0.0** | 0.0 |
+| uniformly random | 0.0 | 0.5 |
+
+Rows 1 and 2 are why both numbers are stored: the symmetric flipper is entirely position-driven and
+`positionBias` alone certifies it unbiased. Rows 2 and 3 are why `orderFlipRate` alone is not enough
+either — it cannot say *which* slot. Note that `orderFlipRate`'s no-information point is **0.5**, not
+0: any order-independent judge flips at least half the time, which is why the literature's 41.3%
+median sits on the correct side of it.
+
+**Consequence on the first scheduled run.** `smollm2` picks slot A on 198 of 617 AB items (0.3214).
+If BA matches, the corrected estimator reports `positionBias = 0.1786` against a 0.10 threshold. The
+inverted definition would have reported **0.00** and cleared it.
 
 ### D4 (approved call) — Forward-only. Historical runs are not retrofitted.
 
@@ -135,13 +170,42 @@ row silently keeps its stale AB-only `rawAgreement`, `verdictCount`, `finishedAt
 during implementation: ground truth is emitted first (`readings.ts:243-244`), so the error message
 blames rater `"ground-truth"`, not the duplicate order.
 
-The fix: group `rows` by `pairOrder` before scoring, and score each partition independently — which
-is exactly the contract `readings.ts:170` states in its own error text, *"pass one pairOrder's
-judgments per call."*
+The fix has three parts, and the second and third are the ones an implementer will miss.
 
-**Acceptance test for this step is bit-identity.** With 22 AB-only runs in production, re-scoring any
-of them after this change must produce byte-identical stored values. This step lands and is verified
-*before any BA row can exist*, which is what makes every later step safe.
+**(a) Partition the rows.** Group by `pairOrder` before scoring and score each partition
+independently — exactly the contract `readings.ts:170` states in its own error text, *"pass one
+pairOrder's judgments per call."*
+
+**(b) The partition must carry `context` with it.** `score.ts:264-267` builds `context` explicitly
+*"Parallel to `rows`"* and indexes it positionally at `:379-381`. Grouping `rows` alone slides every
+disagreement past the first BA row onto another item's `runId`. Either fold `runId`/`itemIndex` into
+the row type or group `(row, context)` pairs. The repo already guards this class at
+`tests/lib/calibration-score.test.ts:666-722` — but that guard's fixture (`:113-135`) emits one
+judgment per run, so it stays **green** under the naive fix and will not catch the regression.
+
+**(c) The no-verdict accounting must move inside the partition. THIS IS THE SUBTLE ONE.**
+`unjudgedItems` and `dispatchedItemCount` are accumulated per-`EvaluationRun` at `score.ts:285-297`,
+*upstream* of the `rows` array, and `unjudgedItems` keys on `run.modelJudgments.length === 0`. With
+two judgments per run and `where: { status: 'completed' }` at `score.ts:254`, **a run whose AB
+judgment errored while its BA judgment completed arrives with `length === 1`**: it escapes
+`unjudgedItems`, contributes no AB row, and is invisible to `projection.missingVerdicts`. The AB
+partition then reports `missingVerdicts 0` and `noVerdictRate 0` over a silently shortened
+denominator — the exact failure `score.ts:276-280` memorialises (*"reported `missingVerdicts 0` while
+FOUR of thirty items had dead-lettered"*), in the direction that **hides loss**.
+
+This is not hypothetical: production holds 737 errored judgments, and `cmtqi78z…` alone has 3 of 620.
+The accounting must ask "no COMPLETED judgment **at this pairOrder**", which requires either pushing
+a `pairOrder` filter into the query at `score.ts:251-256` or selecting `status` unfiltered so a
+launched-but-undrained order stays visible.
+
+**Acceptance test for this step is inertness ON FIXTURES, not on production.** Every pinned
+expectation in `tests/lib/calibration-score.test.ts` is unchanged, and equality holds on all stored
+fields **except `finishedAt`**. It cannot be stated as production byte-identity: `score.ts:494` writes
+`finishedAt: new Date()` and `:479` writes `scoringVersion` unconditionally, and prod currently reads
+20 of 22 rows with `scoringVersion` NULL — a real `--score-only` would flip those to the current
+generation and backfill the v2l/v2m/v2n columns. **No production row is re-scored to prove this step
+inert.** This step lands and is verified *before any BA row can exist*, which is what makes every
+later step safe.
 
 ### Step 2 — The renderer learns order
 
@@ -160,7 +224,11 @@ and the presented order is fixed in the **worker's query**, not at the call site
 `src/worker/judgment-consumer.ts:221-224`: *"Ordered by `position` here so the presented order ('AB')
 is a property of the QUERY, not of whatever order Postgres happened to return."* The full
 `ModelJudgment` row, `pairOrder` included, is destructured at `judgment-consumer.ts:486` and **never
-consulted**. `grep -arn pairOrder src/worker/ src/lib/llm/` returns only comments.
+consulted**. `grep -arn pairOrder src/worker/ src/lib/llm/` returns nine comments plus exactly one
+executable line — `src/worker/run-create-consumer.ts:285`, an unconditional `pairOrder: null` on the
+pointwise expansion path (double-guarded: `run-launch.ts:745` hardcodes `protocol: 'pointwise'` and
+`run-create-consumer.ts:201` throws on anything else). **No READ of `pairOrder` exists anywhere in
+`src/`.**
 
 The prose at `render.ts:575-579` describing the BA sweep as *"a second ORDERING through this same
 function"* is **aspirational, not shipped** — the function has no input that could express it.
@@ -171,9 +239,19 @@ function"* is **aspirational, not shipped** — the function has no input that c
 decides which of the two sorted candidates becomes `Response A`. Default `'AB'` keeps every existing
 caller and `tests/lib/render-pairwise.test.ts:78` green.
 
-Thread `judgment.pairOrder` through four signatures:
-`judgment-consumer.ts:499` → `RegistryJudgmentInput` → `registry.ts:1104-1109 prepareJudgmentCall` →
-`render.ts:636 renderJudgmentPrompt` → `buildPairwiseUserPrompt`.
+Thread `judgment.pairOrder` through **five** hops:
+
+```
+judgment-consumer.ts:488-506   the `registryInput` object literal  (NOT the candidates map at :499 —
+                               that is the rejected no-op below)
+  -> registry.ts:1098          prepareJudgmentCall
+  -> registry.ts:1019          renderJudgmentPromptOrThrow   (the sole caller of the next hop)
+  -> render.ts:626             renderJudgmentPrompt          (:635 is the pairwise arm, :636 pointwise)
+  -> render.ts:585             buildPairwiseUserPrompt
+```
+
+The `renderJudgmentPromptOrThrow` wrapper is **widened, not bypassed** — `registry.ts:1009-1017`
+explains that bypassing it reclassifies a deterministic render failure as retryable.
 
 The comment at `judgment-consumer.ts:221-224` becomes false and is corrected in the same commit.
 
@@ -198,9 +276,10 @@ a second nested `modelJudgments.create` entry for `'BA'`, gated by a new paramet
   Nothing changes for any existing caller.
 - `scripts/calibration/run.ts:162-165` gains `--orders=AB,BA` (default `AB`). The current arg surface
   is only `--golden-set --judge-version --score-only --poll-timeout`.
-- No HTTP route can launch a pairwise run at all (`api/evaluations/route.ts:303-306` and
+- **No web route can WRITE a BA judgment** (`api/evaluations/route.ts:303-306` and
   `api/evaluations/[id]/runs/route.ts:84-89` both omit `protocol`/`candidates`; the default is
-  pointwise at `run-launch.ts:392`). **The web tier is entirely out of blast radius.**
+  pointwise at `run-launch.ts:392`). Scope the claim to writes — the web tier does READ judgments, see
+  §5.
 
 Both judgments are created inside the existing nested `EvaluationRun` create, so they share one
 transaction by construction — satisfying D4.
@@ -212,16 +291,32 @@ const legalWorstCaseMs = MAX_CALIBRATION_ITEMS * 3 * resolveTimeoutBudgets().har
 ```
 
 There is no orders-per-item factor, so this assertion stays **green while the real bound doubles**.
-At `MAX_CALIBRATION_ITEMS = 1000` (`calibration/launch.ts:114`) the two-order bound is
-`1000 × 2 × 3 × 900 000 = 5.4e9` ms against a 45-day net of `3.888e9` — it **exceeds** it. At the
-current `MAX_HARD_CAP_MS = 1_170_000` the one-order figure is already 3.51e9. The test gains the
-factor and the item cap is clamped when `orders.length > 1`. 620 items × 2 orders is within bounds;
-1000 × 2 is not.
+State it as a formula rather than a verdict:
+
+```
+items × orders × 3 × resolveTimeoutBudgets().hardCapMs  <  NEVER_STARTED_TIMEOUT_MS (3.888e9, 45 d)
+```
+
+At the resolved default cap of 900 000 ms (production sets no override) this admits **≤ 719 items at
+two orders**; `1000 × 2 × 3 × 900 000 = 5.4e9` exceeds the net. The clamp is therefore a named
+constant — `MAX_PAIRED_CALIBRATION_ITEMS = 719` — and **`MAX_CALIBRATION_ITEMS` itself stays 1000**
+(`tests/db/calibration-link.test.ts:488` pins it).
+
+**A live caveat the amended test must encode:** 620 × 2 is inside the net only while
+`EVALUATION_MODEL_HARD_CAP_MS` is at or below 1 045 161 ms. At the legal ceiling
+`MAX_HARD_CAP_MS = 1_170_000` (`timeout-policy.ts:94`) the same 620-item paired run is 4.352e9 and the
+amended assertion goes **red**. The test must resolve the cap rather than assume the default.
 
 ### Step 4 — The estimators
 
-New pure module `src/lib/calibration/position-bias.ts`, taking paired readings and returning both D3
-numbers. Pure and separately testable, in the mould of `readings.ts` — a named function with an
+New pure module `src/lib/calibration/position-bias.ts`, taking **`CalibrationVerdictRow`-shaped rows**
+— `{ verdict, pairOrder, itemId }` — and returning both D3 numbers.
+
+**It must NOT take `Reading[]`.** `Reading` (`src/lib/agreement.ts:78`) carries only
+`{ itemId, raterId, category }`, and `readings.ts:242-244` has already collapsed the raw letter and
+the order into a preference. `positionBias` is not computable from that input. The two estimators
+legitimately read different fields of the same row — `positionBias` the raw letter, `orderFlipRate`
+the mapped preference — and an implementer who unifies them reintroduces B1. Pure and separately testable, in the mould of `readings.ts` — a named function with an
 arm-by-arm test, for the same reason that file gives.
 
 **Eligibility.** An item contributes only if **both** orders produced a decisive verdict. `tie` is
@@ -233,7 +328,16 @@ scores a flawless 0.0 position bias on n = 3. This is the scoreboard's standing 
 without its denominator — and it applies here more sharply than anywhere else, because both
 estimators are bounded and a small denominator makes them look confident.
 
-Both numbers carry Wilson 95% intervals, consistent with `selectiveAccuracy`.
+**Intervals are their own sub-step with their own test budget — the machinery does not exist.**
+`grep -arli wilson src/ scripts/ tests/ prisma/` returns nothing; the only source of the Wilson and
+`⚠n<20` conventions is `docs/calibration-scoreboard-2026-09-06.md`, which is **untracked at HEAD**.
+
+The two estimators do **not** take the same interval:
+
+- `orderFlipRate` — Wilson on `pairedDecisiveCount` is correct. One Bernoulli draw per item.
+- `positionBias` — Wilson is **wrong**. Each item contributes two clustered draws and `|·|` folds the
+  scale at 0.5, so a shifted Wilson can exclude its own point estimate. Use a paired interval: the
+  per-item slot-A contribution is in `{0, 1, 2}` and the variance is taken *between* items.
 
 **`orderFlipRate` compares preferences, not raw verdict letters.** It applies `preferenceFromVerdict`
 to each order first and asks whether the resulting `A>B` / `B>A` changed. Comparing raw letters would
@@ -246,6 +350,13 @@ report a *stable* judge as flipping 100% of the time.
 | `positionBias` | **already exists**, `schema.prisma:1002`, 0/22 populated | `marginalSkew` (D3) |
 | `orderFlipRate` | **new** | the flip rate (D3) |
 | `pairedDecisiveCount` | **new** | the denominator both share |
+| `ordersRequested` | **new** | which orders the run ASKED for, e.g. `'AB'` or `'AB,BA'` |
+
+`ordersRequested` exists because `pairedDecisiveCount IS NULL` is **not** a sound discriminator on its
+own: `score.ts:254` filters `status: 'completed'`, and no column records which orders were
+*requested*, so a BA half that launched and never drained would store identically to a run that never
+had one. With `ordersRequested` the three states separate cleanly — `'AB'` = never paired;
+`'AB,BA'` with a NULL estimator = paired but no decisive pairs; `'AB,BA'` with a value = measured.
 
 `positionBias` is finally written with the meaning its own source documents intended.
 
@@ -256,18 +367,26 @@ four columns (`testRetest`, `positionBias`, `biasSensitivityRate`, `flipRateVsPa
 `biasSensitivityRate` does not mean order-flip rate, and a misnamed column is precisely how a number
 gets misread a year later. All three columns ship **with** doc comments.
 
-Migration name must match `/^v2[a-z]$/` (`tests/lib/calibration-scoring-version.test.ts:36`); `v2l`
-and `v2n` are used, so this is `v2o`.
+The next free migration letter is `v2o` — read from `ls prisma/migrations/`, where `v2b`…`v2m`…`v2n`
+are all taken. (The `/^v2[a-z]$/` assertion at `tests/lib/calibration-scoring-version.test.ts:36`
+applies to `SCORING_RULES_CHANGELOG[].migration`, not to directory names; it is satisfied by `v2o` but
+is not what determines the letter.)
 
 `SCORING_RULES_VERSION` stays **2** (D2). The NULL is unambiguous: a run with no BA half has NULL in
 all three new columns together, and `pairedDecisiveCount IS NULL` is the discriminator.
 
 ### Step 6 — Reporting
 
-The CLI (`scripts/calibration/run.ts`) and the scoreboard print both estimators with their shared
-denominator, their intervals, and the tie-exclusion count, under the board's existing "never
-displayed without its companion" rule. A guard fires at `pairedDecisiveCount < 20`, mirroring
-`⚠n<20`.
+Both estimators print with their shared denominator, their intervals, and the tie-exclusion count,
+under the board's "never displayed without its companion" rule. A guard fires at
+`pairedDecisiveCount < 20`.
+
+**The rendering lives in `src/lib/calibration/baseline.ts`, beside `formatSelectiveAccuracyLines` —
+NOT in `scripts/calibration/run.ts`.** That file is in no coverage include, so logic placed there is
+untested by construction. `scripts/calibration/run.ts` gains call sites only; note
+`tests/lib/calibration-baseline.test.ts:389,400` pin *exactly one* call site each of
+`formatSelectiveAccuracyLines(` and `formatNoVerdictRateLine(` in that file, so adding a second call
+to either would go red.
 
 ---
 
@@ -302,17 +421,28 @@ this field was carried separately precisely *"so a future BA sweep breaking that
 rather than assumed away."* Under D2 it is computed on the AB partition only — verify this explicitly
 rather than assuming the partition handles it.
 
-**4.6 `dispatchedItemCount == verdictCount + missingVerdicts` stops holding.** `dispatchedItemCount`
-(`score.ts:294`) is per-run and does not double; `verdictCount` (`:359`) is per-row and does. Under
-D2 the stored `verdictCount` remains AB-only so the identity survives for stored fields, but any new
-code reading both must not assume it.
+**4.6 `dispatchedItemCount == verdictCount + missingVerdicts` BREAKS, and nothing stored records the
+shortfall.** `dispatchedItemCount` (`score.ts:294`) is per-run and does not double; `verdictCount`
+(`:359`) is per-row and does. An earlier draft claimed "the identity survives for stored fields" —
+**it does not.** It breaks whenever *either* order half-drains: a run whose AB errored and BA
+completed is counted as neither judged nor unjudged (see Step 1(c)), so the AB partition's
+`missingVerdicts` under-reports and `rawAgreement` is computed over a short denominator. `score.ts:476-496`
+stores `verdictCount` but neither `dispatchedItemCount` nor `missingVerdicts`, so the discrepancy is
+unrecoverable after the fact. Step 1(c) is the fix; this trap is the reason it is not optional.
 
 **4.7 Coverage gates are the binding constraint, and one is already in regression.**
-`vitest.db.config.ts:157-162` sets `branches: 77` against a measured 1004/1297 = **77.4094%** — six
-entirely-uncovered new branches of budget, against a config whose own policy (`:74-77`) mandates a 2pp
-buffer. Both files this design touches most, `run-launch.ts` (51/70) and `calibration/launch.ts`
-(25/33), sit **below** that aggregate, so branches added there cost double. Unit per-glob budgets are
-looser: `src/worker/**` 114/125 vs floor 87; `src/lib/llm/**` 527/586 vs 83.
+`vitest.db.config.ts:165` (block `162-169`) sets `branches: 77` against a measured 1004/1297 =
+**77.4094%** — six entirely-uncovered new branches of budget, against a config whose own policy
+(`:56-57`) mandates a 2pp buffer. Both files this design touches most, `run-launch.ts` (51/70) and
+`calibration/launch.ts` (25/33), sit **below** that aggregate, so branches added there cost double.
+
+`src/worker/**` at 114/125 against floor 87 is **also 6 uncovered branches** — the same budget, not a
+looser one. `src/lib/llm/**` at 527/586 vs 83 is the only roomy glob.
+
+**`tests/integration/**` carries no coverage instrumentation.** Step 2's five-hop threading must
+therefore be covered by a *unit* test — `tests/lib/judgment-consumer-escalation.test.ts` is the only
+file that drives `defaultRunProviderPairwise` — or it contributes uncovered branches with nothing
+offsetting them.
 
 **The floor does not move.** New code ships with its tests.
 
@@ -320,7 +450,14 @@ looser: `src/worker/**` 114/125 vs floor 87; `src/lib/llm/**` 527/586 vs 83.
 
 ## 5. What does NOT change
 
-- The web tier. No route can launch a pairwise run.
+- The web tier's **write** path. No route can launch a pairwise run.
+  **It is not out of blast radius for reads**, and this is a named accepted risk: `src/lib/export.ts:129`
+  emits one row *per model judgment per run* into an `EvaluationExportRow` that has **no order column**,
+  and the run-detail page renders one card per judgment labelled only by model name — so a paired run
+  exports and displays as two indistinguishable rows for one item. Either add `model_pair_order` (both
+  export routes' `include` already loads it) or accept it explicitly. `/api/leaderboard/route.ts:88-92`
+  is genuinely safe for a specific reason worth stating rather than assuming: it filters
+  `overallScore: { not: null }`, which pairwise judgments never carry.
 - The queue message schema. `{judgmentId, runId, attempt}` (`publish.ts:30-34`) already addresses a
   judgment by primary key; two judgments on one run need no change.
 - Claim and idempotency. `claim.ts:105-108` keys on the judgment PK.
@@ -328,7 +465,6 @@ looser: `src/worker/**` 114/125 vs floor 87; `src/lib/llm/**` 527/586 vs 83.
   is already correct for N judgments.
 - `runModelSelections`, `@@unique([runId, judgeModelVersionId])` (`schema.prisma:468`) — stays
   one row per version regardless of order count.
-- `SCORING_RULES_VERSION`, which stays 2.
 - All 22 historical `CalibrationRun` rows.
 
 ---
@@ -337,15 +473,21 @@ looser: `src/worker/**` 114/125 vs floor 87; `src/lib/llm/**` 527/586 vs 83.
 
 TDD throughout, per the project's standing workflow.
 
-1. **Step 1 inertness** — re-score existing production-shaped fixtures, assert byte-identical stored
-   values. This gates everything downstream.
+1. **Step 1 inertness** — re-score existing production-shaped **fixtures** (never a production row),
+   asserting equality on every stored field except `finishedAt`, with every pinned expectation in
+   `tests/lib/calibration-score.test.ts` unchanged. This gates everything downstream.
 2. **Prompt bytes** (trap 4.1) — the load-bearing test. `userPromptSha256` differs between orders;
    position 1's text precedes position 0's in the BA prompt.
 3. **Single inversion** (trap 4.2) — arm-by-arm, in the style of
    `tests/lib/calibration-readings.test.ts:25-64`.
-4. **The symmetric flipper** — a fixture that answers the first slot every time must score
-   `positionBias = 0.0` and `orderFlipRate = 1.0`. This is the fixture that justifies D3; without it
-   the design's central claim is untested.
+4. **Three archetype fixtures, not one.** This is the set that pins D3 and catches the inversion
+   described there; the single fixture an earlier draft specified would have *enforced* the defect.
+   - pure first-slot stamper → `(positionBias 0.5, orderFlipRate 1.0)`
+   - symmetric flipper → `(0.0, 1.0)`
+   - **perfect content judge, run against the real 336/284 key → `(0.0, 0.0)`**
+
+   The third arm is the load-bearing one: it is the only fixture that catches the key-imbalance
+   confound, and under the inverted definition it reads **0.0419** instead of 0.0.
 5. **Tie exclusion** — an all-tie judge yields `pairedDecisiveCount = 0` and NULL estimators, not
    `0.0`.
 6. **`finalization.test.ts:628`** gains the orders factor (step 3).
@@ -370,20 +512,43 @@ TDD throughout, per the project's standing workflow.
 
 ## 8. Accepted risks and open questions
 
-**The resolution this gets reported against is not yet established.** The scoreboard quotes an
-empirical least-significant-difference of 0.0586
-(`docs/calibration-scoreboard-2026-09-06.md:27,139`), but that is an **n ≈ 30 quantity** — all five
-repeat runs behind it are on `judgebenchsample-30-random`, and **no judge has a repeat run on the 620
-set**. Scaled it is ≈ 0.0129 at n = 620. At n = 620 the 95% CI half-width on a paired order-effect
-estimate is 0.052-0.056 and the 80%-power MDE is 0.074-0.080. A first `positionBias` of, say, 0.04 is
-therefore **not** distinguishable from zero, and must not be reported as if it were.
+**The resolution, computed with the PAIRED formula.** An earlier draft quoted 0.052-0.056 as the
+half-width — that is the *unpaired* two-independent-proportions SE (`1.96·sqrt(2·0.25/620) = 0.05566`)
+on the δ scale, while `positionBias` is `|δ|/2`. It overstates the interval by roughly 2× and led to
+the wrong conclusion. The paired half-width is:
 
-**Nothing enforces that the two orders share sampling parameters.** They do here, because both
-judgments are created in one transaction from one `JudgeModelVersion` — but `samplingDefaults` is
-mutable on the version row and is not snapshotted per judgment
-(`docs/superpowers/specs/2026-09-01-judge-scoreboard-and-model-envelopes.md` §4.1). Editing it
-mid-run would give the two halves different budgets and the difference would be attributed to
-position. Do not edit a version's `samplingDefaults` while a paired run is in flight.
+```
+HW = 1.96 · sqrt( f / (4n) )        f = orderFlipRate,  n = pairedDecisiveCount
+```
+
+| f | HW at n = 620 |
+|---|---|
+| 0.10 | 0.0125 |
+| 0.413 (literature median) | 0.0253 |
+| 1.00 (worst case) | **0.0394** |
+
+**So at n = 620 the maximum half-width is 0.0394, and a `positionBias` of 0.04 IS distinguishable from
+zero.** The earlier text instructed the team to discard a real effect as noise. Note the denominator
+falls below 620 under tie exclusion, which is what makes reporting `pairedDecisiveCount` load-bearing
+rather than decorative. The right significance test for `orderFlipRate` between two judges is
+**McNemar's**, on the paired flip/no-flip table.
+
+The scoreboard's 0.0586 least-significant-difference is a separate quantity and remains an **n ≈ 30**
+figure — all five repeat runs behind it are on `judgebenchsample-30-random`, and no judge has a repeat
+run on the 620 set. It is not the yardstick for these estimators.
+
+**Sampling drift is DETECTED, not silent — but it is detected per-run, not per-order.** An earlier
+draft claimed `samplingParams` is not snapshotted per judgment and that a mid-run edit would be
+silently attributed to position. That is false, and the source it cited says the opposite:
+`2026-09-01-judge-scoreboard-and-model-envelopes.md:422-425` reads *"`ModelJudgment.samplingParams` is
+written per call and never revised."* It is written at `judgment-consumer.ts:762`, and production
+carries it on **3336 of 3336** completed judgments. A mid-run edit surfaces as `moved_mid_run`
+(`sampling-drift.ts:68`, printed at `scripts/calibration/run.ts:350-353`).
+
+The genuine residual: `detectSamplingDrift` groups per **run**, not per **order**. If a version's
+`samplingDefaults` moves mid-run, the drift report will flag it but will not say which orders ran
+under which config — and that breakdown is exactly what a position-bias reader needs. The drift report
+gains a per-order split.
 
 **The `NULLS NOT DISTINCT` half of the unique index carries no production load.** There are zero
 pointwise `EvaluationRun`s in production, so the `missing-pair-order` guard at `readings.ts:225-239`
