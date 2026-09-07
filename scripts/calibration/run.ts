@@ -173,15 +173,12 @@ async function main(): Promise<void> {
   // as omitting the flag, and must not be treated as one — `arg()` returns
   // `''` for it, and `'' ? ... : ['AB']` is falsy, so the old `ordersArg ?
   // ordersArg.split(',') : ['AB']` silently fell back to `['AB']` for BOTH
-  // cases, and `''.split(',')` never produces a zero-length array either
-  // (`['']`, length 1) — which is why the `orders.length === 0` arm below
-  // was dead code: nothing could ever reach it. Distinguishing `undefined`
-  // (omitted) from `''` (typed, empty) up front is what makes that arm
-  // reachable, for a genuinely empty list (impossible to construct any other
-  // way, since split on a non-empty string always yields >= 1 element).
+  // cases. Distinguishing `undefined` (omitted) from `''` (typed, empty) up
+  // front lets the empty string be rejected: `''.split(',')` yields `['']`,
+  // which fails `isPairOrder('')` — the empty string is not a valid pair order.
   const ordersArg = arg('orders');
   const orders = ordersArg === undefined ? ['AB'] : ordersArg.split(',').map((o) => o.trim());
-  if (orders.length === 0 || !orders.every(isPairOrder)) {
+  if (!orders.every(isPairOrder)) {
     throw new Error(`--orders must be a comma-separated list of AB and/or BA; got ${JSON.stringify(ordersArg)}`);
   }
 

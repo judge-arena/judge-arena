@@ -30,7 +30,9 @@ import { seedPromptTemplates } from '../../prisma/seed-prompt-templates';
 // doesn't run `prisma migrate reset` itself, it relies on the schema
 // already being migrated, e.g. by a prior `npm run test:db` run) AND a live
 // RabbitMQ (see .env.test's RABBITMQ_URL, the podman `judge-arena-rabbitmq`
-// container) for the run.create publish-count assertion. Run via `npm run
+// container) for the run.create publish-count assertion AND a live Redis (see
+// .env.test's REDIS_URL, the podman `judge-arena-redis` container) — the
+// reaper lock clearance goes through getConnectedRedis. Run via `npm run
 // test:integration`, never as part of plain `npm test`.
 //
 // Task 7's brief: "duplicate delivery of one judgment message -> exactly
