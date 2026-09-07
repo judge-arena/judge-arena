@@ -999,7 +999,25 @@ model CalibrationRun {
   /// copy for readers that never load the module.
   selectiveBaselineAccuracy Float?
   testRetest          Float?
+  /// v2o. |(verdicts naming slot A across BOTH orders) / 2n - 0.5|, computed
+  /// on the RAW verdict letter BEFORE preferenceFromVerdict — which is what
+  /// makes it independent of the answer key's class balance. 0.5 = every
+  /// verdict named the first slot; 0.0 = no net side. NULL means no paired
+  /// decisive item existed; read `ordersRequested` to tell "never paired"
+  /// from "paired but undecisive".
   positionBias        Float?
+  /// v2o. Fraction of paired decisive items whose PREFERENCE changed under
+  /// swap. Its no-information point is 0.5, not 0: any order-independent
+  /// judge flips at least half the time. Stored beside positionBias because
+  /// a symmetric flipper scores 0.0 there and 1.0 here.
+  orderFlipRate       Float?
+  /// v2o. The denominator BOTH estimators share — items decisive in both
+  /// orders. Never render either rate without it.
+  pairedDecisiveCount Int?
+  /// v2o. Which orders this run ASKED for, e.g. 'AB' or 'AB,BA'. Without it a
+  /// BA half that launched and never drained would store identically to a run
+  /// that never had one, and a NULL estimator would be ambiguous.
+  ordersRequested     String?
   biasSensitivityRate Float?
   flipRateVsParent    Float?
   /// The rubric in force for this calibration. The pairwise SYSTEM prompt
