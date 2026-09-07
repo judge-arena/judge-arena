@@ -225,6 +225,7 @@ type LoadedJudgment = {
   verdict: string | null;
   pairOrder: string | null;
   judgeModelVersionId: string | null;
+  status: string;
 };
 
 type LoadedRun = {
@@ -249,10 +250,14 @@ export async function scoreCalibrationRun(
       id: true,
       goldenItem: { select: { id: true, index: true, expected: true } },
       modelJudgments: {
-        // See the module doc: pending/running/error judgments are absent
-        // answers, not wrong ones.
-        where: { status: 'completed' },
-        select: { verdict: true, pairOrder: true, judgeModelVersionId: true },
+        // NO `where: { status: 'completed' }` any more. With two judgments per
+        // run, filtering here made a run whose AB errored and whose BA
+        // completed arrive with `length === 1` — escaping the `length === 0`
+        // unjudged test, contributing no AB row, and reporting
+        // `missingVerdicts 0` over a short denominator. That is the 2026-08-31
+        // failure this file's comment below memorialises, in the direction
+        // that HIDES loss. The status gate moved into the partition.
+        select: { verdict: true, pairOrder: true, judgeModelVersionId: true, status: true },
       },
     },
     // Stable output for the disagreement list and for the reading order the
@@ -261,28 +266,30 @@ export async function scoreCalibrationRun(
     orderBy: { goldenItem: { index: 'asc' } },
   })) as unknown as LoadedRun[];
 
-  const rows: CalibrationVerdictRow[] = [];
-  // Parallel to `rows`, so the per-item outputs below can be built from the
-  // SAME narrowing groundTruthReadings does rather than a second copy of it.
-  const context: Array<{ runId: string; itemIndex: number }> = [];
+  type Partition = {
+    rows: CalibrationVerdictRow[];
+    /** Parallel to `rows` WITHIN this partition. It must travel with the rows,
+     * not beside the whole set: `rows` is indexed positionally at the
+     * disagreement push below, so grouping rows alone slides every
+     * disagreement past the first BA row onto another item's runId. */
+    context: Array<{ runId: string; itemIndex: number }>;
+    unjudgedItems: number;
+    dispatchedItemCount: number;
+  };
 
-  // Items that were LAUNCHED but produced nothing — the judgment errored,
-  // DLQ'd, or is still in flight. They must be counted here and nowhere else:
-  // the query above selects only `status: 'completed'` judgments, so such a run
-  // arrives with an EMPTY `modelJudgments` array, contributes no row below, and
-  // is therefore invisible to `groundTruthReadings` — which can only report a
-  // missing verdict for a row it was actually handed.
-  //
-  // Getting this wrong is not cosmetic. The first production calibration
-  // (2026-08-31) reported `missingVerdicts 0` while FOUR of thirty items had
-  // dead-lettered, directly under an accuracy line whose own denominator said
-  // 26. A reader is entitled to trust the field named "how many are missing"
-  // over arithmetic they have to do themselves, and that reading was wrong.
-  let unjudgedItems = 0;
-  // Items the judge was ASKED — counted here, past the same `goldenItem === null`
-  // gate as everything else, so a row that cannot be scored against anything is
-  // not counted as having been asked either.
-  let dispatchedItemCount = 0;
+  /** Key for a partition. Pointwise judgments carry `pairOrder: null` and all
+   *  belong to one partition; the empty string cannot collide with 'AB'/'BA'. */
+  const partitionKey = (pairOrder: string | null): string => pairOrder ?? '';
+
+  const partitions = new Map<string, Partition>();
+  const ensure = (key: string): Partition => {
+    let p = partitions.get(key);
+    if (!p) {
+      p = { rows: [], context: [], unjudgedItems: 0, dispatchedItemCount: 0 };
+      partitions.set(key, p);
+    }
+    return p;
+  };
 
   for (const run of runs) {
     // A calibration EvaluationRun without a goldenItem cannot be scored
@@ -291,26 +298,62 @@ export async function scoreCalibrationRun(
     // skipping beats crashing a whole calibration over it, and it cannot go
     // unnoticed because the run contributes to no count.
     if (run.goldenItem === null) continue;
-    dispatchedItemCount += 1;
-    if (run.modelJudgments.length === 0) {
-      unjudgedItems += 1;
-      continue;
-    }
-    // One judgment per run in phase 1 (pairOrder 'AB' only). If phase 2's BA
-    // sweep lands and this is still flattening both orders into one pile,
-    // groundTruthReadings throws on the duplicate (item, rater) rather than
-    // letting Cohen quietly keep the first and discard the second.
-    for (const judgment of run.modelJudgments) {
-      rows.push({
-        itemId: run.goldenItem.id,
-        expected: run.goldenItem.expected,
-        raterId: judgment.judgeModelVersionId ?? 'model',
-        verdict: judgment.verdict,
-        pairOrder: judgment.pairOrder,
-      });
-      context.push({ runId: run.id, itemIndex: run.goldenItem.index });
+
+    // Which orders were ASKED of this item — derived from the judgment rows
+    // that exist at all, regardless of status, which is exactly why the query
+    // no longer filters on `completed`.
+    const askedKeys = new Set(run.modelJudgments.map((j) => partitionKey(j.pairOrder)));
+    // A run with NO judgment rows at all is an unjudged item in every
+    // partition the calibration has. Attributed to '' so it is counted
+    // exactly once when the run is pointwise, and re-attributed below for
+    // pairwise calibrations.
+    if (askedKeys.size === 0) askedKeys.add('');
+
+    for (const key of askedKeys) {
+      const partition = ensure(key);
+      partition.dispatchedItemCount += 1;
+      const completed = run.modelJudgments.filter(
+        (j) => partitionKey(j.pairOrder) === key && j.status === 'completed'
+      );
+      if (completed.length === 0) {
+        partition.unjudgedItems += 1;
+        continue;
+      }
+      for (const judgment of completed) {
+        partition.rows.push({
+          itemId: run.goldenItem.id,
+          expected: run.goldenItem.expected,
+          raterId: judgment.judgeModelVersionId ?? 'model',
+          verdict: judgment.verdict,
+          pairOrder: judgment.pairOrder,
+        });
+        partition.context.push({ runId: run.id, itemIndex: run.goldenItem.index });
+      }
     }
   }
+
+  // THE PARTITION THAT FEEDS THE STORED COLUMNS. 'AB' when a pairwise
+  // calibration ran, otherwise the single partition a pointwise one produced.
+  // Per the spec's D2 the stored rawAgreement/kappa/verdictCount stay AB-only,
+  // so every one of the 22 historical rows scores bit-identically.
+  const primaryKey = partitions.has('AB') ? 'AB' : ([...partitions.keys()][0] ?? '');
+  const primary = ensure(primaryKey);
+  const { rows, context } = primary;
+  // Items that were LAUNCHED but produced nothing for this partition — the
+  // judgment errored, DLQ'd, or is still in flight. They must be counted here
+  // and nowhere else: `groundTruthReadings` can only report a missing verdict
+  // for a row it was actually handed.
+  //
+  // Getting this wrong is not cosmetic. The first production calibration
+  // (2026-08-31) reported `missingVerdicts 0` while FOUR of thirty items had
+  // dead-lettered, directly under an accuracy line whose own denominator said
+  // 26. A reader is entitled to trust the field named "how many are missing"
+  // over arithmetic they have to do themselves, and that reading was wrong.
+  const unjudgedItems = primary.unjudgedItems;
+  // Items the judge was ASKED — counted past the same `goldenItem === null`
+  // gate as everything else, so a row that cannot be scored against anything
+  // is not counted as having been asked either.
+  const dispatchedItemCount = primary.dispatchedItemCount;
 
   const projection = groundTruthReadings(rows);
 

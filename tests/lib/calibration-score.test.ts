@@ -261,6 +261,73 @@ describe('scoreCalibrationRun — the derived preference, not the verdict letter
   });
 });
 
+describe('scoreCalibrationRun — partitions by pairOrder before scoring', () => {
+  it('scores the AB partition when a BA judgment is also present', async () => {
+    // Two judgments per run, opposite orders, same judge. Before the
+    // partition this threw duplicate-reading from groundTruthReadings.
+    const client = fakeClient([
+      {
+        id: 'run-i1',
+        goldenItemId: 'i1',
+        goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        modelJudgments: [
+          { id: 'j-i1-ab', verdict: 'A', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+          { id: 'j-i1-ba', verdict: 'B', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+    ]);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+    // AB only: one item, one verdict, correct.
+    expect(score.verdictCount).toBe(1);
+    expect(score.accuracy).toBe(1);
+  });
+
+  it('counts an item whose AB errored but whose BA completed as MISSING for AB', async () => {
+    const client = fakeClient([
+      {
+        id: 'run-i1',
+        goldenItemId: 'i1',
+        goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        modelJudgments: [
+          { id: 'j-i1-ab', verdict: null, pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'error' },
+          { id: 'j-i1-ba', verdict: 'B', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+    ]);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+    // The run arrives with modelJudgments.length === 1, so the old
+    // `length === 0` test misses it and missingVerdicts silently reads 0.
+    expect(score.missingVerdicts).toBe(1);
+    expect(score.verdictCount).toBe(0);
+    expect(score.noVerdictRate).toBe(1);
+  });
+
+  it('keeps the disagreement list aligned to its own item after a BA row', async () => {
+    const client = fakeClient([
+      {
+        id: 'run-i1',
+        goldenItemId: 'i1',
+        goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        modelJudgments: [
+          { id: 'j-i1-ab', verdict: 'B', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+          { id: 'j-i1-ba', verdict: 'A', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+      {
+        id: 'run-i2',
+        goldenItemId: 'i2',
+        goldenItem: { id: 'i2', index: 1, expected: 'A>B' },
+        modelJudgments: [
+          { id: 'j-i2-ab', verdict: 'B', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+    ]);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+    // Grouping `rows` without `context` slides i2's disagreement onto i1's runId.
+    expect(score.disagreements.map((d) => d.itemIndex)).toEqual([0, 1]);
+  });
+});
+
 describe('scoreCalibrationRun — the denominator is items with a verdict', () => {
   it('a judgment that never completed is not a wrong answer, it is an absent one', async () => {
     // status: 'pending' means the worker has not answered yet. Counting it in
@@ -740,10 +807,11 @@ describe('scoreCalibrationRun — the disagreement list is the debugging surface
 describe('scoreCalibrationRun — items that produced NOTHING', () => {
   // Regression for the first production calibration (2026-08-31), which
   // reported `missingVerdicts 0` while four of thirty items had dead-lettered.
-  // The query selects only completed judgments, so an errored run arrives with
-  // an empty modelJudgments array and contributes no row at all — invisible to
-  // groundTruthReadings, which can only report a missing verdict for a row it
-  // was handed.
+  // The completed-only filter now lives in the partition (score.ts's status
+  // gate), not in the query, so an errored run arrives with a REAL judgment
+  // row carrying `status: 'error'` rather than an empty array — and it must
+  // still contribute no row to `rows`, invisible to groundTruthReadings,
+  // which can only report a missing verdict for a row it was handed.
   const goldenItem = (id: string, index: number, expected: string) => ({ id, index, expected });
 
   function clientWith(runs: unknown[]): CalibrationScoreClient {
@@ -758,11 +826,20 @@ describe('scoreCalibrationRun — items that produced NOTHING', () => {
       {
         id: 'r1',
         goldenItem: goldenItem('i1', 0, 'A>B'),
-        modelJudgments: [{ verdict: 'A', pairOrder: 'AB', judgeModelVersionId: 'v1' }],
+        modelJudgments: [{ verdict: 'A', pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'completed' }],
       },
-      // Errored/DLQ'd/in-flight: the completed-only filter leaves this empty.
-      { id: 'r2', goldenItem: goldenItem('i2', 1, 'B>A'), modelJudgments: [] },
-      { id: 'r3', goldenItem: goldenItem('i3', 2, 'A>B'), modelJudgments: [] },
+      // Errored/DLQ'd/in-flight: the row exists (the query no longer filters
+      // it out) but its status is never 'completed'.
+      {
+        id: 'r2',
+        goldenItem: goldenItem('i2', 1, 'B>A'),
+        modelJudgments: [{ verdict: null, pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'error' }],
+      },
+      {
+        id: 'r3',
+        goldenItem: goldenItem('i3', 2, 'A>B'),
+        modelJudgments: [{ verdict: null, pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'error' }],
+      },
     ]);
 
     const score = await scoreCalibrationRun('cal-1', client);
@@ -776,8 +853,16 @@ describe('scoreCalibrationRun — items that produced NOTHING', () => {
 
   it('reports 0 missing when every launched item produced a verdict', async () => {
     const client = clientWith([
-      { id: 'r1', goldenItem: goldenItem('i1', 0, 'A>B'), modelJudgments: [{ verdict: 'A', pairOrder: 'AB', judgeModelVersionId: 'v1' }] },
-      { id: 'r2', goldenItem: goldenItem('i2', 1, 'B>A'), modelJudgments: [{ verdict: 'B', pairOrder: 'AB', judgeModelVersionId: 'v1' }] },
+      {
+        id: 'r1',
+        goldenItem: goldenItem('i1', 0, 'A>B'),
+        modelJudgments: [{ verdict: 'A', pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'completed' }],
+      },
+      {
+        id: 'r2',
+        goldenItem: goldenItem('i2', 1, 'B>A'),
+        modelJudgments: [{ verdict: 'B', pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'completed' }],
+      },
     ]);
     const score = await scoreCalibrationRun('cal-2', client);
     expect(score.missingVerdicts).toBe(0);
