@@ -62,11 +62,12 @@
  * expected` rule below. The constant floor treats 'tie' as a class like the
  * other two for the same reason; do not "fix" either.
  *
- * A JUDGMENT THAT NEVER COMPLETED IS NOT A WRONG ANSWER. Only
- * `status: 'completed'` judgments are loaded, so an in-flight calibration
- * scores what it has rather than scoring pending work as failure — otherwise
- * the metric would climb as the queue drained, improving while nothing
- * improved.
+ * A JUDGMENT THAT NEVER COMPLETED IS NOT A WRONG ANSWER. Every judgment row is
+ * loaded regardless of status (the partition below is what filters to
+ * `status: 'completed'`, per-pairOrder — see score.ts's partitioning comment),
+ * so an in-flight calibration scores what it has rather than scoring pending
+ * work as failure — otherwise the metric would climb as the queue drained,
+ * improving while nothing improved.
  *
  * ── IDEMPOTENCE ────────────────────────────────────────────────────────────
  *
@@ -291,6 +292,15 @@ export async function scoreCalibrationRun(
     return p;
   };
 
+  // A run with NO judgment rows at all belongs to whichever partition ends up
+  // primary: the OLD flat loop counted it in dispatchedItemCount and
+  // unjudgedItems, and this task must not change that. It cannot be attributed
+  // inside the loop because the primary key is not known until every run has
+  // been seen. Unreachable today — launchSingleRun creates a run's judgments
+  // nested in the same evaluationRun.create — but inertness is this task's
+  // entire point, so it is restored rather than argued away.
+  let judgmentlessRuns = 0;
+
   for (const run of runs) {
     // A calibration EvaluationRun without a goldenItem cannot be scored
     // against anything. The @@unique([calibrationRunId, goldenItemId]) makes
@@ -303,11 +313,10 @@ export async function scoreCalibrationRun(
     // that exist at all, regardless of status, which is exactly why the query
     // no longer filters on `completed`.
     const askedKeys = new Set(run.modelJudgments.map((j) => partitionKey(j.pairOrder)));
-    // A run with NO judgment rows at all is an unjudged item in every
-    // partition the calibration has. Attributed to '' so it is counted
-    // exactly once when the run is pointwise, and re-attributed below for
-    // pairwise calibrations.
-    if (askedKeys.size === 0) askedKeys.add('');
+    if (askedKeys.size === 0) {
+      judgmentlessRuns += 1;
+      continue;
+    }
 
     for (const key of askedKeys) {
       const partition = ensure(key);
@@ -336,8 +345,16 @@ export async function scoreCalibrationRun(
   // calibration ran, otherwise the single partition a pointwise one produced.
   // Per the spec's D2 the stored rawAgreement/kappa/verdictCount stay AB-only,
   // so every one of the 22 historical rows scores bit-identically.
+  // `[...partitions.keys()][0]` is deterministic for every reachable shape —
+  // zero or one non-AB key — and only depends on Map insertion order in the
+  // hypothetical of a mixed calibration with no 'AB' partition at all, which
+  // nothing today produces.
   const primaryKey = partitions.has('AB') ? 'AB' : ([...partitions.keys()][0] ?? '');
   const primary = ensure(primaryKey);
+  // Judgment-less runs belong to the primary partition once it is known — see
+  // the accumulator's own comment above for why this can't happen in the loop.
+  primary.dispatchedItemCount += judgmentlessRuns;
+  primary.unjudgedItems += judgmentlessRuns;
   const { rows, context } = primary;
   // Items that were LAUNCHED but produced nothing for this partition — the
   // judgment errored, DLQ'd, or is still in flight. They must be counted here

@@ -53,12 +53,19 @@ type FakeRun = {
 };
 
 /**
- * A Prisma stand-in that honours the three things the query actually relies
- * on: the `calibrationRunId` filter, the nested `status: 'completed'` filter
- * on modelJudgments, and the `orderBy` on the related golden item's index.
- * All three are enforced here rather than asserted on the call args, so a
+ * A Prisma stand-in that honours what the query actually relies on: the
+ * `calibrationRunId` filter and the `orderBy` on the related golden item's
+ * index. Both are enforced here rather than asserted on the call args, so a
  * scorer that forgot one FAILS a behaviour test instead of passing a shape
  * test.
+ *
+ * It ALSO knows how to filter `modelJudgments` by a nested `status`
+ * where-clause (`wanted`, below) — that was load-bearing before this task,
+ * when the query filtered to `status: 'completed'` server-side. The query no
+ * longer sends that filter (score.ts's partition does the status gate now),
+ * so `wanted` is always `undefined` here and that branch is DEAD against the
+ * real query; it survives only because it is harmless and other test blocks
+ * in this file construct their own equivalent by hand.
  *
  * `orderBy` is honoured because Postgres has no default row order. A scorer
  * that drops the clause reads rows in whatever order the planner returns them,
@@ -368,14 +375,17 @@ describe('scoreCalibrationRun — the denominator is items with a verdict', () =
 
 describe('scoreCalibrationRun — the constant-verdict floor, per denominator', () => {
   /** Minimal stand-in for hand-built rows — the `calibration()` builder cannot
-   *  express a 'tie' KEY or a hand-picked key balance. It ENFORCES the two
-   *  filters the query relies on (`where.calibrationRunId` and the nested
-   *  `status: 'completed'` on modelJudgments) for the same reason `fakeClient`
-   *  above does (its docblock, :54-67): enforcing them here means a scorer that
-   *  drops one fails a BEHAVIOUR test, where a fake that ignored them would let
-   *  these three cases pass a shape test. `orderBy` is deliberately NOT honoured
-   *  — every fixture below is handed in index order, and the ordering clause is
-   *  already pinned by `fakeClient`'s own test. Captures every update's data. */
+   *  express a 'tie' KEY or a hand-picked key balance. It ENFORCES the filter
+   *  the query relies on (`where.calibrationRunId`) for the same reason
+   *  `fakeClient` above does (its docblock, :54-67): enforcing it here means a
+   *  scorer that drops it fails a BEHAVIOUR test, where a fake that ignored it
+   *  would let these three cases pass a shape test. It also carries the same
+   *  nested `status` where-matcher `fakeClient` does, and for the same reason
+   *  that one is now dead against the real query — the fixtures below always
+   *  pass `status: 'completed'` on their own rows instead. `orderBy` is
+   *  deliberately NOT honoured — every fixture below is handed in index order,
+   *  and the ordering clause is already pinned by `fakeClient`'s own test.
+   *  Captures every update's data. */
   type FindManyArgs = {
     where?: { calibrationRunId?: string };
     select?: { modelJudgments?: { where?: { status?: string } } };
@@ -807,11 +817,14 @@ describe('scoreCalibrationRun — the disagreement list is the debugging surface
 describe('scoreCalibrationRun — items that produced NOTHING', () => {
   // Regression for the first production calibration (2026-08-31), which
   // reported `missingVerdicts 0` while four of thirty items had dead-lettered.
-  // The completed-only filter now lives in the partition (score.ts's status
-  // gate), not in the query, so an errored run arrives with a REAL judgment
-  // row carrying `status: 'error'` rather than an empty array — and it must
-  // still contribute no row to `rows`, invisible to groundTruthReadings,
-  // which can only report a missing verdict for a row it was handed.
+  // Two DISTINCT shapes both have to land as missing, and this block pins
+  // both: a judgment row that EXISTS but never reached 'completed' (the
+  // completed-only filter now lives in the partition, not the query, so this
+  // row is no longer stripped before score.ts sees it), and a run with NO
+  // judgment row at all — unreachable today (launchSingleRun nests a run's
+  // judgments in the same evaluationRun.create) but still covered, because
+  // the OLD flat loop counted `modelJudgments.length === 0` here and the
+  // partitioned version must not silently stop doing so.
   const goldenItem = (id: string, index: number, expected: string) => ({ id, index, expected });
 
   function clientWith(runs: unknown[]): CalibrationScoreClient {
@@ -828,18 +841,18 @@ describe('scoreCalibrationRun — items that produced NOTHING', () => {
         goldenItem: goldenItem('i1', 0, 'A>B'),
         modelJudgments: [{ verdict: 'A', pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'completed' }],
       },
-      // Errored/DLQ'd/in-flight: the row exists (the query no longer filters
-      // it out) but its status is never 'completed'.
+      // Errored/DLQ'd: the row exists (the query no longer filters it out)
+      // but its status is never 'completed'.
       {
         id: 'r2',
         goldenItem: goldenItem('i2', 1, 'B>A'),
         modelJudgments: [{ verdict: null, pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'error' }],
       },
-      {
-        id: 'r3',
-        goldenItem: goldenItem('i3', 2, 'A>B'),
-        modelJudgments: [{ verdict: null, pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'error' }],
-      },
+      // The OTHER shape: no judgment row at all. Currently unreachable in
+      // production, but `scoreCalibrationRun` must keep counting it in both
+      // `dispatchedItemCount` and `missingVerdicts` regardless — that is
+      // exactly what `judgmentlessRuns` in score.ts exists to guarantee.
+      { id: 'r3', goldenItem: goldenItem('i3', 2, 'A>B'), modelJudgments: [] },
     ]);
 
     const score = await scoreCalibrationRun('cal-1', client);
@@ -849,6 +862,7 @@ describe('scoreCalibrationRun — items that produced NOTHING', () => {
     // The denominator and the missing count must describe the same 3 items.
     expect(score.verdictCount + score.missingVerdicts).toBe(3);
     expect(score.accuracy).toBe(1);
+    expect(score.dispatchedItemCount).toBe(3);
   });
 
   it('reports 0 missing when every launched item produced a verdict', async () => {
@@ -874,10 +888,12 @@ describe('scoreCalibrationRun — coverage and selective accuracy', () => {
   /** Hand-built rows, the same stand-in shape and for the same reason as the
    *  constant-floor block above: `calibration()` cannot express a hand-picked
    *  key balance or a 'tie' KEY, and both are load-bearing here. It ENFORCES
-   *  the `calibrationRunId` filter and the nested `status: 'completed'` filter
-   *  so a scorer that drops one fails a BEHAVIOUR test. `orderBy` is not
-   *  honoured; every fixture below is handed in index order and the ordering
-   *  clause is pinned by `fakeClient`'s own test. */
+   *  the `calibrationRunId` filter so a scorer that drops it fails a
+   *  BEHAVIOUR test. It also carries the same nested `status` where-matcher
+   *  as `rowsClient` above, which the real query no longer sends — every
+   *  fixture below passes `status: 'completed'` on its own rows instead.
+   *  `orderBy` is not honoured; every fixture below is handed in index order
+   *  and the ordering clause is pinned by `fakeClient`'s own test. */
   type CoverageArgs = {
     where?: { calibrationRunId?: string };
     select?: { modelJudgments?: { where?: { status?: string } } };
@@ -1139,10 +1155,12 @@ describe('scoreCalibrationRun — noVerdictRate: a FLEET property, never abstent
   /** Rows that can be SHAPED, which is what this block is about: an item the
    *  judge was asked and that produced nothing at all. Two shapes reach the
    *  scorer differently and both are exercised — a COMPLETED judgment whose
-   *  verdict is null, and a run with no completed judgment (the query's
-   *  `status: 'completed'` filter, honoured here, hands the scorer an empty
-   *  array). A THIRD shape, an EvaluationRun with no goldenItem, was never
-   *  asked about anything and must be counted in neither. */
+   *  verdict is null, and a judgment row whose status never reached
+   *  'completed' (the query sends every row regardless of status now; the
+   *  `wanted`/nested-status matcher below mirrors `fakeClient`'s and is dead
+   *  the same way — it is score.ts's OWN partition that filters these out).
+   *  A THIRD shape, an EvaluationRun with no goldenItem, was never asked
+   *  about anything and must be counted in neither. */
   type FleetRow = {
     id: string;
     goldenItem: { id: string; index: number; expected: string } | null;
