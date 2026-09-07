@@ -69,6 +69,7 @@
 
 import type { RunProtocol } from '@prisma/client';
 import type { RubricCriterionView } from '@/types';
+import type { PairOrder } from '@/lib/pair-order';
 
 export interface RenderRubric {
   name: string;
@@ -578,11 +579,19 @@ function candidateText(candidate: RenderCandidate): string {
  * `positionBias` lives) presents position 1 as A and is a second ORDERING
  * through this same function, not a second prompt shape.
  *
+ * `order` controls only which sorted candidate is PRESENTED as Response A —
+ * the screen slot. The sort itself STAYS ascending by `position`: `position`
+ * IS candidate identity (golden-sets.ts:48, "position IS the identity (0 = A,
+ * 1 = B)"), and `GoldenItem.expected` is stated against it. Reordering
+ * `position` instead of the presentation would make `expected` ambiguous and
+ * force `preferenceFromVerdict` to stop inverting — the no-symptom bug this
+ * module's callers exist to avoid.
+ *
  * Exactly two candidates, not "at least two": a third candidate silently
  * dropped is a listwise item being judged as a pair, and the run would look
  * successful while measuring the wrong thing.
  */
-export function buildPairwiseUserPrompt(submission: RenderSubmission): string {
+export function buildPairwiseUserPrompt(submission: RenderSubmission, order: PairOrder = 'AB'): string {
   const candidates = [...(submission.candidates ?? [])].sort((a, b) => a.position - b.position);
   if (candidates.length !== 2) {
     throw new Error(
@@ -595,8 +604,9 @@ export function buildPairwiseUserPrompt(submission: RenderSubmission): string {
     throw new Error('Cannot build a pairwise judgment prompt: no inputText or promptText provided');
   }
 
-  const responseA = candidateText(candidates[0]);
-  const responseB = candidateText(candidates[1]);
+  const [first, second] = order === 'AB' ? candidates : [candidates[1], candidates[0]];
+  const responseA = candidateText(first);
+  const responseB = candidateText(second);
   if (!responseA || !responseB) {
     throw new Error('Cannot build a pairwise judgment prompt: both candidates must carry response text');
   }
@@ -626,13 +636,14 @@ Respond with your verdict in the specified JSON format.`;
 export function renderJudgmentPrompt(
   template: RenderTemplate,
   rubric: RenderRubric,
-  submission: RenderSubmission
+  submission: RenderSubmission,
+  order: PairOrder = 'AB'
 ): { systemPrompt: string; userPrompt: string } {
   return {
     systemPrompt: renderJudgmentSystemPrompt(template, rubric),
     userPrompt:
       template.protocol === 'pairwise'
-        ? buildPairwiseUserPrompt(submission)
+        ? buildPairwiseUserPrompt(submission, order)
         : buildJudgmentUserPrompt(submission),
   };
 }
