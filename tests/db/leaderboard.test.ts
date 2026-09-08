@@ -197,6 +197,64 @@ describe('Leaderboard API: latest-finalized-run aggregation', () => {
     // The score should be from the run with the higher ID
     expect(results[0]).toBe(expectedScore);
   });
+
+  // ─── Task 7 / spec D6 ─────────────────────────────────────────────────────
+  // A permuted calibration now creates TWO EvaluationRuns per golden item
+  // (pairOrder 'AB' and 'BA') where there was one. A 'BA' run is an
+  // instrument reading, not a result, and must never reach the leaderboard —
+  // see docs/superpowers/specs/2026-09-07-permuted-run-design.md D6.
+
+  it('excludes a permuted (BA) run even though it was created LATER — the AB run survives, not whichever createdAt wins (spec D6)', async () => {
+    const user = await mkUser();
+    const project = await mkProject(user.id, { isDefault: true });
+    const model = await mkModelConfig(user.id, { name: 'Model D6-AB' });
+    const evaluation = await mkEvaluation(project.id, user.id, { responseText: 'some response' });
+
+    // AB is the original order; BA is the permuted mirror, created LATER —
+    // exactly the shape that fools the pre-fix `createdAt DESC` tie-break
+    // into keeping BA instead of AB. Both judgments carry a non-null
+    // overallScore so this test cannot pass by the PRE-EXISTING accident
+    // (pairwise BA judgments happen to carry overallScore: null, which the
+    // route already filters on) — it has to go through the explicit
+    // pairOrder exclusion.
+    const abRun = await mkEvaluationRun(evaluation.id, { status: 'completed', pairOrder: 'AB', createdAt: OLDER });
+    await mkModelJudgment(abRun.id, model.id, { overallScore: 3 });
+
+    const baRun = await mkEvaluationRun(evaluation.id, { status: 'completed', pairOrder: 'BA', createdAt: NEWER });
+    await mkModelJudgment(baRun.id, model.id, { overallScore: 9 });
+
+    const response = await GET();
+    const data = await response.json();
+
+    expect(data.models).toHaveLength(1);
+    // AB's score — NEVER BA's, regardless of which run is newer.
+    expect(data.models[0].avgScore).toBe(3);
+    expect(data.totalJudgments).toBe(1);
+  });
+
+  it('ordinary (NULL-pairOrder) runs still reach the leaderboard — guards the `IS DISTINCT FROM` vs `!=` mistake (spec D6)', async () => {
+    const user = await mkUser();
+    const project = await mkProject(user.id, { isDefault: true });
+    const model = await mkModelConfig(user.id, { name: 'Model D6-Ordinary' });
+    const evaluation = await mkEvaluation(project.id, user.id, { responseText: 'some response' });
+
+    // pairOrder is left unset -> NULL, exactly the shape of every
+    // non-calibration run in the table today. `pairOrder != 'BA'` evaluates
+    // `NULL != 'BA'` -> NULL, and Postgres' WHERE treats NULL as false —
+    // that would silently drop this ordinary run out of the leaderboard
+    // entirely (a catastrophic regression). `IS DISTINCT FROM` is the one
+    // operator that treats NULL as "not BA" the way it should be.
+    const run = await mkEvaluationRun(evaluation.id, { status: 'completed' });
+    expect(run.pairOrder).toBeNull();
+    await mkModelJudgment(run.id, model.id, { overallScore: 7 });
+
+    const response = await GET();
+    const data = await response.json();
+
+    expect(data.models).toHaveLength(1);
+    expect(data.models[0].avgScore).toBe(7);
+    expect(data.totalJudgments).toBe(1);
+  });
 });
 
 describe('Dataset evaluation summary: averageHumanScore excludes respond-mode placeholder zeros', () => {

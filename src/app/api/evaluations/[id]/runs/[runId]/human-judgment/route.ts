@@ -59,6 +59,24 @@ export async function POST(
     if (run.evaluation.userId !== session.user.id && !isAdmin(session)) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
+    // trap T6: a calibration run measures a judge against a frozen
+    // golden-item answer key — it is not something a human reviewer
+    // annotates through this route, and `HumanJudgment.runId` is @unique,
+    // so a human judgment here would occupy the run's ONE slot with a
+    // value nothing downstream (score.ts, the scoreboard) ever reads. This
+    // was ALREADY a hole before permutation: `calibration/launch.ts` sets
+    // `EvaluationRun.triggeredById` to the launching operator, and that
+    // operator also owns the Evaluation, so they pass every check above
+    // (existence, evaluationId match, ownership). Permutation only widens
+    // it — a permuted calibration now has TWO EvaluationRuns per golden
+    // item (pairOrder 'AB' and 'BA') where there was one, i.e. two
+    // meaningless slots instead of one. Refuse both, unconditionally.
+    if (run.calibrationRunId !== null) {
+      return NextResponse.json(
+        { error: 'Cannot record a human judgment on a calibration run.' },
+        { status: 409 }
+      );
+    }
 
     const mode = deriveRunMode(run.evaluation.responseText);
     const completedJudgments = run.modelJudgments.filter((judgment) => judgment.status === 'completed');
