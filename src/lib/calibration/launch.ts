@@ -545,8 +545,12 @@ export async function launchCalibrationRun(
       // (golden-sets.ts:48) and `GoldenItem.expected` is stated against it;
       // presenting the mirrored order is `render.ts`'s job at render time,
       // not this loop's.
-      let itemPublishFailed = false;
-      let itemPublishError: string | undefined;
+      // `null` = every order published cleanly so far; a `string` is the
+      // reason from the MOST RECENT failing order (if more than one order
+      // fails, both are still attempted — see the doc below — and the later
+      // failure's reason overwrites the earlier one, same as the single-order
+      // path this replaces always did for its one judgment).
+      let itemFailureReason: string | null = null;
 
       for (const order of orders) {
         // eslint-disable-next-line no-await-in-loop -- item-atomic AND order-atomic by design: each (item, order) create+launch must be individually attributable and individually survivable (see module doc); `orders` is capped at PAIR_ORDERS.length (2)
@@ -580,21 +584,24 @@ export async function launchCalibrationRun(
           // a worker WILL claim and execute it. It is NOT scored as a loss: an
           // unpaired verdict simply has no counterpart to decide against, so
           // it drops out of `pairedDecisiveCount` rather than counting against
-          // `positionBias`/`orderFlipRate`. Recovery is a RELAUNCH of this
-          // item — there is no code path that retries just the missing order.
-          // The ITEM is reported as a failure rather than silently counted as
+          // `positionBias`/`orderFlipRate`. Recovery is NOT a relaunch of this
+          // item within the SAME calibration run: the surviving order's
+          // `EvaluationRun` already occupies its slot in the partial
+          // `@@unique([calibrationRunId, goldenItemId, pairOrder])` index, so
+          // a relaunch attempt for that (calibrationRunId, goldenItemId,
+          // pairOrder) fails P2002. Recovery is a NEW calibration run. The
+          // ITEM is reported as a failure rather than silently counted as
           // accepted either way — a caller that treated this as launched
           // would still wait forever for the missing order's verdict, which
           // was never published.
-          itemPublishFailed = true;
-          itemPublishError = launch.publishError ?? 'judgment.execute publish failed';
+          itemFailureReason = launch.publishError ?? 'judgment.execute publish failed';
         }
       }
 
-      if (itemPublishFailed) {
+      if (itemFailureReason !== null) {
         failed.push({
           goldenItemId: item.id,
-          reason: itemPublishError ?? 'judgment.execute publish failed',
+          reason: itemFailureReason,
         });
         continue;
       }

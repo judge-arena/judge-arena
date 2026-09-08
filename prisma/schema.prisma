@@ -433,11 +433,11 @@ model EvaluationRun {
   /// docs/superpowers/specs/2026-09-07-permuted-run-design.md D1.
   ///
   /// Mirrored onto this run's single ModelJudgment.pairOrder in the same
-  /// nested create. score.ts THROWS if the two ever disagree (trap T3): the
-  /// renderer reads the judgment's copy and the scorer reads this one, so a
-  /// divergence files a row into one partition and resolves it as if it were
-  /// the other — and the constant floor still reads 0.5419, so nothing looks
-  /// wrong.
+  /// nested create. score.ts is meant to THROW if the two ever disagree (trap
+  /// T3; that guard is a later task, not yet landed at HEAD): the renderer
+  /// reads the judgment's copy and the scorer reads this one, so a divergence
+  /// files a row into one partition and resolves it as if it were the other —
+  /// and the constant floor still reads 0.5419, so nothing looks wrong.
   pairOrder          String?
 
   /// Idempotency: at most one run per (calibration, item, pairOrder), so a

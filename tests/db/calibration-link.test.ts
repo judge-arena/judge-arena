@@ -272,7 +272,7 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
     ).rejects.toMatchObject({ code: 'P2002' });
   });
 
-  it('two ORDINARY runs (both columns NULL) coexist — the index is NULLS DISTINCT, and must stay that way', async () => {
+  it('two ORDINARY runs (both columns NULL) coexist — the partial WHERE keeps them out of the index entirely', async () => {
     const world = await mkWorld({ items: 0 });
     const evaluation = await db.evaluation.create({
       data: { projectId: world.project.id, userId: world.user.id, inputText: 'q' },
@@ -281,11 +281,21 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
     const first = await db.evaluationRun.create({ data: { evaluationId: evaluation.id } });
     const second = await db.evaluationRun.create({ data: { evaluationId: evaluation.id } });
 
-    // Postgres' DEFAULT NULLS DISTINCT is load-bearing here, and the v2i
-    // migration relies on it deliberately (no hand-edit, unlike
-    // 20260728215410_v2b_idempotency_tighten's ModelJudgment index). Hand-edit
-    // this one to NULLS NOT DISTINCT and EVERY ordinary run after the first
-    // fails P2002 — this assertion is the tripwire for that.
+    // v2p SUPERSEDED v2i's index: the live unique index on (calibrationRunId,
+    // goldenItemId, pairOrder) is `NULLS NOT DISTINCT`, not `NULLS DISTINCT` —
+    // it has to be, so that two calibration rows sharing a NULL pairOrder
+    // still collide (the idempotency guard score.ts relies on). What keeps
+    // THESE two ordinary runs (both columns NULL, including pairOrder)
+    // coexisting is the index's `WHERE "calibrationRunId" IS NOT NULL`
+    // predicate: an ordinary run's calibrationRunId is NULL, so it never
+    // enters the index at all, and rows outside an index cannot collide in
+    // it regardless of NULLS DISTINCT/NOT DISTINCT. Drop that WHERE clause
+    // and EVERY ordinary run after the first fails P2002 — this assertion is
+    // the tripwire for that. (See `prisma/migrations/
+    // 20260907170000_v2p_evaluation_run_pair_order/migration.sql` and the
+    // `v2p pairOrder discriminator` describe block below, which pins the
+    // same predicate directly against the new index rather than inferring it
+    // from this pre-v2p fixture shape.)
     expect(first.id).not.toBe(second.id);
     expect(first.calibrationRunId).toBeNull();
     expect(first.goldenItemId).toBeNull();
@@ -479,6 +489,53 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
     const runs = await db.evaluationRun.findMany({ where: { calibrationRunId: result.calibrationRunId } });
     expect(runs).toHaveLength(2);
     expect(runs.every((run) => run.status === 'error')).toBe(true);
+  });
+
+  it('a publish failure on the FIRST order still attempts the SECOND — the item is reported failed either way (review F3)', async () => {
+    // A2.2 shape: AB and BA are now two INDEPENDENT `launchSingleRun` calls
+    // (two transactions, two publish attempts) rather than two judgments
+    // inside one run's sequential publish loop that stops at the first
+    // failure. This pins that the SECOND order is not short-circuited by the
+    // first order's publish failure — the review judged short-circuiting
+    // WRONG: it would leave the item with a single run row, which score.ts
+    // would read as a legitimately single-order item rather than a
+    // half-failed pair.
+    const world = await mkWorld({ items: 1 });
+    let calls = 0;
+    const result = await launchCalibrationRun(
+      { ...launchParamsFrom(world), orders: ['AB', 'BA'] },
+      {
+        publish: async () => {
+          calls += 1;
+          if (calls === 1) {
+            // AB is dispatched first (orders.join order): fail ONLY this,
+            // the FIRST, call.
+            throw new Error('broker unreachable on the first order');
+          }
+        },
+      }
+    );
+
+    // The second (BA) launchSingleRun call still happened.
+    expect(calls).toBe(2);
+
+    const runs = await db.evaluationRun.findMany({ where: { calibrationRunId: result.calibrationRunId } });
+    expect(runs).toHaveLength(2);
+    const ab = runs.find((run) => run.pairOrder === 'AB')!;
+    const ba = runs.find((run) => run.pairOrder === 'BA')!;
+    // AB's publish failed -> launchSingleRun compensated it to 'error'. BA's
+    // publish succeeded -> it is a normal, still-`pending` run — a
+    // now-orphaned verdict-in-waiting that `pairedDecisiveCount` will simply
+    // never see a counterpart for.
+    expect(ab.status).toBe('error');
+    expect(ba.status).toBe('pending');
+
+    // The ITEM is reported FAILED, not accepted — an unpaired verdict is not
+    // a usable calibration result for this item.
+    expect(result.accepted).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0].goldenItemId).toBe(world.items[0].id);
+    expect(result.failed[0].reason).toMatch(/broker unreachable on the first order/);
   });
 
   // ── (2b) A2.2 (v2p): the fan-out moves from judgments-within-a-run to ─────
