@@ -356,6 +356,13 @@ export async function scoreCalibrationRun(
       // other — every downstream number stays in range, the constant floor
       // still reads a plausible number, and nothing looks wrong. Loud beats
       // plausible.
+      //
+      // This loop only ever sees `completed` judgments (the `completed`
+      // filter above), so a mismatched judgment that is still `pending` or
+      // `error` stays silent until it completes — correct for scoring, since
+      // an incomplete or errored judgment contributes no reading either way,
+      // but it means this is a read-time guard on scored rows, not a
+      // write-time invariant on every judgment ever inserted.
       if (partitionKey(judgment.pairOrder) !== key) {
         throw new CalibrationScoreError(
           'pair-order-mismatch',
@@ -377,21 +384,39 @@ export async function scoreCalibrationRun(
   // presented that order — even one that produced nothing but errors —
   // because per the spec's D2 the stored rawAgreement/kappa/verdictCount stay
   // AB-only: AB is the canonical order, full stop, regardless of what else
-  // ran alongside it. Every one of the 22 historical rows scores
-  // bit-identically.
+  // ran alongside it. This branch is unconditional (no dispatch/rows check),
+  // so a permuted item — an AB run sitting beside a judgmentless BA run for
+  // the SAME item — reports AB's own count, never polluted by BA's loss.
+  // Every one of the 22 historical rows scores bit-identically.
   //
-  // Only when NO run ever presented 'AB' does a fallback apply, and it
-  // prefers a partition that produced actual rows over an empty one. That
-  // distinction is load-bearing, not decoration: a lone judgmentless run in
-  // some OTHER order (a stray BA run with no AB counterpart at all) must
-  // report ZERO for the primary — falling back to "whichever key exists"
-  // would let that run's own dispatch count masquerade as AB's, which is the
-  // same silent mislabelling trap T3 exists to catch, just one level up. A
-  // calibration that genuinely only ran under a non-AB order (BA-only, or
-  // pointwise's '' key) still needs its own real numbers surfaced, which is
-  // exactly what "prefer a partition with rows" gives it.
+  // Only when NO run EVER presented 'AB' does a fallback apply, and it picks
+  // a partition that was actually DISPATCHED TO (dispatchedItemCount > 0),
+  // never a synthetic empty one. That predicate is load-bearing, and got it
+  // wrong once already: an earlier version of this line preferred a
+  // partition with `rows.length > 0` instead, which is wrong in exactly the
+  // case that matters — a non-AB partition with real dispatch and ZERO rows
+  // (every run still pending, or every judgment errored/DLQ'd). That version
+  // fell through to a fresh '' partition and reported `dispatchedItemCount 0
+  // / missingVerdicts 0 / noVerdictRate null` for a calibration that had in
+  // fact lost everything — the SAME hidden-loss direction as the 2026-08-31
+  // incident this file's header memorialises (missingVerdicts 0 while four of
+  // thirty items had dead-lettered), just one layer up and inverted by its
+  // own fallback. `dispatchedItemCount > 0` reports that calibration's real
+  // N-dispatched/N-missing instead of zeroing it into invisibility.
+  //
+  // This cannot be ambiguous on real data: `PairOrder` is `'AB' | 'BA'` and
+  // the CHECK `EvaluationRun_calibration_needs_order` requires a non-NULL
+  // `pairOrder` on every row with a non-NULL `calibrationRunId` — the only
+  // rows this query returns — and calibration/launch.ts refuses any golden
+  // set whose protocol isn't 'pairwise', so a pointwise calibration cannot
+  // exist to contribute a real '' key here. A genuine calibration therefore
+  // has at most ONE candidate for this fallback: 'BA'. `.find()`'s Map-
+  // insertion-order tie-break is dead code on real data; it is exercised only
+  // by a unit fixture that deliberately leaves `pairOrder` unset.
   const primaryKey =
-    partitions.has('AB') ? 'AB' : ([...partitions.entries()].find(([k, p]) => k !== 'AB' && p.rows.length > 0)?.[0] ?? '');
+    partitions.has('AB')
+      ? 'AB'
+      : ([...partitions.entries()].find(([k, p]) => k !== 'AB' && p.dispatchedItemCount > 0)?.[0] ?? '');
   const primary = ensure(primaryKey);
   const { rows, context } = primary;
   // Items that were LAUNCHED but produced nothing for this partition — the

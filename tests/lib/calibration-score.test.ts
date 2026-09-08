@@ -311,6 +311,18 @@ describe('scoreCalibrationRun — partitions by pairOrder before scoring', () =>
   });
 
   it('counts an item whose AB run errored but whose BA run completed as MISSING for AB', async () => {
+    // NOTE (review round 1, F3): under the OLD one-run-two-judgments shape
+    // this fixture demonstrated a real hazard — a server-side `status:
+    // 'completed'` filter stripped the AB judgment, the run arrived with
+    // `modelJudgments.length === 1`, and that escaped the old `length === 0`
+    // unjudged check. Under v2p the AB and BA runs are SEPARATE, each with
+    // its own single judgment, so the AB run here carries only its own
+    // errored judgment regardless of any server-side status filter —
+    // re-adding `where: { status: 'completed' }` to the query would produce
+    // an IDENTICAL result. This fixture no longer demonstrates that escape;
+    // it now pins partition independence instead: AB's own loss is scored on
+    // its own run, and a real verdict on the sibling BA run for the same item
+    // must not paper over it.
     const client = fakeClient([
       {
         id: 'run-i1-ab',
@@ -332,7 +344,6 @@ describe('scoreCalibrationRun — partitions by pairOrder before scoring', () =>
       },
     ]);
     const score = await scoreCalibrationRun(CALIBRATION_ID, client);
-    // The BA run's own verdict must not paper over AB's loss.
     expect(score.missingVerdicts).toBe(1);
     expect(score.verdictCount).toBe(0);
     expect(score.noVerdictRate).toBe(1);
@@ -419,11 +430,26 @@ describe('scoreCalibrationRun — the RUN carries the partition key, not the jud
     await expect(scoreCalibrationRun(CALIBRATION_ID, client)).rejects.toThrow(/pair-order-mismatch/);
   });
 
-  it('counts a judgmentless run in its OWN partition, inline', async () => {
-    // The only run in this calibration presents BA and produced nothing.
-    // BA's loss must not be attributed to AB — AB never ran here at all, so
-    // the primary (AB) numbers must read as though nothing was dispatched.
+  it('a judgmentless run in a NON-primary order does not inflate AB — a permuted item, AB present', async () => {
+    // Review round 1, F1: the brief's own fixture (a LONE judgmentless BA
+    // run, nothing else) contradicted its own assertion — the run's own
+    // partition genuinely has dispatchedItemCount 1, and there is no 'AB'
+    // anywhere to prefer over it, so asserting 0 for that shape was simply
+    // wrong. What "BA's loss must not be attributed to AB" actually means is
+    // THIS shape: a real permuted item, where AB's own run is judged
+    // correctly and is never polluted by a SIBLING run's loss in the other
+    // order. AB exists here, so it wins the primary slot unconditionally
+    // (see score.ts's primaryKey comment) — BA's zero verdicts never touch it.
     const client = fakeClient([
+      {
+        id: 'run-ab',
+        goldenItemId: 'item-0',
+        goldenItem: { id: 'item-0', index: 0, expected: 'A>B' },
+        pairOrder: 'AB',
+        modelJudgments: [
+          { id: 'j-ab', verdict: 'A', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
       {
         id: 'run-ba-empty',
         goldenItemId: 'item-0',
@@ -433,7 +459,47 @@ describe('scoreCalibrationRun — the RUN carries the partition key, not the jud
       },
     ]);
     const score = await scoreCalibrationRun(CALIBRATION_ID, client);
-    expect(score.dispatchedItemCount).toBe(0);
+    expect(score.dispatchedItemCount).toBe(1);
+    expect(score.verdictCount).toBe(1);
+  });
+
+  it('a calibration that ran ONLY at BA (never AB) reports its OWN honest counts, not zero', async () => {
+    // Review round 1, F1: the ORIGINAL fallback preferred a partition with
+    // `rows.length > 0`. For a BA-only calibration that lost every judgment
+    // (every request errored/DLQ'd, or every run is still pending), BA has
+    // real dispatch and ZERO rows, so that predicate fell through to a fresh,
+    // synthetic '' partition and reported dispatchedItemCount 0 /
+    // missingVerdicts 0 / noVerdictRate null — hiding a total loss instead of
+    // reporting it, the SAME direction as the 2026-08-31 incident this file's
+    // header memorialises (missingVerdicts 0 while four of thirty items had
+    // dead-lettered), just one layer up. This is reachable, not hypothetical:
+    // `scripts/calibration/run.ts --orders=BA` is accepted — launch.ts:271
+    // rejects only duplicate orders, nothing requires 'AB' among them.
+    const client = fakeClient([
+      {
+        id: 'run-ba-1',
+        goldenItemId: 'item-0',
+        goldenItem: { id: 'item-0', index: 0, expected: 'A>B' },
+        pairOrder: 'BA',
+        modelJudgments: [
+          { id: 'j-ba-1', verdict: null, pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'error' },
+        ],
+      },
+      {
+        id: 'run-ba-2',
+        goldenItemId: 'item-1',
+        goldenItem: { id: 'item-1', index: 1, expected: 'B>A' },
+        pairOrder: 'BA',
+        modelJudgments: [
+          { id: 'j-ba-2', verdict: null, pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'error' },
+        ],
+      },
+    ]);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+    expect(score.dispatchedItemCount).toBe(2);
+    expect(score.missingVerdicts).toBe(2);
+    expect(score.verdictCount).toBe(0);
+    expect(score.noVerdictRate).toBe(1);
   });
 });
 

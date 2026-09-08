@@ -100,8 +100,9 @@ export const SCORING_RULES_CHANGELOG: readonly ScoringRulesGeneration[] = [
       "The BA sweep. rawAgreement, kappa, verdictCount, committedCount and " +
       "selectiveAccuracy are UNCHANGED in definition and are computed over the " +
       "'AB' partition only, so a generation-3 number is directly comparable to a " +
-      "generation-2 one. What is new is that a pairwise run may now carry a " +
-      "SECOND ModelJudgment per item at pairOrder 'BA', from which positionBias " +
+      "generation-2 one. What is new is that a golden item may now carry a " +
+      "SECOND EvaluationRun at pairOrder 'BA' (one ModelJudgment each, not a " +
+      "second judgment on the AB run — v2p), from which positionBias " +
       "and orderFlipRate are computed over items decisive in both orders. The " +
       "bump is required by this file's own UNLESS carve-out and not by a changed " +
       "definition: without it a NULL positionBias would mean both 'scored under " +
