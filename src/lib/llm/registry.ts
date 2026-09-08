@@ -85,6 +85,7 @@ import {
 import { callAnthropic } from './anthropic';
 import { callOpenAICompatible } from './openai-compatible';
 import { renderJudgmentPrompt, type RenderRubric, type RenderSubmission, type RenderTemplate } from './render';
+import type { PairOrder } from '@/lib/pair-order';
 import { buildRespondSystemPrompt, buildRespondUserPrompt, parseJudgmentResponse, tryParseStructuredJudgment } from './provider';
 import type { ProviderCallResult, ProviderHeaderConfig, ReasoningSource } from './provider';
 import { openRouterHeaders } from './backends/openrouter';
@@ -919,6 +920,10 @@ export interface RunProviderJudgmentInput {
   template: RenderTemplate;
   rubric: RenderRubric;
   submission: RenderSubmission;
+  /** Which order to PRESENT the pair in. Read from
+   * `ModelJudgment.pairOrder` by the worker. Defaults to 'AB' so every
+   * pointwise and pre-BA caller is unchanged. */
+  pairOrder?: PairOrder;
   samplingOverrides?: Partial<SamplingParams>;
   escalation?: TimeoutEscalationContext;
 }
@@ -1020,10 +1025,11 @@ function renderJudgmentPromptOrThrow(
   descriptorId: ServingBackend,
   template: RenderTemplate,
   rubric: RenderRubric,
-  submission: RenderSubmission
+  submission: RenderSubmission,
+  order: PairOrder = 'AB'
 ): { systemPrompt: string; userPrompt: string } {
   try {
-    return renderJudgmentPrompt(template, rubric, submission);
+    return renderJudgmentPrompt(template, rubric, submission, order);
   } catch (error) {
     throw new ProviderError(
       `Failed to render judgment prompt: ${error instanceof Error ? error.message : error}`,
@@ -1106,7 +1112,8 @@ export function prepareJudgmentCall(input: RunProviderJudgmentInput): PreparedJu
     descriptor.id,
     input.template,
     input.rubric,
-    input.submission
+    input.submission,
+    input.pairOrder ?? 'AB'
   );
   const samplingParamsUsed = effectiveSamplingParams(input.judgeVersion.samplingDefaults, input.samplingOverrides);
 

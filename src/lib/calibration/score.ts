@@ -62,26 +62,35 @@
  * expected` rule below. The constant floor treats 'tie' as a class like the
  * other two for the same reason; do not "fix" either.
  *
- * A JUDGMENT THAT NEVER COMPLETED IS NOT A WRONG ANSWER. Only
- * `status: 'completed'` judgments are loaded, so an in-flight calibration
- * scores what it has rather than scoring pending work as failure — otherwise
- * the metric would climb as the queue drained, improving while nothing
- * improved.
+ * A JUDGMENT THAT NEVER COMPLETED IS NOT A WRONG ANSWER. Every judgment row is
+ * loaded regardless of status (the partition below is what filters to
+ * `status: 'completed'`, per-pairOrder — see score.ts's partitioning comment),
+ * so an in-flight calibration scores what it has rather than scoring pending
+ * work as failure — otherwise the metric would climb as the queue drained,
+ * improving while nothing improved.
  *
  * ── IDEMPOTENCE ────────────────────────────────────────────────────────────
  *
  * Every field is recomputed from the source rows and written as a FULL
  * OVERWRITE. Nothing increments. `verdictCount` is the landmine — an `Int`
  * with `@default(0)`, so an implementation reaching for `{ increment }` reads
- * perfectly and returns 60 on the second pass — and the
- * `@@unique([calibrationRunId, goldenItemId])` added in
- * 20260830120000_v2i_calibration_item_link is what guarantees the source rows
- * cannot be double-counted either. Re-scoring after a partial failure resumes;
- * it does not accumulate.
+ * perfectly and returns 60 on the second pass — and the partial unique index
+ * `EvaluationRun_calibrationRunId_goldenItemId_pairOrder_key` (v2p,
+ * prisma/migrations/20260907170000_v2p_evaluation_run_pair_order/migration.sql)
+ * is what guarantees the source rows cannot be double-counted either: at most
+ * one EvaluationRun per (calibration, item, pairOrder). It replaces the plain
+ * `@@unique([calibrationRunId, goldenItemId])` v2i added — dropped in v2p once
+ * a permuted item needed two rows, one per order. Re-scoring after a partial
+ * failure resumes; it does not accumulate.
  */
 
 import { agreement, type AgreementMethod } from '@/lib/agreement';
 import { constantVerdictBaseline, type ConstantBaseline } from '@/lib/calibration/baseline';
+import {
+  positionBiasFromPairs,
+  type Interval,
+  type PairedVerdictRow,
+} from '@/lib/calibration/position-bias';
 import {
   groundTruthReadings,
   preferenceFromVerdict,
@@ -100,6 +109,24 @@ import type { PrismaClient } from '@prisma/client';
  *  DB-free unit run. Same shape as `JudgeModelCatalogClient`
  *  (src/lib/model-catalog.ts) and `OidcUserClient` (src/lib/oidc-user.ts). */
 export type CalibrationScoreClient = Pick<PrismaClient, 'evaluationRun' | 'calibrationRun'>;
+
+export type CalibrationScoreErrorKind = 'pair-order-mismatch';
+
+/** One class, a `kind` for the branch — the same shape as
+ *  `CalibrationReadingsError` (readings.ts), for a failure this module
+ *  detects itself rather than one the read-time projection catches.
+ *  `kind` is folded into `message` (not just carried as a property) so a
+ *  bare `.toThrow(/pair-order-mismatch/)` finds it without unwrapping the
+ *  error object first. */
+export class CalibrationScoreError extends Error {
+  constructor(
+    readonly kind: CalibrationScoreErrorKind,
+    detail: string
+  ) {
+    super(`${kind}: ${detail}`);
+    this.name = 'CalibrationScoreError';
+  }
+}
 
 /** One item the judge got wrong, with everything needed to go look at it:
  *  the key, what the judge meant, and the raw (verdict, pairOrder) it meant
@@ -219,17 +246,54 @@ export type CalibrationScore = {
   selectiveBaseline: ConstantBaseline | null;
   /** selectiveAccuracy − selectiveBaseline.accuracy. `null` when either is. */
   selectiveMarginOverConstant: number | null;
+
+  // ── Position bias (v2o/A2.3) — the ONE set of figures here that is NOT
+  // AB-only (spec D4). Pooled from `positionBiasFromPairs` over BOTH
+  // partitions' raw verdict letters; every field above this comment stays
+  // computed over the AB partition alone, unchanged by this block's
+  // existence. See `positionBiasFromPairs`'s own module doc
+  // (src/lib/calibration/position-bias.ts) for what each number means and
+  // why there are two of them.
+  /** `null` exactly when `pairedDecisiveCount` is 0 — never 0.0, which would
+   *  read as "measured no bias" rather than "nothing paired to measure". */
+  positionBias: number | null;
+  /** `null` under the same rule as `positionBias`. Its no-information point
+   *  is 0.5, NOT 0 — see `formatPositionBiasLines` (baseline.ts). */
+  orderFlipRate: number | null;
+  /** The denominator BOTH estimators above share. 0 on an AB-only
+   *  calibration (`ordersRequested` never included 'BA', or the BA half
+   *  never produced a single completed judgment) — never render
+   *  `positionBias`/`orderFlipRate` without this beside them. */
+  pairedDecisiveCount: number;
+  /** Items that paired (a usable verdict in both orders) but tied in at
+   *  least one of them — excluded from both estimators, per
+   *  position-bias.ts's TIES section. */
+  tieExcludedCount: number;
+  /** Items that did not produce a usable verdict in both orders at all —
+   *  the far more common case for an AB-only calibration, where every item
+   *  is unpaired rather than tie-excluded. */
+  unpairedCount: number;
+  /** `null` only at `pairedDecisiveCount === 1` (no between-item variance is
+   *  estimable from one item) — see position-bias.ts. */
+  positionBiasInterval: Interval | null;
+  /** Wilson interval; defined at any `pairedDecisiveCount >= 1`, so this is
+   *  `null` only at `pairedDecisiveCount === 0`, same as the point estimate. */
+  orderFlipRateInterval: Interval | null;
 };
 
 type LoadedJudgment = {
   verdict: string | null;
   pairOrder: string | null;
   judgeModelVersionId: string | null;
+  status: string;
 };
 
 type LoadedRun = {
   id: string;
   goldenItem: { id: string; index: number; expected: string | null } | null;
+  /** v2p: the partition key. Read from the RUN, never from a judgment —
+   *  see EvaluationRun.pairOrder's doc and the mismatch guard below. */
+  pairOrder: string | null;
   modelJudgments: LoadedJudgment[];
 };
 
@@ -248,11 +312,22 @@ export async function scoreCalibrationRun(
     select: {
       id: true,
       goldenItem: { select: { id: true, index: true, expected: true } },
+      // v2p. The partition key, read off the RUN rather than derived from
+      // whichever judgment rows happen to be attached — see the loop below
+      // and EvaluationRun.pairOrder's doc. Omitting this from `select` would
+      // leave `run.pairOrder` `undefined` at runtime while `LoadedRun`'s cast
+      // types it as present, so the mismatch guard would compare every
+      // judgment against `undefined` instead of the real column.
+      pairOrder: true,
       modelJudgments: {
-        // See the module doc: pending/running/error judgments are absent
-        // answers, not wrong ones.
-        where: { status: 'completed' },
-        select: { verdict: true, pairOrder: true, judgeModelVersionId: true },
+        // NO `where: { status: 'completed' }` any more. With two judgments per
+        // run, filtering here made a run whose AB errored and whose BA
+        // completed arrive with `length === 1` — escaping the `length === 0`
+        // unjudged test, contributing no AB row, and reporting
+        // `missingVerdicts 0` over a short denominator. That is the 2026-08-31
+        // failure this file's comment below memorialises, in the direction
+        // that HIDES loss. The status gate moved into the partition.
+        select: { verdict: true, pairOrder: true, judgeModelVersionId: true, status: true },
       },
     },
     // Stable output for the disagreement list and for the reading order the
@@ -261,56 +336,172 @@ export async function scoreCalibrationRun(
     orderBy: { goldenItem: { index: 'asc' } },
   })) as unknown as LoadedRun[];
 
-  const rows: CalibrationVerdictRow[] = [];
-  // Parallel to `rows`, so the per-item outputs below can be built from the
-  // SAME narrowing groundTruthReadings does rather than a second copy of it.
-  const context: Array<{ runId: string; itemIndex: number }> = [];
+  type Partition = {
+    rows: CalibrationVerdictRow[];
+    /** Parallel to `rows` WITHIN this partition. It must travel with the rows,
+     * not beside the whole set: `rows` is indexed positionally at the
+     * disagreement push below, so grouping rows alone slides every
+     * disagreement past the first BA row onto another item's runId. */
+    context: Array<{ runId: string; itemIndex: number }>;
+    unjudgedItems: number;
+    dispatchedItemCount: number;
+  };
 
-  // Items that were LAUNCHED but produced nothing — the judgment errored,
-  // DLQ'd, or is still in flight. They must be counted here and nowhere else:
-  // the query above selects only `status: 'completed'` judgments, so such a run
-  // arrives with an EMPTY `modelJudgments` array, contributes no row below, and
-  // is therefore invisible to `groundTruthReadings` — which can only report a
-  // missing verdict for a row it was actually handed.
-  //
-  // Getting this wrong is not cosmetic. The first production calibration
-  // (2026-08-31) reported `missingVerdicts 0` while FOUR of thirty items had
-  // dead-lettered, directly under an accuracy line whose own denominator said
-  // 26. A reader is entitled to trust the field named "how many are missing"
-  // over arithmetic they have to do themselves, and that reading was wrong.
-  let unjudgedItems = 0;
-  // Items the judge was ASKED — counted here, past the same `goldenItem === null`
-  // gate as everything else, so a row that cannot be scored against anything is
-  // not counted as having been asked either.
-  let dispatchedItemCount = 0;
+  /** Key for a partition. Pointwise judgments carry `pairOrder: null` and all
+   *  belong to one partition; the empty string cannot collide with 'AB'/'BA'. */
+  const partitionKey = (pairOrder: string | null): string => pairOrder ?? '';
+
+  const partitions = new Map<string, Partition>();
+  const ensure = (key: string): Partition => {
+    let p = partitions.get(key);
+    if (!p) {
+      p = { rows: [], context: [], unjudgedItems: 0, dispatchedItemCount: 0 };
+      partitions.set(key, p);
+    }
+    return p;
+  };
+
+  // v2o/A2.3. Pooled across BOTH partitions as this loop runs — the ONE place
+  // in this function that reads both orders together; every other stored
+  // figure below is AB-only per spec D4. `pairOrder` here is READ OFF THE
+  // RUN (`run.pairOrder`), not the judgment: the scorer's partition key is
+  // the run's (see `partitionKey` above and EvaluationRun.pairOrder's doc),
+  // and this is the module that now documents the two-runs-per-item shape.
+  // The T3 guard below has already fired for any row that would disagree, so
+  // `run.pairOrder` and `judgment.pairOrder` are equal by the time a row
+  // reaches this push — but the SOURCE matters for a reader, not just the
+  // value.
+  const pairedVerdictRows: PairedVerdictRow[] = [];
 
   for (const run of runs) {
     // A calibration EvaluationRun without a goldenItem cannot be scored
-    // against anything. The @@unique([calibrationRunId, goldenItemId]) makes
-    // the pair the identity of the row, so this is a shape nothing writes;
-    // skipping beats crashing a whole calibration over it, and it cannot go
-    // unnoticed because the run contributes to no count.
+    // against anything. It cannot collide on (calibration, item, pairOrder)
+    // either — see EvaluationRun_calibrationRunId_goldenItemId_pairOrder_key
+    // — so this is a shape nothing writes; skipping beats crashing a whole
+    // calibration over it, and it cannot go unnoticed because the run
+    // contributes to no count.
     if (run.goldenItem === null) continue;
-    dispatchedItemCount += 1;
-    if (run.modelJudgments.length === 0) {
-      unjudgedItems += 1;
+
+    // The key is the RUN's, not the judgment's. With one judgment per run
+    // (v2p) the two are written from one variable at creation
+    // (run-launch.ts), and the guard below makes a later divergence loud
+    // rather than silent. A judgmentless run is attributed to ITS OWN
+    // partition right here, inline — no separate accumulator needed, because
+    // (unlike when the key lived on the judgment) the key is never unknown.
+    const key = partitionKey(run.pairOrder);
+    const partition = ensure(key);
+    partition.dispatchedItemCount += 1;
+
+    const completed = run.modelJudgments.filter((j) => j.status === 'completed');
+    if (completed.length === 0) {
+      partition.unjudgedItems += 1;
       continue;
     }
-    // One judgment per run in phase 1 (pairOrder 'AB' only). If phase 2's BA
-    // sweep lands and this is still flattening both orders into one pile,
-    // groundTruthReadings throws on the duplicate (item, rater) rather than
-    // letting Cohen quietly keep the first and discard the second.
-    for (const judgment of run.modelJudgments) {
-      rows.push({
+    for (const judgment of completed) {
+      // Trap T3. `EvaluationRun.pairOrder` and this judgment's own
+      // `pairOrder` are dual-written from one variable at creation and are
+      // supposed to always agree; the renderer reads the judgment's copy and
+      // this function reads the run's. If they ever diverge, staying silent
+      // files the row into one partition and resolves it as if it were the
+      // other — every downstream number stays in range, the constant floor
+      // still reads a plausible number, and nothing looks wrong. Loud beats
+      // plausible.
+      //
+      // This loop only ever sees `completed` judgments (the `completed`
+      // filter above), so a mismatched judgment that is still `pending` or
+      // `error` stays silent until it completes — correct for scoring, since
+      // an incomplete or errored judgment contributes no reading either way,
+      // but it means this is a read-time guard on scored rows, not a
+      // write-time invariant on every judgment ever inserted.
+      if (partitionKey(judgment.pairOrder) !== key) {
+        throw new CalibrationScoreError(
+          'pair-order-mismatch',
+          `judgment ${JSON.stringify(judgment.pairOrder)} on a run with pairOrder ${JSON.stringify(run.pairOrder)}`
+        );
+      }
+      partition.rows.push({
         itemId: run.goldenItem.id,
         expected: run.goldenItem.expected,
         raterId: judgment.judgeModelVersionId ?? 'model',
         verdict: judgment.verdict,
         pairOrder: judgment.pairOrder,
       });
-      context.push({ runId: run.id, itemIndex: run.goldenItem.index });
+      partition.context.push({ runId: run.id, itemIndex: run.goldenItem.index });
+      // v2o/A2.3: the pooled input to `positionBiasFromPairs`, built here
+      // rather than reconstructed later from `partitions` — this is the
+      // single place both orders are read together, and `run.pairOrder` (not
+      // `judgment.pairOrder`) is the source, per this loop's own header
+      // comment above.
+      pairedVerdictRows.push({
+        itemId: run.goldenItem.id,
+        verdict: judgment.verdict,
+        pairOrder: run.pairOrder,
+      });
     }
   }
+
+  // Pure, and independent of which partition ends up `primary` below: an
+  // AB-only calibration (no run ever presented 'BA') pools rows from one
+  // partition only, every item is `undefined` on the other side, and
+  // `positionBiasFromPairs` returns `positionBias: null, orderFlipRate: null,
+  // pairedDecisiveCount: 0` — never zeroes. See position-bias.ts's own
+  // module doc for the two estimators and the tie-exclusion rule.
+  const positionBiasResult = positionBiasFromPairs(pairedVerdictRows);
+
+  // THE PARTITION THAT FEEDS THE STORED COLUMNS. 'AB' whenever any run
+  // presented that order — even one that produced nothing but errors —
+  // because per the spec's D2 the stored rawAgreement/kappa/verdictCount stay
+  // AB-only: AB is the canonical order, full stop, regardless of what else
+  // ran alongside it. This branch is unconditional (no dispatch/rows check),
+  // so a permuted item — an AB run sitting beside a judgmentless BA run for
+  // the SAME item — reports AB's own count, never polluted by BA's loss.
+  // Every one of the 22 historical rows scores bit-identically.
+  //
+  // Only when NO run EVER presented 'AB' does a fallback apply, and it picks
+  // a partition that was actually DISPATCHED TO (dispatchedItemCount > 0),
+  // never a synthetic empty one. That predicate is load-bearing, and got it
+  // wrong once already: an earlier version of this line preferred a
+  // partition with `rows.length > 0` instead, which is wrong in exactly the
+  // case that matters — a non-AB partition with real dispatch and ZERO rows
+  // (every run still pending, or every judgment errored/DLQ'd). That version
+  // fell through to a fresh '' partition and reported `dispatchedItemCount 0
+  // / missingVerdicts 0 / noVerdictRate null` for a calibration that had in
+  // fact lost everything — the SAME hidden-loss direction as the 2026-08-31
+  // incident this file's header memorialises (missingVerdicts 0 while four of
+  // thirty items had dead-lettered), just one layer up and inverted by its
+  // own fallback. `dispatchedItemCount > 0` reports that calibration's real
+  // N-dispatched/N-missing instead of zeroing it into invisibility.
+  //
+  // This cannot be ambiguous on real data: `PairOrder` is `'AB' | 'BA'` and
+  // the CHECK `EvaluationRun_calibration_needs_order` requires a non-NULL
+  // `pairOrder` on every row with a non-NULL `calibrationRunId` — the only
+  // rows this query returns — and calibration/launch.ts refuses any golden
+  // set whose protocol isn't 'pairwise', so a pointwise calibration cannot
+  // exist to contribute a real '' key here. A genuine calibration therefore
+  // has at most ONE candidate for this fallback: 'BA'. `.find()`'s Map-
+  // insertion-order tie-break is dead code on real data; it is exercised only
+  // by a unit fixture that deliberately leaves `pairOrder` unset.
+  const primaryKey =
+    partitions.has('AB')
+      ? 'AB'
+      : ([...partitions.entries()].find(([k, p]) => k !== 'AB' && p.dispatchedItemCount > 0)?.[0] ?? '');
+  const primary = ensure(primaryKey);
+  const { rows, context } = primary;
+  // Items that were LAUNCHED but produced nothing for this partition — the
+  // judgment errored, DLQ'd, or is still in flight. They must be counted here
+  // and nowhere else: `groundTruthReadings` can only report a missing verdict
+  // for a row it was actually handed.
+  //
+  // Getting this wrong is not cosmetic. The first production calibration
+  // (2026-08-31) reported `missingVerdicts 0` while FOUR of thirty items had
+  // dead-lettered, directly under an accuracy line whose own denominator said
+  // 26. A reader is entitled to trust the field named "how many are missing"
+  // over arithmetic they have to do themselves, and that reading was wrong.
+  const unjudgedItems = primary.unjudgedItems;
+  // Items the judge was ASKED — counted past the same `goldenItem === null`
+  // gate as everything else, so a row that cannot be scored against anything
+  // is not counted as having been asked either.
+  const dispatchedItemCount = primary.dispatchedItemCount;
 
   const projection = groundTruthReadings(rows);
 
@@ -443,6 +634,13 @@ export async function scoreCalibrationRun(
     selectiveAccuracy,
     selectiveBaseline,
     selectiveMarginOverConstant,
+    positionBias: positionBiasResult.positionBias,
+    orderFlipRate: positionBiasResult.orderFlipRate,
+    pairedDecisiveCount: positionBiasResult.pairedDecisiveCount,
+    tieExcludedCount: positionBiasResult.tieExcludedCount,
+    unpairedCount: positionBiasResult.unpairedCount,
+    positionBiasInterval: positionBiasResult.positionBiasInterval,
+    orderFlipRateInterval: positionBiasResult.orderFlipRateInterval,
     method: {
       statistic: result.statistic,
       weighting: result.weighting,
@@ -472,6 +670,30 @@ export async function scoreCalibrationRun(
       committedCount,
       selectiveAccuracy,
       selectiveBaselineAccuracy: selectiveBaseline === null ? null : selectiveBaseline.accuracy,
+      // v2o/A2.3. Pooled over BOTH orders (the one exception to "AB-only" on
+      // this row, per spec D4) — `null`/`0` on an AB-only calibration, never
+      // zeroes. `tieExcludedCount`/`unpairedCount`/the two intervals are NOT
+      // stored (no v2o column for them): they are returned on `CalibrationScore`
+      // for the CLI's formatter, the same way `constantBaseline`'s full shape
+      // is returned but only `.accuracy` is a column.
+      positionBias: positionBiasResult.positionBias,
+      orderFlipRate: positionBiasResult.orderFlipRate,
+      pairedDecisiveCount: positionBiasResult.pairedDecisiveCount,
+      // `ordersRequested` is DELIBERATELY NOT WRITTEN HERE. launch.ts writes
+      // it once, at CREATE time, from what the launch actually asked for —
+      // it does not change after that. A fix-round-1 review caught an
+      // earlier version of this file reading it back off the header and
+      // writing that same value straight through: harmless on a healthy run
+      // (it just re-wrote what launch.ts already wrote), but a
+      // `scoreCalibrationRun` call on a header with ZERO `EvaluationRun`s —
+      // reachable via `scripts/calibration/run.ts --score-only=<id>` (or a
+      // fresh launch's poll loop falling out at the timeout before a single
+      // run lands) — read `null` off the empty `runs` array and clobbered a
+      // correct 'AB,BA' back to `null`. That is precisely the "never
+      // permuted" vs "the BA half died" ambiguity spec D5 created this
+      // column to eliminate. The scorer has no business rewriting a column
+      // it never computes; leaving it out of this update is what makes the
+      // launch-time write durable.
       // v2m. Scoring is ex post and re-runnable, so the numbers above are
       // uninterpretable without the generation that produced them. Written from
       // the CONSTANT, never a literal, in the same full overwrite: the stamp and

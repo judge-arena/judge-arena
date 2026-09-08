@@ -5,7 +5,9 @@ import { prisma } from '@/lib/db';
 import { logger } from '@/lib/logger';
 import { isGoldenSetFrozen } from '@/lib/golden-sets';
 import { effectiveSamplingParams } from '@/lib/llm/sampling';
-import { launchCalibrationRun, MAX_CALIBRATION_ITEMS } from '@/lib/calibration/launch';
+import { launchCalibrationRun, MAX_CALIBRATION_ITEMS, maxPairedCalibrationItems } from '@/lib/calibration/launch';
+import { launchSingleRun } from '@/lib/run-launch';
+import { resolveTimeoutBudgets, MAX_HARD_CAP_MS } from '@/lib/llm/timeout-policy';
 import { seedPromptTemplates } from '../../prisma/seed-prompt-templates';
 
 // ─── The calibration ⇄ golden-item link (A2.1, v2i) ────────────────────────
@@ -242,29 +244,36 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
       data: { judgeModelVersionId: world.version.id, goldenSetId: world.goldenSet.id },
     });
 
+    // v2p: a calibration run always names its order (CHECK
+    // EvaluationRun_calibration_needs_order) — 'AB' both times, since this
+    // test is pinning the SAME-order collision, not the cross-order case
+    // ('two ORDINARY runs' below covers ordinary rows, and the v2p describe
+    // block below covers the OTHER-order acceptance).
     await db.evaluationRun.create({
       data: {
         evaluationId: evaluation.id,
         calibrationRunId: calibrationRun.id,
         goldenItemId: world.items[0].id,
+        pairOrder: 'AB',
       },
     });
 
     // This is what makes a re-launch after a partial failure resumable rather
     // than double-counting: the same item cannot be measured twice inside one
-    // calibration.
+    // calibration (at the same order).
     await expect(
       db.evaluationRun.create({
         data: {
           evaluationId: evaluation.id,
           calibrationRunId: calibrationRun.id,
           goldenItemId: world.items[0].id,
+          pairOrder: 'AB',
         },
       })
     ).rejects.toMatchObject({ code: 'P2002' });
   });
 
-  it('two ORDINARY runs (both columns NULL) coexist — the index is NULLS DISTINCT, and must stay that way', async () => {
+  it('two ORDINARY runs (both columns NULL) coexist — the partial WHERE keeps them out of the index entirely', async () => {
     const world = await mkWorld({ items: 0 });
     const evaluation = await db.evaluation.create({
       data: { projectId: world.project.id, userId: world.user.id, inputText: 'q' },
@@ -273,11 +282,21 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
     const first = await db.evaluationRun.create({ data: { evaluationId: evaluation.id } });
     const second = await db.evaluationRun.create({ data: { evaluationId: evaluation.id } });
 
-    // Postgres' DEFAULT NULLS DISTINCT is load-bearing here, and the v2i
-    // migration relies on it deliberately (no hand-edit, unlike
-    // 20260728215410_v2b_idempotency_tighten's ModelJudgment index). Hand-edit
-    // this one to NULLS NOT DISTINCT and EVERY ordinary run after the first
-    // fails P2002 — this assertion is the tripwire for that.
+    // v2p SUPERSEDED v2i's index: the live unique index on (calibrationRunId,
+    // goldenItemId, pairOrder) is `NULLS NOT DISTINCT`, not `NULLS DISTINCT` —
+    // it has to be, so that two calibration rows sharing a NULL pairOrder
+    // still collide (the idempotency guard score.ts relies on). What keeps
+    // THESE two ordinary runs (both columns NULL, including pairOrder)
+    // coexisting is the index's `WHERE "calibrationRunId" IS NOT NULL`
+    // predicate: an ordinary run's calibrationRunId is NULL, so it never
+    // enters the index at all, and rows outside an index cannot collide in
+    // it regardless of NULLS DISTINCT/NOT DISTINCT. Drop that WHERE clause
+    // and EVERY ordinary run after the first fails P2002 — this assertion is
+    // the tripwire for that. (See `prisma/migrations/
+    // 20260907170000_v2p_evaluation_run_pair_order/migration.sql` and the
+    // `v2p pairOrder discriminator` describe block below, which pins the
+    // same predicate directly against the new index rather than inferring it
+    // from this pre-v2p fixture shape.)
     expect(first.id).not.toBe(second.id);
     expect(first.calibrationRunId).toBeNull();
     expect(first.goldenItemId).toBeNull();
@@ -293,11 +312,14 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
     const calibrationRun = await db.calibrationRun.create({
       data: { judgeModelVersionId: world.version.id, goldenSetId: world.goldenSet.id },
     });
+    // v2p: CHECK EvaluationRun_calibration_needs_order requires pairOrder
+    // whenever calibrationRunId is set.
     await db.evaluationRun.create({
       data: {
         evaluationId: evaluation.id,
         calibrationRunId: calibrationRun.id,
         goldenItemId: world.items[0].id,
+        pairOrder: 'AB',
       },
     });
 
@@ -468,6 +490,231 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
     const runs = await db.evaluationRun.findMany({ where: { calibrationRunId: result.calibrationRunId } });
     expect(runs).toHaveLength(2);
     expect(runs.every((run) => run.status === 'error')).toBe(true);
+  });
+
+  it('a publish failure on the FIRST order still attempts the SECOND — the item is reported failed either way (review F3)', async () => {
+    // A2.2 shape: AB and BA are now two INDEPENDENT `launchSingleRun` calls
+    // (two transactions, two publish attempts) rather than two judgments
+    // inside one run's sequential publish loop that stops at the first
+    // failure. This pins that the SECOND order is not short-circuited by the
+    // first order's publish failure — the review judged short-circuiting
+    // WRONG: it would leave the item with a single run row, which score.ts
+    // would read as a legitimately single-order item rather than a
+    // half-failed pair.
+    const world = await mkWorld({ items: 1 });
+    let calls = 0;
+    const result = await launchCalibrationRun(
+      { ...launchParamsFrom(world), orders: ['AB', 'BA'] },
+      {
+        publish: async () => {
+          calls += 1;
+          if (calls === 1) {
+            // AB is dispatched first (orders.join order): fail ONLY this,
+            // the FIRST, call.
+            throw new Error('broker unreachable on the first order');
+          }
+        },
+      }
+    );
+
+    // The second (BA) launchSingleRun call still happened.
+    expect(calls).toBe(2);
+
+    const runs = await db.evaluationRun.findMany({ where: { calibrationRunId: result.calibrationRunId } });
+    expect(runs).toHaveLength(2);
+    const ab = runs.find((run) => run.pairOrder === 'AB')!;
+    const ba = runs.find((run) => run.pairOrder === 'BA')!;
+    // AB's publish failed -> launchSingleRun compensated it to 'error'. BA's
+    // publish succeeded -> it is a normal, still-`pending` run — a
+    // now-orphaned verdict-in-waiting that `pairedDecisiveCount` will simply
+    // never see a counterpart for.
+    expect(ab.status).toBe('error');
+    expect(ba.status).toBe('pending');
+
+    // The ITEM is reported FAILED, not accepted — an unpaired verdict is not
+    // a usable calibration result for this item.
+    expect(result.accepted).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0].goldenItemId).toBe(world.items[0].id);
+    expect(result.failed[0].reason).toMatch(/broker unreachable on the first order/);
+  });
+
+  // ── (2b) A2.2 (v2p): the fan-out moves from judgments-within-a-run to ─────
+  //       runs-within-an-Evaluation
+  //
+  // `launchSingleRun.pairOrder` (singular) is written from ONE variable onto
+  // BOTH `EvaluationRun.pairOrder` and its single `ModelJudgment.pairOrder`
+  // in the same nested create (trap T3) — see run-launch.ts's module doc.
+  // `launchCalibrationRun.orders` (plural) is still the per-launch opt-in
+  // (spec D5): it now calls `launchSingleRun` ONCE PER ORDER, against the
+  // SAME `evaluationId`, rather than asking one `launchSingleRun` call to
+  // fan out internally. `claim.ts` stamps a run's `deadlineAt` exactly ONCE,
+  // from `judgmentCount`, at first dequeue — a judgment inserted after that
+  // point would inherit an already-expired deadline and be reaped
+  // (`src/worker/reaper.ts`); one judgment per run, fixed at creation, makes
+  // that true by construction rather than by convention.
+
+  it('launchSingleRun writes the SAME pairOrder onto EvaluationRun and its single ModelJudgment', async () => {
+    const world = await mkWorld({ items: 0 });
+    const evaluation = await db.evaluation.create({
+      data: { projectId: world.project.id, userId: world.user.id, rubricId: world.rubric.id, inputText: 'q' },
+    });
+
+    const launch = await launchSingleRun(
+      {
+        evaluationId: evaluation.id,
+        triggeredById: world.user.id,
+        judgeModelVersionIds: [world.version.id],
+        protocol: 'pairwise',
+        candidates: [
+          { position: 0, responseText: 'candidate A' },
+          { position: 1, responseText: 'candidate B' },
+        ],
+        pairOrder: 'BA',
+      },
+      { publish: noopPublish }
+    );
+
+    const run = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: launch.run.id } });
+    expect(run.pairOrder).toBe('BA');
+    const judgments = await prisma.modelJudgment.findMany({ where: { runId: launch.run.id } });
+    expect(judgments).toHaveLength(1);
+    expect(judgments[0].pairOrder).toBe('BA');
+    // Both must exist before the run is claimable: claim.ts stamps deadlineAt
+    // once from judgmentCount, so a late insert inherits an expired deadline.
+    expect(judgments[0].status).toBe('pending');
+  });
+
+  it('launchSingleRun still creates exactly one AB judgment (and run.pairOrder "AB") when pairOrder is omitted', async () => {
+    const world = await mkWorld({ items: 0 });
+    const evaluation = await db.evaluation.create({
+      data: { projectId: world.project.id, userId: world.user.id, rubricId: world.rubric.id, inputText: 'q' },
+    });
+
+    const launch = await launchSingleRun(
+      {
+        evaluationId: evaluation.id,
+        triggeredById: world.user.id,
+        judgeModelVersionIds: [world.version.id],
+        protocol: 'pairwise',
+        candidates: [
+          { position: 0, responseText: 'candidate A' },
+          { position: 1, responseText: 'candidate B' },
+        ],
+      },
+      { publish: noopPublish }
+    );
+    const run = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: launch.run.id } });
+    expect(run.pairOrder).toBe('AB');
+    const judgments = await prisma.modelJudgment.findMany({ where: { runId: launch.run.id } });
+    expect(judgments).toHaveLength(1);
+    expect(judgments[0].pairOrder).toBe('AB');
+  });
+
+  it('maxPairedCalibrationItems() is 719 at the DEFAULT hard cap — the stricter, PAIRED item ceiling', () => {
+    expect(maxPairedCalibrationItems()).toBe(719);
+  });
+
+  it('a raised EVALUATION_MODEL_HARD_CAP_MS genuinely LOWERS the paired ceiling', () => {
+    // This is the assertion that would have caught the bug: the ceiling used
+    // to be a static `= 719` literal compared against a CONFIGURABLE cap.
+    // `EVALUATION_MODEL_HARD_CAP_MS` is env-tunable up to `MAX_HARD_CAP_MS`
+    // (1_170_000 ms), and at that ceiling the genuinely safe paired bound is
+    // ~553, not 719 — a static 719 would have stayed green at exactly the
+    // configuration this test now exercises.
+    const atDefault = maxPairedCalibrationItems();
+    const atMaxHardCap = maxPairedCalibrationItems(
+      resolveTimeoutBudgets({ EVALUATION_MODEL_HARD_CAP_MS: String(MAX_HARD_CAP_MS) })
+    );
+    expect(atDefault).toBe(719);
+    expect(atMaxHardCap).toBe(553);
+    expect(atMaxHardCap).toBeLessThan(atDefault);
+  });
+
+  it('creates 2N EvaluationRuns with ONE judgment each for a permuted calibration', async () => {
+    const world = await mkWorld({ items: 2 });
+
+    const result = await launchCalibrationRun(
+      { ...launchParamsFrom(world), orders: ['AB', 'BA'] },
+      { publish: noopPublish }
+    );
+
+    expect(result.failed).toEqual([]);
+    const runs = await db.evaluationRun.findMany({
+      where: { calibrationRunId: result.calibrationRunId },
+      include: { _count: { select: { modelJudgments: true } } },
+    });
+    expect(runs).toHaveLength(world.items.length * 2);
+    expect(runs.every((r) => r._count.modelJudgments === 1)).toBe(true);
+    expect(runs.filter((r) => r.pairOrder === 'AB')).toHaveLength(world.items.length);
+    expect(runs.filter((r) => r.pairOrder === 'BA')).toHaveLength(world.items.length);
+
+    // v2o. COMMA-SEPARATED — membership is `.includes()`, not `===`; see
+    // schema.prisma's own doc on this column.
+    const header = await db.calibrationRun.findUniqueOrThrow({ where: { id: result.calibrationRunId } });
+    expect(header.ordersRequested).toBe('AB,BA');
+  });
+
+  it('puts both orders of one item on the SAME Evaluation', async () => {
+    const world = await mkWorld({ items: 2 });
+
+    const result = await launchCalibrationRun(
+      { ...launchParamsFrom(world), orders: ['AB', 'BA'] },
+      { publish: noopPublish }
+    );
+
+    const runs = await db.evaluationRun.findMany({ where: { calibrationRunId: result.calibrationRunId } });
+    const byEvaluation = new Map<string, number>();
+    for (const run of runs) {
+      byEvaluation.set(run.evaluationId, (byEvaluation.get(run.evaluationId) ?? 0) + 1);
+    }
+    expect([...byEvaluation.values()].every((n) => n === 2)).toBe(true);
+    // Evaluation.count stays N — the leaderboard and the public counts read it.
+    expect(byEvaluation.size).toBe(world.items.length);
+    expect(await db.evaluation.count()).toBe(world.items.length);
+  });
+
+  it('defaults to a single AB run per item when orders is omitted', async () => {
+    const world = await mkWorld({ items: 2 });
+
+    const result = await launchCalibrationRun(launchParamsFrom(world), { publish: noopPublish });
+
+    const runs = await db.evaluationRun.findMany({ where: { calibrationRunId: result.calibrationRunId } });
+    expect(runs).toHaveLength(world.items.length);
+    expect(runs.every((r) => r.pairOrder === 'AB')).toBe(true);
+  });
+
+  it('copies RunCandidate positions VERBATIM into both orders — no materialised swap', async () => {
+    // Swapping position here is spec build W: render.ts re-sorts it, reverses
+    // it again, and the mirror prompt comes out byte-identical to AB while
+    // readings.ts inverts anyway.
+    const world = await mkWorld({ items: 2 });
+
+    const result = await launchCalibrationRun(
+      { ...launchParamsFrom(world), orders: ['AB', 'BA'] },
+      { publish: noopPublish }
+    );
+
+    const runs = await db.evaluationRun.findMany({
+      where: { calibrationRunId: result.calibrationRunId },
+      include: { runCandidates: { orderBy: { position: 'asc' } } },
+    });
+    for (const item of world.items) {
+      const ab = runs.find((r) => r.pairOrder === 'AB' && r.goldenItemId === item.id)!;
+      const ba = runs.find((r) => r.pairOrder === 'BA' && r.goldenItemId === item.id)!;
+      expect(ba.runCandidates.map((c) => c.responseText)).toEqual(ab.runCandidates.map((c) => c.responseText));
+      expect(ba.runCandidates.map((c) => c.position)).toEqual([0, 1]);
+      expect(ab.runCandidates.map((c) => c.position)).toEqual([0, 1]);
+    }
+  });
+
+  it('launchCalibrationRun still records ordersRequested "AB" when orders is omitted', async () => {
+    const world = await mkWorld({ items: 1 });
+
+    const result = await launchCalibrationRun(launchParamsFrom(world), { publish: noopPublish });
+
+    const header = await db.calibrationRun.findUniqueOrThrow({ where: { id: result.calibrationRunId } });
+    expect(header.ordersRequested).toBe('AB');
   });
 
   // ── (3) The refusals, and what they must NOT leave behind ────────────────
@@ -766,5 +1013,96 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
 
     expect(result.budgetWarning).toMatch(/max_tokens 4096/);
     expect(result.accepted).toEqual([world.items[0].id]);
+  });
+});
+
+// ─── v2p: the pairOrder discriminator on EvaluationRun (A2.2) ──────────────
+//
+// The order discriminator moves from ModelJudgment up to EvaluationRun so a
+// permuted calibration can be 2N runs with ONE judgment each rather than N
+// runs with two (the v2o shape) — see docs/superpowers/specs/
+// 2026-09-07-permuted-run-design.md D1. This block pins the new index and
+// CHECK constraint in isolation, one raw `db.evaluationRun.create` at a
+// time, deliberately not through `launchCalibrationRun` — the launch path's
+// own reshape to "2N runs, one judgment each" is a separate task.
+describe('v2p pairOrder discriminator on EvaluationRun (DB)', () => {
+  let world: Awaited<ReturnType<typeof mkWorld>>;
+  let evaluationId: string;
+  let calibrationRunId: string;
+  let goldenItemId: string;
+
+  beforeEach(async () => {
+    vi.restoreAllMocks();
+    await truncateAll();
+    await seedPromptTemplates(db);
+
+    world = await mkWorld({ items: 1 });
+    const evaluation = await db.evaluation.create({
+      data: { projectId: world.project.id, userId: world.user.id, inputText: 'q' },
+    });
+    const calibrationRun = await db.calibrationRun.create({
+      data: { judgeModelVersionId: world.version.id, goldenSetId: world.goldenSet.id },
+    });
+    evaluationId = evaluation.id;
+    calibrationRunId = calibrationRun.id;
+    goldenItemId = world.items[0].id;
+  });
+
+  /** One calibration-side EvaluationRun, at a given pairOrder. Each call gets
+   * its own `evaluationId` so the collision under test is on
+   * (calibrationRunId, goldenItemId, pairOrder) alone, not on any other
+   * unique constraint sharing an Evaluation would introduce. */
+  async function createCalibrationEvaluationRun(opts: {
+    calibrationRunId: string;
+    goldenItemId: string;
+    pairOrder: 'AB' | 'BA';
+  }) {
+    const runEvaluation = await db.evaluation.create({
+      data: { projectId: world.project.id, userId: world.user.id, inputText: 'q' },
+    });
+    return db.evaluationRun.create({
+      data: {
+        evaluationId: runEvaluation.id,
+        calibrationRunId: opts.calibrationRunId,
+        goldenItemId: opts.goldenItemId,
+        pairOrder: opts.pairOrder,
+      },
+    });
+  }
+
+  /** An ORDINARY run — both calibration columns and pairOrder left NULL. */
+  function ordinaryRun() {
+    return { evaluationId };
+  }
+
+  it('rejects a second run for the same (calibrationRun, goldenItem, pairOrder)', async () => {
+    await createCalibrationEvaluationRun({ calibrationRunId, goldenItemId, pairOrder: 'AB' });
+    await expect(
+      createCalibrationEvaluationRun({ calibrationRunId, goldenItemId, pairOrder: 'AB' })
+    ).rejects.toMatchObject({ code: 'P2002' });
+  });
+
+  it('ACCEPTS the same (calibrationRun, goldenItem) at the OTHER pairOrder', async () => {
+    await createCalibrationEvaluationRun({ calibrationRunId, goldenItemId, pairOrder: 'AB' });
+    await expect(
+      createCalibrationEvaluationRun({ calibrationRunId, goldenItemId, pairOrder: 'BA' })
+    ).resolves.toBeTruthy();
+  });
+
+  it('still lets two ORDINARY runs coexist — the partial predicate keeps them out of the index', async () => {
+    // Without `WHERE "calibrationRunId" IS NOT NULL`, NULLS NOT DISTINCT makes
+    // every ordinary run's (NULL, NULL, NULL) equal and THIS fails P2002.
+    await prisma.evaluationRun.create({ data: ordinaryRun() });
+    await expect(prisma.evaluationRun.create({ data: ordinaryRun() })).resolves.toBeTruthy();
+  });
+
+  it('refuses a calibration run with no pairOrder — the CHECK constraint', async () => {
+    await expect(
+      prisma.$executeRawUnsafe(
+        `insert into "EvaluationRun" (id, "evaluationId", "calibrationRunId", "goldenItemId", status, "createdAt", "updatedAt")
+         values ($1,$2,$3,$4,'pending',now(),now())`,
+        'er-no-order', evaluationId, calibrationRunId, goldenItemId
+      )
+    ).rejects.toThrow(/EvaluationRun_calibration_needs_order/);
   });
 });

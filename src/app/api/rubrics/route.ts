@@ -5,6 +5,7 @@ import { requireAuth, requireScope, isAdmin, optionalAuth, RateLimitedError } fr
 import { generateSlug } from '@/lib/config';
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicRubric } from '@/lib/serializers';
+import { canonicalOrderRunWhere } from '@/lib/run-counting';
 
 const criterionSchema = z.object({
   name: z.string().min(1),
@@ -42,7 +43,9 @@ export async function GET() {
       include: {
         criteria: { orderBy: { order: 'asc' } },
         user: { select: { id: true, name: true, email: true } },
-        _count: { select: { evaluations: true, evaluationRuns: true } },
+        // Task 9: see the identical comment on GET /api/rubrics/[id] —
+        // `canonicalOrderRunWhere` keeps this an "N runs" count, not "2N".
+        _count: { select: { evaluations: true, evaluationRuns: { where: canonicalOrderRunWhere } } },
       },
       orderBy: { updatedAt: 'desc' },
     });

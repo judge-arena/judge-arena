@@ -102,7 +102,7 @@ import { publishJudgmentExecute, resolveDestinationQueue } from '@/lib/queue/pub
 import { LANE_FALLBACK_QUEUE } from '@/lib/queue/lanes';
 import { resolveEndpointsForPairs, resolveEndpointsForVersions } from '@/lib/endpoint-resolution';
 import { maybeFinalizeRun } from '@/lib/run-finalizer';
-import { LEASE_MS } from './claim';
+import { clearRunDeadlineOnRequeue, LEASE_MS } from './claim';
 
 /** How often each replica attempts a sweep (whether or not it wins the lock). */
 export const SWEEP_INTERVAL_MS = 60_000;
@@ -211,6 +211,38 @@ const FORCE_FINALIZE_GRACE_MS = 3 * SWEEP_INTERVAL_MS;
  * imported, so this arm republishes its judgments onto a live judge lane and
  * then force-finalizes them. Production had ZERO such rows when this landed
  * (read-only check, 2026-09-03); re-run that check before any future import.
+ *
+ * ── A THIRD SOURCE, SINCE THE STALE-RECLAIM FIX: THIS IS NOW A WEDGED
+ *    WORKER'S ONLY BOUND TOO ───────────────────────────────────────────────
+ * `reclaimStaleJudgments` (below) clears `EvaluationRun.deadlineAt` after
+ * every successful reclaim of a stale `running` judgment — see that
+ * function's own comment for why (the pre-fix behavior force-finalized the
+ * very judgment the reclaim had just rescued). One consequence of that fix
+ * worth stating explicitly, not leaving implicit: for a judgment that is
+ * repeatedly WEDGED — a worker that hangs without ever throwing, so
+ * `judgment-consumer.ts`'s provider-error catch, and the `effectiveAttempt
+ * >= MAX_ATTEMPTS` cap inside it (`judgment-consumer.ts:1306-1308`), is
+ * never reached — nothing bounds the reclaim loop at the run-deadline layer
+ * any more. Each cycle: the reaper resets the row `running -> pending`
+ * (deliberately NOT incrementing `attemptCount` itself — see this file's own
+ * module doc) and clears the deadline; the NEXT `claimJudgment()` call, made
+ * by whichever consumer picks up the republished message, reclaims it
+ * `pending -> running` and DOES increment `attemptCount`; if that claimant
+ * also hangs, the cycle repeats. `attemptCount` climbs every cycle, but
+ * `MAX_ATTEMPTS` is never evaluated against it for this failure mode, so it
+ * climbs unbounded — production has already observed `attemptCount` reach
+ * 6, past `MAX_ATTEMPTS` (3), which is exactly this loop surviving a cap
+ * meant for a different failure mode (a provider call that throws, not one
+ * that never returns). The only remaining bound on such a judgment is THIS
+ * constant, via `sweepOverdueRuns`'s null-deadline arm below — the same
+ * 45-day bound a never-dequeued judgment gets. That is a real widening from
+ * the pre-fix ~19-minute bound (`deadline + FORCE_FINALIZE_GRACE_MS`), and
+ * it is accepted rather than an oversight: the pre-fix bound was the bug
+ * this task fixes, because it force-finalized HEALTHY reclaimed work
+ * indistinguishably from truly dead work. A genuinely wedged judgment is now
+ * bounded the same loose-but-bounded way a lost message is, not tightly —
+ * and loosely-but-boundedly is strictly better than the alternative this
+ * fix removes.
  */
 export const NEVER_STARTED_TIMEOUT_MS = 45 * 24 * 60 * 60 * 1000;
 
@@ -342,6 +374,41 @@ async function reclaimStaleJudgments(): Promise<void> {
       );
     } catch (error) {
       logger.error('reaper: failed to republish a reclaimed stale judgment', {
+        judgmentId: judgment.id,
+        runId: judgment.runId,
+        error: serializeError(error),
+      });
+      continue;
+    }
+
+    // The run's execution deadline was sized for a judgment that is no
+    // longer executing. Every OTHER running -> pending path clears it —
+    // judgment-consumer.ts:1346 on a retryable error — and claim.ts:252-254
+    // states the invariant this restores: "deadlineAt is non-null EXACTLY
+    // WHILE the run has a claimed judgment in flight."
+    //
+    // Without it this sweep kills the judgment it just rescued.
+    // LEASE_MS is hardCapMs + 30_000 and runStartBudgetMs(1) is
+    // hardCapMs + 60_000, so a stale reclaim lands 30s or more PAST the
+    // run's own deadline; sweepOverdueRuns then runs later in this SAME
+    // runReaperSweep() call, sees deadlineAt < now, and stamps every
+    // `pending` judgment on the run `reaper: abandoned` — including this
+    // one, which is `pending` because we just made it so. One production
+    // judgment (cmtluq5t5038x2l0s83p3h1aw) died exactly this way.
+    //
+    // AFTER the publish, never before — deliberately the OPPOSITE order from
+    // judgment-consumer.ts:1346, which clears BEFORE its own republish at
+    // :1356. That order does not work here: clearing first and then failing
+    // to publish would leave a `pending` judgment with no deadline AND no
+    // queue message, reachable only by the 45-day never-started net instead
+    // of by the retry that was supposed to follow. So this path clears only
+    // once the publish has already succeeded. Best-effort, same as the
+    // consumer's call in that regard — a failure to CLEAR (not to publish)
+    // must not fail the reclaim.
+    try {
+      await clearRunDeadlineOnRequeue(judgment.runId);
+    } catch (error) {
+      logger.error('reaper: failed to clear the run deadline after reclaiming a stale judgment', {
         judgmentId: judgment.id,
         runId: judgment.runId,
         error: serializeError(error),

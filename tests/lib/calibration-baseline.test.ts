@@ -4,6 +4,7 @@ import {
   constantVerdictBaseline,
   formatConstantBaselineLines,
   formatNoVerdictRateLine,
+  formatPositionBiasLines,
   formatSelectiveAccuracyLines,
 } from '@/lib/calibration/baseline';
 
@@ -370,6 +371,89 @@ describe('calibration/baseline: formatNoVerdictRateLine', () => {
   });
 });
 
+describe('formatPositionBiasLines — v2o/A2.3, never a rate without pairedDecisiveCount', () => {
+  // The rendering lives here, not in scripts/calibration/run.ts, for the same
+  // reason every other formatter in this file does: that script is outside
+  // every coverage include (vitest.config.ts:37) and has no harness. The
+  // load-bearing parts of these strings are the empty-return gate on
+  // `pairedDecisiveCount === 0`, the `< 20` warning, and the ⓘ note that
+  // orderFlipRate's no-information point is 0.5, not 0 — all three are
+  // silently wrong in exactly the way nothing downstream would notice.
+
+  it('pairedDecisiveCount 0 → no lines at all, not a line of nulls', () => {
+    // An AB-only calibration (no BA half ever launched) reports positionBias
+    // and orderFlipRate as `null` — an empty array is the only honest
+    // rendering; `n/a` would suggest a number exists and could not be shown.
+    expect(
+      formatPositionBiasLines({
+        positionBias: null,
+        orderFlipRate: null,
+        pairedDecisiveCount: 0,
+        tieExcludedCount: 0,
+        unpairedCount: 30,
+        positionBiasInterval: null,
+        orderFlipRateInterval: null,
+      })
+    ).toEqual([]);
+  });
+
+  it('small n (< 20): both estimators, their shared denominator, BOTH intervals, the no-information note, AND the low-n warning', () => {
+    // The pure first-slot-stamper archetype (position-bias.ts's own module
+    // doc): positionBias 0.5, orderFlipRate 1.0. n=4 is deliberately under 20
+    // so this one fixture also pins the warning line.
+    const lines = formatPositionBiasLines({
+      positionBias: 0.5,
+      orderFlipRate: 1,
+      pairedDecisiveCount: 4,
+      tieExcludedCount: 2,
+      unpairedCount: 1,
+      positionBiasInterval: { low: 0.5, high: 0.5 },
+      orderFlipRateInterval: { low: 0.5101091635454027, high: 1 },
+    });
+    expect(lines).toEqual([
+      '  position bias  0.5000   (n=4 paired decisive items; 2 excluded for a tie in either order, 1 unpaired)   95% CI [0.5000, 0.5000]',
+      '  order flip     1.0000   (n=4)   95% CI [0.5101, 1.0000]',
+      "  ⓘ orderFlipRate's no-information point is 0.5, not 0 — an order-independent judge already flips at least half the time, so do not read 0.4 here as 'good'.",
+      '  ⚠ pairedDecisiveCount is only 4 (< 20) — both estimators above are on a small paired sample; read the point values as noisy.',
+    ]);
+  });
+
+  it('n >= 20: no low-n warning', () => {
+    const lines = formatPositionBiasLines({
+      positionBias: 0.1,
+      orderFlipRate: 0.3,
+      pairedDecisiveCount: 25,
+      tieExcludedCount: 0,
+      unpairedCount: 0,
+      positionBiasInterval: { low: 0.05, high: 0.15 },
+      orderFlipRateInterval: { low: 0.2, high: 0.4 },
+    });
+    expect(lines).toEqual([
+      '  position bias  0.1000   (n=25 paired decisive items; 0 excluded for a tie in either order, 0 unpaired)   95% CI [0.0500, 0.1500]',
+      '  order flip     0.3000   (n=25)   95% CI [0.2000, 0.4000]',
+      "  ⓘ orderFlipRate's no-information point is 0.5, not 0 — an order-independent judge already flips at least half the time, so do not read 0.4 here as 'good'.",
+    ]);
+    expect(lines.some((l) => l.includes('⚠'))).toBe(false);
+  });
+
+  it('n = 1: positionBiasInterval is null (no between-item variance is estimable) and renders n/a, not a collapsed point interval', () => {
+    const lines = formatPositionBiasLines({
+      positionBias: 0.5,
+      orderFlipRate: 1,
+      pairedDecisiveCount: 1,
+      tieExcludedCount: 0,
+      unpairedCount: 0,
+      positionBiasInterval: null,
+      // Real wilson(successes=1, n=1) — position-bias.ts's own Wilson helper.
+      orderFlipRateInterval: { low: 0.20654931437723742, high: 1 },
+    });
+    expect(lines[0]).toBe(
+      '  position bias  0.5000   (n=1 paired decisive items; 0 excluded for a tie in either order, 0 unpaired)   95% CI n/a (n=1, no between-item variance)'
+    );
+    expect(lines[1]).toBe('  order flip     1.0000   (n=1)   95% CI [0.2065, 1.0000]');
+  });
+});
+
 describe('calibration/baseline: the CLI actually prints the coverage block', () => {
   //   what it catches  — the block being deleted, renamed, computed and never
   //                      printed, or called with the wrong argument
@@ -405,6 +489,19 @@ describe('calibration/baseline: the CLI actually prints the coverage block', () 
     expect(RUN_TS.match(/formatNoVerdictRateLine\(/g)).toHaveLength(1);
     expect(RUN_TS).toMatch(
       /for \(const line of formatNoVerdictRateLine\(score\)\) console\.log\(line\);/
+    );
+  });
+
+  it('imports and prints formatPositionBiasLines exactly once (Task 5)', () => {
+    // NOT folded into the import statement pinned above (line 389's regex is
+    // an exact-substring match on THAT statement alone) — a separate import
+    // line, same one-call convention as the two formatters above.
+    expect(RUN_TS).toMatch(
+      /import \{ formatPositionBiasLines \} from '@\/lib\/calibration\/baseline';/
+    );
+    expect(RUN_TS.match(/formatPositionBiasLines\(/g)).toHaveLength(1);
+    expect(RUN_TS).toMatch(
+      /for \(const line of formatPositionBiasLines\(score\)\) console\.log\(line\);/
     );
   });
 });

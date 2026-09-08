@@ -34,6 +34,11 @@
  */
 
 import { PREFERENCES, type Preference } from '@/lib/calibration/readings';
+// Type-only — erased at compile time, so this does not compromise the
+// "import-free by design" note above (only the preference vocabulary and now
+// this interval shape cross a module boundary, and neither drags anything
+// into the DB-free unit run).
+import type { Interval } from '@/lib/calibration/position-bias';
 
 export type ConstantBaseline = {
   /** Hit rate of the best constant verdict over the SCORED subset:
@@ -291,4 +296,85 @@ export function formatNoVerdictRateLine(score: {
       `${score.missingVerdicts} of ${score.dispatchedItemCount} asked items produced none — ` +
       'FLEET property (truncation/dead request), NOT abstention',
   ];
+}
+
+/** Renders `interval` as a `[low, high]` 95% CI, or `n/a` when it is `null` —
+ *  which happens exactly at `pairedDecisiveCount === 1` for
+ *  `positionBiasInterval` (position-bias.ts: no between-item variance is
+ *  estimable from one item) and never for `orderFlipRateInterval` (Wilson is
+ *  defined at n = 1). A blank cell here would read as "not computed"; this
+ *  says WHY there is nothing to show. */
+function formatInterval(interval: Interval | null): string {
+  return interval === null ? 'n/a (n=1, no between-item variance)' : `[${fmt4(interval.low)}, ${fmt4(interval.high)}]`;
+}
+
+/**
+ * The position-bias block (v2o/A2.3): what `positionBiasFromPairs`
+ * (src/lib/calibration/position-bias.ts) measured, pooled over BOTH orders —
+ * the one figure in this whole report that is NOT AB-only (spec D4).
+ *
+ * NEVER A RATE WITHOUT ITS DENOMINATOR. Both `positionBias` and
+ * `orderFlipRate` share one denominator, `pairedDecisiveCount`, and it is
+ * printed beside EVERY line here, together with `tieExcludedCount` and
+ * `unpairedCount` — the two ways an item fails to reach the estimators at
+ * all (see position-bias.ts's own TIES section). Reporting either rate alone
+ * is how an abstaining or half-launched judge scores a flawless-looking
+ * number on a handful of items.
+ *
+ * PRINTS NOTHING — an empty array, not a line of nulls — when
+ * `pairedDecisiveCount === 0`: an AB-only calibration (`ordersRequested`
+ * never included 'BA', or the BA half never produced a single completed
+ * judgment) has nothing paired to report, and `n/a` would suggest a number
+ * exists and could not be rendered, the same contract every formatter in
+ * this file follows.
+ *
+ * THE LOW-N WARNING. Below 20 paired decisive items both estimators are
+ * computed from a handful of Bernoulli-ish draws; the point value is real but
+ * noisy, and the CI beside it is the honest way to see that — this line is a
+ * pointer to read the CI rather than a substitute for it.
+ *
+ * THE ⓘ ON `orderFlipRate`'S NO-INFORMATION POINT. position-bias.ts's own
+ * module doc: any order-independent judge still flips at least half the
+ * time, so its floor is 0.5, not 0 — a reader who does not know that reads a
+ * flip rate of 0.4 as "mostly consistent" when it is BELOW the floor an
+ * order-blind judge clears by chance. This line is on every non-empty
+ * render, not just the low-n branch, because the misreading has nothing to
+ * do with sample size.
+ *
+ * The parameter is a structural literal, not `Pick<CalibrationScore, …>`, for
+ * the same reason every other formatter here takes one: score.ts imports
+ * THIS module, so a type import back would close an import cycle. TypeScript
+ * therefore narrows `positionBias`/`orderFlipRate` independently of
+ * `pairedDecisiveCount`, which is why the guard below names all three even
+ * though score.ts makes them null/zero together — same contract as
+ * `formatConstantBaselineLines` and `formatSelectiveAccuracyLines` document
+ * for their own structural guards.
+ */
+export function formatPositionBiasLines(result: {
+  positionBias: number | null;
+  orderFlipRate: number | null;
+  pairedDecisiveCount: number;
+  tieExcludedCount: number;
+  unpairedCount: number;
+  positionBiasInterval: Interval | null;
+  orderFlipRateInterval: Interval | null;
+}): string[] {
+  if (result.pairedDecisiveCount === 0 || result.positionBias === null || result.orderFlipRate === null) {
+    return [];
+  }
+
+  const lines = [
+    `  position bias  ${fmt4(result.positionBias)}   ` +
+      `(n=${result.pairedDecisiveCount} paired decisive items; ${result.tieExcludedCount} excluded for a tie in either order, ` +
+      `${result.unpairedCount} unpaired)   95% CI ${formatInterval(result.positionBiasInterval)}`,
+    `  order flip     ${fmt4(result.orderFlipRate)}   ` +
+      `(n=${result.pairedDecisiveCount})   95% CI ${formatInterval(result.orderFlipRateInterval)}`,
+    "  ⓘ orderFlipRate's no-information point is 0.5, not 0 — an order-independent judge already flips at least half the time, so do not read 0.4 here as 'good'.",
+  ];
+  if (result.pairedDecisiveCount < 20) {
+    lines.push(
+      `  ⚠ pairedDecisiveCount is only ${result.pairedDecisiveCount} (< 20) — both estimators above are on a small paired sample; read the point values as noisy.`
+    );
+  }
+  return lines;
 }

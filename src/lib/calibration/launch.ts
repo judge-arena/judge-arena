@@ -41,7 +41,7 @@ import { prisma } from '@/lib/db';
 import { logger } from '@/lib/logger';
 import { goldenItemLifecycleWhere, isGoldenSetFrozen } from '@/lib/golden-sets';
 import { budgetWarningFor, judgeThroughputEstimate } from '@/lib/calibration/latency';
-import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
+import { resolveTimeoutBudgets, type TimeoutBudgets } from '@/lib/llm/timeout-policy';
 // The LEAF module, deliberately — not registry.ts and not the `@/lib/llm`
 // barrel. This file is bundled into the image's calibration-run.js by esbuild
 // (Dockerfile, only @prisma/client external); importing registry.ts would
@@ -49,6 +49,7 @@ import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
 // into a CLI that never calls a provider. tests/lib/sampling.test.ts keeps
 // sampling.ts a leaf.
 import { effectiveSamplingParams, type SamplingParams } from '@/lib/llm/sampling';
+import type { PairOrder } from '@/lib/pair-order';
 import {
   launchSingleRun,
   requireOwnedActiveEndpoints,
@@ -91,10 +92,15 @@ import {
  * items, seeded but previously unrunnable under the 100 cap — is 19.4 days
  * of legal occupancy and ~52 hours expected, inside both.
  *
- * `tests/integration/finalization.test.ts` pins the RELATIONSHIP
- * (`NEVER_STARTED_TIMEOUT_MS > MAX_CALIBRATION_ITEMS x 3 x hardCapMs`), not
- * a second literal, so raising this number again without revisiting the net
- * goes red rather than silently re-arming the bug.
+ * `tests/integration/finalization.test.ts` pins the RELATIONSHIP — since A2's
+ * BA sweep, over `maxPairedCalibrationItems()` (the stricter, PAIRED bound;
+ * see that function's own doc), not a second literal — so raising either
+ * number again without revisiting the net goes red rather than silently
+ * re-arming the bug. This constant's own single-order arithmetic above
+ * (1000 x 1 x 3 x hardCapMs) is a looser bound than the paired one and is
+ * implied by it for any legal hard cap — `maxPairedCalibrationItems() x 2`
+ * stays above 1000 all the way up to `MAX_HARD_CAP_MS` (553 x 2 = 1106) — so
+ * it is not tested a second time.
  *
  * WHAT STILL BOUNDS THIS NUMBER, so it is not "raise it again next time
  * someone wants more": (1) `NEVER_STARTED_TIMEOUT_MS` — raising the item
@@ -113,6 +119,82 @@ import {
  */
 export const MAX_CALIBRATION_ITEMS = 1000;
 
+/**
+ * 45 days, in ms. Duplicated from `src/worker/reaper.ts`'s
+ * `NEVER_STARTED_TIMEOUT_MS` — not imported — because that module pulls
+ * redis, queue publish, endpoint-resolution and run-finalizer into its
+ * graph, and this file is the CLI-safe LEAF bundled into the image's
+ * calibration-run.js (see this file's own module doc): importing reaper.ts
+ * would ship all of that into a CLI that touches none of it. If reaper.ts's
+ * constant ever moves, this literal must move with it —
+ * `tests/integration/finalization.test.ts`'s "the never-started net outlasts
+ * the LEGAL drain time of a full-cap PAIRED calibration batch" test computes
+ * `maxPairedCalibrationItems()`'s legal worst case (which uses THIS literal)
+ * against the REAL `NEVER_STARTED_TIMEOUT_MS` import from `reaper.ts`, so a
+ * divergence that makes this one too small goes red there.
+ */
+const NEVER_STARTED_TIMEOUT_MS = 45 * 24 * 60 * 60 * 1000;
+
+/** AB + BA — the only paired shape this product supports. */
+const PAIRED_ORDERS_PER_ITEM = 2;
+
+/**
+ * "Two 15-minute attempts total, then exit" is `HARD_CAP_MAX_ATTEMPTS` (2);
+ * this is the LEGAL worst case, which counts every DELIVERY, not every
+ * hard-cap abort — `judgment-consumer.ts`'s (unexported) `MAX_ATTEMPTS` is 3
+ * total deliveries, each of which may legally run to the full hard cap
+ * before this attempt's abort or a retry moves on. Duplicated as a literal
+ * for the same reason `NEVER_STARTED_TIMEOUT_MS` above is: judgment-consumer.ts
+ * is not import-safe from this leaf module.
+ */
+const CALIBRATION_MAX_ATTEMPTS = 3;
+
+/**
+ * The item ceiling for a PAIRED run (`orders.length > 1`) — a FUNCTION of the
+ * RESOLVED hard cap, not a literal, because the bound MOVES with it. The
+ * reaper's never-started net gives a launched judgment 45 days
+ * (`NEVER_STARTED_TIMEOUT_MS` above), and the legal worst case for a
+ * calibration batch is
+ *
+ *     items x orders x MAX_ATTEMPTS(3) x resolveTimeoutBudgets().hardCapMs
+ *
+ * `MAX_CALIBRATION_ITEMS` (1000) was sized against that net assuming ONE
+ * order per item — `1000 x 1 x 3 x 900_000 = 2.7e9`, comfortably inside. A
+ * two-order (AB+BA) run DOUBLES the orders factor, and 1000 items at two
+ * orders is `1000 x 2 x 3 x 900_000 = 5.4e9` — over the net.
+ * `MAX_CALIBRATION_ITEMS` itself STAYS 1000 — it is the one-order ceiling and
+ * `tests/db/calibration-link.test.ts:488` pins it.
+ *
+ * `EVALUATION_MODEL_HARD_CAP_MS` is env-tunable up to `MAX_HARD_CAP_MS`
+ * (1_170_000 ms, `src/lib/llm/timeout-policy.ts:94`), so this function
+ * resolves the cap EVERY CALL rather than baking in the default: at the
+ * resolved DEFAULT cap of 900_000 ms, two orders admits `floor(3.888e9 /
+ * (2 x 3 x 900_000)) = 720` items exactly (`720 x 2 x 3 x 900_000 = 3.888e9`,
+ * equal to the net, not strictly inside it, so this returns 719); at
+ * `MAX_HARD_CAP_MS` it returns `floor(3.888e9 / (2 x 3 x 1_170_000)) = 553`
+ * — a genuinely LOWER ceiling, not the same 719 reinterpreted. A caller (or a
+ * test) that hardcodes 719 is correct only at the default cap and silently
+ * wrong at every other legal configuration — that was this function's own
+ * former shape, a literal `= 719` that stayed green in CI because
+ * `tests/integration/finalization.test.ts` resolved the cap but CI's
+ * `EVALUATION_MODEL_HARD_CAP_MS` was never actually raised while asserting
+ * against it. `tests/db/calibration-link.test.ts`'s "a raised
+ * EVALUATION_MODEL_HARD_CAP_MS genuinely LOWERS the paired ceiling" test
+ * exists so that regression cannot ship quietly again.
+ *
+ * Pass `budgets` to check the ceiling under a hypothetical configuration (as
+ * that test does); omit it to resolve the cap this process actually runs
+ * under.
+ */
+export function maxPairedCalibrationItems(
+  budgets: TimeoutBudgets = resolveTimeoutBudgets()
+): number {
+  const perItemMs = PAIRED_ORDERS_PER_ITEM * CALIBRATION_MAX_ATTEMPTS * budgets.hardCapMs;
+  const ceiling = Math.floor(NEVER_STARTED_TIMEOUT_MS / perItemMs);
+  // Strictly inside the net, never landing exactly on it — see doc above.
+  return ceiling * perItemMs === NEVER_STARTED_TIMEOUT_MS ? ceiling - 1 : ceiling;
+}
+
 export interface LaunchCalibrationRunParams {
   goldenSetId: string;
   judgeModelVersionId: string;
@@ -122,6 +204,18 @@ export interface LaunchCalibrationRunParams {
   /** The acting user: owns the endpoint the judge is reached through, and is
    * recorded as `EvaluationRun.triggeredById` on every run. */
   triggeredById: string;
+  /** Which candidate orders each item is judged in. Defaults to `['AB']`.
+   * A2.2: ONE `EvaluationRun` (with exactly one `ModelJudgment`) is launched
+   * PER order, per item — `orders.length > 1` therefore dispatches
+   * `items.length * orders.length` runs against the SAME `items.length`
+   * `Evaluation` rows (one `Evaluation` shared by every order of an item; see
+   * the item loop's own doc). `orders.length > 1` also swaps the item ceiling
+   * from `MAX_CALIBRATION_ITEMS` to the stricter, cap-derived
+   * `maxPairedCalibrationItems()` — see that function's doc for why the
+   * ceiling cannot stay the same number (and moves with the configured hard
+   * cap), and note it is compared against `items.length`, never against
+   * the dispatched run count. */
+  orders?: PairOrder[];
 }
 
 export interface CalibrationItemFailure {
@@ -197,7 +291,8 @@ function toRunCandidates(candidates: GoldenCandidate[]): LaunchRunCandidateInput
  *
  * BECAUSE THAT WRITE IS IRREVERSIBLE, EVERYTHING KNOWABLE WITHOUT TOUCHING AN
  * ITEM IS CHECKED FIRST — the set exists, is not tombstoned, is pairwise, has
- * at least one live item and not more than `MAX_CALIBRATION_ITEMS`; the
+ * at least one live item and not more than `MAX_CALIBRATION_ITEMS` (or the
+ * stricter `maxPairedCalibrationItems()` when `orders.length > 1`); the
  * project and rubric exist; a pairwise `PromptTemplate` exists; and the caller
  * owns an active, verified `ModelEndpoint` for the judge version. Every one of
  * those would otherwise surface as a per-item failure DISCOVERED AFTER THE
@@ -212,8 +307,27 @@ export async function launchCalibrationRun(
   deps: LaunchSingleRunDeps = {}
 ): Promise<CalibrationLaunchResult> {
   const { goldenSetId, judgeModelVersionId, rubricId, projectId, triggeredById } = params;
+  const orders = params.orders ?? ['AB'];
 
   // ── Pre-flight (see the doc block: all of this precedes the freeze) ──────
+
+  // F3 (review round 1): a duplicate order (e.g. `['AB', 'AB']`) passes every
+  // OTHER pre-flight check, freezes the golden set, and then fails EVERY
+  // single item's SECOND `launchSingleRun` call on
+  // `EvaluationRun`'s partial `@@unique([calibrationRunId, goldenItemId,
+  // pairOrder])` (v2p) — the second call for the same item is asking for a
+  // second run at the SAME order, which that index (and the CHECK it pairs
+  // with) exists to refuse. Knowable up front, from the params alone, with
+  // no DB read at all, so it is checked FIRST, before anything that costs a
+  // query.
+  if (new Set(orders).size !== orders.length) {
+    throw new RunLaunchError(
+      400,
+      `orders must not contain duplicates — got [${orders.join(', ')}]. A repeated order would launch every ` +
+        "item, freeze the golden set, and then fail all of them on EvaluationRun's " +
+        '@@unique([calibrationRunId, goldenItemId, pairOrder]).'
+    );
+  }
 
   const goldenSet = await prisma.goldenSet.findUnique({
     where: { id: goldenSetId },
@@ -260,18 +374,24 @@ export async function launchCalibrationRun(
       `Golden set ${goldenSetId} has no live items to calibrate against.`
     );
   }
-  if (items.length > MAX_CALIBRATION_ITEMS) {
-    // LOGGED, not truncated — see MAX_CALIBRATION_ITEMS' own doc.
-    logger.warn('launchCalibrationRun: refused a golden set over the phase-1 item cap', {
+  // A paired (2-order) run has a STRICTER ceiling than a single-order one —
+  // see maxPairedCalibrationItems()'s own doc for the formula. Resolved here,
+  // before the freeze, same as every other pre-flight in this function.
+  const itemCeiling = orders.length > 1 ? maxPairedCalibrationItems() : MAX_CALIBRATION_ITEMS;
+  if (items.length > itemCeiling) {
+    // LOGGED, not truncated — see MAX_CALIBRATION_ITEMS'/maxPairedCalibrationItems()'s own doc.
+    logger.warn('launchCalibrationRun: refused a golden set over the item cap', {
       goldenSetId,
       liveItems: items.length,
-      cap: MAX_CALIBRATION_ITEMS,
+      orders: orders.length,
+      cap: itemCeiling,
     });
     throw new RunLaunchError(
       400,
-      `Golden set ${goldenSetId} has ${items.length} live items, over the phase-1 cap of ` +
-        `${MAX_CALIBRATION_ITEMS}. Fork a smaller set rather than calibrating part of this one — ` +
-        'a kappa over a silently truncated subset is indistinguishable from one over the whole set.'
+      `Golden set ${goldenSetId} has ${items.length} live items x ${orders.length} orders, over the ` +
+        `${itemCeiling}-item ceiling for ${orders.length}-order runs. Fork a smaller set rather than ` +
+        'calibrating part of this one — a kappa over a silently truncated subset is indistinguishable ' +
+        'from one over the whole set. See maxPairedCalibrationItems().'
     );
   }
 
@@ -388,6 +508,9 @@ export async function launchCalibrationRun(
         // a historical run (scoreboard spec §4.1; seed-core.ts:223-229 states
         // the invariant the production SQL edits broke).
         samplingParams: resolved as unknown as Prisma.InputJsonValue,
+        // v2o. COMMA-SEPARATED — see schema.prisma's own doc on this column
+        // for the contract (membership via `.includes()`, never `===`).
+        ordersRequested: orders.join(','),
       },
       select: { id: true },
     });
@@ -443,6 +566,13 @@ export async function launchCalibrationRun(
       // `launchSingleRun` knows this — it forces judge mode for pairwise
       // rather than letting `deriveRunMode` read the empty column and classify
       // the run as respond-mode.
+      //
+      // A2.2: hoisted ABOVE the orders loop below — ONE `Evaluation` per item,
+      // shared by every order's `EvaluationRun`. `EvaluationRun` has only
+      // `@@index([evaluationId])`, no unique, so two runs (AB and BA) may
+      // point at the same evaluation; sharing it here is what keeps
+      // `Evaluation.count` at N (one per item), not 2N — the number the
+      // leaderboard and the public counts read.
       // eslint-disable-next-line no-await-in-loop -- item-atomic by design: each item's create+launch must be individually attributable and individually survivable (see module doc)
       const evaluation = await prisma.evaluation.create({
         data: {
@@ -457,29 +587,73 @@ export async function launchCalibrationRun(
         select: { id: true },
       });
 
-      // eslint-disable-next-line no-await-in-loop -- see above
-      const launch = await launchSingleRun(
-        {
-          evaluationId: evaluation.id,
-          triggeredById,
-          rubricId,
-          judgeModelVersionIds: [judgeModelVersionId],
-          protocol: 'pairwise',
-          candidates: toRunCandidates(item.candidates),
-          goldenItemId: item.id,
-          calibrationRunId: calibrationRun.id,
-        },
-        deps
-      );
+      // A2.2: the fan-out that used to live INSIDE one `launchSingleRun` call
+      // (one run, one judgment per requested order) now lives HERE — one
+      // `launchSingleRun` call PER requested order, each producing its own
+      // `EvaluationRun` with exactly one `ModelJudgment`, all against the
+      // SAME `evaluation.id` hoisted above. `RunCandidate` positions are
+      // copied VERBATIM every time via `toRunCandidates(item.candidates)` —
+      // never reordered per order — because `position` IS candidate identity
+      // (golden-sets.ts:48) and `GoldenItem.expected` is stated against it;
+      // presenting the mirrored order is `render.ts`'s job at render time,
+      // not this loop's.
+      // `null` = every order published cleanly so far; a `string` is the
+      // reason from the MOST RECENT failing order (if more than one order
+      // fails, both are still attempted — see the doc below — and the later
+      // failure's reason overwrites the earlier one, same as the single-order
+      // path this replaces always did for its one judgment).
+      let itemFailureReason: string | null = null;
 
-      if (launch.publishFailed) {
-        // The run exists and `launchSingleRun` has already compensated it to
-        // `status: 'error'`; nothing will ever execute it. Reported as a
-        // failure rather than silently counted as accepted — a caller that
-        // treated it as launched would wait forever for a verdict.
+      for (const order of orders) {
+        // eslint-disable-next-line no-await-in-loop -- item-atomic AND order-atomic by design: each (item, order) create+launch must be individually attributable and individually survivable (see module doc); `orders` is capped at PAIR_ORDERS.length (2)
+        const launch = await launchSingleRun(
+          {
+            evaluationId: evaluation.id,
+            triggeredById,
+            rubricId,
+            judgeModelVersionIds: [judgeModelVersionId],
+            protocol: 'pairwise',
+            candidates: toRunCandidates(item.candidates),
+            goldenItemId: item.id,
+            calibrationRunId: calibrationRun.id,
+            pairOrder: order,
+          },
+          deps
+        );
+
+        if (launch.publishFailed) {
+          // F4 (review round 1), re-shaped for A2.2: AB and BA are now two
+          // INDEPENDENT `launchSingleRun` calls (two transactions, two publish
+          // attempts), not two judgments inside one run's sequential publish
+          // loop — so it is possible for AB to have published successfully
+          // before BA's publish throws (or vice versa; both orders are still
+          // attempted, never short-circuited). Either way the ALREADY-
+          // published order's `judgment.execute` message is live on the
+          // broker regardless of its own run's now-'error' status (if that
+          // one is the one that failed) or its normal 'pending' status (if
+          // it's the one that succeeded), and `claimJudgment` has NO
+          // run-status guard (deliberately — see that function's own doc), so
+          // a worker WILL claim and execute it. It is NOT scored as a loss: an
+          // unpaired verdict simply has no counterpart to decide against, so
+          // it drops out of `pairedDecisiveCount` rather than counting against
+          // `positionBias`/`orderFlipRate`. Recovery is NOT a relaunch of this
+          // item within the SAME calibration run: the surviving order's
+          // `EvaluationRun` already occupies its slot in the partial
+          // `@@unique([calibrationRunId, goldenItemId, pairOrder])` index, so
+          // a relaunch attempt for that (calibrationRunId, goldenItemId,
+          // pairOrder) fails P2002. Recovery is a NEW calibration run. The
+          // ITEM is reported as a failure rather than silently counted as
+          // accepted either way — a caller that treated this as launched
+          // would still wait forever for the missing order's verdict, which
+          // was never published.
+          itemFailureReason = launch.publishError ?? 'judgment.execute publish failed';
+        }
+      }
+
+      if (itemFailureReason !== null) {
         failed.push({
           goldenItemId: item.id,
-          reason: launch.publishError ?? 'judgment.execute publish failed',
+          reason: itemFailureReason,
         });
         continue;
       }

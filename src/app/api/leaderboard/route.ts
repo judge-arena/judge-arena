@@ -70,12 +70,29 @@ export async function GET() {
     // direct Prisma query-builder equivalent for "latest row per group".
     // `status` is a Postgres enum column — cast to text before comparing
     // against string literals to avoid any literal/enum inference surprises.
+    //
+    // spec D6 / task-7: a permuted calibration creates TWO EvaluationRuns
+    // per golden item (pairOrder 'AB' and 'BA') where there was one. A 'BA'
+    // run is an instrument reading, not a result, and must never reach the
+    // leaderboard — so it is excluded here explicitly, rather than relying
+    // on the surviving row happening to be whichever was created later.
+    //
+    // Today this route is safe only by coincidence: pairwise judgments
+    // carry `overallScore: null` (judgment-consumer.ts:~830) and the
+    // `overallScore: { not: null }` filter below happens to drop them —
+    // an accident that evaporates the moment a pointwise permuted protocol
+    // exists. `IS DISTINCT FROM`, NOT `!=`: ordinary (non-calibration) runs
+    // have `pairOrder` NULL, and `NULL != 'BA'` evaluates to NULL, which a
+    // WHERE clause treats as false — that would silently drop EVERY
+    // ordinary run from the leaderboard. `IS DISTINCT FROM` is the one
+    // operator that correctly treats NULL as "not equal to 'BA'".
     const latestFinalizedRuns = await prisma.$queryRaw<Array<{ id: string }>>`
       SELECT DISTINCT ON (er."evaluationId") er.id
       FROM "EvaluationRun" er
       JOIN "Evaluation" e ON e.id = er."evaluationId"
       WHERE e."projectId" = ${leaderboardProject.id}
         AND er.status::text IN (${Prisma.join(FINALIZED_RUN_STATUSES)})
+        AND er."pairOrder" IS DISTINCT FROM 'BA'
       ORDER BY er."evaluationId", er."createdAt" DESC, er."id" DESC
     `;
     const finalizedRunIds = latestFinalizedRuns.map((run) => run.id);

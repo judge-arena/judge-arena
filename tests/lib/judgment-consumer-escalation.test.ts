@@ -200,4 +200,43 @@ describe('every provider seam carries the timeout escalation', () => {
 
     expect(result.parseMode).toBe('structured');
   });
+
+  /**
+   * Task 4: `ModelJudgment.pairOrder` has existed since v2b and, until this
+   * task, was read NOWHERE in `src/` — the presented order was fixed by the
+   * query's `orderBy: { position: 'asc' }`, so writing 'BA' produced a row
+   * that lied about the prompt the model actually saw. These pin the last
+   * hop of the threading chain: the `registryInput` literal in
+   * `defaultRunProviderPairwise`.
+   */
+  describe('pairOrder threading (Task 4)', () => {
+    it('passes the judgment pairOrder into the registry input', async () => {
+      const mod = await import('@/worker/judgment-consumer');
+      await (mod as any).defaultRunProviderPairwise({
+        ...input,
+        judgment: { ...judgment, pairOrder: 'BA' },
+      });
+
+      expect(executePairwiseMock.mock.calls[0][0].pairOrder).toBe('BA');
+    });
+
+    it('falls back to AB for an unrecognised pairOrder rather than rendering BA', async () => {
+      const mod = await import('@/worker/judgment-consumer');
+      await (mod as any).defaultRunProviderPairwise({
+        ...input,
+        // Not a Prisma enum — a nullable String column — so a bad value like
+        // this is storable and must not silently fall through to a BA render.
+        judgment: { ...judgment, pairOrder: 'ba' },
+      });
+
+      expect(executePairwiseMock.mock.calls[0][0].pairOrder).toBe('AB');
+    });
+
+    it('falls back to AB when pairOrder is absent — the pre-BA baseline', async () => {
+      const mod = await import('@/worker/judgment-consumer');
+      await (mod as any).defaultRunProviderPairwise(input);
+
+      expect(executePairwiseMock.mock.calls[0][0].pairOrder).toBe('AB');
+    });
+  });
 });

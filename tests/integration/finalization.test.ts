@@ -8,8 +8,8 @@ import type { JudgmentExecuteMsg } from '@/lib/queue/publish';
 import { getConnectedRedis } from '@/lib/redis';
 import { maybeFinalizeRun, markRunCompleted } from '@/lib/run-finalizer';
 import { runReaperSweep, REAPER_LOCK_KEY, NEVER_STARTED_TIMEOUT_MS } from '@/worker/reaper';
-import { MAX_CALIBRATION_ITEMS } from '@/lib/calibration/launch';
-import { resolveTimeoutBudgets } from '@/lib/llm/timeout-policy';
+import { maxPairedCalibrationItems } from '@/lib/calibration/launch';
+import { resolveTimeoutBudgets, MAX_HARD_CAP_MS } from '@/lib/llm/timeout-policy';
 import { LEASE_MS } from '@/worker/claim';
 import { createJudgmentConsumer, type ProviderFn, type RunProviderJudgmentInput } from '@/worker/judgment-consumer';
 import { seedPromptTemplates } from '../../prisma/seed-prompt-templates';
@@ -614,19 +614,32 @@ describe('reaper (src/worker/reaper.ts): the never-started safety net (deadlineA
     expect(NEVER_STARTED_TIMEOUT_MS).toBe(45 * 24 * 60 * 60 * 1000);
   });
 
-  it('the never-started net outlasts the LEGAL drain time of a full-cap calibration batch', () => {
+  it('the never-started net outlasts the LEGAL drain time of a full-cap PAIRED calibration batch, at ANY legal hard cap', () => {
     // The RELATIONSHIP, not a second literal — this repo's own idiom (cf.
     // tests/lib/timeout-policy.test.ts:320, `LEASE_MS > hardCapMs`). A
     // calibration serialises through ONE judge's gate; each item may legally
-    // run to hardCapMs and be delivered MAX_ATTEMPTS (3) times. If someone
-    // raises MAX_CALIBRATION_ITEMS again without revisiting this net, this
-    // goes red instead of silently re-arming the bug the net exists to
-    // prevent — a batch force-finalized while still healthily queued.
+    // run to hardCapMs and be delivered MAX_ATTEMPTS (3) times.
     // The 3 mirrors judgment-consumer.ts:199's MAX_ATTEMPTS (not exported).
     // Raising that number invalidates NEVER_STARTED_TIMEOUT_MS and must
     // move this literal too.
-    const legalWorstCaseMs = MAX_CALIBRATION_ITEMS * 3 * resolveTimeoutBudgets().hardCapMs;
-    expect(NEVER_STARTED_TIMEOUT_MS).toBeGreaterThan(legalWorstCaseMs);
+    //
+    // `maxPairedCalibrationItems()` derives the ceiling from the RESOLVED cap
+    // rather than a static literal (F2 fix) — it used to be a bare `= 719`
+    // compared against a CONFIGURABLE cap, so this same assertion stayed
+    // GREEN under exactly the `EVALUATION_MODEL_HARD_CAP_MS` configuration it
+    // warned about. Checked at both the default cap and the legal ceiling
+    // `MAX_HARD_CAP_MS`, since the ceiling MOVES with the configured cap and
+    // asserting only the default would repeat the same mistake.
+    const ORDERS_PER_ITEM = 2;
+    const budgetsToCheck = [
+      resolveTimeoutBudgets(),
+      resolveTimeoutBudgets({ EVALUATION_MODEL_HARD_CAP_MS: String(MAX_HARD_CAP_MS) }),
+    ];
+    for (const budgets of budgetsToCheck) {
+      const legalWorstCaseMs =
+        maxPairedCalibrationItems(budgets) * ORDERS_PER_ITEM * 3 * budgets.hardCapMs;
+      expect(legalWorstCaseMs).toBeLessThan(NEVER_STARTED_TIMEOUT_MS);
+    }
   });
 
   it('a run created long before NEVER_STARTED_TIMEOUT_MS, never dequeued, past the grace period is force-finalized', async () => {

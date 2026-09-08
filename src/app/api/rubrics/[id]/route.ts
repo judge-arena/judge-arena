@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { requireAuth, requireScope, optionalAuth, resolveResourceAccess, requireOwnership, RateLimitedError } from '@/lib/auth-guard';
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicRubric } from '@/lib/serializers';
+import { canonicalOrderRunWhere } from '@/lib/run-counting';
 
 const updateRubricSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -39,7 +40,13 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
       include: {
         criteria: { orderBy: { order: 'asc' } },
         user: { select: { id: true, name: true, email: true } },
-        _count: { select: { evaluations: true, evaluationRuns: true } },
+        // Task 9 (spec §2): `canonicalOrderRunWhere` excludes a permuted
+        // calibration's 'BA' EvaluationRuns, so this reads "how many runs
+        // used this rubric" rather than double-counting the position-bias
+        // instrument reading. Currently dropped by `toPublicRubric` (only
+        // reaches the owner/admin branch below) and unrendered by any page —
+        // fixed anyway since it's part of the API's public shape.
+        _count: { select: { evaluations: true, evaluationRuns: { where: canonicalOrderRunWhere } } },
       },
     });
 

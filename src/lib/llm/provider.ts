@@ -32,6 +32,7 @@
  */
 
 import type { CriteriaScore, RubricCriterionView } from '@/types';
+import type { SamplingParams } from '@/lib/llm/sampling';
 import { computeWeightedScore } from '@/lib/utils';
 import { ProviderError } from './errors';
 
@@ -97,7 +98,10 @@ export interface ProviderCallOptions {
   modelId: string;
   systemPrompt: string;
   userPrompt: string;
-  samplingParams: { temperature: number; max_tokens: number };
+  /** Canonical type ensures all backends see the same fields (e.g.,
+   *  optional `repeat_penalty`/`frequency_penalty`) without maintaining
+   *  duplicate copies. See `@/lib/llm/sampling` for the source of truth. */
+  samplingParams: SamplingParams;
   /** Aborts the in-flight HTTP call once `EVALUATION_MODEL_TIMEOUT_MS`
    * elapses — see registry.ts's `execute()` (MANDATORY carry from Task 8's
    * review: the timeout budget was never wired into an actual request

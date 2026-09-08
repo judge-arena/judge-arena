@@ -181,6 +181,7 @@ import type {
 } from '@/lib/llm';
 import { maybeFinalizeRun } from '@/lib/run-finalizer';
 import { deriveRunMode } from '@/lib/run-mode';
+import { isPairOrder, type PairOrder } from '@/lib/pair-order';
 import { claimJudgment, clearRunDeadlineOnRequeue, stampRunStartedAtFirstDequeue } from './claim';
 import { judgeLatencyBaseline, type LatencyBaseline } from '@/lib/calibration/latency';
 import {
@@ -219,8 +220,10 @@ function judgmentContextQuery(judgmentId: string) {
           evaluation: { select: { inputText: true, promptText: true, responseText: true } },
           rubric: { include: { criteria: { orderBy: { order: 'asc' as const } } } },
           // A0: the pairwise comparison set. Ordered by `position` here so
-          // the presented order ('AB') is a property of the QUERY, not of
-          // whatever order Postgres happened to return.
+          // the candidate identity is stable and not whatever order Postgres
+          // happened to return. The PRESENTED order is no longer a property
+          // of this query — it is `ModelJudgment.pairOrder`, applied in
+          // render.ts's buildPairwiseUserPrompt.
           runCandidates: { orderBy: { position: 'asc' as const } },
         },
       },
@@ -485,6 +488,26 @@ export type PairwiseProviderFn = (input: RunProviderPairwiseInput) => Promise<Pa
 export const defaultRunProviderPairwise: PairwiseProviderFn = async (input) => {
   const { run, rubric, version, endpoint, judgment } = input;
 
+  // The judgment row has always carried `pairOrder`; until now NOTHING in
+  // src/ read it, so writing 'BA' produced a row that lied about the prompt
+  // it was shown. `isPairOrder` rather than a cast: the column is a nullable
+  // String in Prisma, not an enum, so 'ba' is storable and must not silently
+  // fall through to a BA render. The fallback branch is WARNED, not silent —
+  // a write path bug that lands a malformed pairOrder (the write side is
+  // src/lib/run-launch.ts's launchSingleRun, A2) would otherwise render as a
+  // plain 'AB' with no trace anywhere that anything was wrong.
+  let pairOrder: PairOrder;
+  if (isPairOrder(judgment.pairOrder)) {
+    pairOrder = judgment.pairOrder;
+  } else {
+    pairOrder = 'AB';
+    logger.warn('judgment.pairOrder was not a valid PairOrder — rendering as AB', {
+      judgmentId: judgment.id,
+      runId: run.id,
+      pairOrder: judgment.pairOrder,
+    });
+  }
+
   const registryInput: RegistryJudgmentInput = {
     judgeVersion: version,
     endpoint,
@@ -492,6 +515,7 @@ export const defaultRunProviderPairwise: PairwiseProviderFn = async (input) => {
     // Guarded by the consumer's own promptTemplate check before this seam
     // is ever called (see `handle()` below).
     template: judgment.promptTemplate!,
+    pairOrder,
     rubric: { name: rubric.name, description: rubric.description, criteria: rubric.criteria },
     submission: {
       inputText: run.evaluation.inputText,

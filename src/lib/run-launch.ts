@@ -124,6 +124,7 @@ import {
 import { LANE_FALLBACK_QUEUE } from '@/lib/queue/lanes';
 import { resolveEndpointsForVersions } from '@/lib/endpoint-resolution';
 import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
+import type { PairOrder } from '@/lib/pair-order';
 
 /** UNUSED since 2026-09-03: this module no longer computes a deadline at
  * creation (see the module doc's "EvaluationRun.deadlineAt is no longer
@@ -352,6 +353,14 @@ export interface LaunchSingleRunParams {
    * under `@@unique([calibrationRunId, goldenItemId])`, so one calibration
    * cannot measure the same item twice. */
   calibrationRunId?: string;
+  /** A2.2: which candidate order THIS run presents. Written to
+   * `EvaluationRun.pairOrder` and mirrored onto the run's single
+   * `ModelJudgment.pairOrder` from this one variable, so the two cannot
+   * disagree at creation (trap T3). Defaults to `'AB'` for pairwise and is
+   * ignored for pointwise. A caller wanting both orders launches TWICE
+   * against the same `evaluationId` — one judgment per run is the invariant
+   * the deadline model assumes (timeout-policy.ts:230-258). */
+  pairOrder?: PairOrder;
 }
 
 export interface LaunchSingleRunDeps {
@@ -499,6 +508,13 @@ export async function launchSingleRun(
     promptTemplateId = promptTemplate.id;
   }
 
+  // A2.2 / v2p / trap T3: ONE variable, read by BOTH the run's own column and
+  // its single judgment's column below, in the SAME nested create — see
+  // `LaunchSingleRunParams.pairOrder`'s doc. NULL for pointwise (no order to
+  // present); `params.pairOrder ?? 'AB'` for pairwise, matching A0's
+  // single-order default so every existing caller is unchanged.
+  const pairOrder: PairOrder | null = protocol === 'pairwise' ? (params.pairOrder ?? 'AB') : null;
+
   const createdRun = await prisma.$transaction(async (tx) => {
     return tx.evaluationRun.create({
       data: {
@@ -519,6 +535,15 @@ export async function launchSingleRun(
         // it cannot attribute to any `expected`.
         goldenItemId: params.goldenItemId ?? null,
         calibrationRunId: params.calibrationRunId ?? null,
+        // v2p: which candidate order THIS run presented — the SAME `pairOrder`
+        // variable as the judgment's own copy a few lines below. Two columns,
+        // one fact, one variable: the renderer reads the judgment's copy and
+        // the scorer reads this one, so if they could diverge a row would be
+        // filed into one partition and resolved as if it were the other, with
+        // every downstream number staying plausible (trap T3). This is also
+        // what the CHECK constraint `EvaluationRun_calibration_needs_order`
+        // requires whenever `calibrationRunId` is set.
+        pairOrder,
         // RunCandidate rows are created in the SAME transaction as the run.
         // A pairwise run whose candidates land in a second write can be
         // observed — and claimed by a worker — with a complete-looking run
@@ -538,19 +563,21 @@ export async function launchSingleRun(
           create: selectedVersionIds.map((judgeModelVersionId) => ({ judgeModelVersionId })),
         },
         modelJudgments: {
+          // A2.2: the fan-out that used to live HERE (one judgment per
+          // requested order) moved up to `calibration/launch.ts`'s item loop,
+          // which now calls `launchSingleRun` once per order against the same
+          // `evaluationId` instead of asking this function to create two
+          // judgments on one run. `timeout-policy.ts`'s `runStartBudgetMs` doc
+          // states outright that a calibration run's judgment count "is always
+          // 1" — the two-judgments-per-run shape this replaces had silently
+          // broken that invariant; one judgment per `EvaluationRun` restores
+          // it by construction. `pairOrder` is the SAME variable as the run's
+          // own column above — never re-derived here, so the two cannot
+          // disagree at creation.
           create: selectedVersionIds.map((judgeModelVersionId) => ({
             judgeModelVersionId, // modelConfigId intentionally left null — see module doc
             promptTemplateId,
-            // pairOrder is written EXPLICITLY on every judgment, never left
-            // to a default: 'AB' for the single order A0 emits, NULL for
-            // pointwise, which is what the existing
-            // @@unique([runId, judgeModelVersionId, pairOrder]) —
-            // hand-edited NULLS NOT DISTINCT in
-            // 20260728215410_v2b_idempotency_tighten — assumes. That is
-            // what makes A2's BA sweep additive: a second judgment per pair,
-            // no migration, no backfill, and no ambiguity about what the
-            // existing rows measured.
-            pairOrder: protocol === 'pairwise' ? 'AB' : null,
+            pairOrder,
             status: 'pending' as const,
           })),
         },

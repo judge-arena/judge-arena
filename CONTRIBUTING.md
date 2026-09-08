@@ -75,7 +75,7 @@ missing variable. `npm run dev` is the exception: Next.js reads `.env.local` its
 && npx tsx prisma/seed.ts` — and is left in `package.json`, but **prefer the sequence above**:
 `setup` ends in `prisma db push`, which lays the schema on directly and never records a row in
 `_prisma_migrations`. A database created that way will diverge from every other environment the
-first time a migration carries hand-written SQL — and eight of ours do (see [Known migrate-diff
+first time a migration carries hand-written SQL — and ten of ours do (see [Known migrate-diff
 pseudo-drift](#known-migrate-diff-pseudo-drift)).
 
 **Do not read `db:seed`'s output as a report of what it inserted.** `seedPromptTemplates` upserts
@@ -747,20 +747,37 @@ own introspected model; `prisma migrate diff --from-url ...
 --to-schema-datamodel prisma/schema.prisma` reports an empty diff; `prisma
 db push` reports "already in sync". There is currently nothing to
 whitelist in a CI drift check for the cases below — a plain `migrate diff`
-gate would pass clean today. Currently eight cases (the count was stale at
+gate would pass clean today. Currently ten cases (the count was stale at
 "one" while the table already listed two — corrected while landing A0,
-incremented again by L1's CHECK below, and by the three v2h adds; keep this
-number in step with the rows):
+incremented again by L1's CHECK below, by the three v2h adds, and by the two
+v2p adds; keep this number in step with the rows):
 
-> **Still eight after v2i (2026-08-31), and that is a fact worth stating rather than a row worth
-> adding.** `20260830120000_v2i_calibration_item_link` was written with **zero hand edits** — the
-> whole migration is what Prisma generated. Its `@@unique([calibrationRunId, goldenItemId])` needs
-> no `NULLS NOT DISTINCT` edit (the way `ModelJudgment`'s did) precisely because Postgres' **default
-> `NULLS DISTINCT` is what that index wants**: every ordinary run has both columns NULL and they
-> must all coexist, while at most one calibration run may exist per (calibration, item). Adding
-> `NULLS NOT DISTINCT` there would have made the *first* ordinary run block every subsequent one.
-> If you find yourself reaching for a hand edit on a unique index, check first whether the default
-> is already the semantics you need.
+> **Still eight after v2i (2026-08-31), and that was a fact worth stating rather than a row worth
+> adding — AT THE TIME.** `20260830120000_v2i_calibration_item_link` was written with **zero hand
+> edits** — the whole migration is what Prisma generated. Its
+> `@@unique([calibrationRunId, goldenItemId])` needed no `NULLS NOT DISTINCT` edit (the way
+> `ModelJudgment`'s did) precisely because Postgres' **default `NULLS DISTINCT` is what that index
+> wanted**: every ordinary run has both columns NULL and they must all coexist, while at most one
+> calibration run may exist per (calibration, item). Adding `NULLS NOT DISTINCT` there would have
+> made the *first* ordinary run block every subsequent one. If you find yourself reaching for a hand
+> edit on a unique index, check first whether the default is already the semantics you need.
+>
+> **SUPERSEDED by v2p (2026-09-07), and here is why the same reasoning didn't just get reversed.**
+> `20260907170000_v2p_evaluation_run_pair_order` (A2.2, the permuted-run write path) needed to widen
+> the idempotency key from "one calibration run per item" to "one calibration run per (item,
+> **order**)" — a permuted calibration launches BOTH an AB and a BA `EvaluationRun` for the same
+> item, and each order needs its own idempotency slot rather than colliding with its sibling. That
+> pushed the index over the same line `ModelJudgment`'s idempotency index crossed in v2b: inside the
+> calibration partition, two rows sharing a NULL `pairOrder` must still collide (score.ts's
+> idempotency guard), which needs `NULLS NOT DISTINCT` — but the v2i reasoning above (every ordinary
+> run's shared NULLs must all coexist) is STILL correct for ordinary rows, so `NULLS NOT DISTINCT`
+> alone would have reintroduced exactly the bug this callout used to warn against. The fix is the
+> partial predicate in the two new v2p rows below: `WHERE "calibrationRunId" IS NOT NULL` removes
+> every ordinary run from the index entirely, so `NULLS NOT DISTINCT` only ever applies inside the
+> calibration partition where it's wanted, and the v2i-era default-only approach simply doesn't scale
+> to a second discriminator column without it. `EvaluationRun_calibrationRunId_goldenItemId_key` (the
+> index this callout describes) is dropped by v2p and replaced by
+> `EvaluationRun_calibrationRunId_goldenItemId_pairOrder_key`.
 
 | Migration | What's really there | Why `schema.prisma` can't say it |
 |---|---|---|
@@ -772,6 +789,8 @@ number in step with the rows):
 | `20260818120000_v2h_human_verification` | `GoldenLabel_score_xor_preference`, a table `CHECK` asserting `num_nonnulls("overallScore", "preference") = 1` — a pointwise label carries a score, a pairwise label carries a preference, and exactly one of the two is set (A1, human verification) | Same class as the v2f row above: no `CHECK` syntax of any kind. `schema.prisma` can only say that both columns are optional, so without this constraint a both-null row and a both-set row are equally acceptable. The typed client cannot construct a violating row either — `overallScore` and `preference` are separate optional inputs — so it is pinned by raw `INSERT`s in `tests/db/golden-label-constraints.test.ts`, verified to fail (`promise resolved "1" instead of rejecting`) with the constraint dropped. |
 | `20260818120000_v2h_human_verification` | `GoldenLabel_goldenItemId_annotatorId_round_live_key`, a unique index on `GoldenLabel(goldenItemId, annotatorId, round)` restricted to `WHERE "tombstonedAt" IS NULL` — **it REPLACES the v2e row above**, which is dropped by this migration (A1, test-retest) | No partial-index syntax, same as the v2e row it supersedes. The widening is what makes test-retest possible: two blind readings by one annotator on one item are PEERS, and the two-column index permitted only one live label per (item, annotator). Note `migrate diff` does not emit the `DROP INDEX` either — it cannot see the old index any more than the new one — so **both** the drop and the recreate are hand-written. Pinned by `tests/db/golden-label-constraints.test.ts`, verified to fail (`promise resolved "{ …(13) }" instead of rejecting`) with the index dropped. |
 | `20260818120000_v2h_human_verification` | `GoldenAssignment_item_annotator_round_active_key`, a unique index on `GoldenAssignment(goldenItemId, annotatorId, round)` restricted to `WHERE "revokedAt" IS NULL` — one ACTIVE assignment per (item, annotator, round) (A1, assignment) | No partial-index syntax, same as the two rows above. The predicate is load-bearing because `DELETE` on the assignments route **revokes** rather than removing the row: a whole-table unique would let a revoked assignment permanently block reassigning that work to the same annotator. Pinned by `tests/db/golden-label-constraints.test.ts`, verified to fail (`promise resolved "{ …(10) }" instead of rejecting`) with the index dropped. |
+| `20260907170000_v2p_evaluation_run_pair_order` | `EvaluationRun_calibrationRunId_goldenItemId_pairOrder_key`, a unique index on `EvaluationRun(calibrationRunId, goldenItemId, pairOrder)` restricted to `WHERE "calibrationRunId" IS NOT NULL`, created `NULLS NOT DISTINCT` — **REPLACES** `EvaluationRun_calibrationRunId_goldenItemId_key`, the plain (Prisma-expressible, `NULLS DISTINCT`) index v2i created; that index is dropped by this migration (A2.2, one calibration run per (item, order) so a permuted calibration can hold both an AB and a BA run per item) | No Prisma DSL syntax for `NULLS NOT DISTINCT` or a partial index (`WHERE`), same class as the v2d/v2e/v2h rows above — and, like the v2e→v2h row above, this REPLACES a row, so both the `DROP INDEX` and the `CREATE UNIQUE INDEX` are hand-written. Unlike v2e's declared `@@unique`, v2i's was never expressible as one on its own (see the callout above) — it just happened to need no hand edit, so it never had a row here; v2p's replacement does. Pinned by `tests/db/calibration-link.test.ts`'s "v2p pairOrder discriminator on EvaluationRun" describe block: `rejects a second run for the same (calibrationRun, goldenItem, pairOrder)` (P2002), `ACCEPTS the same (calibrationRun, goldenItem) at the OTHER pairOrder`, and `still lets two ORDINARY runs coexist — the partial predicate keeps them out of the index entirely`. |
+| `20260907170000_v2p_evaluation_run_pair_order` | `EvaluationRun_calibration_needs_order`, a table `CHECK` asserting `"calibrationRunId" IS NULL OR "pairOrder" IS NOT NULL` — a calibration run always names the candidate order it presented (A2.2) | Same class as the v2f/v2h `CHECK` rows above: no `CHECK` syntax of any kind, and `schema.prisma` can only say `pairOrder` is an optional `String?`, so nothing stops a caller from omitting it on a calibration row without this constraint. Pinned by `tests/db/calibration-link.test.ts`'s `refuses a calibration run with no pairOrder — the CHECK constraint`, a raw `INSERT` (`$executeRawUnsafe`) verified to reject with the constraint name in the error, same raw-SQL convention as the other `CHECK` rows. |
 
 The real hazard is the opposite direction from "drift tooling nags you to
 revert it": because `schema.prisma` can never re-declare any of these —
@@ -786,9 +805,10 @@ Prisma can't see any of them either way. The `CHECK` row is the sharpest
 case, because it is not an index at all and so leaves nothing behind for
 introspection to half-notice. Every row here has an automated guard —
 `tests/db/idempotency-tighten.test.ts`, `tests/db/email-partial-unique.test.ts`
-and `tests/db/meta-eval.test.ts` cover the four index rows — and the
-`CHECK` row's, `tests/db/tombstone-check-constraint.test.ts`, is the only
-one that must attempt its violating rows through RAW SQL. Not because the
+and `tests/db/meta-eval.test.ts` cover the seven index rows — and all three
+`CHECK` rows' tests — `tests/db/tombstone-check-constraint.test.ts`,
+`tests/db/golden-label-constraints.test.ts`, and `tests/db/calibration-link.test.ts`'s
+v2p block — must attempt their violating rows through RAW SQL. Not because the
 typed client refuses them — `tombstone.create({ data: {} })` and a `data`
 setting both FKs each compile clean, and both reach Postgres and die on
 `23514`. Raw SQL is used because a typed create needs real FK rows to

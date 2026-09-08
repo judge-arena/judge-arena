@@ -144,6 +144,35 @@ describe('render: buildPairwiseUserPrompt', () => {
       })
     ).toThrow(/both candidates must carry response text/);
   });
+
+  it('renders position 1 as Response A under BA', () => {
+    const submission = {
+      inputText: 'Q',
+      candidates: [
+        { position: 0, responseText: 'ZERO', promptText: null, label: null },
+        { position: 1, responseText: 'ONE', promptText: null, label: null },
+      ],
+    };
+    const ab = buildPairwiseUserPrompt(submission, 'AB');
+    const ba = buildPairwiseUserPrompt(submission, 'BA');
+
+    expect(ab.indexOf('ZERO')).toBeLessThan(ab.indexOf('ONE'));
+    expect(ba.indexOf('ONE')).toBeLessThan(ba.indexOf('ZERO'));
+    // The bytes must actually differ — this is the assertion that catches a
+    // swap that silently did nothing.
+    expect(ba).not.toBe(ab);
+  });
+
+  it('defaults to AB so every existing caller is unchanged', () => {
+    const submission = {
+      inputText: 'Q',
+      candidates: [
+        { position: 0, responseText: 'ZERO', promptText: null, label: null },
+        { position: 1, responseText: 'ONE', promptText: null, label: null },
+      ],
+    };
+    expect(buildPairwiseUserPrompt(submission)).toBe(buildPairwiseUserPrompt(submission, 'AB'));
+  });
 });
 
 describe('render: renderJudgmentPrompt picks the builder from template.protocol', () => {

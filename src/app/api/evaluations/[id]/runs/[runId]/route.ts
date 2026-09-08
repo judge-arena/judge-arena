@@ -87,7 +87,39 @@ export async function GET(
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    return NextResponse.json(run);
+    // Task 9 (spec §2): a permuted calibration run has exactly one sibling —
+    // the other pairOrder at the same (calibrationRunId, goldenItemId), per
+    // the DB's partial unique index (v2p). The list page
+    // (src/app/evaluate/[id]/page.tsx) already collapses a full pair into
+    // one AB/BA row, but a caller can still land directly on ONE run here
+    // (a bookmarked link, a shared URL) — attach the sibling's minimal
+    // display shape so this page doesn't look like a self-contained run when
+    // it's actually half of a position-bias pair. `null` for every ordinary
+    // run and for an unpaired calibration order (sibling not yet launched,
+    // or its publish failed — see launch.ts's F4 doc).
+    let pairedRun: {
+      id: string;
+      pairOrder: string | null;
+      status: string;
+      modelJudgments: Array<{ verdict: string | null; status: string }>;
+    } | null = null;
+    if (run.calibrationRunId && run.goldenItemId) {
+      pairedRun = await prisma.evaluationRun.findFirst({
+        where: {
+          calibrationRunId: run.calibrationRunId,
+          goldenItemId: run.goldenItemId,
+          id: { not: run.id },
+        },
+        select: {
+          id: true,
+          pairOrder: true,
+          status: true,
+          modelJudgments: { select: { verdict: true, status: true }, orderBy: { createdAt: 'asc' } },
+        },
+      });
+    }
+
+    return NextResponse.json({ ...run, pairedRun });
   } catch (error) {
     logger.error('Failed to fetch run', { error: serializeError(error) });
     return NextResponse.json({ error: 'Failed to fetch run' }, { status: 500 });

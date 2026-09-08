@@ -49,16 +49,29 @@ type FakeRun = {
   id: string;
   goldenItemId: string;
   goldenItem: { id: string; index: number; expected: string | null };
+  /** v2p: the partition key now lives HERE, not on the judgment. Every
+   *  fixture below sets it to match its own judgment's `pairOrder` — the
+   *  dual-write the real launch path performs from one variable at creation
+   *  (run-launch.ts) — except where a test deliberately makes the two
+   *  disagree to exercise the mismatch guard. */
+  pairOrder: string | null;
   modelJudgments: FakeJudgment[];
 };
 
 /**
- * A Prisma stand-in that honours the three things the query actually relies
- * on: the `calibrationRunId` filter, the nested `status: 'completed'` filter
- * on modelJudgments, and the `orderBy` on the related golden item's index.
- * All three are enforced here rather than asserted on the call args, so a
+ * A Prisma stand-in that honours what the query actually relies on: the
+ * `calibrationRunId` filter and the `orderBy` on the related golden item's
+ * index. Both are enforced here rather than asserted on the call args, so a
  * scorer that forgot one FAILS a behaviour test instead of passing a shape
  * test.
+ *
+ * It ALSO knows how to filter `modelJudgments` by a nested `status`
+ * where-clause (`wanted`, below) — that was load-bearing before this task,
+ * when the query filtered to `status: 'completed'` server-side. The query no
+ * longer sends that filter (score.ts's partition does the status gate now),
+ * so `wanted` is always `undefined` here and that branch is DEAD against the
+ * real query; it survives only because it is harmless and other test blocks
+ * in this file construct their own equivalent by hand.
  *
  * `orderBy` is honoured because Postgres has no default row order. A scorer
  * that drops the clause reads rows in whatever order the planner returns them,
@@ -124,6 +137,7 @@ function calibration(
     id: `run-${index}`,
     goldenItemId: `item-${index}`,
     goldenItem: { id: `item-${index}`, index, expected },
+    pairOrder: order,
     modelJudgments: [
       {
         id: `j-${index}`,
@@ -261,6 +275,234 @@ describe('scoreCalibrationRun — the derived preference, not the verdict letter
   });
 });
 
+describe('scoreCalibrationRun — partitions by pairOrder before scoring', () => {
+  // v2p moved the discriminator off the judgment and onto the RUN: a
+  // permuted item is TWO EvaluationRuns (one per order), each with exactly
+  // ONE ModelJudgment — never one run carrying both orders' judgments, which
+  // is what these three fixtures used to construct. Restructured into the
+  // real two-runs-per-item shape below; every assertion is untouched.
+  it('scores the AB partition when a BA run is also present', async () => {
+    // Two runs, same item, opposite orders, same judge. Before the
+    // partition this threw duplicate-reading from groundTruthReadings.
+    const client = fakeClient([
+      {
+        id: 'run-i1-ab',
+        goldenItemId: 'i1',
+        goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        pairOrder: 'AB',
+        modelJudgments: [
+          { id: 'j-i1-ab', verdict: 'A', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+      {
+        id: 'run-i1-ba',
+        goldenItemId: 'i1',
+        goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        pairOrder: 'BA',
+        modelJudgments: [
+          { id: 'j-i1-ba', verdict: 'B', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+    ]);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+    // AB only: one item, one verdict, correct.
+    expect(score.verdictCount).toBe(1);
+    expect(score.accuracy).toBe(1);
+  });
+
+  it('counts an item whose AB run errored but whose BA run completed as MISSING for AB', async () => {
+    // NOTE (review round 1, F3): under the OLD one-run-two-judgments shape
+    // this fixture demonstrated a real hazard — a server-side `status:
+    // 'completed'` filter stripped the AB judgment, the run arrived with
+    // `modelJudgments.length === 1`, and that escaped the old `length === 0`
+    // unjudged check. Under v2p the AB and BA runs are SEPARATE, each with
+    // its own single judgment, so the AB run here carries only its own
+    // errored judgment regardless of any server-side status filter —
+    // re-adding `where: { status: 'completed' }` to the query would produce
+    // an IDENTICAL result. This fixture no longer demonstrates that escape;
+    // it now pins partition independence instead: AB's own loss is scored on
+    // its own run, and a real verdict on the sibling BA run for the same item
+    // must not paper over it.
+    const client = fakeClient([
+      {
+        id: 'run-i1-ab',
+        goldenItemId: 'i1',
+        goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        pairOrder: 'AB',
+        modelJudgments: [
+          { id: 'j-i1-ab', verdict: null, pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'error' },
+        ],
+      },
+      {
+        id: 'run-i1-ba',
+        goldenItemId: 'i1',
+        goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        pairOrder: 'BA',
+        modelJudgments: [
+          { id: 'j-i1-ba', verdict: 'B', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+    ]);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+    expect(score.missingVerdicts).toBe(1);
+    expect(score.verdictCount).toBe(0);
+    expect(score.noVerdictRate).toBe(1);
+  });
+
+  it('keeps the disagreement list aligned to its own item after a BA run', async () => {
+    const client = fakeClient([
+      {
+        id: 'run-i1-ab',
+        goldenItemId: 'i1',
+        goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        pairOrder: 'AB',
+        modelJudgments: [
+          { id: 'j-i1-ab', verdict: 'B', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+      {
+        id: 'run-i1-ba',
+        goldenItemId: 'i1',
+        goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        pairOrder: 'BA',
+        modelJudgments: [
+          { id: 'j-i1-ba', verdict: 'A', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+      {
+        id: 'run-i2',
+        goldenItemId: 'i2',
+        goldenItem: { id: 'i2', index: 1, expected: 'A>B' },
+        pairOrder: 'AB',
+        modelJudgments: [
+          { id: 'j-i2-ab', verdict: 'B', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+    ]);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+    // Grouping `rows` without `context` slides i2's disagreement onto i1's runId.
+    expect(score.disagreements.map((d) => d.itemIndex)).toEqual([0, 1]);
+  });
+});
+
+describe('scoreCalibrationRun — the RUN carries the partition key, not the judgment (v2p)', () => {
+  it('partitions on the RUN pairOrder, not the judgment', async () => {
+    const client = fakeClient([
+      {
+        id: 'run-ab',
+        goldenItemId: 'item-0',
+        goldenItem: { id: 'item-0', index: 0, expected: 'A>B' },
+        pairOrder: 'AB',
+        modelJudgments: [
+          { id: 'j-ab', verdict: 'A', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+      {
+        id: 'run-ba',
+        goldenItemId: 'item-0',
+        goldenItem: { id: 'item-0', index: 0, expected: 'A>B' },
+        pairOrder: 'BA',
+        modelJudgments: [
+          { id: 'j-ba', verdict: 'B', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+    ]);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+    expect(score.verdictCount).toBe(1); // AB partition only
+  });
+
+  it('THROWS when a judgment pairOrder disagrees with its run', async () => {
+    // Trap T3: the renderer reads the judgment's copy, the scorer reads the
+    // run's. A divergence files the row into one partition and resolves it
+    // as the other, and the constant floor STILL reads a plausible number —
+    // nothing looks wrong.
+    const client = fakeClient([
+      {
+        id: 'run-mismatch',
+        goldenItemId: 'item-0',
+        goldenItem: { id: 'item-0', index: 0, expected: 'A>B' },
+        pairOrder: 'AB',
+        modelJudgments: [
+          { id: 'j-mismatch', verdict: 'A', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+    ]);
+    await expect(scoreCalibrationRun(CALIBRATION_ID, client)).rejects.toThrow(/pair-order-mismatch/);
+  });
+
+  it('a judgmentless run in a NON-primary order does not inflate AB — a permuted item, AB present', async () => {
+    // Review round 1, F1: the brief's own fixture (a LONE judgmentless BA
+    // run, nothing else) contradicted its own assertion — the run's own
+    // partition genuinely has dispatchedItemCount 1, and there is no 'AB'
+    // anywhere to prefer over it, so asserting 0 for that shape was simply
+    // wrong. What "BA's loss must not be attributed to AB" actually means is
+    // THIS shape: a real permuted item, where AB's own run is judged
+    // correctly and is never polluted by a SIBLING run's loss in the other
+    // order. AB exists here, so it wins the primary slot unconditionally
+    // (see score.ts's primaryKey comment) — BA's zero verdicts never touch it.
+    const client = fakeClient([
+      {
+        id: 'run-ab',
+        goldenItemId: 'item-0',
+        goldenItem: { id: 'item-0', index: 0, expected: 'A>B' },
+        pairOrder: 'AB',
+        modelJudgments: [
+          { id: 'j-ab', verdict: 'A', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+      {
+        id: 'run-ba-empty',
+        goldenItemId: 'item-0',
+        goldenItem: { id: 'item-0', index: 0, expected: 'A>B' },
+        pairOrder: 'BA',
+        modelJudgments: [],
+      },
+    ]);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+    expect(score.dispatchedItemCount).toBe(1);
+    expect(score.verdictCount).toBe(1);
+  });
+
+  it('a calibration that ran ONLY at BA (never AB) reports its OWN honest counts, not zero', async () => {
+    // Review round 1, F1: the ORIGINAL fallback preferred a partition with
+    // `rows.length > 0`. For a BA-only calibration that lost every judgment
+    // (every request errored/DLQ'd, or every run is still pending), BA has
+    // real dispatch and ZERO rows, so that predicate fell through to a fresh,
+    // synthetic '' partition and reported dispatchedItemCount 0 /
+    // missingVerdicts 0 / noVerdictRate null — hiding a total loss instead of
+    // reporting it, the SAME direction as the 2026-08-31 incident this file's
+    // header memorialises (missingVerdicts 0 while four of thirty items had
+    // dead-lettered), just one layer up. This is reachable, not hypothetical:
+    // `scripts/calibration/run.ts --orders=BA` is accepted — launch.ts:271
+    // rejects only duplicate orders, nothing requires 'AB' among them.
+    const client = fakeClient([
+      {
+        id: 'run-ba-1',
+        goldenItemId: 'item-0',
+        goldenItem: { id: 'item-0', index: 0, expected: 'A>B' },
+        pairOrder: 'BA',
+        modelJudgments: [
+          { id: 'j-ba-1', verdict: null, pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'error' },
+        ],
+      },
+      {
+        id: 'run-ba-2',
+        goldenItemId: 'item-1',
+        goldenItem: { id: 'item-1', index: 1, expected: 'B>A' },
+        pairOrder: 'BA',
+        modelJudgments: [
+          { id: 'j-ba-2', verdict: null, pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'error' },
+        ],
+      },
+    ]);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+    expect(score.dispatchedItemCount).toBe(2);
+    expect(score.missingVerdicts).toBe(2);
+    expect(score.verdictCount).toBe(0);
+    expect(score.noVerdictRate).toBe(1);
+  });
+});
+
 describe('scoreCalibrationRun — the denominator is items with a verdict', () => {
   it('a judgment that never completed is not a wrong answer, it is an absent one', async () => {
     // status: 'pending' means the worker has not answered yet. Counting it in
@@ -301,14 +543,17 @@ describe('scoreCalibrationRun — the denominator is items with a verdict', () =
 
 describe('scoreCalibrationRun — the constant-verdict floor, per denominator', () => {
   /** Minimal stand-in for hand-built rows — the `calibration()` builder cannot
-   *  express a 'tie' KEY or a hand-picked key balance. It ENFORCES the two
-   *  filters the query relies on (`where.calibrationRunId` and the nested
-   *  `status: 'completed'` on modelJudgments) for the same reason `fakeClient`
-   *  above does (its docblock, :54-67): enforcing them here means a scorer that
-   *  drops one fails a BEHAVIOUR test, where a fake that ignored them would let
-   *  these three cases pass a shape test. `orderBy` is deliberately NOT honoured
-   *  — every fixture below is handed in index order, and the ordering clause is
-   *  already pinned by `fakeClient`'s own test. Captures every update's data. */
+   *  express a 'tie' KEY or a hand-picked key balance. It ENFORCES the filter
+   *  the query relies on (`where.calibrationRunId`) for the same reason
+   *  `fakeClient` above does (its docblock, :54-67): enforcing it here means a
+   *  scorer that drops it fails a BEHAVIOUR test, where a fake that ignored it
+   *  would let these three cases pass a shape test. It also carries the same
+   *  nested `status` where-matcher `fakeClient` does, and for the same reason
+   *  that one is now dead against the real query — the fixtures below always
+   *  pass `status: 'completed'` on their own rows instead. `orderBy` is
+   *  deliberately NOT honoured — every fixture below is handed in index order,
+   *  and the ordering clause is already pinned by `fakeClient`'s own test.
+   *  Captures every update's data. */
   type FindManyArgs = {
     where?: { calibrationRunId?: string };
     select?: { modelJudgments?: { where?: { status?: string } } };
@@ -322,6 +567,7 @@ describe('scoreCalibrationRun — the constant-verdict floor, per denominator', 
   type Row = {
     id: string;
     goldenItem: { id: string; index: number; expected: string };
+    pairOrder: string;
     modelJudgments: RowJudgment[];
   };
   function rowsClient(
@@ -357,6 +603,7 @@ describe('scoreCalibrationRun — the constant-verdict floor, per denominator', 
   const item = (id: string, index: number, expected: string, verdict: string | null): Row => ({
     id: `run-${id}`,
     goldenItem: { id, index, expected },
+    pairOrder: 'AB',
     modelJudgments: [{ verdict, pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'completed' }],
   });
 
@@ -740,10 +987,14 @@ describe('scoreCalibrationRun — the disagreement list is the debugging surface
 describe('scoreCalibrationRun — items that produced NOTHING', () => {
   // Regression for the first production calibration (2026-08-31), which
   // reported `missingVerdicts 0` while four of thirty items had dead-lettered.
-  // The query selects only completed judgments, so an errored run arrives with
-  // an empty modelJudgments array and contributes no row at all — invisible to
-  // groundTruthReadings, which can only report a missing verdict for a row it
-  // was handed.
+  // Two DISTINCT shapes both have to land as missing, and this block pins
+  // both: a judgment row that EXISTS but never reached 'completed' (the
+  // completed-only filter now lives in the partition, not the query, so this
+  // row is no longer stripped before score.ts sees it), and a run with NO
+  // judgment row at all — unreachable today (launchSingleRun nests a run's
+  // judgments in the same evaluationRun.create) but still covered: the run's
+  // own `pairOrder` makes the partition knowable inline, so it is counted in
+  // its own partition directly rather than through a separate accumulator.
   const goldenItem = (id: string, index: number, expected: string) => ({ id, index, expected });
 
   function clientWith(runs: unknown[]): CalibrationScoreClient {
@@ -758,11 +1009,24 @@ describe('scoreCalibrationRun — items that produced NOTHING', () => {
       {
         id: 'r1',
         goldenItem: goldenItem('i1', 0, 'A>B'),
-        modelJudgments: [{ verdict: 'A', pairOrder: 'AB', judgeModelVersionId: 'v1' }],
+        pairOrder: 'AB',
+        modelJudgments: [{ verdict: 'A', pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'completed' }],
       },
-      // Errored/DLQ'd/in-flight: the completed-only filter leaves this empty.
-      { id: 'r2', goldenItem: goldenItem('i2', 1, 'B>A'), modelJudgments: [] },
-      { id: 'r3', goldenItem: goldenItem('i3', 2, 'A>B'), modelJudgments: [] },
+      // Errored/DLQ'd: the row exists (the query no longer filters it out)
+      // but its status is never 'completed'.
+      {
+        id: 'r2',
+        goldenItem: goldenItem('i2', 1, 'B>A'),
+        pairOrder: 'AB',
+        modelJudgments: [{ verdict: null, pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'error' }],
+      },
+      // The OTHER shape: no judgment row at all. Currently unreachable in
+      // production, but `scoreCalibrationRun` must keep counting it in both
+      // `dispatchedItemCount` and `missingVerdicts` regardless — the run's
+      // OWN `pairOrder` ('AB' here) is now known inline, so it is attributed
+      // to that partition directly rather than through a separate
+      // judgmentless-run accumulator.
+      { id: 'r3', goldenItem: goldenItem('i3', 2, 'A>B'), pairOrder: 'AB', modelJudgments: [] },
     ]);
 
     const score = await scoreCalibrationRun('cal-1', client);
@@ -772,12 +1036,23 @@ describe('scoreCalibrationRun — items that produced NOTHING', () => {
     // The denominator and the missing count must describe the same 3 items.
     expect(score.verdictCount + score.missingVerdicts).toBe(3);
     expect(score.accuracy).toBe(1);
+    expect(score.dispatchedItemCount).toBe(3);
   });
 
   it('reports 0 missing when every launched item produced a verdict', async () => {
     const client = clientWith([
-      { id: 'r1', goldenItem: goldenItem('i1', 0, 'A>B'), modelJudgments: [{ verdict: 'A', pairOrder: 'AB', judgeModelVersionId: 'v1' }] },
-      { id: 'r2', goldenItem: goldenItem('i2', 1, 'B>A'), modelJudgments: [{ verdict: 'B', pairOrder: 'AB', judgeModelVersionId: 'v1' }] },
+      {
+        id: 'r1',
+        goldenItem: goldenItem('i1', 0, 'A>B'),
+        pairOrder: 'AB',
+        modelJudgments: [{ verdict: 'A', pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'completed' }],
+      },
+      {
+        id: 'r2',
+        goldenItem: goldenItem('i2', 1, 'B>A'),
+        pairOrder: 'AB',
+        modelJudgments: [{ verdict: 'B', pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'completed' }],
+      },
     ]);
     const score = await scoreCalibrationRun('cal-2', client);
     expect(score.missingVerdicts).toBe(0);
@@ -789,10 +1064,12 @@ describe('scoreCalibrationRun — coverage and selective accuracy', () => {
   /** Hand-built rows, the same stand-in shape and for the same reason as the
    *  constant-floor block above: `calibration()` cannot express a hand-picked
    *  key balance or a 'tie' KEY, and both are load-bearing here. It ENFORCES
-   *  the `calibrationRunId` filter and the nested `status: 'completed'` filter
-   *  so a scorer that drops one fails a BEHAVIOUR test. `orderBy` is not
-   *  honoured; every fixture below is handed in index order and the ordering
-   *  clause is pinned by `fakeClient`'s own test. */
+   *  the `calibrationRunId` filter so a scorer that drops it fails a
+   *  BEHAVIOUR test. It also carries the same nested `status` where-matcher
+   *  as `rowsClient` above, which the real query no longer sends — every
+   *  fixture below passes `status: 'completed'` on its own rows instead.
+   *  `orderBy` is not honoured; every fixture below is handed in index order
+   *  and the ordering clause is pinned by `fakeClient`'s own test. */
   type CoverageArgs = {
     where?: { calibrationRunId?: string };
     select?: { modelJudgments?: { where?: { status?: string } } };
@@ -800,6 +1077,7 @@ describe('scoreCalibrationRun — coverage and selective accuracy', () => {
   type CoverageRow = {
     id: string;
     goldenItem: { id: string; index: number; expected: string };
+    pairOrder: string;
     modelJudgments: Array<{
       verdict: string | null;
       pairOrder: string;
@@ -838,6 +1116,7 @@ describe('scoreCalibrationRun — coverage and selective accuracy', () => {
   const row = (index: number, expected: string, verdict: string | null): CoverageRow => ({
     id: `run-${index}`,
     goldenItem: { id: `item-${index}`, index, expected },
+    pairOrder: 'AB',
     modelJudgments: [{ verdict, pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'completed' }],
   });
   // `coverageClient`/`row` duplicate `rowsClient`/`item` in the constant-floor
@@ -1028,7 +1307,7 @@ describe('scoreCalibrationRun — coverage and selective accuracy', () => {
     // reference (they are equal today); the literal alone would not fail when
     // the constant is bumped without the write following it.
     expect(data.scoringVersion).toBe(SCORING_RULES_VERSION);
-    expect(data.scoringVersion).toBe(2);
+    expect(data.scoringVersion).toBe(3);
     // The floor over ALL scored items is a DIFFERENT column and a different
     // number — 0.6 against 4/7. Two floors on one row, and the wrong one is the
     // one that gets quoted.
@@ -1054,13 +1333,16 @@ describe('scoreCalibrationRun — noVerdictRate: a FLEET property, never abstent
   /** Rows that can be SHAPED, which is what this block is about: an item the
    *  judge was asked and that produced nothing at all. Two shapes reach the
    *  scorer differently and both are exercised — a COMPLETED judgment whose
-   *  verdict is null, and a run with no completed judgment (the query's
-   *  `status: 'completed'` filter, honoured here, hands the scorer an empty
-   *  array). A THIRD shape, an EvaluationRun with no goldenItem, was never
-   *  asked about anything and must be counted in neither. */
+   *  verdict is null, and a judgment row whose status never reached
+   *  'completed' (the query sends every row regardless of status now; the
+   *  `wanted`/nested-status matcher below mirrors `fakeClient`'s and is dead
+   *  the same way — it is score.ts's OWN partition that filters these out).
+   *  A THIRD shape, an EvaluationRun with no goldenItem, was never asked
+   *  about anything and must be counted in neither. */
   type FleetRow = {
     id: string;
     goldenItem: { id: string; index: number; expected: string } | null;
+    pairOrder: string;
     modelJudgments: Array<{
       verdict: string | null;
       pairOrder: string;
@@ -1109,16 +1391,16 @@ describe('scoreCalibrationRun — noVerdictRate: a FLEET property, never abstent
     let i = 0;
     const item = (index: number) => ({ id: `item-${index}`, index, expected: 'A>B' });
     for (let n = 0; n < counts.answered; n++, i++)
-      rows.push({ id: `run-${i}`, goldenItem: item(i), modelJudgments: [judgment('A', 'completed')] });
+      rows.push({ id: `run-${i}`, goldenItem: item(i), pairOrder: 'AB', modelJudgments: [judgment('A', 'completed')] });
     // finishReason='length': the request came back and carried no usable verdict.
     for (let n = 0; n < counts.truncated; n++, i++)
-      rows.push({ id: `run-${i}`, goldenItem: item(i), modelJudgments: [judgment(null, 'completed')] });
+      rows.push({ id: `run-${i}`, goldenItem: item(i), pairOrder: 'AB', modelJudgments: [judgment(null, 'completed')] });
     // A dead request: nothing ever COMPLETED, so the status filter leaves the
     // scorer an empty array and only `unjudgedItems` can see it.
     for (let n = 0; n < counts.dead; n++, i++)
-      rows.push({ id: `run-${i}`, goldenItem: item(i), modelJudgments: [judgment(null, 'error')] });
+      rows.push({ id: `run-${i}`, goldenItem: item(i), pairOrder: 'AB', modelJudgments: [judgment(null, 'error')] });
     for (let n = 0; n < (counts.orphaned ?? 0); n++, i++)
-      rows.push({ id: `run-${i}`, goldenItem: null, modelJudgments: [judgment('A', 'completed')] });
+      rows.push({ id: `run-${i}`, goldenItem: null, pairOrder: 'AB', modelJudgments: [judgment('A', 'completed')] });
     return rows;
   }
 
@@ -1219,5 +1501,181 @@ describe('scoreCalibrationRun — noVerdictRate: a FLEET property, never abstent
     expect(score.verdictCount).toBe(5);
     expect(score.missingVerdicts).toBe(0);
     expect(score.noVerdictRate).toBe(0);
+  });
+});
+
+describe('scoreCalibrationRun — position bias (v2o/A2.3): pooled across BOTH orders, stored beside the AB-only columns', () => {
+  it('an AB-only calibration stores NULL estimators and pairedDecisiveCount 0 — D4 INERTNESS: rawAgreement/kappa/verdictCount/committedCount/selectiveAccuracy are UNCHANGED from the pre-Task-5 numbers', async () => {
+    // Every AB-only fixture elsewhere in this file (all 22 historical
+    // production rows are AB-only) must keep scoring bit-identically. This is
+    // that proof: the SAME `calibration(GROUND_TRUTH)` fixture the
+    // pre-existing "matches the key on all 30" test uses (line 631), with the
+    // SAME expected accuracy/kappa/verdictCount, PLUS the new columns.
+    const client = fakeClient(calibration(GROUND_TRUTH));
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+
+    // ── D4: the AB-only stored columns, bit-identical to before this task ──
+    expect(score.accuracy).toBe(1);
+    expect(score.kappa).toBeCloseTo(1, 10);
+    expect(score.verdictCount).toBe(30);
+    expect(score.committedCount).toBe(30);
+    expect(score.selectiveAccuracy).toBe(1);
+
+    // ── The new columns: NULL, never zero — "no paired decisive item
+    // existed" is not "position bias measured zero". ──
+    expect(score.positionBias).toBeNull();
+    expect(score.orderFlipRate).toBeNull();
+    expect(score.pairedDecisiveCount).toBe(0);
+    expect(score.tieExcludedCount).toBe(0);
+    // Every one of the 30 AB rows has no BA counterpart at all: unpaired,
+    // not tie-excluded.
+    expect(score.unpairedCount).toBe(30);
+    expect(score.positionBiasInterval).toBeNull();
+    expect(score.orderFlipRateInterval).toBeNull();
+
+    // Stored, not just returned — the SAME full-overwrite `update()` call.
+    expect(client.row.rawAgreement).toBe(1);
+    expect(client.row.kappa).toBeCloseTo(1, 10);
+    expect(client.row.verdictCount).toBe(30);
+    expect(client.row.committedCount).toBe(30);
+    expect(client.row.selectiveAccuracy).toBe(1);
+    expect(client.row.positionBias).toBeNull();
+    expect(client.row.orderFlipRate).toBeNull();
+    expect(client.row.pairedDecisiveCount).toBe(0);
+  });
+
+  it('a permuted (AB+BA) calibration pools BOTH orders — the pure first-slot-stamper archetype: positionBias 0.5, orderFlipRate 1.0', async () => {
+    // 4 golden items, each with an AB run AND a BA run (the real two-runs-
+    // per-item shape, v2p), verdict ALWAYS 'A' regardless of which order it
+    // was shown in — position-bias.ts's own 'always first slot' archetype.
+    const runs: FakeRun[] = [0, 1, 2, 3].flatMap((i) => {
+      const goldenItem = { id: `item-${i}`, index: i, expected: i % 2 === 0 ? 'A>B' : 'B>A' };
+      return [
+        {
+          id: `run-${i}-ab`,
+          goldenItemId: goldenItem.id,
+          goldenItem,
+          pairOrder: 'AB',
+          modelJudgments: [
+            { id: `j-${i}-ab`, verdict: 'A', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+          ],
+        },
+        {
+          id: `run-${i}-ba`,
+          goldenItemId: goldenItem.id,
+          goldenItem,
+          pairOrder: 'BA',
+          modelJudgments: [
+            { id: `j-${i}-ba`, verdict: 'A', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+          ],
+        },
+      ];
+    });
+    const client = fakeClient(runs);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+
+    expect(score.pairedDecisiveCount).toBe(4);
+    expect(score.tieExcludedCount).toBe(0);
+    expect(score.unpairedCount).toBe(0);
+    expect(score.positionBias).toBeCloseTo(0.5, 10);
+    expect(score.orderFlipRate).toBeCloseTo(1, 10);
+    expect(score.positionBiasInterval).toEqual({ low: 0.5, high: 0.5 });
+    expect(score.orderFlipRateInterval?.low).toBeCloseTo(0.5101091635454027, 10);
+    expect(score.orderFlipRateInterval?.high).toBe(1);
+
+    // ── D4 unaffected by the permutation: rawAgreement/kappa/verdictCount
+    // stay AB-only — computed over the 4 AB runs alone, never the pooled 8. ──
+    expect(score.verdictCount).toBe(4);
+
+    // Stored in the same full-overwrite update.
+    expect(client.row.positionBias).toBeCloseTo(0.5, 10);
+    expect(client.row.orderFlipRate).toBeCloseTo(1, 10);
+    expect(client.row.pairedDecisiveCount).toBe(4);
+  });
+
+  it('a single paired item with DIFFERENT slot-A namings scores positionBias 0.0 and orderFlipRate 0.0 — the wiring oracle', async () => {
+    // AB says 'A' (names slot A), BA says 'B' (names slot B): one of two
+    // slot-A namings in 2n=2 → pA = 0.5 → positionBias 0.0. The preferences
+    // differ (AB≠BA as raw letters) → no flip → orderFlipRate 0.0. This is
+    // the same fixture the "scores the AB partition when a BA run is also
+    // present" test above uses (line 287) — proof that adding position-bias
+    // computation alongside it does not disturb the AB-only accuracy=1
+    // result that test already pins.
+    const client = fakeClient([
+      {
+        id: 'run-i1-ab',
+        goldenItemId: 'i1',
+        goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        pairOrder: 'AB',
+        modelJudgments: [
+          { id: 'j-i1-ab', verdict: 'A', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+      {
+        id: 'run-i1-ba',
+        goldenItemId: 'i1',
+        goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        pairOrder: 'BA',
+        modelJudgments: [
+          { id: 'j-i1-ba', verdict: 'B', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+    ]);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+    // AB says 'A' (slot A), BA says 'B' (slot B): one of two slot-A namings
+    // in 2n=2 → pA = 0.5 → positionBias 0.0. Preferences differ (AB≠BA) → no
+    // flip → orderFlipRate 0.0.
+    expect(score.pairedDecisiveCount).toBe(1);
+    expect(score.positionBias).toBeCloseTo(0, 10);
+    expect(score.orderFlipRate).toBeCloseTo(0, 10);
+  });
+
+  it('does NOT write ordersRequested at all — launch.ts writes it once at CREATE time and the scorer must not touch it, so a launch-set value SURVIVES scoring', async () => {
+    // Fix round 1: an earlier version of this file read `ordersRequested`
+    // off the CalibrationRun header relation and wrote that SAME value back
+    // through `calibrationRun.update`. Harmless on a healthy run (it just
+    // re-wrote what launch.ts already wrote) — but `scoreCalibrationRun` on
+    // a header with ZERO EvaluationRuns (reachable: `--score-only=<id>`
+    // against a fresh header, or a launch's poll loop falling out at the
+    // timeout before a single run lands) read `null` off the empty `runs`
+    // array and CLOBBERED a correct 'AB,BA' back to `null` — precisely the
+    // "never permuted" vs "the BA half died" ambiguity spec D5 created this
+    // column to eliminate. The fix is to never write it from here at all.
+    const client = fakeClient(calibration(GROUND_TRUTH));
+    // Simulate what launch.ts already wrote at CREATE time, before this
+    // calibration was ever scored.
+    client.row.ordersRequested = 'AB,BA';
+
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+
+    // The scorer's own update() call never mentions the column — not even to
+    // write back the value it just read. A regression that reintroduces the
+    // read-and-write-back would still pass a `.toBe('AB,BA')` check on the
+    // final row (a no-op round trip), so the stronger assertion is on the
+    // update `data` object itself: the KEY must not be present.
+    const lastUpdate = client.updates.at(-1);
+    expect(lastUpdate).toBeDefined();
+    expect(Object.prototype.hasOwnProperty.call(lastUpdate as object, 'ordersRequested')).toBe(false);
+
+    // And the launch-time value is exactly what a reader would see after
+    // this score — untouched.
+    expect(client.row.ordersRequested).toBe('AB,BA');
+
+    // Sanity: this is still an ordinary AB-only score, not a degenerate one.
+    expect(score.accuracy).toBe(1);
+  });
+
+  it('the empty-runs case (score-only against a header with zero EvaluationRuns, or a fresh launch scored before anything landed) does not clobber a pre-existing ordersRequested either', async () => {
+    // The exact shape fix round 1 flagged as reachable: `fakeClient([])` is
+    // already used elsewhere in this file (e.g. "a calibration with nothing
+    // scored yet reports null, not 0"), so this is not a hypothetical input.
+    const client = fakeClient([]);
+    client.row.ordersRequested = 'AB,BA';
+
+    await scoreCalibrationRun(CALIBRATION_ID, client);
+
+    expect(client.row.ordersRequested).toBe('AB,BA');
+    const lastUpdate = client.updates.at(-1);
+    expect(Object.prototype.hasOwnProperty.call(lastUpdate as object, 'ordersRequested')).toBe(false);
   });
 });

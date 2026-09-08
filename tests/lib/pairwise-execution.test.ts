@@ -56,6 +56,7 @@ const { JUDGMENT_JSON_SCHEMA, JUDGMENT_JSON_SCHEMA_NAME, PAIRWISE_JUDGMENT_JSON_
 );
 import { createHash } from 'crypto';
 import type { RunProviderJudgmentInput } from '@/lib/llm';
+import { preferenceFromVerdict } from '@/lib/calibration/readings';
 
 function okChatResponse(content: string, model = 'served-model') {
   return {
@@ -413,6 +414,71 @@ describe('pairwise parseMode: "structured" only when a schema was requested AND 
     // written as `caps.structuredOutput !== 'none'` says 'structured' and a
     // rule written as `raw.structuredOutputRequested` says 'fallback'.
     expect(result.parseMode).toBe('fallback');
+  });
+});
+
+/**
+ * Task 4: `buildPairwiseUserPrompt` now takes a `PairOrder`, threaded through
+ * `prepareJudgmentCall`'s `input.pairOrder`. Spec trap 4.1: a sign error in
+ * this threading has NO SYMPTOM downstream (readings.ts:26-33) — an accuracy
+ * assertion cannot catch it, only the persisted bytes can. Runs the real
+ * `prepareJudgmentCall` -> `executePairwiseCall` path against the mocked
+ * OpenAI client, same harness as the `userPromptSha256` assertions above.
+ */
+describe('pairwise: pairOrder controls what is rendered and persisted (Task 4)', () => {
+  const orderedInput: RunProviderJudgmentInput = {
+    ...pairwiseInput,
+    submission: {
+      inputText: 'Q',
+      candidates: [
+        { position: 0, promptText: null, responseText: 'CANDIDATE_AT_POSITION_ZERO', label: null },
+        { position: 1, promptText: null, responseText: 'CANDIDATE_AT_POSITION_ONE', label: null },
+      ],
+    },
+  };
+
+  it('persists a DIFFERENT userPrompt and sha256 for BA than for AB', async () => {
+    openaiCreateMock.mockResolvedValue(okChatResponse('{"verdict":"A","reasoning":"r"}'));
+
+    const abPrepared = prepareJudgmentCall({ ...orderedInput, pairOrder: 'AB' });
+    const ab = await executePairwiseCall(abPrepared);
+
+    const baPrepared = prepareJudgmentCall({ ...orderedInput, pairOrder: 'BA' });
+    const ba = await executePairwiseCall(baPrepared);
+
+    // The bytes actually changed. If this passes while the two are equal, the
+    // swap silently did nothing and every BA row would be mislabelled.
+    expect(ba.userPrompt).not.toBe(ab.userPrompt);
+    expect(ba.userPromptSha256).not.toBe(ab.userPromptSha256);
+
+    // And it changed in the RIGHT direction: position 1's text is presented
+    // first under BA. Asserted against `prepared.userPrompt` (a plain
+    // `string`, not the optional `CallCaptureFields.userPrompt`) — already
+    // proven equal to `result.userPrompt` by the describe block above.
+    const zero = 'CANDIDATE_AT_POSITION_ZERO';
+    const one = 'CANDIDATE_AT_POSITION_ONE';
+    expect(abPrepared.userPrompt.indexOf(zero)).toBeLessThan(abPrepared.userPrompt.indexOf(one));
+    expect(baPrepared.userPrompt.indexOf(one)).toBeLessThan(baPrepared.userPrompt.indexOf(zero));
+  });
+
+  it('defaults to AB when pairOrder is omitted, matching every pre-BA caller', async () => {
+    openaiCreateMock.mockResolvedValue(okChatResponse('{"verdict":"A","reasoning":"r"}'));
+
+    const withoutOrder = await executePairwiseCall(prepareJudgmentCall(orderedInput));
+    const withAb = await executePairwiseCall(prepareJudgmentCall({ ...orderedInput, pairOrder: 'AB' }));
+
+    expect(withoutOrder.userPrompt).toBe(withAb.userPrompt);
+    expect(withoutOrder.userPromptSha256).toBe(withAb.userPromptSha256);
+  });
+
+  it('inverts in exactly ONE layer — a BA verdict of A means B>A', () => {
+    // Guards the double-inversion trap: the renderer (this file's tests
+    // above) swaps what is SHOWN; `preferenceFromVerdict`
+    // (calibration/readings.ts, unmodified by this task and already pinned
+    // arm-by-arm in tests/lib/calibration-readings.test.ts) swaps what the
+    // verdict letter MEANS. Both together would silently return to AB.
+    expect(preferenceFromVerdict('A', 'BA')).toBe('B>A');
+    expect(preferenceFromVerdict('A', 'AB')).toBe('A>B');
   });
 });
 
