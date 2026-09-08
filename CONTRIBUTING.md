@@ -805,9 +805,10 @@ Prisma can't see any of them either way. The `CHECK` row is the sharpest
 case, because it is not an index at all and so leaves nothing behind for
 introspection to half-notice. Every row here has an automated guard —
 `tests/db/idempotency-tighten.test.ts`, `tests/db/email-partial-unique.test.ts`
-and `tests/db/meta-eval.test.ts` cover the four index rows — and the
-`CHECK` row's, `tests/db/tombstone-check-constraint.test.ts`, is the only
-one that must attempt its violating rows through RAW SQL. Not because the
+and `tests/db/meta-eval.test.ts` cover the seven index rows — and all three
+`CHECK` rows' tests — `tests/db/tombstone-check-constraint.test.ts`,
+`tests/db/golden-label-constraints.test.ts`, and `tests/db/calibration-link.test.ts`'s
+v2p block — must attempt their violating rows through RAW SQL. Not because the
 typed client refuses them — `tombstone.create({ data: {} })` and a `data`
 setting both FKs each compile clean, and both reach Postgres and die on
 `23514`. Raw SQL is used because a typed create needs real FK rows to

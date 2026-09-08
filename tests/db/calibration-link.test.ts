@@ -5,8 +5,9 @@ import { prisma } from '@/lib/db';
 import { logger } from '@/lib/logger';
 import { isGoldenSetFrozen } from '@/lib/golden-sets';
 import { effectiveSamplingParams } from '@/lib/llm/sampling';
-import { launchCalibrationRun, MAX_CALIBRATION_ITEMS, MAX_PAIRED_CALIBRATION_ITEMS } from '@/lib/calibration/launch';
+import { launchCalibrationRun, MAX_CALIBRATION_ITEMS, maxPairedCalibrationItems } from '@/lib/calibration/launch';
 import { launchSingleRun } from '@/lib/run-launch';
+import { resolveTimeoutBudgets, MAX_HARD_CAP_MS } from '@/lib/llm/timeout-policy';
 import { seedPromptTemplates } from '../../prisma/seed-prompt-templates';
 
 // ─── The calibration ⇄ golden-item link (A2.1, v2i) ────────────────────────
@@ -610,8 +611,24 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
     expect(judgments[0].pairOrder).toBe('AB');
   });
 
-  it('MAX_PAIRED_CALIBRATION_ITEMS is 719 — the stricter, PAIRED item ceiling', () => {
-    expect(MAX_PAIRED_CALIBRATION_ITEMS).toBe(719);
+  it('maxPairedCalibrationItems() is 719 at the DEFAULT hard cap — the stricter, PAIRED item ceiling', () => {
+    expect(maxPairedCalibrationItems()).toBe(719);
+  });
+
+  it('a raised EVALUATION_MODEL_HARD_CAP_MS genuinely LOWERS the paired ceiling', () => {
+    // This is the assertion that would have caught the bug: the ceiling used
+    // to be a static `= 719` literal compared against a CONFIGURABLE cap.
+    // `EVALUATION_MODEL_HARD_CAP_MS` is env-tunable up to `MAX_HARD_CAP_MS`
+    // (1_170_000 ms), and at that ceiling the genuinely safe paired bound is
+    // ~553, not 719 — a static 719 would have stayed green at exactly the
+    // configuration this test now exercises.
+    const atDefault = maxPairedCalibrationItems();
+    const atMaxHardCap = maxPairedCalibrationItems(
+      resolveTimeoutBudgets({ EVALUATION_MODEL_HARD_CAP_MS: String(MAX_HARD_CAP_MS) })
+    );
+    expect(atDefault).toBe(719);
+    expect(atMaxHardCap).toBe(553);
+    expect(atMaxHardCap).toBeLessThan(atDefault);
   });
 
   it('creates 2N EvaluationRuns with ONE judgment each for a permuted calibration', async () => {

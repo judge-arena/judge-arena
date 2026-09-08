@@ -1,5 +1,16 @@
 # BA Sweep / Position Bias Implementation Plan
 
+> **SUPERSEDED — 2026-09-07.** Replaced by
+> `docs/superpowers/plans/2026-09-07-permuted-run.md` (spec:
+> `docs/superpowers/specs/2026-09-07-permuted-run-design.md`). What changed: the
+> order discriminator moved from `ModelJudgment` to `EvaluationRun`, so a permuted
+> calibration is 2N runs with one judgment each, not N runs with two — which
+> restored the `judgmentCount === 1` invariant the timeout model depends on. This
+> document is kept as the record of the plan that was written here and then
+> revised; everything below (starting with the Architecture line's "two
+> `ModelJudgment` rows ... on the same `EvaluationRun`") describes the ABANDONED
+> two-judgments-per-run design, not what shipped.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Render every pairwise judgment in both candidate orders and store two independent position-bias estimators, so a judge's position preference can be separated from its content signal.

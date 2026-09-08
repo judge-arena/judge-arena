@@ -240,7 +240,7 @@ export const RUN_DEADLINE_SLACK_MS = 60_000;
  * codebase adds a judgment to a run after creation), so it is safe for the
  * caller to read once, outside any lock, and combine with `Date.now()` at
  * claim time without racing itself. For an ordinary run this is the model
- * count `launchSingleRun` created it with; for a calibration run (A2.1) it
+ * count `launchSingleRun` created it with; for a calibration run (A2.2 / v2p) it
  * is always 1 — one judge, one item, one judgment per `EvaluationRun` — so
  * the deadline this produces is `now + 1 * hardCapMs + slackMs`, roughly 16
  * minutes at the defaults, REGARDLESS of how many OTHER calibration runs

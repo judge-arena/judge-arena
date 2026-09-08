@@ -1,5 +1,15 @@
 # The BA sweep — disentangling position bias from judge signal — 2026-09-07
 
+> **SUPERSEDED — 2026-09-07.** Replaced by
+> `docs/superpowers/specs/2026-09-07-permuted-run-design.md`. What changed: the
+> order discriminator moved from `ModelJudgment` to `EvaluationRun`, so a permuted
+> calibration is 2N runs with one judgment each, not N runs with two — which
+> restored the `judgmentCount === 1` invariant the timeout model depends on. This
+> document is kept as the record of the design that was decided here and then
+> revised; everything below (including D1's "SECOND `ModelJudgment` on the SAME
+> `CalibrationRun`" shape) describes the ABANDONED two-judgments-per-run design,
+> not what shipped.
+
 ## 0. If you read one thing
 
 Every pairwise judgment this product has ever made — **4200 of 4200** — was rendered in one order,
