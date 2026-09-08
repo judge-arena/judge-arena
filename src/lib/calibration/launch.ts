@@ -154,9 +154,15 @@ export interface LaunchCalibrationRunParams {
    * recorded as `EvaluationRun.triggeredById` on every run. */
   triggeredById: string;
   /** Which candidate orders each item is judged in. Defaults to `['AB']`.
-   * `orders.length > 1` swaps the item ceiling from `MAX_CALIBRATION_ITEMS`
-   * to the stricter `MAX_PAIRED_CALIBRATION_ITEMS` — see that constant's doc
-   * for why the ceiling cannot stay the same number. */
+   * A2.2: ONE `EvaluationRun` (with exactly one `ModelJudgment`) is launched
+   * PER order, per item — `orders.length > 1` therefore dispatches
+   * `items.length * orders.length` runs against the SAME `items.length`
+   * `Evaluation` rows (one `Evaluation` shared by every order of an item; see
+   * the item loop's own doc). `orders.length > 1` also swaps the item ceiling
+   * from `MAX_CALIBRATION_ITEMS` to the stricter `MAX_PAIRED_CALIBRATION_ITEMS`
+   * — see that constant's doc for why the ceiling cannot stay the same
+   * number, and note it is compared against `items.length`, never against
+   * the dispatched run count. */
   orders?: PairOrder[];
 }
 
@@ -255,16 +261,19 @@ export async function launchCalibrationRun(
 
   // F3 (review round 1): a duplicate order (e.g. `['AB', 'AB']`) passes every
   // OTHER pre-flight check, freezes the golden set, and then fails EVERY
-  // single item at `launchSingleRun`'s nested `modelJudgments.create` on the
-  // `@@unique([runId, judgeModelVersionId, pairOrder])` constraint —
-  // knowable up front, from the params alone, with no DB read at all, so it
-  // is checked FIRST, before anything that costs a query.
+  // single item's SECOND `launchSingleRun` call on
+  // `EvaluationRun`'s partial `@@unique([calibrationRunId, goldenItemId,
+  // pairOrder])` (v2p) — the second call for the same item is asking for a
+  // second run at the SAME order, which that index (and the CHECK it pairs
+  // with) exists to refuse. Knowable up front, from the params alone, with
+  // no DB read at all, so it is checked FIRST, before anything that costs a
+  // query.
   if (new Set(orders).size !== orders.length) {
     throw new RunLaunchError(
       400,
       `orders must not contain duplicates — got [${orders.join(', ')}]. A repeated order would launch every ` +
-        "item, freeze the golden set, and then fail all of them on ModelJudgment's " +
-        '@@unique([runId, judgeModelVersionId, pairOrder]).'
+        "item, freeze the golden set, and then fail all of them on EvaluationRun's " +
+        '@@unique([calibrationRunId, goldenItemId, pairOrder]).'
     );
   }
 
@@ -505,6 +514,13 @@ export async function launchCalibrationRun(
       // `launchSingleRun` knows this — it forces judge mode for pairwise
       // rather than letting `deriveRunMode` read the empty column and classify
       // the run as respond-mode.
+      //
+      // A2.2: hoisted ABOVE the orders loop below — ONE `Evaluation` per item,
+      // shared by every order's `EvaluationRun`. `EvaluationRun` has only
+      // `@@index([evaluationId])`, no unique, so two runs (AB and BA) may
+      // point at the same evaluation; sharing it here is what keeps
+      // `Evaluation.count` at N (one per item), not 2N — the number the
+      // leaderboard and the public counts read.
       // eslint-disable-next-line no-await-in-loop -- item-atomic by design: each item's create+launch must be individually attributable and individually survivable (see module doc)
       const evaluation = await prisma.evaluation.create({
         data: {
@@ -519,42 +535,66 @@ export async function launchCalibrationRun(
         select: { id: true },
       });
 
-      // eslint-disable-next-line no-await-in-loop -- see above
-      const launch = await launchSingleRun(
-        {
-          evaluationId: evaluation.id,
-          triggeredById,
-          rubricId,
-          judgeModelVersionIds: [judgeModelVersionId],
-          protocol: 'pairwise',
-          candidates: toRunCandidates(item.candidates),
-          goldenItemId: item.id,
-          calibrationRunId: calibrationRun.id,
-          orders,
-        },
-        deps
-      );
+      // A2.2: the fan-out that used to live INSIDE one `launchSingleRun` call
+      // (one run, one judgment per requested order) now lives HERE — one
+      // `launchSingleRun` call PER requested order, each producing its own
+      // `EvaluationRun` with exactly one `ModelJudgment`, all against the
+      // SAME `evaluation.id` hoisted above. `RunCandidate` positions are
+      // copied VERBATIM every time via `toRunCandidates(item.candidates)` —
+      // never reordered per order — because `position` IS candidate identity
+      // (golden-sets.ts:48) and `GoldenItem.expected` is stated against it;
+      // presenting the mirrored order is `render.ts`'s job at render time,
+      // not this loop's.
+      let itemPublishFailed = false;
+      let itemPublishError: string | undefined;
 
-      if (launch.publishFailed) {
-        // F4 (review round 1): the run has been compensated to `status:
-        // 'error'`, but that is a RUN-LEVEL status write, not a judgment-level
-        // one — `launchSingleRun`'s publish loop is sequential and stops at
-        // the FIRST failure, so for a paired (2-order) run it is possible for
-        // AB to have published successfully before BA's publish throws. AB's
-        // `judgment.execute` message is live on the broker regardless of the
-        // run's now-'error' status, and `claimJudgment` has NO run-status
-        // guard (deliberately — see that function's own doc), so a worker
-        // WILL claim and execute it. It is NOT scored as a loss: an
-        // unpaired verdict simply has no BA counterpart to decide against,
-        // so it drops out of `pairedDecisiveCount` rather than counting
-        // against `positionBias`/`orderFlipRate`. Recovery is a RELAUNCH of
-        // this item — there is no code path that retries just the missing
-        // order. Reported as a failure rather than silently counted as
-        // accepted either way — a caller that treated this as launched would
-        // still wait forever for BA's verdict, which was never published.
+      for (const order of orders) {
+        // eslint-disable-next-line no-await-in-loop -- item-atomic AND order-atomic by design: each (item, order) create+launch must be individually attributable and individually survivable (see module doc); `orders` is capped at PAIR_ORDERS.length (2)
+        const launch = await launchSingleRun(
+          {
+            evaluationId: evaluation.id,
+            triggeredById,
+            rubricId,
+            judgeModelVersionIds: [judgeModelVersionId],
+            protocol: 'pairwise',
+            candidates: toRunCandidates(item.candidates),
+            goldenItemId: item.id,
+            calibrationRunId: calibrationRun.id,
+            pairOrder: order,
+          },
+          deps
+        );
+
+        if (launch.publishFailed) {
+          // F4 (review round 1), re-shaped for A2.2: AB and BA are now two
+          // INDEPENDENT `launchSingleRun` calls (two transactions, two publish
+          // attempts), not two judgments inside one run's sequential publish
+          // loop — so it is possible for AB to have published successfully
+          // before BA's publish throws (or vice versa; both orders are still
+          // attempted, never short-circuited). Either way the ALREADY-
+          // published order's `judgment.execute` message is live on the
+          // broker regardless of its own run's now-'error' status (if that
+          // one is the one that failed) or its normal 'pending' status (if
+          // it's the one that succeeded), and `claimJudgment` has NO
+          // run-status guard (deliberately — see that function's own doc), so
+          // a worker WILL claim and execute it. It is NOT scored as a loss: an
+          // unpaired verdict simply has no counterpart to decide against, so
+          // it drops out of `pairedDecisiveCount` rather than counting against
+          // `positionBias`/`orderFlipRate`. Recovery is a RELAUNCH of this
+          // item — there is no code path that retries just the missing order.
+          // The ITEM is reported as a failure rather than silently counted as
+          // accepted either way — a caller that treated this as launched
+          // would still wait forever for the missing order's verdict, which
+          // was never published.
+          itemPublishFailed = true;
+          itemPublishError = launch.publishError ?? 'judgment.execute publish failed';
+        }
+      }
+
+      if (itemPublishFailed) {
         failed.push({
           goldenItemId: item.id,
-          reason: launch.publishError ?? 'judgment.execute publish failed',
+          reason: itemPublishError ?? 'judgment.execute publish failed',
         });
         continue;
       }

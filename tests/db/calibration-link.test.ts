@@ -481,21 +481,22 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
     expect(runs.every((run) => run.status === 'error')).toBe(true);
   });
 
-  // ── (2b) A2 (v2o BA sweep): launch emits one judgment per requested order ─
+  // ── (2b) A2.2 (v2p): the fan-out moves from judgments-within-a-run to ─────
+  //       runs-within-an-Evaluation
   //
-  // Both `launchSingleRun.orders` and `launchCalibrationRun.orders` are
-  // threaded through the SAME nested `modelJudgments.create` inside
-  // `evaluationRun.create` that has always existed — see run-launch.ts's
-  // module doc. `claim.ts` stamps a run's `deadlineAt` exactly ONCE, from
-  // `judgmentCount`, at first dequeue; a judgment inserted after that point
-  // would inherit an already-expired deadline and be reaped
-  // (`src/worker/reaper.ts`). The one-transaction shape is what makes "one
-  // judgment per order, all pending, none late" true by construction — these
-  // tests pin the OBSERVABLE consequence (both rows exist, both `pending`,
-  // in one query) rather than the transaction boundary itself, which is not
-  // independently observable from outside `$transaction`.
+  // `launchSingleRun.pairOrder` (singular) is written from ONE variable onto
+  // BOTH `EvaluationRun.pairOrder` and its single `ModelJudgment.pairOrder`
+  // in the same nested create (trap T3) — see run-launch.ts's module doc.
+  // `launchCalibrationRun.orders` (plural) is still the per-launch opt-in
+  // (spec D5): it now calls `launchSingleRun` ONCE PER ORDER, against the
+  // SAME `evaluationId`, rather than asking one `launchSingleRun` call to
+  // fan out internally. `claim.ts` stamps a run's `deadlineAt` exactly ONCE,
+  // from `judgmentCount`, at first dequeue — a judgment inserted after that
+  // point would inherit an already-expired deadline and be reaped
+  // (`src/worker/reaper.ts`); one judgment per run, fixed at creation, makes
+  // that true by construction rather than by convention.
 
-  it('launchSingleRun creates one judgment per requested order, all pending', async () => {
+  it('launchSingleRun writes the SAME pairOrder onto EvaluationRun and its single ModelJudgment', async () => {
     const world = await mkWorld({ items: 0 });
     const evaluation = await db.evaluation.create({
       data: { projectId: world.project.id, userId: world.user.id, rubricId: world.rubric.id, inputText: 'q' },
@@ -511,23 +512,22 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
           { position: 0, responseText: 'candidate A' },
           { position: 1, responseText: 'candidate B' },
         ],
-        orders: ['AB', 'BA'],
+        pairOrder: 'BA',
       },
       { publish: noopPublish }
     );
 
-    const judgments = await prisma.modelJudgment.findMany({
-      where: { runId: launch.run.id },
-      orderBy: { pairOrder: 'asc' },
-    });
-    expect(judgments).toHaveLength(2);
-    expect(judgments.map((j) => j.pairOrder)).toEqual(['AB', 'BA']);
+    const run = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: launch.run.id } });
+    expect(run.pairOrder).toBe('BA');
+    const judgments = await prisma.modelJudgment.findMany({ where: { runId: launch.run.id } });
+    expect(judgments).toHaveLength(1);
+    expect(judgments[0].pairOrder).toBe('BA');
     // Both must exist before the run is claimable: claim.ts stamps deadlineAt
     // once from judgmentCount, so a late insert inherits an expired deadline.
-    expect(judgments.every((j) => j.status === 'pending')).toBe(true);
+    expect(judgments[0].status).toBe('pending');
   });
 
-  it('launchSingleRun still creates exactly one AB judgment when orders is omitted', async () => {
+  it('launchSingleRun still creates exactly one AB judgment (and run.pairOrder "AB") when pairOrder is omitted', async () => {
     const world = await mkWorld({ items: 0 });
     const evaluation = await db.evaluation.create({
       data: { projectId: world.project.id, userId: world.user.id, rubricId: world.rubric.id, inputText: 'q' },
@@ -546,6 +546,8 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
       },
       { publish: noopPublish }
     );
+    const run = await prisma.evaluationRun.findUniqueOrThrow({ where: { id: launch.run.id } });
+    expect(run.pairOrder).toBe('AB');
     const judgments = await prisma.modelJudgment.findMany({ where: { runId: launch.run.id } });
     expect(judgments).toHaveLength(1);
     expect(judgments[0].pairOrder).toBe('AB');
@@ -555,7 +557,7 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
     expect(MAX_PAIRED_CALIBRATION_ITEMS).toBe(719);
   });
 
-  it('launchCalibrationRun threads orders through every item and records ordersRequested on the header', async () => {
+  it('creates 2N EvaluationRuns with ONE judgment each for a permuted calibration', async () => {
     const world = await mkWorld({ items: 2 });
 
     const result = await launchCalibrationRun(
@@ -566,18 +568,70 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
     expect(result.failed).toEqual([]);
     const runs = await db.evaluationRun.findMany({
       where: { calibrationRunId: result.calibrationRunId },
-      include: { modelJudgments: true },
+      include: { _count: { select: { modelJudgments: true } } },
     });
-    expect(runs).toHaveLength(2);
-    for (const run of runs) {
-      expect(run.modelJudgments).toHaveLength(2);
-      expect(new Set(run.modelJudgments.map((j) => j.pairOrder))).toEqual(new Set(['AB', 'BA']));
-    }
+    expect(runs).toHaveLength(world.items.length * 2);
+    expect(runs.every((r) => r._count.modelJudgments === 1)).toBe(true);
+    expect(runs.filter((r) => r.pairOrder === 'AB')).toHaveLength(world.items.length);
+    expect(runs.filter((r) => r.pairOrder === 'BA')).toHaveLength(world.items.length);
 
     // v2o. COMMA-SEPARATED — membership is `.includes()`, not `===`; see
     // schema.prisma's own doc on this column.
     const header = await db.calibrationRun.findUniqueOrThrow({ where: { id: result.calibrationRunId } });
     expect(header.ordersRequested).toBe('AB,BA');
+  });
+
+  it('puts both orders of one item on the SAME Evaluation', async () => {
+    const world = await mkWorld({ items: 2 });
+
+    const result = await launchCalibrationRun(
+      { ...launchParamsFrom(world), orders: ['AB', 'BA'] },
+      { publish: noopPublish }
+    );
+
+    const runs = await db.evaluationRun.findMany({ where: { calibrationRunId: result.calibrationRunId } });
+    const byEvaluation = new Map<string, number>();
+    for (const run of runs) {
+      byEvaluation.set(run.evaluationId, (byEvaluation.get(run.evaluationId) ?? 0) + 1);
+    }
+    expect([...byEvaluation.values()].every((n) => n === 2)).toBe(true);
+    // Evaluation.count stays N — the leaderboard and the public counts read it.
+    expect(byEvaluation.size).toBe(world.items.length);
+    expect(await db.evaluation.count()).toBe(world.items.length);
+  });
+
+  it('defaults to a single AB run per item when orders is omitted', async () => {
+    const world = await mkWorld({ items: 2 });
+
+    const result = await launchCalibrationRun(launchParamsFrom(world), { publish: noopPublish });
+
+    const runs = await db.evaluationRun.findMany({ where: { calibrationRunId: result.calibrationRunId } });
+    expect(runs).toHaveLength(world.items.length);
+    expect(runs.every((r) => r.pairOrder === 'AB')).toBe(true);
+  });
+
+  it('copies RunCandidate positions VERBATIM into both orders — no materialised swap', async () => {
+    // Swapping position here is spec build W: render.ts re-sorts it, reverses
+    // it again, and the mirror prompt comes out byte-identical to AB while
+    // readings.ts inverts anyway.
+    const world = await mkWorld({ items: 2 });
+
+    const result = await launchCalibrationRun(
+      { ...launchParamsFrom(world), orders: ['AB', 'BA'] },
+      { publish: noopPublish }
+    );
+
+    const runs = await db.evaluationRun.findMany({
+      where: { calibrationRunId: result.calibrationRunId },
+      include: { runCandidates: { orderBy: { position: 'asc' } } },
+    });
+    for (const item of world.items) {
+      const ab = runs.find((r) => r.pairOrder === 'AB' && r.goldenItemId === item.id)!;
+      const ba = runs.find((r) => r.pairOrder === 'BA' && r.goldenItemId === item.id)!;
+      expect(ba.runCandidates.map((c) => c.responseText)).toEqual(ab.runCandidates.map((c) => c.responseText));
+      expect(ba.runCandidates.map((c) => c.position)).toEqual([0, 1]);
+      expect(ab.runCandidates.map((c) => c.position)).toEqual([0, 1]);
+    }
   });
 
   it('launchCalibrationRun still records ordersRequested "AB" when orders is omitted', async () => {
