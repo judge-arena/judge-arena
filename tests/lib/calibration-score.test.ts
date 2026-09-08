@@ -49,6 +49,12 @@ type FakeRun = {
   id: string;
   goldenItemId: string;
   goldenItem: { id: string; index: number; expected: string | null };
+  /** v2p: the partition key now lives HERE, not on the judgment. Every
+   *  fixture below sets it to match its own judgment's `pairOrder` — the
+   *  dual-write the real launch path performs from one variable at creation
+   *  (run-launch.ts) — except where a test deliberately makes the two
+   *  disagree to exercise the mismatch guard. */
+  pairOrder: string | null;
   modelJudgments: FakeJudgment[];
 };
 
@@ -131,6 +137,7 @@ function calibration(
     id: `run-${index}`,
     goldenItemId: `item-${index}`,
     goldenItem: { id: `item-${index}`, index, expected },
+    pairOrder: order,
     modelJudgments: [
       {
         id: `j-${index}`,
@@ -269,16 +276,30 @@ describe('scoreCalibrationRun — the derived preference, not the verdict letter
 });
 
 describe('scoreCalibrationRun — partitions by pairOrder before scoring', () => {
-  it('scores the AB partition when a BA judgment is also present', async () => {
-    // Two judgments per run, opposite orders, same judge. Before the
+  // v2p moved the discriminator off the judgment and onto the RUN: a
+  // permuted item is TWO EvaluationRuns (one per order), each with exactly
+  // ONE ModelJudgment — never one run carrying both orders' judgments, which
+  // is what these three fixtures used to construct. Restructured into the
+  // real two-runs-per-item shape below; every assertion is untouched.
+  it('scores the AB partition when a BA run is also present', async () => {
+    // Two runs, same item, opposite orders, same judge. Before the
     // partition this threw duplicate-reading from groundTruthReadings.
     const client = fakeClient([
       {
-        id: 'run-i1',
+        id: 'run-i1-ab',
         goldenItemId: 'i1',
         goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        pairOrder: 'AB',
         modelJudgments: [
           { id: 'j-i1-ab', verdict: 'A', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+      {
+        id: 'run-i1-ba',
+        goldenItemId: 'i1',
+        goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        pairOrder: 'BA',
+        modelJudgments: [
           { id: 'j-i1-ba', verdict: 'B', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
         ],
       },
@@ -289,34 +310,51 @@ describe('scoreCalibrationRun — partitions by pairOrder before scoring', () =>
     expect(score.accuracy).toBe(1);
   });
 
-  it('counts an item whose AB errored but whose BA completed as MISSING for AB', async () => {
+  it('counts an item whose AB run errored but whose BA run completed as MISSING for AB', async () => {
     const client = fakeClient([
       {
-        id: 'run-i1',
+        id: 'run-i1-ab',
         goldenItemId: 'i1',
         goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        pairOrder: 'AB',
         modelJudgments: [
           { id: 'j-i1-ab', verdict: null, pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'error' },
+        ],
+      },
+      {
+        id: 'run-i1-ba',
+        goldenItemId: 'i1',
+        goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        pairOrder: 'BA',
+        modelJudgments: [
           { id: 'j-i1-ba', verdict: 'B', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
         ],
       },
     ]);
     const score = await scoreCalibrationRun(CALIBRATION_ID, client);
-    // The run arrives with modelJudgments.length === 1, so the old
-    // `length === 0` test misses it and missingVerdicts silently reads 0.
+    // The BA run's own verdict must not paper over AB's loss.
     expect(score.missingVerdicts).toBe(1);
     expect(score.verdictCount).toBe(0);
     expect(score.noVerdictRate).toBe(1);
   });
 
-  it('keeps the disagreement list aligned to its own item after a BA row', async () => {
+  it('keeps the disagreement list aligned to its own item after a BA run', async () => {
     const client = fakeClient([
       {
-        id: 'run-i1',
+        id: 'run-i1-ab',
         goldenItemId: 'i1',
         goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        pairOrder: 'AB',
         modelJudgments: [
           { id: 'j-i1-ab', verdict: 'B', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+      {
+        id: 'run-i1-ba',
+        goldenItemId: 'i1',
+        goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        pairOrder: 'BA',
+        modelJudgments: [
           { id: 'j-i1-ba', verdict: 'A', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
         ],
       },
@@ -324,6 +362,7 @@ describe('scoreCalibrationRun — partitions by pairOrder before scoring', () =>
         id: 'run-i2',
         goldenItemId: 'i2',
         goldenItem: { id: 'i2', index: 1, expected: 'A>B' },
+        pairOrder: 'AB',
         modelJudgments: [
           { id: 'j-i2-ab', verdict: 'B', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
         ],
@@ -332,6 +371,69 @@ describe('scoreCalibrationRun — partitions by pairOrder before scoring', () =>
     const score = await scoreCalibrationRun(CALIBRATION_ID, client);
     // Grouping `rows` without `context` slides i2's disagreement onto i1's runId.
     expect(score.disagreements.map((d) => d.itemIndex)).toEqual([0, 1]);
+  });
+});
+
+describe('scoreCalibrationRun — the RUN carries the partition key, not the judgment (v2p)', () => {
+  it('partitions on the RUN pairOrder, not the judgment', async () => {
+    const client = fakeClient([
+      {
+        id: 'run-ab',
+        goldenItemId: 'item-0',
+        goldenItem: { id: 'item-0', index: 0, expected: 'A>B' },
+        pairOrder: 'AB',
+        modelJudgments: [
+          { id: 'j-ab', verdict: 'A', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+      {
+        id: 'run-ba',
+        goldenItemId: 'item-0',
+        goldenItem: { id: 'item-0', index: 0, expected: 'A>B' },
+        pairOrder: 'BA',
+        modelJudgments: [
+          { id: 'j-ba', verdict: 'B', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+    ]);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+    expect(score.verdictCount).toBe(1); // AB partition only
+  });
+
+  it('THROWS when a judgment pairOrder disagrees with its run', async () => {
+    // Trap T3: the renderer reads the judgment's copy, the scorer reads the
+    // run's. A divergence files the row into one partition and resolves it
+    // as the other, and the constant floor STILL reads a plausible number —
+    // nothing looks wrong.
+    const client = fakeClient([
+      {
+        id: 'run-mismatch',
+        goldenItemId: 'item-0',
+        goldenItem: { id: 'item-0', index: 0, expected: 'A>B' },
+        pairOrder: 'AB',
+        modelJudgments: [
+          { id: 'j-mismatch', verdict: 'A', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+    ]);
+    await expect(scoreCalibrationRun(CALIBRATION_ID, client)).rejects.toThrow(/pair-order-mismatch/);
+  });
+
+  it('counts a judgmentless run in its OWN partition, inline', async () => {
+    // The only run in this calibration presents BA and produced nothing.
+    // BA's loss must not be attributed to AB — AB never ran here at all, so
+    // the primary (AB) numbers must read as though nothing was dispatched.
+    const client = fakeClient([
+      {
+        id: 'run-ba-empty',
+        goldenItemId: 'item-0',
+        goldenItem: { id: 'item-0', index: 0, expected: 'A>B' },
+        pairOrder: 'BA',
+        modelJudgments: [],
+      },
+    ]);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+    expect(score.dispatchedItemCount).toBe(0);
   });
 });
 
@@ -399,6 +501,7 @@ describe('scoreCalibrationRun — the constant-verdict floor, per denominator', 
   type Row = {
     id: string;
     goldenItem: { id: string; index: number; expected: string };
+    pairOrder: string;
     modelJudgments: RowJudgment[];
   };
   function rowsClient(
@@ -434,6 +537,7 @@ describe('scoreCalibrationRun — the constant-verdict floor, per denominator', 
   const item = (id: string, index: number, expected: string, verdict: string | null): Row => ({
     id: `run-${id}`,
     goldenItem: { id, index, expected },
+    pairOrder: 'AB',
     modelJudgments: [{ verdict, pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'completed' }],
   });
 
@@ -822,9 +926,9 @@ describe('scoreCalibrationRun — items that produced NOTHING', () => {
   // completed-only filter now lives in the partition, not the query, so this
   // row is no longer stripped before score.ts sees it), and a run with NO
   // judgment row at all — unreachable today (launchSingleRun nests a run's
-  // judgments in the same evaluationRun.create) but still covered, because
-  // the OLD flat loop counted `modelJudgments.length === 0` here and the
-  // partitioned version must not silently stop doing so.
+  // judgments in the same evaluationRun.create) but still covered: the run's
+  // own `pairOrder` makes the partition knowable inline, so it is counted in
+  // its own partition directly rather than through a separate accumulator.
   const goldenItem = (id: string, index: number, expected: string) => ({ id, index, expected });
 
   function clientWith(runs: unknown[]): CalibrationScoreClient {
@@ -839,6 +943,7 @@ describe('scoreCalibrationRun — items that produced NOTHING', () => {
       {
         id: 'r1',
         goldenItem: goldenItem('i1', 0, 'A>B'),
+        pairOrder: 'AB',
         modelJudgments: [{ verdict: 'A', pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'completed' }],
       },
       // Errored/DLQ'd: the row exists (the query no longer filters it out)
@@ -846,13 +951,16 @@ describe('scoreCalibrationRun — items that produced NOTHING', () => {
       {
         id: 'r2',
         goldenItem: goldenItem('i2', 1, 'B>A'),
+        pairOrder: 'AB',
         modelJudgments: [{ verdict: null, pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'error' }],
       },
       // The OTHER shape: no judgment row at all. Currently unreachable in
       // production, but `scoreCalibrationRun` must keep counting it in both
-      // `dispatchedItemCount` and `missingVerdicts` regardless — that is
-      // exactly what `judgmentlessRuns` in score.ts exists to guarantee.
-      { id: 'r3', goldenItem: goldenItem('i3', 2, 'A>B'), modelJudgments: [] },
+      // `dispatchedItemCount` and `missingVerdicts` regardless — the run's
+      // OWN `pairOrder` ('AB' here) is now known inline, so it is attributed
+      // to that partition directly rather than through a separate
+      // judgmentless-run accumulator.
+      { id: 'r3', goldenItem: goldenItem('i3', 2, 'A>B'), pairOrder: 'AB', modelJudgments: [] },
     ]);
 
     const score = await scoreCalibrationRun('cal-1', client);
@@ -870,11 +978,13 @@ describe('scoreCalibrationRun — items that produced NOTHING', () => {
       {
         id: 'r1',
         goldenItem: goldenItem('i1', 0, 'A>B'),
+        pairOrder: 'AB',
         modelJudgments: [{ verdict: 'A', pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'completed' }],
       },
       {
         id: 'r2',
         goldenItem: goldenItem('i2', 1, 'B>A'),
+        pairOrder: 'AB',
         modelJudgments: [{ verdict: 'B', pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'completed' }],
       },
     ]);
@@ -901,6 +1011,7 @@ describe('scoreCalibrationRun — coverage and selective accuracy', () => {
   type CoverageRow = {
     id: string;
     goldenItem: { id: string; index: number; expected: string };
+    pairOrder: string;
     modelJudgments: Array<{
       verdict: string | null;
       pairOrder: string;
@@ -939,6 +1050,7 @@ describe('scoreCalibrationRun — coverage and selective accuracy', () => {
   const row = (index: number, expected: string, verdict: string | null): CoverageRow => ({
     id: `run-${index}`,
     goldenItem: { id: `item-${index}`, index, expected },
+    pairOrder: 'AB',
     modelJudgments: [{ verdict, pairOrder: 'AB', judgeModelVersionId: 'v1', status: 'completed' }],
   });
   // `coverageClient`/`row` duplicate `rowsClient`/`item` in the constant-floor
@@ -1164,6 +1276,7 @@ describe('scoreCalibrationRun — noVerdictRate: a FLEET property, never abstent
   type FleetRow = {
     id: string;
     goldenItem: { id: string; index: number; expected: string } | null;
+    pairOrder: string;
     modelJudgments: Array<{
       verdict: string | null;
       pairOrder: string;
@@ -1212,16 +1325,16 @@ describe('scoreCalibrationRun — noVerdictRate: a FLEET property, never abstent
     let i = 0;
     const item = (index: number) => ({ id: `item-${index}`, index, expected: 'A>B' });
     for (let n = 0; n < counts.answered; n++, i++)
-      rows.push({ id: `run-${i}`, goldenItem: item(i), modelJudgments: [judgment('A', 'completed')] });
+      rows.push({ id: `run-${i}`, goldenItem: item(i), pairOrder: 'AB', modelJudgments: [judgment('A', 'completed')] });
     // finishReason='length': the request came back and carried no usable verdict.
     for (let n = 0; n < counts.truncated; n++, i++)
-      rows.push({ id: `run-${i}`, goldenItem: item(i), modelJudgments: [judgment(null, 'completed')] });
+      rows.push({ id: `run-${i}`, goldenItem: item(i), pairOrder: 'AB', modelJudgments: [judgment(null, 'completed')] });
     // A dead request: nothing ever COMPLETED, so the status filter leaves the
     // scorer an empty array and only `unjudgedItems` can see it.
     for (let n = 0; n < counts.dead; n++, i++)
-      rows.push({ id: `run-${i}`, goldenItem: item(i), modelJudgments: [judgment(null, 'error')] });
+      rows.push({ id: `run-${i}`, goldenItem: item(i), pairOrder: 'AB', modelJudgments: [judgment(null, 'error')] });
     for (let n = 0; n < (counts.orphaned ?? 0); n++, i++)
-      rows.push({ id: `run-${i}`, goldenItem: null, modelJudgments: [judgment('A', 'completed')] });
+      rows.push({ id: `run-${i}`, goldenItem: null, pairOrder: 'AB', modelJudgments: [judgment('A', 'completed')] });
     return rows;
   }
 
