@@ -95,21 +95,20 @@ Sorted by **`margin*` = rawAgreement − constantBaseline**, descending, within 
 
 | # | judge · v | run · finished (UTC) | margin* | raw agr. (n) | constant floor | coverage (n) | selective (n) [95% CI] | selective floor | sel. margin | no-verdict (n) | guards |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| — | qwen3.5:9b (Ollama) v2 | `cmtluplg5` · **OPEN** | *+0.2827* | *0.8237 (271/329)* | *0.5410 'A>B' 178/329* | *1.0000 (329/329, 0 tie)* | *0.8237 (271/329) [0.7789–0.8611]* | *0.5410 'A>B' 178/329* | *+0.2827* | *0.4694 (291/620)* | ⏳LIVE ⚠LOSS! ⚠STALE |
 
-> **⏳ IN FLIGHT** — snapshot **2026-09-06 21:40:49 UTC**, **n = 329 of 620 answered** (258 pending, 1 running, 32 error). Every figure on this row MOVES between queries; it moved from 328 → 329 during this session's own reads. This is a snapshot, not a measurement, and it is not ranked against the terminal rows above.
-> **⚠ LOSS!** — 291 of 620 asked items have no verdict, **but 259 are still QUEUED, not lost.** Realized loss so far: 32/620 = 0.0516 (0.0886 of the 361 attempted). Do not read 0.4694 as a fleet loss rate until the run is terminal.
-> **⚠ STALE** — stored `CalibrationRun.verdictCount` is 0 and `rawAgreement` NULL; the rows carry 329 verdicts. This row is computed, not read.
-> **⚠ SINCE GONE TERMINAL — the row above is the stale in-flight snapshot, not the final measurement.** `cmtluplg5` finished with `noVerdictRate` **0.2645 (164/620)**, crossing the `⚠LOSS!` guard's `>= 0.25` threshold: on the board's own rule this run belongs in **TIER 3, excluded from ranking**, not tier 2. Exactly one of those 164 is judgment `cmtluq5t5038x2l0s83p3h1aw`, error `reaper: abandoned` — the only `reaper: abandoned` row among all 4200 production judgments. It was an **infrastructure kill of a healthy, queued judgment, not a judge failure**: the reaper reclaimed it (lease expired, requeued to `pending`, republished), then force-finalized it later in the SAME sweep, because the reclaim did not clear the run's execution deadline. The timings prove it — `startedAt` 2026-09-06 21:40:09.334, `deadlineAt` 21:56:09.34 (`startedAt` + `960_000` ms, exactly), `updatedAt` (the abandon) 21:59:25.437 (`deadlineAt` + the 180s force-finalize grace + sweep granularity); `attemptCount` was 2 — it had already been reclaimed once. Fixed on this branch in `f0db7fe` (`src/worker/reaper.ts` now calls `clearRunDeadlineOnRequeue` after a successful republish). **True judge-attributable loss for this run is therefore at most 163/620 — 0.2645 is an upper bound, not a measurement.** Not re-scored: `scoreCalibrationRun` is a full overwrite and this run is terminal and published, so re-scoring would move `finishedAt`, stamp the current `scoringVersion`, and recompute every stored column. This note IS the correction.
+> *No rows currently shown here. The `cmtluplg5` row previously in this tier (qwen3.5:9b v2, snapshot 2026-09-06 21:40:49 UTC, n=329/620) went terminal at 2026-09-07 17:25:44 UTC and has moved to TIER 3 below — see its `⚠LOSS!` guard.*
 
 #### ▸ TIER 3 — NOT MEASURED · NOT RANKED
 
 | # | judge · v | run · finished (UTC) | margin* | raw agr. (n) | constant floor | coverage (n) | selective (n) [95% CI] | selective floor | sel. margin | no-verdict (n) | guards |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | — | lfm2.5:8b (Ollama) v1 | `cmton7ip5` · 09-05 17:18 | ~~−0.6875~~ | ~~0.0000 (0/16)~~ | 0.6875 'A>B' 11/16 | ~~0.0625 (1/16, 15 tie)~~ | ~~0.0000 (0/1) [0.0000–0.7935]~~ | 1.0000 'A>B' 1/1 | ~~−1.0000~~ | 0.9742 (604/620) | ⛔VOID ⚠LOSS! ⚠COV ⚠n<20 ⚑FLOOR ⚑SFLOOR ⚠STALE |
+| — | qwen3.5:9b (Ollama) v2 | `cmtluplg5` · 09-07 17:25 | ~~+0.3246~~ | ~~0.8575 (391/456)~~ | 0.5329 'A>B' 243/456 | ~~0.9978 (455/456, 1 tie)~~ | ~~0.8593 (391/455) [0.8244–0.8883]~~ | 0.5341 'A>B' 243/455 | ~~+0.3253~~ | 0.2645 (164/620) | ⚠LOSS! |
 
 > **⛔ VOID** — 604 of 620 judgments carry a `VOID:` marker ("run abandoned at max_tokens 8192 — relaunched at 32768"). Abandoned, not measured.
 > **⚠ n<20** — selective accuracy 0.0000 rests on **ONE** committed item. Its Wilson 95% interval is **[0.0000, 0.7935]**, width 0.7935. A judge whose selective accuracy is "0.0000" with an upper bound of 0.79 has been measured on nothing. Its own selective floor is 1.0000 ('A>B', 1/1) — stamping would have been perfect on n=1.
+> **`cmtluplg5` — terminal, moved from TIER 2.** Finished **2026-09-07 17:25:44 UTC**: verdictCount 456/620, errors 164. `noVerdictRate` **0.2645 (164/620)** crosses the `⚠LOSS!` guard's `>= 0.25` threshold, so on the board's own rule this run is **excluded from ranking** — it is no longer the in-flight snapshot it was shown as before. kappa **0.7151** (not a board column per rule 3.7; recorded here). Exactly one of those 164 is judgment `cmtluq5t5038x2l0s83p3h1aw`, error `reaper: abandoned` — the only `reaper: abandoned` row among all 4200 production judgments. It was an **infrastructure kill of a healthy, queued judgment, not a judge failure**: the reaper reclaimed it (lease expired, requeued to `pending`, republished), then force-finalized it later in the SAME sweep, because the reclaim did not clear the run's execution deadline. The timings prove it — `startedAt` 2026-09-06 21:40:09.334, `deadlineAt` 21:56:09.34 (`startedAt` + `960_000` ms, exactly), `updatedAt` (the abandon) 21:59:25.437 (`deadlineAt` + the 180s force-finalize grace + sweep granularity); `attemptCount` was 2 — it had already been reclaimed once. Fixed on this branch in `f0db7fe` (`src/worker/reaper.ts` now calls `clearRunDeadlineOnRequeue` after a successful republish). **True judge-attributable loss for this run is therefore at most 163/620 — 0.2645 is an upper bound, not a measurement.** Not re-scored: `scoreCalibrationRun` is a full overwrite and this run is terminal and published, so re-scoring would move `finishedAt`, stamp the current `scoringVersion`, and recompute every stored column. This note IS the correction.
+> **ⓘ near-balanced slots, a genuine finding.** Raw verdict distribution: A 233, B 222, tie 1 (233+222+1=456). Against a key that is ~53% 'A>B' (243/456, the constant floor above), this judge splits almost evenly between slots A and B — essentially no slot preference. Contrast `smollm2:1.7b`, which picks slot A on only 198/617 = **0.3214** of AB items (`docs/superpowers/specs/2026-09-07-ba-sweep-position-bias-design.md`): this run's near-50/50 split sits at the opposite end of that spectrum.
 
 ---
 
@@ -159,10 +158,13 @@ Sorted by **`margin*` = rawAgreement − constantBaseline**, descending, within 
 ```sql
 -- ═══ judge-arena calibration scoreboard ═══════════════════════════════════
 -- READ-ONLY. Recomputes every figure from ModelJudgment; reads NOTHING
--- aggregate off CalibrationRun, because (a) v2m/v2n are NOT applied on
--- judge-arena-pg-1 (no scoringVersion / committedCount / selectiveAccuracy /
--- selectiveBaselineAccuracy columns exist there) and (b) the columns that DO
--- exist are stale on 3 of 20 runs and NULL on 12 of 20.
+-- aggregate off CalibrationRun. UPDATED: v2m/v2n LANDED on judge-arena-pg-1
+-- at 2026-09-06 21:43:08 UTC — minutes after this file's figures were
+-- computed (21:40-21:43 UTC) — so scoringVersion / committedCount /
+-- selectiveAccuracy / selectiveBaselineAccuracy DO now exist as columns.
+-- This query still avoids them: the columns that exist are stale on 3 of 20
+-- runs and NULL on 12 of 20, migration timing notwithstanding, so
+-- ModelJudgment remains the only trustworthy source for every figure below.
 -- Semantics mirror src/lib/calibration/score.ts @ c0785f0 exactly.
 with j as (
   select cr.id                     as crid,
@@ -175,10 +177,13 @@ with j as (
          mj.status                 as mstat,
          mj.error                  as merr,
          mj.verdict                as verdict,
-         -- pairOrder is 'AB' on all 3,550 ModelJudgment rows (0 NULL, 0 'BA'),
-         -- verified corpus-wide, so preferenceFromVerdict collapses to identity.
-         -- If that EVER stops holding this CASE is silently wrong: see the
-         -- assertion query at the bottom.
+         -- pairOrder is NOT uniformly 'AB' anymore: the permuted calibration
+         -- (migration v2p) produces 'BA' rows too. The join below now filters
+         -- on er."pairOrder" = 'AB', so every row reaching this CASE is
+         -- ENFORCED to be 'AB' by the join predicate, not merely observed to
+         -- be — preferenceFromVerdict's identity mapping is guaranteed
+         -- correct here, not assumed. See the assertion query at the bottom
+         -- for the tripwire that protects this join.
          case when mj.verdict = 'tie' then 'tie'
               when mj.verdict = 'A'   then 'A>B'
               when mj.verdict = 'B'   then 'B>A'
@@ -188,6 +193,7 @@ with j as (
   join "JudgeModel"       jm on jm.id = jv."judgeModelId"
   join "GoldenSet"        gs on gs.id = cr."goldenSetId"
   join "EvaluationRun"    er on er."calibrationRunId" = cr.id
+                             and er."pairOrder" = 'AB'    -- v2p: exclude 'BA' rows from a permuted run
   join "GoldenItem"       gi on gi.id = er."goldenItemId"   -- = dispatchedItemCount
   left join "ModelJudgment" mj on mj."runId" = er.id        -- ALL statuses; gated below
 ),
@@ -314,8 +320,19 @@ from "ModelJudgment" group by 1 order by 1;
 -- Must all return 0.
 select count(*) from "ModelJudgment" where status='completed' and verdict is null;
 select count(*) from "EvaluationRun" where "calibrationRunId" is not null and "goldenItemId" is null;
-select count(*) from (select "runId" from "ModelJudgment" where status='completed'
-                      group by 1 having count(*)>1) d;                 -- duplicate (item,rater)
+-- Re-keyed: under one judgment per EvaluationRun by construction, the old
+-- `group by "runId" having count(*)>1` returns 0 UNCONDITIONALLY — disarmed
+-- by that very design, it could never fire again. The invariant the v2p
+-- partial unique index actually protects is one completed judgment per
+-- (calibrationRunId, goldenItemId, pairOrder): a permuted run legitimately
+-- gets a SECOND EvaluationRun for the same item (the 'BA' leg), so runId-level
+-- duplication is no longer the thing worth catching.
+select count(*) from (select er."calibrationRunId", er."goldenItemId", er."pairOrder"
+                      from "EvaluationRun" er
+                      join "ModelJudgment" mj on mj."runId" = er.id and mj.status = 'completed'
+                      where er."calibrationRunId" is not null
+                      group by 1,2,3
+                      having count(*) > 1) d;                          -- duplicate (run,item,order)
 select count(*) from (select er."calibrationRunId" from "EvaluationRun" er
                       join "ModelJudgment" mj on mj."runId"=er.id and mj.status='completed'
                       where er."calibrationRunId" is not null group by 1
