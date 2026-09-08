@@ -43,11 +43,30 @@
  */
 import { isPairOrder } from '@/lib/pair-order';
 
+export type PositionBiasErrorCode = 'duplicate-pair-row';
+
+/** One class, a `code` for the branch — mirrors `CalibrationReadingsError`
+ *  (readings.ts) so a caller that already switches on that shape can switch
+ *  on this one the same way. */
+export class PositionBiasError extends Error {
+  constructor(
+    readonly code: PositionBiasErrorCode,
+    message: string
+  ) {
+    super(message);
+    this.name = 'PositionBiasError';
+  }
+}
+
 export type PairedVerdictRow = {
   itemId: string;
   /** `ModelJudgment.verdict`, RAW — 'A' | 'B' | 'tie' | null. */
   verdict: string | null;
-  /** `ModelJudgment.pairOrder`. */
+  /** Which order THIS ROW's item was shown in. Under v2p this is the
+   *  `EvaluationRun.pairOrder` of the run the verdict came from (mirrored
+   *  onto that run's one `ModelJudgment.pairOrder` at write time) — the
+   *  caller is responsible for reading it off the run and attaching it here;
+   *  this module has no opinion about which column it came from. */
   pairOrder: string | null;
 };
 
@@ -85,19 +104,39 @@ export function positionBiasFromPairs(rows: PairedVerdictRow[]): PositionBiasRes
   // route to `unpairedCount` below — neither may vanish from every counter,
   // which is what happened before this was a distinct case from "no row".
   //
-  // A duplicate (itemId, pairOrder) row is last-write-wins here. That is
-  // safe for the only wired caller: `ModelJudgment` is
-  // `@@unique([runId, judgeModelVersionId, pairOrder])` (schema.prisma:568),
-  // `EvaluationRun.runId` is `@@unique([calibrationRunId, goldenItemId])`
-  // (schema.prisma:432), and a `CalibrationRun` carries a single
-  // `judgeModelVersionId` (schema.prisma:939) — so within one calibration
-  // run, (goldenItemId, pairOrder) is unique by construction and duplicates
-  // can only arise from a caller mixing rows across runs, which is not this
-  // module's contract to police.
+  // A duplicate (itemId, pairOrder) row THROWS. It used to be last-write-wins,
+  // which is not a crash — it is a silently WRONG answer: the surviving row
+  // pairs against the wrong partner (or against nothing), and a run that
+  // measured position bias perfectly can come out the far side reporting
+  // `positionBias: null, orderFlipRate: null, pairedDecisiveCount: 0` — read
+  // by every downstream consumer as "this run was never paired". A plausible
+  // all-null is worse than an exception.
+  //
+  // Under the shape this module now serves, one golden item's pair lives on
+  // TWO `EvaluationRun`s — same `calibrationRunId`, same `goldenItemId`, one
+  // `pairOrder` each, one `ModelJudgment` each — guarded by the partial
+  // unique index `EvaluationRun_calibrationRunId_goldenItemId_pairOrder_key`
+  // (`WHERE "calibrationRunId" IS NOT NULL`, `NULLS NOT DISTINCT`) plus the
+  // `EvaluationRun_calibration_needs_order` CHECK (migration
+  // 20260907170000_v2p_evaluation_run_pair_order). That constraint makes
+  // (goldenItemId, pairOrder) unique WITHIN one calibration run's rows, same
+  // as before — but this module is pure and has no database in front of it,
+  // so nothing stops a caller from handing it rows assembled across multiple
+  // judges' runs, or the same run's rows twice. The throw below is what
+  // still catches that when it happens, instead of quietly reporting "never
+  // paired" for a pair that was actually measured.
   const byItem = new Map<string, { AB?: string | null; BA?: string | null }>();
   for (const row of rows) {
     if (!isPairOrder(row.pairOrder)) continue;
     const entry = byItem.get(row.itemId) ?? {};
+    if (row.pairOrder in entry) {
+      throw new PositionBiasError(
+        'duplicate-pair-row',
+        `positionBiasFromPairs: duplicate row for item ${row.itemId} at pairOrder ${JSON.stringify(row.pairOrder)}. ` +
+          `Last-write-wins would silently drop one and can report a fully-measured pair as ` +
+          `unpaired — pass at most one row per (itemId, pairOrder).`
+      );
+    }
     entry[row.pairOrder] = row.verdict;
     byItem.set(row.itemId, entry);
   }

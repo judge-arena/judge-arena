@@ -92,4 +92,15 @@ describe('positionBiasFromPairs', () => {
     expect(r.positionBias).toBeNull();
     expect(r.orderFlipRate).toBeNull();
   });
+
+  it('THROWS on a duplicate (itemId, pairOrder) instead of last-write-wins', () => {
+    // Trap T5: last-write-wins made a perfectly-measured run report
+    // positionBias: null, pairedDecisiveCount: 0 — "never paired" — with no crash.
+    expect(() =>
+      positionBiasFromPairs([
+        { itemId: 'i1', verdict: 'A', pairOrder: 'AB' },
+        { itemId: 'i1', verdict: 'B', pairOrder: 'AB' },
+      ])
+    ).toThrow(/duplicate/i);
+  });
 });
