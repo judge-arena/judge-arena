@@ -75,7 +75,7 @@ missing variable. `npm run dev` is the exception: Next.js reads `.env.local` its
 && npx tsx prisma/seed.ts` — and is left in `package.json`, but **prefer the sequence above**:
 `setup` ends in `prisma db push`, which lays the schema on directly and never records a row in
 `_prisma_migrations`. A database created that way will diverge from every other environment the
-first time a migration carries hand-written SQL — and eight of ours do (see [Known migrate-diff
+first time a migration carries hand-written SQL — and nine of ours do (see [Known migrate-diff
 pseudo-drift](#known-migrate-diff-pseudo-drift)).
 
 **Do not read `db:seed`'s output as a report of what it inserted.** `seedPromptTemplates` upserts

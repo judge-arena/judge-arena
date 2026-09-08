@@ -243,23 +243,30 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
       data: { judgeModelVersionId: world.version.id, goldenSetId: world.goldenSet.id },
     });
 
+    // v2p: a calibration run always names its order (CHECK
+    // EvaluationRun_calibration_needs_order) — 'AB' both times, since this
+    // test is pinning the SAME-order collision, not the cross-order case
+    // ('two ORDINARY runs' below covers ordinary rows, and the v2p describe
+    // block below covers the OTHER-order acceptance).
     await db.evaluationRun.create({
       data: {
         evaluationId: evaluation.id,
         calibrationRunId: calibrationRun.id,
         goldenItemId: world.items[0].id,
+        pairOrder: 'AB',
       },
     });
 
     // This is what makes a re-launch after a partial failure resumable rather
     // than double-counting: the same item cannot be measured twice inside one
-    // calibration.
+    // calibration (at the same order).
     await expect(
       db.evaluationRun.create({
         data: {
           evaluationId: evaluation.id,
           calibrationRunId: calibrationRun.id,
           goldenItemId: world.items[0].id,
+          pairOrder: 'AB',
         },
       })
     ).rejects.toMatchObject({ code: 'P2002' });
@@ -294,11 +301,14 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
     const calibrationRun = await db.calibrationRun.create({
       data: { judgeModelVersionId: world.version.id, goldenSetId: world.goldenSet.id },
     });
+    // v2p: CHECK EvaluationRun_calibration_needs_order requires pairOrder
+    // whenever calibrationRunId is set.
     await db.evaluationRun.create({
       data: {
         evaluationId: evaluation.id,
         calibrationRunId: calibrationRun.id,
         goldenItemId: world.items[0].id,
+        pairOrder: 'AB',
       },
     });
 
@@ -875,5 +885,96 @@ describe('v2i calibration ⇄ golden item link + v2k sampling snapshot (DB)', ()
 
     expect(result.budgetWarning).toMatch(/max_tokens 4096/);
     expect(result.accepted).toEqual([world.items[0].id]);
+  });
+});
+
+// ─── v2p: the pairOrder discriminator on EvaluationRun (A2.2) ──────────────
+//
+// The order discriminator moves from ModelJudgment up to EvaluationRun so a
+// permuted calibration can be 2N runs with ONE judgment each rather than N
+// runs with two (the v2o shape) — see docs/superpowers/specs/
+// 2026-09-07-permuted-run-design.md D1. This block pins the new index and
+// CHECK constraint in isolation, one raw `db.evaluationRun.create` at a
+// time, deliberately not through `launchCalibrationRun` — the launch path's
+// own reshape to "2N runs, one judgment each" is a separate task.
+describe('v2p pairOrder discriminator on EvaluationRun (DB)', () => {
+  let world: Awaited<ReturnType<typeof mkWorld>>;
+  let evaluationId: string;
+  let calibrationRunId: string;
+  let goldenItemId: string;
+
+  beforeEach(async () => {
+    vi.restoreAllMocks();
+    await truncateAll();
+    await seedPromptTemplates(db);
+
+    world = await mkWorld({ items: 1 });
+    const evaluation = await db.evaluation.create({
+      data: { projectId: world.project.id, userId: world.user.id, inputText: 'q' },
+    });
+    const calibrationRun = await db.calibrationRun.create({
+      data: { judgeModelVersionId: world.version.id, goldenSetId: world.goldenSet.id },
+    });
+    evaluationId = evaluation.id;
+    calibrationRunId = calibrationRun.id;
+    goldenItemId = world.items[0].id;
+  });
+
+  /** One calibration-side EvaluationRun, at a given pairOrder. Each call gets
+   * its own `evaluationId` so the collision under test is on
+   * (calibrationRunId, goldenItemId, pairOrder) alone, not on any other
+   * unique constraint sharing an Evaluation would introduce. */
+  async function createCalibrationEvaluationRun(opts: {
+    calibrationRunId: string;
+    goldenItemId: string;
+    pairOrder: 'AB' | 'BA';
+  }) {
+    const runEvaluation = await db.evaluation.create({
+      data: { projectId: world.project.id, userId: world.user.id, inputText: 'q' },
+    });
+    return db.evaluationRun.create({
+      data: {
+        evaluationId: runEvaluation.id,
+        calibrationRunId: opts.calibrationRunId,
+        goldenItemId: opts.goldenItemId,
+        pairOrder: opts.pairOrder,
+      },
+    });
+  }
+
+  /** An ORDINARY run — both calibration columns and pairOrder left NULL. */
+  function ordinaryRun() {
+    return { evaluationId };
+  }
+
+  it('rejects a second run for the same (calibrationRun, goldenItem, pairOrder)', async () => {
+    await createCalibrationEvaluationRun({ calibrationRunId, goldenItemId, pairOrder: 'AB' });
+    await expect(
+      createCalibrationEvaluationRun({ calibrationRunId, goldenItemId, pairOrder: 'AB' })
+    ).rejects.toMatchObject({ code: 'P2002' });
+  });
+
+  it('ACCEPTS the same (calibrationRun, goldenItem) at the OTHER pairOrder', async () => {
+    await createCalibrationEvaluationRun({ calibrationRunId, goldenItemId, pairOrder: 'AB' });
+    await expect(
+      createCalibrationEvaluationRun({ calibrationRunId, goldenItemId, pairOrder: 'BA' })
+    ).resolves.toBeTruthy();
+  });
+
+  it('still lets two ORDINARY runs coexist — the partial predicate keeps them out of the index', async () => {
+    // Without `WHERE "calibrationRunId" IS NOT NULL`, NULLS NOT DISTINCT makes
+    // every ordinary run's (NULL, NULL, NULL) equal and THIS fails P2002.
+    await prisma.evaluationRun.create({ data: ordinaryRun() });
+    await expect(prisma.evaluationRun.create({ data: ordinaryRun() })).resolves.toBeTruthy();
+  });
+
+  it('refuses a calibration run with no pairOrder — the CHECK constraint', async () => {
+    await expect(
+      prisma.$executeRawUnsafe(
+        `insert into "EvaluationRun" (id, "evaluationId", "calibrationRunId", "goldenItemId", status, "createdAt", "updatedAt")
+         values ($1,$2,$3,$4,'pending',now(),now())`,
+        'er-no-order', evaluationId, calibrationRunId, goldenItemId
+      )
+    ).rejects.toThrow(/EvaluationRun_calibration_needs_order/);
   });
 });

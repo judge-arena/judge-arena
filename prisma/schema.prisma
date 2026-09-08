@@ -424,12 +424,34 @@ model EvaluationRun {
   calibrationRunId   String?
   calibrationRun     CalibrationRun?     @relation(fields: [calibrationRunId], references: [id], onDelete: Restrict)
 
-  /// Idempotency: at most one run per (calibration, item), so a re-launch after
-  /// a partial failure resumes instead of double-counting. Both columns are
-  /// NULL on every non-calibration run, and Postgres' DEFAULT `NULLS DISTINCT`
-  /// lets those coexist freely — so unlike ModelJudgment's index this needs NO
-  /// hand-edited SQL.
-  @@unique([calibrationRunId, goldenItemId])
+  /// v2p. Which candidate order this run PRESENTED. NULL on every ordinary run
+  /// and every pointwise run; non-NULL on every calibration run, enforced by
+  /// the CHECK constraint EvaluationRun_calibration_needs_order.
+  ///
+  /// This is the discriminator that lets a permuted calibration hold two runs
+  /// per golden item while keeping ONE judgment per run — see
+  /// docs/superpowers/specs/2026-09-07-permuted-run-design.md D1.
+  ///
+  /// Mirrored onto this run's single ModelJudgment.pairOrder in the same
+  /// nested create. score.ts THROWS if the two ever disagree (trap T3): the
+  /// renderer reads the judgment's copy and the scorer reads this one, so a
+  /// divergence files a row into one partition and resolves it as if it were
+  /// the other — and the constant floor still reads 0.5419, so nothing looks
+  /// wrong.
+  pairOrder          String?
+
+  /// Idempotency: at most one run per (calibration, item, pairOrder), so a
+  /// re-launch after a partial failure resumes instead of double-counting.
+  /// HAND-WRITTEN in migration v2p — Prisma's DSL cannot express the partial
+  /// `WHERE "calibrationRunId" IS NOT NULL` predicate or `NULLS NOT DISTINCT`
+  /// this index needs, both load-bearing (see the migration's own comment):
+  /// without the partial predicate, NULLS NOT DISTINCT would equate every
+  /// ordinary run's (NULL, NULL, NULL) and the second ordinary run ever
+  /// launched would fail P2002; without NULLS NOT DISTINCT, two NULL-order
+  /// calibration rows would silently coexist and the idempotency guard
+  /// disappears. See
+  /// "EvaluationRun_calibrationRunId_goldenItemId_pairOrder_key" in
+  /// prisma/migrations/20260907170000_v2p_evaluation_run_pair_order/migration.sql.
   @@index([goldenItemId])
   @@index([evaluationId])
   @@index([rubricId])
