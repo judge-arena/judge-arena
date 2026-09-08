@@ -311,7 +311,12 @@ order by setname,
 ### Assertion query — run this BEFORE trusting the `pairOrder` shortcut above
 
 ```sql
--- Must return exactly one row: AB | 3550 (or whatever the current total is).
+-- One row per distinct pairOrder actually present: 'AB' alone on a
+-- single-order calibration, 'AB' and 'BA' both on a permuted one (v2p) --
+-- NOT "exactly one row" any more. What matters on a permuted run is that
+-- the two counts are EQUAL (detector A's key-doubling property: every AB
+-- dispatch gets a matching BA dispatch) -- not the row count, and not any
+-- particular total (whatever the current total is, checked at the time).
 -- coalesce() is required: a bare GROUP BY hides a NULL pairOrder in plain sight,
 -- and a NULL order makes preferenceFromVerdict THROW rather than assume 'AB'.
 select coalesce("pairOrder",'<<NULL>>') as pair_order, count(*)
