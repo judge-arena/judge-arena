@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { Header } from '@/components/layout/header';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -195,6 +196,29 @@ export default function RunDetailPage() {
       />
 
       <div className="p-6">
+        {/* Task 9 (spec §2): this run is HALF of a collapsed AB/BA row on the
+         * evaluation's list page — surface that here too, since a caller can
+         * land directly on one run without ever seeing the collapsed view. */}
+        {run.calibrationRunId && (
+          <div className="mb-6 rounded-xl border border-brand-200 bg-brand-50 dark:border-brand-800 dark:bg-brand-950/30 p-4 text-sm text-brand-800 dark:text-brand-200 flex items-center justify-between gap-3">
+            <span className="flex items-center gap-2">
+              <Badge variant="info" size="sm">{run.pairOrder ?? '—'} order</Badge>
+              Position-bias calibration run.
+              {run.pairedRun
+                ? ' Both candidate orders were judged for this golden item.'
+                : ' The other candidate order for this golden item has not landed yet.'}
+            </span>
+            {run.pairedRun && (
+              <Link
+                href={`/evaluate/${evaluationId}/runs/${run.pairedRun.id}`}
+                className="shrink-0 font-medium underline hover:no-underline"
+              >
+                View {run.pairedRun.pairOrder} run →
+              </Link>
+            )}
+          </div>
+        )}
+
         {/* Warning banners */}
         {!rubric && (
           <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">

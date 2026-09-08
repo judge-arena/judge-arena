@@ -27,6 +27,8 @@ import {
   getScoreColor,
 } from '@/lib/utils';
 import { deriveRunMode } from '@/lib/run-mode';
+import { projectCalibrationRunRows } from '@/lib/dataset-run-groups';
+import { resolveModelDisplay } from '@/lib/model-display';
 import { toast } from 'sonner';
 
 const statusConfig: Record<string, { label: string; variant: 'default' | 'success' | 'warning' | 'error' | 'info' }> = {
@@ -36,6 +38,59 @@ const statusConfig: Record<string, { label: string; variant: 'default' | 'succes
   completed:   { label: 'Completed',    variant: 'success' },
   error:       { label: 'Error',        variant: 'error' },
 };
+
+/** Verdict, exactly as A0 decision #4 requires: raw and never normalised
+ * ("what the model SAID, against the pairOrder it was shown"). This is
+ * display-only sugar over that raw string — it does NOT re-derive a
+ * preference the way score.ts's readings layer does. */
+function verdictLabel(verdict: string | null | undefined): string | null {
+  if (verdict === 'A') return 'Chose A';
+  if (verdict === 'B') return 'Chose B';
+  if (verdict === 'tie') return 'Tie';
+  return null;
+}
+
+/**
+ * One column of a collapsed calibration pair row (Task 9, spec §2). Shows
+ * just enough to compare AB against BA at a glance — status, judge, verdict —
+ * and links out to the full single-run page for everything else (reasoning,
+ * criteria, human judgment).
+ */
+function CalibrationOrderColumn({
+  label,
+  run,
+  href,
+}: {
+  label: 'AB' | 'BA';
+  run: any;
+  href: string;
+}) {
+  const sc = statusConfig[run.status] ?? statusConfig.pending;
+  const judgment = (run.modelJudgments ?? [])[0] ?? null;
+  const display = judgment ? resolveModelDisplay(judgment) : null;
+  const verdict = verdictLabel(judgment?.verdict);
+
+  return (
+    <Link
+      href={href}
+      className="block rounded-lg border border-surface-200 dark:border-surface-700 p-3 hover:border-brand-300 dark:hover:border-brand-600 hover:shadow-sm transition-all"
+    >
+      <div className="flex items-center justify-between gap-2 mb-1">
+        <span className="text-xs font-bold text-surface-700 dark:text-surface-300">{label}</span>
+        <Badge variant={sc.variant} size="sm">
+          {run.status === 'needs_human' ? 'Needs Human Action' : sc.label}
+        </Badge>
+      </div>
+      <div className="flex items-center justify-between gap-2 text-xs text-surface-500 dark:text-surface-400">
+        <span className="truncate">{display?.name ?? '—'}</span>
+        {verdict && (
+          <span className="shrink-0 font-medium text-surface-700 dark:text-surface-300">{verdict}</span>
+        )}
+      </div>
+      <div className="mt-1 font-mono text-2xs text-surface-300 truncate">{run.id}</div>
+    </Link>
+  );
+}
 
 export default function EvaluateTemplatePage() {
   const params = useParams();
@@ -200,6 +255,8 @@ export default function EvaluateTemplatePage() {
 
   const rubric = evaluation.rubric;
   const runs: any[] = evaluation.runs ?? [];
+  // Task 9 (spec §2): see the "Runs list" comment below for what this counts.
+  const projectedRows = projectCalibrationRunRows(runs);
   const evaluationMode = deriveRunMode(evaluation?.responseText);
   const needsHumanLabel =
     evaluationMode === 'respond' ? 'Select Best Response' : 'Needs Human Feedback';
@@ -339,14 +396,25 @@ export default function EvaluateTemplatePage() {
         </Card>
 
         {/* ── Runs list ─────────────────────────────────────────────────── */}
+        {/*
+         * Task 9 (spec §2): `projectedRows` collapses a permuted calibration
+         * pair — two EvaluationRuns, pairOrder 'AB' and 'BA', sharing this
+         * Evaluation (launch.ts D3) — into ONE row. The header count below is
+         * therefore `projectedRows.length`, NOT `runs.length`: for a
+         * calibration item it is 1 (one golden-item record), not 2 (the raw
+         * EvaluationRun count) — "one record ... with a BA vs AB bias", not
+         * two rows. Every ordinary (non-calibration) run is unaffected and
+         * still renders as its own row, so this number is unchanged for every
+         * evaluation that isn't a permuted calibration item.
+         */}
         <div>
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-semibold text-surface-700 dark:text-surface-300">
-              Runs ({runs.length})
+              Runs ({projectedRows.length})
             </h2>
           </div>
 
-          {runs.length === 0 ? (
+          {projectedRows.length === 0 ? (
             <EmptyState
               title="No runs yet"
               description='Click "New Run" to run models against this evaluation template.'
@@ -358,7 +426,38 @@ export default function EvaluateTemplatePage() {
             />
           ) : (
             <div className="space-y-2">
-              {runs.map((run: any, index: number) => {
+              {projectedRows.map((row, index) => {
+                const rowNumber = projectedRows.length - index;
+
+                if (row.isPair) {
+                  return (
+                    <Card key={row.key} className="border-brand-200 dark:border-brand-800">
+                      <CardContent className="p-4">
+                        <div className="flex items-center gap-2 mb-3">
+                          <span className="shrink-0 hidden sm:inline text-xs font-bold text-surface-500 dark:text-surface-400 w-10 text-center">
+                            #{rowNumber}
+                          </span>
+                          <Badge variant="info" size="sm">Calibration pair · AB vs BA</Badge>
+                          <span className="text-xs text-surface-400">Position-bias check — one golden item, both candidate orders</span>
+                        </div>
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:pl-12">
+                          <CalibrationOrderColumn
+                            label="AB"
+                            run={row.ab}
+                            href={`/evaluate/${evaluationId}/runs/${row.ab.id}`}
+                          />
+                          <CalibrationOrderColumn
+                            label="BA"
+                            run={row.ba}
+                            href={`/evaluate/${evaluationId}/runs/${row.ba.id}`}
+                          />
+                        </div>
+                      </CardContent>
+                    </Card>
+                  );
+                }
+
+                const run = row.single;
                 const sc = statusConfig[run.status] ?? statusConfig.pending;
                 const runStatusLabel =
                   run.status === 'needs_human' ? needsHumanLabel : sc.label;
@@ -373,7 +472,7 @@ export default function EvaluateTemplatePage() {
 
                 return (
                   <Link
-                    key={run.id}
+                    key={row.key}
                     href={`/evaluate/${evaluationId}/runs/${run.id}`}
                     className="block"
                   >
@@ -382,13 +481,22 @@ export default function EvaluateTemplatePage() {
                         <div className="flex items-center gap-4">
                           {/* Run number + ID */}
                           <div className="shrink-0 hidden sm:flex flex-col items-center w-10">
-                            <span className="text-xs font-bold text-surface-500 dark:text-surface-400">#{runs.length - index}</span>
+                            <span className="text-xs font-bold text-surface-500 dark:text-surface-400">#{rowNumber}</span>
                           </div>
 
                           {/* Meta */}
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-2 mb-1">
                               <Badge variant={sc.variant} size="sm">{runStatusLabel}</Badge>
+                              {/* Only for an UNPAIRED calibration order — every
+                               * ordinary pairwise run also carries pairOrder
+                               * 'AB' (run-launch.ts's default) and would
+                               * otherwise show this badge unconditionally. */}
+                              {run.calibrationRunId && run.pairOrder && (
+                                <Badge variant="warning" size="sm">
+                                  {run.pairOrder} order · sibling not yet launched
+                                </Badge>
+                              )}
                               {run.rubric && (
                                 <Badge variant="info" size="sm">
                                   📋 {run.rubric.name} v{run.rubric.version}

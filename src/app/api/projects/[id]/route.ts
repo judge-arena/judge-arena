@@ -5,6 +5,7 @@ import { requireAuth, requireScope, optionalAuth, resolveResourceAccess, require
 import { logger, serializeError } from '@/lib/logger';
 import { toPublicProject } from '@/lib/serializers';
 import { liveDatasetsOnly, liveSamplesOnly } from '@/lib/tombstones';
+import { canonicalOrderRunWhere } from '@/lib/run-counting';
 
 const updateProjectSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -149,8 +150,24 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
               },
               orderBy: { createdAt: 'asc' },
             },
-            // Include latest run + run count so project page can group dataset batches
+            // Include latest run + run count so project page can group dataset batches.
+            //
+            // Task 9 (spec §2): `canonicalOrderRunWhere` excludes a permuted
+            // calibration item's 'BA' EvaluationRun from BOTH the "latest run"
+            // pick below and the `_count.runs` badge
+            // (src/lib/dataset-run-groups.ts's `getEvaluationRunCount`,
+            // rendered by src/app/projects/[id]/page.tsx's "Individual
+            // Evaluations" list and src/app/projects/[id]/dataset-runs/
+            // [groupKey]/page.tsx). Without it, a calibration item's shared
+            // Evaluation (one per item; launch.ts D3) reports 2 runs instead
+            // of 1, and — since 'BA' is created microseconds after 'AB' —
+            // `orderBy: createdAt desc, take: 1` would silently pick the 'BA'
+            // instrument-reading run as "the" run instead of the canonical
+            // 'AB' one. Ordinary (non-calibration) runs are untouched: every
+            // one of them has `pairOrder` 'AB' (pairwise) or null (pointwise),
+            // both admitted by the filter.
             runs: {
+              where: canonicalOrderRunWhere,
               select: {
                 id: true,
                 status: true,
@@ -172,7 +189,7 @@ export async function GET(_request: Request, props: { params: Promise<{ id: stri
             },
             _count: {
               select: {
-                runs: true,
+                runs: { where: canonicalOrderRunWhere },
               },
             },
           },

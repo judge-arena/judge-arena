@@ -35,7 +35,23 @@ export async function GET() {
     ] = await Promise.all([
       prisma.project.count({ where: userFilter }),
       prisma.evaluation.count({ where: userFilter }),
-      // Runs (not templates) are what have a status
+      // Runs (not templates) are what have a status.
+      //
+      // Task 9 (spec §2): deliberately NOT filtered through
+      // `canonicalOrderRunWhere` the way src/app/api/projects/[id]/route.ts's
+      // per-evaluation run count is. A permuted calibration's 'AB' and 'BA'
+      // EvaluationRuns are two genuinely separate queue/worker work units —
+      // each with its own status, its own worker claim, its own ModelJudgment
+      // — and this endpoint's queue.* fields exist to answer "how much run
+      // work is in flight", which is the 2N figure, not the N-golden-item
+      // corpus figure. That is the same "queue-depth independence" the
+      // per-run deadline model is built on (design doc §4). These fields are
+      // currently NOT rendered by any page (verified via grep — dashboard/
+      // page.tsx reads only stats.totalEvaluations from this response), so
+      // there is no live "620 vs 1240" surface today, but the NEXT thing that
+      // renders `completedEvaluations`/`pendingEvaluations`/`queue.*` should
+      // label them as run/work counts, not item counts, rather than silently
+      // inheriting the collapsed-to-N convention used elsewhere in this task.
       prisma.evaluationRun.count({ where: { status: 'completed', ...runFilter } }),
       prisma.evaluationRun.count({ where: { status: { in: ['pending', 'judging'] }, ...runFilter } }),
       // Task 12: ModelConfig is write-retired — ModelEndpoint is the live
