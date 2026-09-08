@@ -87,6 +87,11 @@
 import { agreement, type AgreementMethod } from '@/lib/agreement';
 import { constantVerdictBaseline, type ConstantBaseline } from '@/lib/calibration/baseline';
 import {
+  positionBiasFromPairs,
+  type Interval,
+  type PairedVerdictRow,
+} from '@/lib/calibration/position-bias';
+import {
   groundTruthReadings,
   preferenceFromVerdict,
   PREFERENCES,
@@ -241,6 +246,39 @@ export type CalibrationScore = {
   selectiveBaseline: ConstantBaseline | null;
   /** selectiveAccuracy − selectiveBaseline.accuracy. `null` when either is. */
   selectiveMarginOverConstant: number | null;
+
+  // ── Position bias (v2o/A2.3) — the ONE set of figures here that is NOT
+  // AB-only (spec D4). Pooled from `positionBiasFromPairs` over BOTH
+  // partitions' raw verdict letters; every field above this comment stays
+  // computed over the AB partition alone, unchanged by this block's
+  // existence. See `positionBiasFromPairs`'s own module doc
+  // (src/lib/calibration/position-bias.ts) for what each number means and
+  // why there are two of them.
+  /** `null` exactly when `pairedDecisiveCount` is 0 — never 0.0, which would
+   *  read as "measured no bias" rather than "nothing paired to measure". */
+  positionBias: number | null;
+  /** `null` under the same rule as `positionBias`. Its no-information point
+   *  is 0.5, NOT 0 — see `formatPositionBiasLines` (baseline.ts). */
+  orderFlipRate: number | null;
+  /** The denominator BOTH estimators above share. 0 on an AB-only
+   *  calibration (`ordersRequested` never included 'BA', or the BA half
+   *  never produced a single completed judgment) — never render
+   *  `positionBias`/`orderFlipRate` without this beside them. */
+  pairedDecisiveCount: number;
+  /** Items that paired (a usable verdict in both orders) but tied in at
+   *  least one of them — excluded from both estimators, per
+   *  position-bias.ts's TIES section. */
+  tieExcludedCount: number;
+  /** Items that did not produce a usable verdict in both orders at all —
+   *  the far more common case for an AB-only calibration, where every item
+   *  is unpaired rather than tie-excluded. */
+  unpairedCount: number;
+  /** `null` only at `pairedDecisiveCount === 1` (no between-item variance is
+   *  estimable from one item) — see position-bias.ts. */
+  positionBiasInterval: Interval | null;
+  /** Wilson interval; defined at any `pairedDecisiveCount >= 1`, so this is
+   *  `null` only at `pairedDecisiveCount === 0`, same as the point estimate. */
+  orderFlipRateInterval: Interval | null;
 };
 
 type LoadedJudgment = {
@@ -257,6 +295,16 @@ type LoadedRun = {
    *  see EvaluationRun.pairOrder's doc and the mismatch guard below. */
   pairOrder: string | null;
   modelJudgments: LoadedJudgment[];
+  /** v2o. The header's OWN `ordersRequested`, reached through the relation —
+   *  every row this query returns belongs to the SAME calibration
+   *  (`where: { calibrationRunId }`), so any one of them carries it. Read
+   *  this rather than deriving a value from which `pairOrder`s happen to
+   *  appear among `runs`: a BA half that failed to create even one row must
+   *  not silently read back as "never permuted" (spec D5). Optional because
+   *  a hand-built test fixture may omit the relation entirely; a real query
+   *  always returns it (non-null, since these rows are filtered on a
+   *  non-null `calibrationRunId`). */
+  calibrationRun?: { ordersRequested: string | null } | null;
 };
 
 /**
@@ -281,6 +329,10 @@ export async function scoreCalibrationRun(
       // types it as present, so the mismatch guard would compare every
       // judgment against `undefined` instead of the real column.
       pairOrder: true,
+      // v2o. Read via the relation rather than a second query — every row
+      // this filter returns shares one `calibrationRunId`, so any one of
+      // them carries the header's `ordersRequested`. See LoadedRun's doc.
+      calibrationRun: { select: { ordersRequested: true } },
       modelJudgments: {
         // NO `where: { status: 'completed' }` any more. With two judgments per
         // run, filtering here made a run whose AB errored and whose BA
@@ -322,6 +374,18 @@ export async function scoreCalibrationRun(
     }
     return p;
   };
+
+  // v2o/A2.3. Pooled across BOTH partitions as this loop runs — the ONE place
+  // in this function that reads both orders together; every other stored
+  // figure below is AB-only per spec D4. `pairOrder` here is READ OFF THE
+  // RUN (`run.pairOrder`), not the judgment: the scorer's partition key is
+  // the run's (see `partitionKey` above and EvaluationRun.pairOrder's doc),
+  // and this is the module that now documents the two-runs-per-item shape.
+  // The T3 guard below has already fired for any row that would disagree, so
+  // `run.pairOrder` and `judgment.pairOrder` are equal by the time a row
+  // reaches this push — but the SOURCE matters for a reader, not just the
+  // value.
+  const pairedVerdictRows: PairedVerdictRow[] = [];
 
   for (const run of runs) {
     // A calibration EvaluationRun without a goldenItem cannot be scored
@@ -377,8 +441,33 @@ export async function scoreCalibrationRun(
         pairOrder: judgment.pairOrder,
       });
       partition.context.push({ runId: run.id, itemIndex: run.goldenItem.index });
+      // v2o/A2.3: the pooled input to `positionBiasFromPairs`, built here
+      // rather than reconstructed later from `partitions` — this is the
+      // single place both orders are read together, and `run.pairOrder` (not
+      // `judgment.pairOrder`) is the source, per this loop's own header
+      // comment above.
+      pairedVerdictRows.push({
+        itemId: run.goldenItem.id,
+        verdict: judgment.verdict,
+        pairOrder: run.pairOrder,
+      });
     }
   }
+
+  // Pure, and independent of which partition ends up `primary` below: an
+  // AB-only calibration (no run ever presented 'BA') pools rows from one
+  // partition only, every item is `undefined` on the other side, and
+  // `positionBiasFromPairs` returns `positionBias: null, orderFlipRate: null,
+  // pairedDecisiveCount: 0` — never zeroes. See position-bias.ts's own
+  // module doc for the two estimators and the tie-exclusion rule.
+  const positionBiasResult = positionBiasFromPairs(pairedVerdictRows);
+
+  // v2o/D5. What the LAUNCH asked for, read off the header relation — every
+  // row `runs` shares one calibrationRunId, so any one of them carries it.
+  // NOT derived from `[...partitions.keys()]`: a BA half that failed to
+  // create even a single EvaluationRun must not silently read back as "never
+  // permuted" (spec D5's own rationale for this column existing at all).
+  const ordersRequested = runs[0]?.calibrationRun?.ordersRequested ?? null;
 
   // THE PARTITION THAT FEEDS THE STORED COLUMNS. 'AB' whenever any run
   // presented that order — even one that produced nothing but errors —
@@ -566,6 +655,13 @@ export async function scoreCalibrationRun(
     selectiveAccuracy,
     selectiveBaseline,
     selectiveMarginOverConstant,
+    positionBias: positionBiasResult.positionBias,
+    orderFlipRate: positionBiasResult.orderFlipRate,
+    pairedDecisiveCount: positionBiasResult.pairedDecisiveCount,
+    tieExcludedCount: positionBiasResult.tieExcludedCount,
+    unpairedCount: positionBiasResult.unpairedCount,
+    positionBiasInterval: positionBiasResult.positionBiasInterval,
+    orderFlipRateInterval: positionBiasResult.orderFlipRateInterval,
     method: {
       statistic: result.statistic,
       weighting: result.weighting,
@@ -595,6 +691,19 @@ export async function scoreCalibrationRun(
       committedCount,
       selectiveAccuracy,
       selectiveBaselineAccuracy: selectiveBaseline === null ? null : selectiveBaseline.accuracy,
+      // v2o/A2.3. Pooled over BOTH orders (the one exception to "AB-only" on
+      // this row, per spec D4) — `null`/`0` on an AB-only calibration, never
+      // zeroes. `tieExcludedCount`/`unpairedCount`/the two intervals are NOT
+      // stored (no v2o column for them): they are returned on `CalibrationScore`
+      // for the CLI's formatter, the same way `constantBaseline`'s full shape
+      // is returned but only `.accuracy` is a column.
+      positionBias: positionBiasResult.positionBias,
+      orderFlipRate: positionBiasResult.orderFlipRate,
+      pairedDecisiveCount: positionBiasResult.pairedDecisiveCount,
+      // v2o/D5. What the launch asked for — see `ordersRequested`'s own
+      // computation above for why this is read off the header relation
+      // rather than inferred from `partitions`.
+      ordersRequested,
       // v2m. Scoring is ex post and re-runnable, so the numbers above are
       // uninterpretable without the generation that produced them. Written from
       // the CONSTANT, never a literal, in the same full overwrite: the stamp and

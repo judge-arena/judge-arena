@@ -59,6 +59,10 @@ import {
 } from '@/lib/calibration/latency';
 import { formatReasoningLengthLine, summarizeReasoningLength } from '@/lib/calibration/reasoning-length';
 import { formatConstantBaselineLines, formatSelectiveAccuracyLines, formatNoVerdictRateLine } from '@/lib/calibration/baseline';
+// Separate import statement on purpose — NOT folded into the one above.
+// tests/lib/calibration-baseline.test.ts pins that exact statement as a
+// substring; adding a fourth name to it would break that pin for no reason.
+import { formatPositionBiasLines } from '@/lib/calibration/baseline';
 import { scoreCalibrationRun } from '@/lib/calibration/score';
 import { SCORING_RULES_VERSION, describeScoringVersion } from '@/lib/calibration/scoring-version';
 import { canonicalJson, describeSamplingSnapshot, detectSamplingDrift } from '@/lib/calibration/sampling-drift';
@@ -341,6 +345,15 @@ async function main(): Promise<void> {
   for (const [exp, row] of Object.entries(score.confusion)) {
     console.log(`    ${exp.padEnd(5)} -> ${Object.entries(row).map(([k, v]) => `${k}:${v}`).join('  ')}`);
   }
+
+  // ── Position bias (v2o/A2.3) ────────────────────────────────────────────
+  // The ONE block in this whole report that is NOT AB-only (spec D4): pooled
+  // over BOTH orders. `[]` — no lines at all, not even a header — on an
+  // AB-only calibration; a header with nothing under it would still claim a
+  // number was checked. The rendering, including the empty-return gate and
+  // the low-n warning, is in src/lib/calibration/baseline.ts where the unit
+  // suite pins it.
+  for (const line of formatPositionBiasLines(score)) console.log(line);
 
   const judgments = await prisma.modelJudgment.findMany({
     where: { run: { calibrationRunId } },

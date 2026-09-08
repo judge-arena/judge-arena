@@ -56,6 +56,13 @@ type FakeRun = {
    *  disagree to exercise the mismatch guard. */
   pairOrder: string | null;
   modelJudgments: FakeJudgment[];
+  /** v2o. OPTIONAL — most fixtures below never set it, and `fakeClient`'s
+   *  `findMany` spreads whatever is on the fixture straight through, so an
+   *  omitted field arrives as `undefined` at score.ts, exactly like a real
+   *  query would never omit the relation but a hand-built fixture naturally
+   *  does. Task 5 reads `ordersRequested` off this relation rather than
+   *  inferring it from which pairOrders happen to appear among `runs`. */
+  calibrationRun?: { ordersRequested: string | null } | null;
 };
 
 /**
@@ -1501,5 +1508,153 @@ describe('scoreCalibrationRun — noVerdictRate: a FLEET property, never abstent
     expect(score.verdictCount).toBe(5);
     expect(score.missingVerdicts).toBe(0);
     expect(score.noVerdictRate).toBe(0);
+  });
+});
+
+describe('scoreCalibrationRun — position bias (v2o/A2.3): pooled across BOTH orders, stored beside the AB-only columns', () => {
+  it('an AB-only calibration stores NULL estimators and pairedDecisiveCount 0 — D4 INERTNESS: rawAgreement/kappa/verdictCount/committedCount/selectiveAccuracy are UNCHANGED from the pre-Task-5 numbers', async () => {
+    // Every AB-only fixture elsewhere in this file (all 22 historical
+    // production rows are AB-only) must keep scoring bit-identically. This is
+    // that proof: the SAME `calibration(GROUND_TRUTH)` fixture the
+    // pre-existing "matches the key on all 30" test uses (line 631), with the
+    // SAME expected accuracy/kappa/verdictCount, PLUS the new columns.
+    const client = fakeClient(calibration(GROUND_TRUTH));
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+
+    // ── D4: the AB-only stored columns, bit-identical to before this task ──
+    expect(score.accuracy).toBe(1);
+    expect(score.kappa).toBeCloseTo(1, 10);
+    expect(score.verdictCount).toBe(30);
+    expect(score.committedCount).toBe(30);
+    expect(score.selectiveAccuracy).toBe(1);
+
+    // ── The new columns: NULL, never zero — "no paired decisive item
+    // existed" is not "position bias measured zero". ──
+    expect(score.positionBias).toBeNull();
+    expect(score.orderFlipRate).toBeNull();
+    expect(score.pairedDecisiveCount).toBe(0);
+    expect(score.tieExcludedCount).toBe(0);
+    // Every one of the 30 AB rows has no BA counterpart at all: unpaired,
+    // not tie-excluded.
+    expect(score.unpairedCount).toBe(30);
+    expect(score.positionBiasInterval).toBeNull();
+    expect(score.orderFlipRateInterval).toBeNull();
+
+    // Stored, not just returned — the SAME full-overwrite `update()` call.
+    expect(client.row.rawAgreement).toBe(1);
+    expect(client.row.kappa).toBeCloseTo(1, 10);
+    expect(client.row.verdictCount).toBe(30);
+    expect(client.row.committedCount).toBe(30);
+    expect(client.row.selectiveAccuracy).toBe(1);
+    expect(client.row.positionBias).toBeNull();
+    expect(client.row.orderFlipRate).toBeNull();
+    expect(client.row.pairedDecisiveCount).toBe(0);
+  });
+
+  it('a permuted (AB+BA) calibration pools BOTH orders — the pure first-slot-stamper archetype: positionBias 0.5, orderFlipRate 1.0', async () => {
+    // 4 golden items, each with an AB run AND a BA run (the real two-runs-
+    // per-item shape, v2p), verdict ALWAYS 'A' regardless of which order it
+    // was shown in — position-bias.ts's own 'always first slot' archetype.
+    const runs: FakeRun[] = [0, 1, 2, 3].flatMap((i) => {
+      const goldenItem = { id: `item-${i}`, index: i, expected: i % 2 === 0 ? 'A>B' : 'B>A' };
+      return [
+        {
+          id: `run-${i}-ab`,
+          goldenItemId: goldenItem.id,
+          goldenItem,
+          pairOrder: 'AB',
+          modelJudgments: [
+            { id: `j-${i}-ab`, verdict: 'A', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+          ],
+        },
+        {
+          id: `run-${i}-ba`,
+          goldenItemId: goldenItem.id,
+          goldenItem,
+          pairOrder: 'BA',
+          modelJudgments: [
+            { id: `j-${i}-ba`, verdict: 'A', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+          ],
+        },
+      ];
+    });
+    const client = fakeClient(runs);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+
+    expect(score.pairedDecisiveCount).toBe(4);
+    expect(score.tieExcludedCount).toBe(0);
+    expect(score.unpairedCount).toBe(0);
+    expect(score.positionBias).toBeCloseTo(0.5, 10);
+    expect(score.orderFlipRate).toBeCloseTo(1, 10);
+    expect(score.positionBiasInterval).toEqual({ low: 0.5, high: 0.5 });
+    expect(score.orderFlipRateInterval?.low).toBeCloseTo(0.5101091635454027, 10);
+    expect(score.orderFlipRateInterval?.high).toBe(1);
+
+    // ── D4 unaffected by the permutation: rawAgreement/kappa/verdictCount
+    // stay AB-only — computed over the 4 AB runs alone, never the pooled 8. ──
+    expect(score.verdictCount).toBe(4);
+
+    // Stored in the same full-overwrite update.
+    expect(client.row.positionBias).toBeCloseTo(0.5, 10);
+    expect(client.row.orderFlipRate).toBeCloseTo(1, 10);
+    expect(client.row.pairedDecisiveCount).toBe(4);
+  });
+
+  it('a single paired item with DIFFERENT slot-A namings scores positionBias 0.0 and orderFlipRate 0.0 — the wiring oracle', async () => {
+    // AB says 'A' (names slot A), BA says 'B' (names slot B): one of two
+    // slot-A namings in 2n=2 → pA = 0.5 → positionBias 0.0. The preferences
+    // differ (AB≠BA as raw letters) → no flip → orderFlipRate 0.0. This is
+    // the same fixture the "scores the AB partition when a BA run is also
+    // present" test above uses (line 287) — proof that adding position-bias
+    // computation alongside it does not disturb the AB-only accuracy=1
+    // result that test already pins.
+    const client = fakeClient([
+      {
+        id: 'run-i1-ab',
+        goldenItemId: 'i1',
+        goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        pairOrder: 'AB',
+        modelJudgments: [
+          { id: 'j-i1-ab', verdict: 'A', pairOrder: 'AB', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+      {
+        id: 'run-i1-ba',
+        goldenItemId: 'i1',
+        goldenItem: { id: 'i1', index: 0, expected: 'A>B' },
+        pairOrder: 'BA',
+        modelJudgments: [
+          { id: 'j-i1-ba', verdict: 'B', pairOrder: 'BA', judgeModelVersionId: JUDGE_ID, status: 'completed' },
+        ],
+      },
+    ]);
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+    // AB says 'A' (slot A), BA says 'B' (slot B): one of two slot-A namings
+    // in 2n=2 → pA = 0.5 → positionBias 0.0. Preferences differ (AB≠BA) → no
+    // flip → orderFlipRate 0.0.
+    expect(score.pairedDecisiveCount).toBe(1);
+    expect(score.positionBias).toBeCloseTo(0, 10);
+    expect(score.orderFlipRate).toBeCloseTo(0, 10);
+  });
+
+  it('stores ordersRequested read off the CalibrationRun header relation — not inferred from which pairOrders happen to appear among the loaded EvaluationRuns (D5)', async () => {
+    const runs: FakeRun[] = calibration(GROUND_TRUTH).map((r) => ({
+      ...r,
+      calibrationRun: { ordersRequested: 'AB,BA' },
+    }));
+    const client = fakeClient(runs);
+    await scoreCalibrationRun(CALIBRATION_ID, client);
+    expect(client.row.ordersRequested).toBe('AB,BA');
+  });
+
+  it('ordersRequested falls back to null, never inferred as "AB" from an AB-only partition, when the header relation is unavailable', async () => {
+    // Every fixture built via the bare `calibration()` helper omits
+    // `calibrationRun` entirely — the real query always returns the
+    // relation, but a wrong implementation that derived `ordersRequested`
+    // from `[...partitions.keys()]` would print 'AB' here instead of null,
+    // silently claiming a launch intent the row never recorded.
+    const client = fakeClient(calibration(GROUND_TRUTH));
+    await scoreCalibrationRun(CALIBRATION_ID, client);
+    expect(client.row.ordersRequested).toBeNull();
   });
 });
