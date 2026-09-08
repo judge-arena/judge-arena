@@ -56,13 +56,6 @@ type FakeRun = {
    *  disagree to exercise the mismatch guard. */
   pairOrder: string | null;
   modelJudgments: FakeJudgment[];
-  /** v2o. OPTIONAL — most fixtures below never set it, and `fakeClient`'s
-   *  `findMany` spreads whatever is on the fixture straight through, so an
-   *  omitted field arrives as `undefined` at score.ts, exactly like a real
-   *  query would never omit the relation but a hand-built fixture naturally
-   *  does. Task 5 reads `ordersRequested` off this relation rather than
-   *  inferring it from which pairOrders happen to appear among `runs`. */
-  calibrationRun?: { ordersRequested: string | null } | null;
 };
 
 /**
@@ -1637,24 +1630,52 @@ describe('scoreCalibrationRun — position bias (v2o/A2.3): pooled across BOTH o
     expect(score.orderFlipRate).toBeCloseTo(0, 10);
   });
 
-  it('stores ordersRequested read off the CalibrationRun header relation — not inferred from which pairOrders happen to appear among the loaded EvaluationRuns (D5)', async () => {
-    const runs: FakeRun[] = calibration(GROUND_TRUTH).map((r) => ({
-      ...r,
-      calibrationRun: { ordersRequested: 'AB,BA' },
-    }));
-    const client = fakeClient(runs);
-    await scoreCalibrationRun(CALIBRATION_ID, client);
+  it('does NOT write ordersRequested at all — launch.ts writes it once at CREATE time and the scorer must not touch it, so a launch-set value SURVIVES scoring', async () => {
+    // Fix round 1: an earlier version of this file read `ordersRequested`
+    // off the CalibrationRun header relation and wrote that SAME value back
+    // through `calibrationRun.update`. Harmless on a healthy run (it just
+    // re-wrote what launch.ts already wrote) — but `scoreCalibrationRun` on
+    // a header with ZERO EvaluationRuns (reachable: `--score-only=<id>`
+    // against a fresh header, or a launch's poll loop falling out at the
+    // timeout before a single run lands) read `null` off the empty `runs`
+    // array and CLOBBERED a correct 'AB,BA' back to `null` — precisely the
+    // "never permuted" vs "the BA half died" ambiguity spec D5 created this
+    // column to eliminate. The fix is to never write it from here at all.
+    const client = fakeClient(calibration(GROUND_TRUTH));
+    // Simulate what launch.ts already wrote at CREATE time, before this
+    // calibration was ever scored.
+    client.row.ordersRequested = 'AB,BA';
+
+    const score = await scoreCalibrationRun(CALIBRATION_ID, client);
+
+    // The scorer's own update() call never mentions the column — not even to
+    // write back the value it just read. A regression that reintroduces the
+    // read-and-write-back would still pass a `.toBe('AB,BA')` check on the
+    // final row (a no-op round trip), so the stronger assertion is on the
+    // update `data` object itself: the KEY must not be present.
+    const lastUpdate = client.updates.at(-1);
+    expect(lastUpdate).toBeDefined();
+    expect(Object.prototype.hasOwnProperty.call(lastUpdate as object, 'ordersRequested')).toBe(false);
+
+    // And the launch-time value is exactly what a reader would see after
+    // this score — untouched.
     expect(client.row.ordersRequested).toBe('AB,BA');
+
+    // Sanity: this is still an ordinary AB-only score, not a degenerate one.
+    expect(score.accuracy).toBe(1);
   });
 
-  it('ordersRequested falls back to null, never inferred as "AB" from an AB-only partition, when the header relation is unavailable', async () => {
-    // Every fixture built via the bare `calibration()` helper omits
-    // `calibrationRun` entirely — the real query always returns the
-    // relation, but a wrong implementation that derived `ordersRequested`
-    // from `[...partitions.keys()]` would print 'AB' here instead of null,
-    // silently claiming a launch intent the row never recorded.
-    const client = fakeClient(calibration(GROUND_TRUTH));
+  it('the empty-runs case (score-only against a header with zero EvaluationRuns, or a fresh launch scored before anything landed) does not clobber a pre-existing ordersRequested either', async () => {
+    // The exact shape fix round 1 flagged as reachable: `fakeClient([])` is
+    // already used elsewhere in this file (e.g. "a calibration with nothing
+    // scored yet reports null, not 0"), so this is not a hypothetical input.
+    const client = fakeClient([]);
+    client.row.ordersRequested = 'AB,BA';
+
     await scoreCalibrationRun(CALIBRATION_ID, client);
-    expect(client.row.ordersRequested).toBeNull();
+
+    expect(client.row.ordersRequested).toBe('AB,BA');
+    const lastUpdate = client.updates.at(-1);
+    expect(Object.prototype.hasOwnProperty.call(lastUpdate as object, 'ordersRequested')).toBe(false);
   });
 });

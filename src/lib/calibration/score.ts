@@ -295,16 +295,6 @@ type LoadedRun = {
    *  see EvaluationRun.pairOrder's doc and the mismatch guard below. */
   pairOrder: string | null;
   modelJudgments: LoadedJudgment[];
-  /** v2o. The header's OWN `ordersRequested`, reached through the relation —
-   *  every row this query returns belongs to the SAME calibration
-   *  (`where: { calibrationRunId }`), so any one of them carries it. Read
-   *  this rather than deriving a value from which `pairOrder`s happen to
-   *  appear among `runs`: a BA half that failed to create even one row must
-   *  not silently read back as "never permuted" (spec D5). Optional because
-   *  a hand-built test fixture may omit the relation entirely; a real query
-   *  always returns it (non-null, since these rows are filtered on a
-   *  non-null `calibrationRunId`). */
-  calibrationRun?: { ordersRequested: string | null } | null;
 };
 
 /**
@@ -329,10 +319,6 @@ export async function scoreCalibrationRun(
       // types it as present, so the mismatch guard would compare every
       // judgment against `undefined` instead of the real column.
       pairOrder: true,
-      // v2o. Read via the relation rather than a second query — every row
-      // this filter returns shares one `calibrationRunId`, so any one of
-      // them carries the header's `ordersRequested`. See LoadedRun's doc.
-      calibrationRun: { select: { ordersRequested: true } },
       modelJudgments: {
         // NO `where: { status: 'completed' }` any more. With two judgments per
         // run, filtering here made a run whose AB errored and whose BA
@@ -461,13 +447,6 @@ export async function scoreCalibrationRun(
   // pairedDecisiveCount: 0` — never zeroes. See position-bias.ts's own
   // module doc for the two estimators and the tie-exclusion rule.
   const positionBiasResult = positionBiasFromPairs(pairedVerdictRows);
-
-  // v2o/D5. What the LAUNCH asked for, read off the header relation — every
-  // row `runs` shares one calibrationRunId, so any one of them carries it.
-  // NOT derived from `[...partitions.keys()]`: a BA half that failed to
-  // create even a single EvaluationRun must not silently read back as "never
-  // permuted" (spec D5's own rationale for this column existing at all).
-  const ordersRequested = runs[0]?.calibrationRun?.ordersRequested ?? null;
 
   // THE PARTITION THAT FEEDS THE STORED COLUMNS. 'AB' whenever any run
   // presented that order — even one that produced nothing but errors —
@@ -700,10 +679,21 @@ export async function scoreCalibrationRun(
       positionBias: positionBiasResult.positionBias,
       orderFlipRate: positionBiasResult.orderFlipRate,
       pairedDecisiveCount: positionBiasResult.pairedDecisiveCount,
-      // v2o/D5. What the launch asked for — see `ordersRequested`'s own
-      // computation above for why this is read off the header relation
-      // rather than inferred from `partitions`.
-      ordersRequested,
+      // `ordersRequested` is DELIBERATELY NOT WRITTEN HERE. launch.ts writes
+      // it once, at CREATE time, from what the launch actually asked for —
+      // it does not change after that. A fix-round-1 review caught an
+      // earlier version of this file reading it back off the header and
+      // writing that same value straight through: harmless on a healthy run
+      // (it just re-wrote what launch.ts already wrote), but a
+      // `scoreCalibrationRun` call on a header with ZERO `EvaluationRun`s —
+      // reachable via `scripts/calibration/run.ts --score-only=<id>` (or a
+      // fresh launch's poll loop falling out at the timeout before a single
+      // run lands) — read `null` off the empty `runs` array and clobbered a
+      // correct 'AB,BA' back to `null`. That is precisely the "never
+      // permuted" vs "the BA half died" ambiguity spec D5 created this
+      // column to eliminate. The scorer has no business rewriting a column
+      // it never computes; leaving it out of this update is what makes the
+      // launch-time write durable.
       // v2m. Scoring is ex post and re-runnable, so the numbers above are
       // uninterpretable without the generation that produced them. Written from
       // the CONSTANT, never a literal, in the same full overwrite: the stamp and
